@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>个人中心 · 知库 Agent</title>
+  <link rel="stylesheet" href="/static/css/common.css">
+  <link rel="stylesheet" href="/static/css/profile.css">
+</head>
+<body>
+  <div id="topnav-container"></div>
+
+  <div class="layout">
+    <div id="sidebar-container"></div>
+    <div class="main">
+    <div class="page-header">
+      <div class="breadcrumb"><a href="/">首页</a><span class="sep">/</span>个人中心</div>
+      <div class="page-title">个人中心</div>
+      <div class="page-desc">管理你的资料、AI 记忆、订阅偏好与安全设置</div>
+    </div>
+    <div class="profile-layout">
+      <aside class="profile-menu">
+        <div class="profile-menu-item active" onclick="setProfileMenu('basic')">👤 基本信息</div>
+        <div class="profile-menu-item" onclick="setProfileMenu('memory')">🧠 我的记忆</div>
+        <div class="profile-menu-item" onclick="setProfileMenu('permissions')">🔑 我的权限</div>
+        <div class="profile-menu-item" onclick="setProfileMenu('email')">📧 邮件订阅</div>
+        <div class="profile-menu-item" onclick="setProfileMenu('pwd')">🔐 修改密码</div>
+      </aside>
+      <div class="profile-content" id="profileContent"></div>
+    </div>
+    </div>
+  </div>
+
+  <div id="mask" class="mask"></div>
+  <div id="toast-wrap" class="toast-wrap"></div>
+
+  <!-- 申请权限弹窗 -->
+  <div class="modal" id="modal-permission-apply">
+    <div class="modal-header">
+      <div class="modal-title">申请权限</div>
+      <button class="modal-close" onclick="closePermissionApplyModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-item">
+        <label class="form-label">权限编码 <span class="required">*</span></label>
+        <input type="text" class="input" id="applyPermCode" placeholder="如 knowledge:upload:team">
+        <div class="form-hint">格式：{module}:{action}:{scope}，例如 knowledge:upload:team / knowledge:read:department</div>
+      </div>
+      <div class="form-item">
+        <label class="form-label">申请范围</label>
+        <select class="select" id="applyScope" onchange="loadApprovers(this.value)">
+          <option value="team">团队级（团队负责人 / 部门经理）</option>
+          <option value="department">部门级（部门经理 / 知识库运维）</option>
+          <option value="all">全平台（知识库运维 / 超级管理员）</option>
+        </select>
+      </div>
+      <div class="form-item">
+        <label class="form-label">审批人 <span class="required">*</span></label>
+        <select class="select" id="applyApprover">
+          <option value="">请选择审批人</option>
+        </select>
+        <div id="approverHint" class="form-hint">请先选择申请范围</div>
+      </div>
+      <div class="form-item">
+        <label class="form-label">申请理由 <span class="required">*</span></label>
+        <textarea class="textarea" id="applyReason" style="min-height:80px" placeholder="请简要说明为什么需要此权限..."></textarea>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closePermissionApplyModal()">取消</button>
+      <button class="btn btn-primary" onclick="submitPermissionApplication()">提交申请</button>
+    </div>
+  </div>
+
+  <script src="/static/js/common.js"></script>
+  <script src="/static/js/profile.js"></script>
+</body>
+</html>

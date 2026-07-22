@@ -1,0 +1,96 @@
+/* ============ 登录页 & 重置密码共用 ============ */
+.auth-page{
+  min-height:100vh;
+  display:flex;align-items:center;justify-content:center;
+  background:linear-gradient(135deg,#eff6ff 0%,#dbeafe 50%,#f5f7fa 100%);
+  padding:20px;
+  position:relative;
+}
+.auth-page::before{
+  content:"";position:absolute;top:0;left:0;right:0;bottom:0;
+  background-image:
+    radial-gradient(circle at 20% 30%,rgba(37,99,235,0.08),transparent 40%),
+    radial-gradient(circle at 80% 70%,rgba(59,130,246,0.06),transparent 40%);
+  pointer-events:none;
+}
+.auth-card{
+  background:var(--white);border-radius:12px;
+  box-shadow:0 10px 40px rgba(0,0,0,0.08),0 2px 6px rgba(0,0,0,0.04);
+  padding:40px 44px;width:100%;max-width:420px;
+  position:relative;z-index:1;
+}
+.auth-logo{
+  display:flex;align-items:center;justify-content:center;gap:12px;
+  margin-bottom:8px;
+}
+.auth-logo-icon{
+  width:44px;height:44px;border-radius:10px;
+  background:linear-gradient(135deg,var(--primary),#1e40af);
+  color:#fff;display:flex;align-items:center;justify-content:center;
+  font-size:20px;font-weight:700;
+  box-shadow:0 4px 12px rgba(37,99,235,0.3);
+}
+.auth-title{text-align:center;font-size:22px;font-weight:600;margin:16px 0 8px}
+.auth-desc{text-align:center;color:var(--text-sub);font-size:13px;margin-bottom:28px}
+.auth-form{margin-top:20px}
+.auth-captcha{display:flex;gap:8px}
+.auth-captcha input{flex:1}
+.auth-captcha-img{
+  width:110px;height:38px;border:1px solid var(--border);border-radius:var(--radius);
+  display:flex;align-items:center;justify-content:center;
+  background:linear-gradient(45deg,#f0f4ff,#e0e7ff,#dbeafe);
+  font-family:'Courier New',monospace;
+  font-size:20px;font-weight:700;
+  letter-spacing:4px;color:var(--primary);
+  cursor:pointer;user-select:none;
+  position:relative;overflow:hidden;
+}
+.auth-captcha-img::before{
+  content:"";position:absolute;inset:0;
+  background-image:
+    linear-gradient(45deg,transparent 48%,rgba(37,99,235,0.15) 49%,rgba(37,99,235,0.15) 51%,transparent 52%),
+    linear-gradient(-45deg,transparent 48%,rgba(37,99,235,0.1) 49%,rgba(37,99,235,0.1) 51%,transparent 52%);
+  pointer-events:none;
+}
+.auth-remember{display:flex;justify-content:space-between;align-items:center;margin:12px 0 20px}
+.auth-divider{
+  display:flex;align-items:center;gap:12px;margin:20px 0;
+  color:var(--text-placeholder);font-size:12px;
+}
+.auth-divider::before,.auth-divider::after{
+  content:"";flex:1;height:1px;background:var(--border);
+}
+.auth-sso{display:flex;gap:8px}
+.auth-sso .btn{flex:1;font-size:13px}
+.auth-footer{text-align:center;margin-top:24px;color:var(--text-sub);font-size:12px}
+.auth-footer-badge{
+  display:inline-flex;align-items:center;gap:4px;
+  padding:3px 10px;background:var(--primary-light);color:var(--primary);
+  border-radius:12px;font-size:11px;font-weight:500;
+}
+
+/* 步骤条 */
+.steps{display:flex;align-items:center;margin:8px 0 32px;gap:0}
+.step{display:flex;align-items:center;flex:1}
+.step-num{
+  width:28px;height:28px;border-radius:50%;
+  background:var(--border);color:var(--text-sub);
+  display:flex;align-items:center;justify-content:center;
+  font-size:13px;font-weight:600;flex-shrink:0;
+  transition:all 0.2s;
+}
+.step-name{margin-left:8px;font-size:13px;color:var(--text-sub);white-space:nowrap}
+.step-line{flex:1;height:2px;background:var(--border);margin:0 12px}
+.step.active .step-num{background:var(--primary);color:#fff}
+.step.active .step-name{color:var(--text);font-weight:500}
+.step.done .step-num{background:var(--success);color:#fff}
+.step.done .step-name{color:var(--text)}
+.step:last-child .step-line{display:none}
+
+/* 密码强度 */
+.password-strength{display:flex;gap:4px;margin-top:6px}
+.password-strength .bar{flex:1;height:4px;border-radius:2px;background:var(--border)}
+.password-strength.weak .bar:nth-child(1){background:var(--danger)}
+.password-strength.medium .bar:nth-child(-n+2){background:var(--warning)}
+.password-strength.strong .bar{background:var(--success)}
+.password-hint{font-size:12px;color:var(--text-sub);margin-top:4px}

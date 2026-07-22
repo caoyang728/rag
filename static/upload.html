@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>文档上传 · 知库 Agent</title>
+	<link rel="stylesheet" href="/static/css/common.css">
+	<link rel="stylesheet" href="/static/css/upload.css">
+</head>
+
+<body>
+	<!-- 顶栏容器 -->
+	<div id="topnav-container"></div>
+
+	<div class="layout">
+		<!-- 侧栏容器 -->
+		<div id="sidebar-container"></div>
+		<div class="main">
+			<div class="page-header">
+				<div class="breadcrumb"><a href="/chat/">首页</a><span class="sep">/</span><a href="#">工作台</a><span
+						class="sep">/</span>文档上传</div>
+				<div class="page-header-flex">
+					<div>
+						<div class="page-title">文档上传</div>
+						<div class="page-desc">支持 PDF / Word / MD / TXT / 源代码 / YML / JSON 六大类文档，自动脱敏与向量化入库</div>
+					</div>
+					<div id="celeryStatus" class="flex items-center gap-12">
+						<span class="tag tag-default" style="display:flex;align-items:center;gap:6px">
+							<span id="celeryIcon">⏳</span>
+							<span id="celeryText">检查文档解析服务状态...</span>
+						</span>
+						<button class="btn btn-sm btn-warning" id="retryPendingBtn" onclick="retryPendingDocs()"
+							style="display:none">🔄 重试待处理文档</button>
+					</div>
+				</div>
+			</div>
+			<div class="upload-drop" id="dropZone" style="position:relative">
+				<input type="file" id="fileInput" multiple
+					accept=".pdf,.doc,.docx,.md,.txt,.py,.js,.ts,.java,.go,.rs,.yml,.yaml,.json,.xml,.conf,.cfg,.ini,.toml,.sh,.bat,.ps1"
+					style="position:absolute;inset:0;opacity:0;cursor:pointer;z-index:5">
+				<div class="upload-drop-icon">📤</div>
+				<div class="upload-drop-title">拖拽文件到此处，或<span class="text-primary">点击选择上传</span></div>
+				<div class="upload-drop-desc">支持批量上传，单个文件最大 100 MB，建议单批次不超过 20 个文件</div>
+				<div class="upload-types">
+					<span class="tag tag-info">📕 PDF</span>
+					<span class="tag tag-info">📄 Word</span>
+					<span class="tag tag-info">📝 Markdown</span>
+					<span class="tag tag-info">📃 TXT</span>
+					<span class="tag tag-info">💻 源代码</span>
+					<span class="tag tag-info">⚙️ YML</span>
+					<span class="tag tag-info">📊 JSON</span>
+				</div>
+			</div>
+
+			<div class="card mt-16" id="uploadPanel" style="display:none">
+				<div class="card-title flex justify-between items-center">
+					<span>本次上传文件（<span id="fileCount">0</span>）</span>
+					<div class="flex gap-8">
+						<button class="btn btn-sm" onclick="clearFileList()">清空列表</button>
+						<button class="btn btn-sm btn-primary" onclick="startUpload()">🚀 开始上传</button>
+					</div>
+				</div>
+				<div id="fileList" class="file-list"></div>
+				<div id="fileEmpty" class="empty">
+					<div class="empty-icon">📭</div>
+					<div class="empty-text">还没有添加任何文件，请点击上方拖拽区添加</div>
+				</div>
+			</div>
+
+			<div class="upload-options" id="uploadOptions" style="display:none">
+				<div class="grid-2" style="gap:24px">
+					<div>
+						<label class="form-label">归属节点 <span class="required">*</span></label>
+						<select class="select" id="nodeSelect">
+							<option value="">-- 请选择归属节点 --</option>
+						</select>
+						<div class="form-hint">上传后可在节点管理中调整归属</div>
+					</div>
+					<div>
+						<label class="form-label">自动化选项</label>
+						<div style="display:flex;flex-direction:column;gap:8px;padding:6px 0">
+							<label class="checkbox"><input type="checkbox" checked><span>🔒 自动脱敏（手机号 / 身份证 / 密钥 / 内网
+									IP）</span></label>
+							<label class="checkbox"><input type="checkbox" checked><span>🧠 自动切片 + 向量化入库（BGE
+									Embedding）</span></label>
+							<label class="checkbox"><input type="checkbox"><span>📧 处理完成后邮件通知</span></label>
+							<label class="checkbox">
+								<input type="checkbox" id="chkOverwrite">
+								<div>
+									<span>♻️ 相同文件名自动覆盖旧版本</span>
+									<div class="form-hint" style="margin-top:2px">本人上传的同名文件将直接覆盖；非本人的文件覆盖需原上传人或管理员确认
+									</div>
+								</div>
+							</label>
+						</div>
+					</div>
+				</div>
+				<div style="margin-top:20px">
+					<label class="form-label">可见范围 <span class="required">*</span></label>
+					<div class="upload-radio-group" id="visRadios">
+						<label class="upload-radio selected" onclick="pickVis(this)">
+							<input type="radio" name="vis" value="self" checked>
+							<div>
+								<div class="upload-radio-title">🔒 仅本人（Self）</div>
+								<div class="upload-radio-desc">仅上传者本人可检索，用于个人笔记、草稿</div>
+							</div>
+						</label>
+						<label class="upload-radio" onclick="pickVis(this)">
+							<input type="radio" name="vis" value="team">
+							<div>
+								<div class="upload-radio-title">👥 团队可见（Team）</div>
+								<div class="upload-radio-desc">同团队成员可检索，用于团队共享资料</div>
+							</div>
+						</label>
+						<label class="upload-radio" onclick="pickVis(this)">
+							<input type="radio" name="vis" value="dept">
+							<div>
+								<div class="upload-radio-title">🏢 部门可见（Dept）</div>
+								<div class="upload-radio-desc">全部门成员可检索，用于部门规范和流程</div>
+							</div>
+						</label>
+						<label class="upload-radio" onclick="pickVis(this)">
+							<input type="radio" name="vis" value="all">
+							<div>
+								<div class="upload-radio-title">🌐 全平台（All）</div>
+								<div class="upload-radio-desc">全公司可检索，用于公开规范和白皮书</div>
+							</div>
+						</label>
+					</div>
+				</div>
+			</div>
+
+			<div class="mt-24">
+				<div class="page-header-flex mb-12">
+					<div class="text-xl">📋 上传历史</div>
+					<div class="page-actions">
+						<input class="input" style="width:200px" placeholder="🔍 搜索文件名">
+						<select class="select" style="width:140px">
+							<option>全部状态</option>
+							<option>已完成</option>
+							<option>解析中</option>
+							<option>失败</option>
+						</select>
+					</div>
+				</div>
+				<div class="table-container">
+					<table class="table">
+						<thead>
+							<tr>
+								<th>文件名</th>
+								<th>类型</th>
+								<th>归属节点</th>
+								<th>上传人</th>
+								<th>可见范围</th>
+								<th>状态</th>
+								<th>上传时间</th>
+								<th style="width:120px">操作</th>
+							</tr>
+						</thead>
+						<tbody id="uploadHistoryBody"></tbody>
+					</table>
+					<div class="pagination" id="uploadPagination"></div>
+				</div>
+			</div>
+		</div>
+	</div>
+
+	<div id="mask" class="mask"></div>
+	<div id="toast-wrap" class="toast-wrap"></div>
+
+	<script src="/static/js/common.js"></script>
+	<script src="/static/js/upload.js"></script>
+</body>
+
+</html>

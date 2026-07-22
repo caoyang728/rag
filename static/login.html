@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>登录 · 知库 Agent</title>
+  <link rel="stylesheet" href="/static/css/common.css">
+  <link rel="stylesheet" href="/static/css/login.css">
+</head>
+<body>
+  <div class="auth-page">
+    <div class="auth-card">
+      <div class="auth-logo">
+        <div class="auth-logo-icon">知</div>
+      </div>
+      <h1 class="auth-title">知库 Agent</h1>
+      <p class="auth-desc">企业私有化多场景智能 RAG 知识库平台</p>
+      <form class="auth-form" onsubmit="event.preventDefault();doLogin()">
+        <div class="form-item">
+          <label class="form-label">账号</label>
+          <input class="input input-lg" id="loginAccount" type="text" placeholder="请输入邮箱或工号">
+        </div>
+        <div class="form-item">
+          <label class="form-label">密码</label>
+          <input class="input input-lg" id="loginPwd" type="password" placeholder="请输入密码">
+        </div>
+        <div class="form-item">
+          <label class="form-label">图形验证码</label>
+          <div class="auth-captcha">
+            <input class="input input-lg" type="text" placeholder="请输入 4 位验证码" maxlength="4">
+            <div class="auth-captcha-img" title="点击刷新" onclick="this.textContent=Math.random().toString(36).slice(2,6).toUpperCase()"></div>
+          </div>
+        </div>
+        <div class="auth-remember">
+          <label class="checkbox">
+            <input type="checkbox" checked> <span>记住我（7 天）</span>
+          </label>
+          <a href="/reset-password/">忘记密码？</a>
+        </div>
+        <button type="submit" class="btn btn-primary btn-lg btn-block">登 录</button>
+        <div class="auth-divider">或使用企业身份</div>
+        <div class="auth-sso">
+          <button type="button" class="btn" disabled title="即将支持">🏢 企业 LDAP</button>
+          <button type="button" class="btn" disabled title="即将支持">🔐 SSO 单点</button>
+        </div>
+      </form>
+      <div class="auth-footer">
+        <div class="auth-footer-badge">🔒 企业内网私有化部署</div>
+        <div style="margin-top:8px">© 2026 知库 Agent · 内部使用 · v1.0.0</div>
+      </div>
+    </div>
+  </div>
+
+  <div id="mask" class="mask"></div>
+  <div id="toast-wrap" class="toast-wrap"></div>
+
+  <script src="/static/js/common.js"></script>
+  <script src="/static/js/login.js"></script>
+</body>
+</html>

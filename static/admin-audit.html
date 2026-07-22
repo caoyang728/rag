@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>审计与安全 · 知库 Agent</title>
+	<link rel="stylesheet" href="/static/css/common.css">
+	<link rel="stylesheet" href="/static/css/admin-audit.css">
+</head>
+
+<body>
+	<div id="topnav-container"></div>
+
+	<div class="layout">
+		<div id="sidebar-container"></div>
+		<div class="main">
+			<div class="page-header">
+				<div class="breadcrumb"><a href="/chat/">首页</a><span class="sep">/</span>管理后台<span
+						class="sep">/</span>审计与安全</div>
+				<div class="page-header-flex">
+					<div>
+						<div class="page-title">审计日志与安全</div>
+						<div class="page-desc">全链路操作留痕，IP 黑白名单管控，登录异常追踪</div>
+					</div>
+					<div class="page-actions">
+						<button class="btn btn-primary" onclick="exportAuditLogs()">📥 导出 Excel</button>
+					</div>
+				</div>
+			</div>
+			<div class="card" style="padding:0">
+				<div class="tabs">
+					<div class="tab-item active" onclick="setAuditTab('audit')">📋 审计日志</div>
+					<div class="tab-item" onclick="setAuditTab('white')">✅ IP 白名单</div>
+					<div class="tab-item" onclick="setAuditTab('black')">🚫 IP 黑名单</div>
+					<div class="tab-item" onclick="setAuditTab('login')">🔐 登录尝试</div>
+				</div>
+				<div id="auditBody" style="padding:16px"></div>
+			</div>
+		</div>
+	</div>
+
+	<!-- 审计详情弹窗 -->
+	<div class="modal" id="modal-audit">
+		<div class="modal-header">
+			<div class="modal-title" id="modal-audit-title">审计详情</div>
+			<button class="modal-close" onclick="closeAllOverlays()">✕</button>
+		</div>
+		<div class="modal-body" id="modal-audit-body"></div>
+		<div class="modal-footer">
+			<button class="btn" onclick="closeAllOverlays()">关闭</button>
+			<button class="btn btn-primary" onclick="copyAuditJson()">复制 JSON</button>
+		</div>
+	</div>
+
+	<div id="mask" class="mask"></div>
+	<div id="toast-wrap" class="toast-wrap"></div>
+
+	<script src="/static/js/common.js"></script>
+	<script src="/static/js/admin-audit.js"></script>
+</body>
+
+</html>

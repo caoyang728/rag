@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RBAC 权限配置 · 知库 Agent</title>
+  <link rel="stylesheet" href="/static/css/common.css">
+</head>
+<body>
+  <div id="topnav-container"></div>
+  <div class="layout">
+    <div id="sidebar-container"></div>
+    <div class="main">
+      <div class="page-header">
+        <div class="breadcrumb"><a href="/chat/">首页</a><span class="sep">/</span>管理后台<span class="sep">/</span>RBAC 权限配置</div>
+        <div>
+          <div class="page-title">RBAC 权限配置</div>
+          <div class="page-subtitle">管理组织架构（部门/团队）</div>
+        </div>
+      </div>
+
+      <!-- ===== 部门管理 ===== -->
+      <div class="card">
+        <div class="flex items-center justify-between mb-16">
+          <div class="card-title" style="margin-bottom:0">部门管理</div>
+          <button class="btn btn-primary btn-sm" onclick="openDeptModal()">＋ 新增部门</button>
+        </div>
+        <div id="deptList"></div>
+      </div>
+
+
+    </div>
+  </div>
+
+  <!-- ===== 部门/团队 Modal ===== -->
+  <div class="modal" id="deptModal" style="max-width:480px">
+      <div class="modal-header">
+        <div class="modal-title" id="deptModalTitle">新增部门</div>
+        <button class="modal-close" onclick="closeModal('deptModal')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="deptId">
+        <div class="form-item">
+          <label class="form-label">部门名称 <span class="required">*</span></label>
+          <input id="deptName" class="input" placeholder="如: 研发中心">
+        </div>
+        <div class="form-item">
+          <label class="form-label">编码 <span class="form-hint">（留空自动生成拼音首字母）</span></label>
+          <input id="deptCode" class="input" placeholder="如: yfzx">
+        </div>
+        <div id="deptTeamsSection" style="display:none;border-top:1px solid var(--border);padding-top:12px;margin-top:12px">
+          <div class="flex items-center justify-between mb-8">
+            <label class="form-label" style="margin:0">下属团队</label>
+            <button class="btn btn-primary btn-sm" onclick="openTeamModal(document.getElementById('deptId').value)">＋ 新增团队</button>
+          </div>
+          <div id="deptTeamsList" style="display:flex;flex-wrap:wrap;gap:6px"></div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" onclick="closeModal('deptModal')">取消</button>
+        <button class="btn btn-primary" onclick="saveDept()">保存</button>
+      </div>
+  </div>
+
+  <!-- ===== 团队 Modal ===== -->
+  <div class="modal" id="teamModal" style="max-width:400px">
+      <div class="modal-header">
+        <div class="modal-title" id="teamModalTitle">新增团队</div>
+        <button class="modal-close" onclick="closeModal('teamModal')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="teamId">
+        <input type="hidden" id="teamDeptId">
+        <div class="form-item">
+          <label class="form-label">团队名称 <span class="required">*</span></label>
+          <input id="teamName" class="input" placeholder="如: AI 平台组">
+        </div>
+        <div class="form-item">
+          <label class="form-label">编码 <span class="form-hint">（留空自动生成，含部门前缀）</span></label>
+          <input id="teamCode" class="input" placeholder="如: yfzx_aiptz">
+        </div>
+        <div class="form-item">
+          <label class="form-label">描述</label>
+          <input id="teamDesc" class="input" placeholder="团队描述">
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" onclick="closeModal('teamModal')">取消</button>
+        <button class="btn btn-primary" onclick="saveTeam()">保存</button>
+      </div>
+  </div>
+
+  <div id="mask" class="mask"></div>
+  <div id="toast-wrap" class="toast-wrap"></div>
+  <script src="/static/js/common.js"></script>
+  <script src="/static/js/admin-rbac.js"></script>
+</body>
+</html>

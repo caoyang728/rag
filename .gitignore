@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Django
+*.log
+db.sqlite3
+media/
+staticfiles/
+
+# 配置
+.env
+.env.local
+.env.production
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# Node（前端未使用打包工具，但预留）
+node_modules/
+dist/
+
+# 模型权重（不入库）
+models/
+*.bin
+*.safetensors
+
+# Docker
+*.override.yml
+!docker-compose.override.yml.example

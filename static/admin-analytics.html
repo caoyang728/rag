@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>反馈与报表 · 知库 Agent</title>
+	<link rel="stylesheet" href="/static/css/common.css">
+	<link rel="stylesheet" href="/static/css/admin-analytics.css">
+</head>
+
+<body>
+	<div id="topnav-container"></div>
+
+	<div class="layout">
+		<div id="sidebar-container"></div>
+		<div class="main">
+			<div class="page-header">
+				<div class="breadcrumb"><a href="/chat/">首页</a><span class="sep">/</span>管理后台<span
+						class="sep">/</span>反馈与报表</div>
+				<div class="page-header-flex">
+					<div>
+						<div class="page-title">反馈与准确率报表</div>
+						<div class="page-desc">监控召回准确率、响应耗时与用户反馈趋势，驱动持续优化</div>
+					</div>
+					<div class="page-actions">
+						<div class="flex gap-4"
+							style="background:var(--white);border:1px solid var(--border);border-radius:var(--radius);padding:2px">
+							<button class="btn btn-sm btn-ghost" onclick="setTimeRange('today')">今日</button>
+							<button class="btn btn-sm btn-primary" onclick="setTimeRange('week')">本周</button>
+							<button class="btn btn-sm btn-ghost" onclick="setTimeRange('month')">本月</button>
+							<button class="btn btn-sm btn-ghost" onclick="showCustomDateRange()">自定义</button>
+						</div>
+						<select class="select" style="width:180px" id="reportRootType"
+							onchange="loadOverview();loadTrend();loadKeywords();loadBadFeedbacks()">
+							<option value="">全部节点</option>
+						</select>
+						<button class="btn" onclick="exportReport()">📥 导出报表</button>
+					</div>
+				</div>
+			</div>
+
+			<div class="kpi-grid">
+				<div class="kpi-card">
+					<div class="kpi-label">总问答数</div>
+					<div class="kpi-value">--</div>
+					<div class="kpi-trend up">▲ 12.4% vs 上周</div>
+				</div>
+				<div class="kpi-card">
+					<div class="kpi-label">满意率</div>
+					<div class="kpi-value">--<span class="text-sm text-sub">%</span></div>
+					<div class="kpi-trend up">▲ 2.1 pt · 达标 ≥ 85%</div>
+				</div>
+				<div class="kpi-card">
+					<div class="kpi-label">平均响应耗时</div>
+					<div class="kpi-value">--<span class="text-sm text-sub">s</span></div>
+					<div class="kpi-trend up">▼ 0.32s 优化</div>
+				</div>
+				<div class="kpi-card">
+					<div class="kpi-label">活跃用户</div>
+					<div class="kpi-value">--</div>
+					<div class="kpi-trend down">▼ 3 · 环比降 2.3%</div>
+				</div>
+			</div>
+
+			<div class="chart-wrap mb-16">
+				<div class="flex justify-between items-center mb-16">
+					<div class="text-lg fw-600">📈 满意率与响应耗时趋势（近 7 天）</div>
+					<div class="flex gap-8">
+						<label class="checkbox"><input type="checkbox" checked
+								onclick="toggleChartDisplay('accuracy')"><span>满意率</span></label>
+						<label class="checkbox"><input type="checkbox" checked
+								onclick="toggleChartDisplay('latency')"><span>响应耗时</span></label>
+					</div>
+				</div>
+				<div class="chart-container" id="trendChart"></div>
+				<div class="chart-legend">
+					<div class="legend-item"><span class="legend-dot" style="background:#2563eb"></span>满意率 (%)</div>
+					<div class="legend-item"><span class="legend-dot" style="background:#f59e0b"></span>响应耗时 (s)</div>
+				</div>
+			</div>
+
+			<div class="grid-2" style="grid-template-columns:5fr 4fr">
+				<div class="card">
+					<div class="card-title flex justify-between items-center">
+						<span>🔧 关键词权重调优</span>
+						<button class="btn btn-sm btn-primary" onclick="addKeyword()">＋ 新增关键词</button>
+					</div>
+					<table class="table" style="border:1px solid var(--border);border-radius:var(--radius)">
+						<thead>
+							<tr>
+								<th>关键词</th>
+								<th>当前权重</th>
+								<th>调整历史</th>
+								<th style="width:100px">操作</th>
+							</tr>
+						</thead>
+						<tbody id="keywordsTableBody"></tbody>
+					</table>
+				</div>
+				<div class="card">
+					<div class="card-title">👎 差评反馈明细</div>
+					<div id="feedbackList"
+						style="display:flex;flex-direction:column;gap:12px;max-height:520px;overflow-y:auto"></div>
+				</div>
+			</div>
+		</div>
+	</div>
+
+	<div id="mask" class="mask"></div>
+	<div id="toast-wrap" class="toast-wrap"></div>
+
+	<!-- 自定义日期范围弹窗 -->
+	<div class="modal" id="modal-date-range">
+		<div class="modal-header">
+			<div class="modal-title">自定义日期范围</div>
+			<button class="modal-close" onclick="closeAllOverlays()">✕</button>
+		</div>
+		<div class="modal-body">
+			<div class="form-item">
+				<label class="form-label">开始日期</label>
+				<input type="date" class="input" id="customDateStart">
+			</div>
+			<div class="form-item">
+				<label class="form-label">结束日期</label>
+				<input type="date" class="input" id="customDateEnd">
+			</div>
+		</div>
+		<div class="modal-footer">
+			<button class="btn" onclick="closeAllOverlays()">取消</button>
+			<button class="btn btn-primary" onclick="applyCustomDateRange()">确定</button>
+		</div>
+	</div>
+
+	<!-- 新增关键词弹窗 -->
+	<div class="modal" id="modal-add-keyword">
+		<div class="modal-header">
+			<div class="modal-title">新增关键词</div>
+			<button class="modal-close" onclick="closeAllOverlays()">✕</button>
+		</div>
+		<div class="modal-body">
+			<div class="form-item">
+				<label class="form-label">关键词 <span class="required">*</span></label>
+				<input type="text" class="input" id="newKeywordText" placeholder="请输入关键词">
+			</div>
+			<div class="form-item">
+				<label class="form-label">权重</label>
+				<input type="number" class="input" id="newKeywordWeight" value="1.0" step="0.1" min="0.1" max="5.0">
+				<div class="form-hint">权重范围 0.1 ~ 5.0，默认 1.0</div>
+			</div>
+			<div class="form-item">
+				<label class="form-label">所属根节点</label>
+				<select class="select" id="newKeywordRootType">
+					<option value="all">全部</option>
+				</select>
+			</div>
+		</div>
+		<div class="modal-footer">
+			<button class="btn" onclick="closeAllOverlays()">取消</button>
+			<button class="btn btn-primary" onclick="submitNewKeyword()">确定新增</button>
+		</div>
+	</div>
+
+	<script src="/static/js/common.js"></script>
+	<script src="/static/js/admin-analytics.js"></script>
+</body>
+
+</html>

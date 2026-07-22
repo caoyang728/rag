@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>智能聊天 · 知库 Agent</title>
+  <link rel="stylesheet" href="/static/css/common.css">
+  <link rel="stylesheet" href="/static/css/chat.css">
+</head>
+<body>
+  <div id="topnav-container"></div>
+
+  <!-- 知识库范围下拉面板（固定定位，在导航栏下方） -->
+  <div class="scope-dropdown" id="scopeDropdown">
+    <div class="scope-hint">💡 选择对应的范围，可以更精准的查询</div>
+    <div class="scope-quick-actions">
+      <button class="btn btn-sm" onclick="selectAllScopes()">全选</button>
+      <button class="btn btn-sm" onclick="clearAllScopes()">清空</button>
+    </div>
+    <div class="scope-list" id="scopeList"></div>
+  </div>
+
+  <div class="layout">
+    <div id="sidebar-container"></div>
+
+    <div class="chat-main">
+      <div class="chat-header">
+        <div class="chat-title-input" id="chatTitle" style="display:none"></div>
+        <div class="flex gap-8 items-center">
+          <span class="tag tag-info">💡 已启用 4 层记忆</span>
+          <button class="btn btn-sm" onclick="newSession()">+ 新建会话</button>
+        </div>
+      </div>
+
+      <div class="chat-messages" id="chatMessages"></div>
+
+      <div class="chat-input-area">
+        <div class="chat-input-wrap">
+          <textarea class="chat-input" id="chatInput" placeholder="请输入你的问题，Shift + Enter 换行，Enter 发送…" onkeydown="handleChatKey(event)"></textarea>
+          <div class="chat-input-actions">
+            <button class="chat-send-btn" onclick="sendChat()">发送 ↵</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 历史会话右栏 -->
+    <aside class="chat-sessions">
+      <div class="panel-header">
+        <div class="panel-title">💬 历史会话</div>
+        <div class="session-search-wrap">
+          <input class="session-search-input" placeholder="搜索会话" id="sessionSearchInput" onkeydown="if(event.key==='Enter')searchSessions()" oninput="debounceSearch()">
+          <button class="session-search-btn" onclick="searchSessions()" title="搜索">🔍</button>
+        </div>
+      </div>
+      <div class="panel-body" id="sessionList"></div>
+    </aside>
+  </div>
+
+  <div id="mask" class="mask"></div>
+  <div id="toast-wrap" class="toast-wrap"></div>
+
+  <script src="/static/js/common.js"></script>
+  <script src="/static/js/chat.js"></script>
+</body>
+</html>

@@ -1,0 +1,309 @@
+# ==========================================================================
+# 系统初始化配置文件
+# 使用方法：python deploy/init_system.py
+# 首次部署时运行，创建必要的账号、角色、权限、部门等基础数据
+# ==========================================================================
+
+# ------------------------------
+# 初始超级管理员账号
+# 其他用户由超级管理员登录后在系统中创建
+# ------------------------------
+users:
+  - username: admin
+    email: admin@example.com
+    real_name: 系统管理员
+    password: Admin@1234
+    is_superadmin: true
+
+# ------------------------------
+# 系统内置角色
+# ------------------------------
+roles:
+  - code: super_admin
+    name: 超级管理员
+    description: 系统超级管理员，拥有所有权限
+    is_builtin: true
+
+  - code: kb_admin
+    name: 知识库管理员
+    description: 拥有所有文档的管理权限
+    is_builtin: true
+
+  - code: audit_admin
+    name: 审计管理员
+    description: 审计日志查看权限
+    is_builtin: true
+
+  - code: user_admin
+    name: 用户管理员
+    description: 用户管理权限
+    is_builtin: true
+
+  - code: dept_manager
+    name: 部门经理
+    description: 必须归属某个部门，管理部门成员及部门级文档
+    is_builtin: true
+
+  - code: team_leader
+    name: 组长
+    description: 必须归属某个团队，管理团队成员及团队级文档
+    is_builtin: true
+
+  - code: employee
+    name: 普通员工
+    description: 个人文档CRUD+上传，部门/团队文档只读
+    is_builtin: true
+
+  - code: readonly
+    name: 只读用户
+    description: 仅文档只读权限
+    is_builtin: true
+
+# ------------------------------
+# 系统内置权限
+# ------------------------------
+permissions:
+  # 知识库权限
+  - code: knowledge:read:all
+    name: 知识库全局只读
+    module: knowledge
+    action: read
+    scope: all
+
+  - code: knowledge:read:department
+    name: 知识库部门只读
+    module: knowledge
+    action: read
+    scope: department
+
+  - code: knowledge:read:team
+    name: 知识库团队只读
+    module: knowledge
+    action: read
+    scope: team
+
+  - code: knowledge:read:personal
+    name: 知识库个人只读
+    module: knowledge
+    action: read
+    scope: personal
+
+  - code: knowledge:upload:all
+    name: 全局上传文档
+    module: knowledge
+    action: upload
+    scope: all
+
+  - code: knowledge:upload:department
+    name: 部门上传文档
+    module: knowledge
+    action: upload
+    scope: department
+
+  - code: knowledge:upload:team
+    name: 团队上传文档
+    module: knowledge
+    action: upload
+    scope: team
+
+  - code: knowledge:upload:personal
+    name: 个人上传文档
+    module: knowledge
+    action: upload
+    scope: personal
+
+  - code: knowledge:edit:all
+    name: 全局编辑文档
+    module: knowledge
+    action: edit
+    scope: all
+
+  - code: knowledge:delete:all
+    name: 全局删除文档
+    module: knowledge
+    action: delete
+    scope: all
+
+  - code: knowledge:export:all
+    name: 全局导出文档
+    module: knowledge
+    action: export
+    scope: all
+
+  - code: knowledge:share:all
+    name: 全局分享文档
+    module: knowledge
+    action: share
+    scope: all
+
+  - code: knowledge:manage:all
+    name: 知识库管理
+    module: knowledge
+    action: manage
+    scope: all
+
+  # 用户管理权限
+  - code: user:manage:all
+    name: 用户管理
+    module: user
+    action: manage
+    scope: all
+
+  - code: user:read:all
+    name: 用户查看
+    module: user
+    action: read
+    scope: all
+
+  # 审计权限
+  - code: audit:read:all
+    name: 审计日志查看
+    module: audit
+    action: read
+    scope: all
+
+  # 系统权限
+  - code: system:config:all
+    name: 系统配置
+    module: system
+    action: config
+    scope: all
+
+# ------------------------------
+# 角色-权限映射
+# ------------------------------
+role_permissions:
+  super_admin:
+    - knowledge:read:all
+    - knowledge:upload:all
+    - knowledge:edit:all
+    - knowledge:delete:all
+    - knowledge:export:all
+    - knowledge:share:all
+    - knowledge:manage:all
+    - user:manage:all
+    - user:read:all
+    - audit:read:all
+    - system:config:all
+
+  kb_admin:
+    - knowledge:read:all
+    - knowledge:upload:all
+    - knowledge:edit:all
+    - knowledge:delete:all
+    - knowledge:export:all
+    - knowledge:share:all
+    - knowledge:manage:all
+
+  audit_admin:
+    - audit:read:all
+    - knowledge:read:all
+
+  user_admin:
+    - user:manage:all
+    - user:read:all
+    - knowledge:read:all
+
+  dept_manager:
+    - knowledge:read:all
+    - knowledge:upload:all
+    - knowledge:edit:all
+    - knowledge:delete:all
+    - knowledge:export:all
+    - knowledge:share:all
+    - user:manage:all
+    - user:read:all
+
+  team_leader:
+    - knowledge:read:all
+    - knowledge:upload:all
+    - knowledge:edit:all
+    - knowledge:delete:all
+    - knowledge:export:all
+    - knowledge:share:all
+    - user:manage:all
+    - user:read:all
+
+  employee:
+    - knowledge:read:all
+    - knowledge:upload:all
+    - knowledge:edit:personal
+    - knowledge:delete:personal
+    - knowledge:export:personal
+    - knowledge:share:personal
+
+  readonly:
+    - knowledge:read:all
+
+# ------------------------------
+# 初始部门结构
+# ------------------------------
+departments:
+  - name: 公司总部
+    code: HQ
+    sort_order: 1
+    children:
+      - name: 研发部
+        code: RD
+        sort_order: 10
+        children:
+          - name: 后端开发组
+            code: RD-BE
+            sort_order: 100
+          - name: 前端开发组
+            code: RD-FE
+            sort_order: 101
+          - name: AI算法组
+            code: RD-AI
+            sort_order: 102
+
+      - name: 产品部
+        code: PM
+        sort_order: 20
+        children:
+          - name: 产品经理组
+            code: PM-MGR
+            sort_order: 200
+          - name: UI设计组
+            code: PM-UI
+            sort_order: 201
+
+      - name: 运营部
+        code: OP
+        sort_order: 30
+        children:
+          - name: 内容运营组
+            code: OP-CONTENT
+            sort_order: 300
+          - name: 用户运营组
+            code: OP-USER
+            sort_order: 301
+
+      - name: 行政人事部
+        code: HR
+        sort_order: 40
+        children:
+          - name: 招聘组
+            code: HR-REC
+            sort_order: 400
+          - name: 培训组
+            code: HR-TRN
+            sort_order: 401
+
+# ------------------------------
+# 初始团队
+# ------------------------------
+teams:
+  - name: RAG项目组
+    code: RAG-PROJ
+    description: RAG知识库平台项目组
+    department: 研发部
+
+  - name: 数据安全组
+    code: SEC-DATA
+    description: 数据安全与合规团队
+    department: 研发部
+
+  - name: 跨部门协作组
+    code: CROSS-DEP
+    description: 跨部门协作团队

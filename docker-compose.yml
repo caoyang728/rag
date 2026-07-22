@@ -1,0 +1,121 @@
+version: "3.9"
+
+# ==========================================================================
+# 企业私有化多场景智能 RAG-Agent 统一知识库平台 - Docker Compose 编排
+# 部署：django + celery-worker + celery-beat
+# 依赖：外部 PostgreSQL + Redis（单独部署在 data_network）
+# ==========================================================================
+
+services:
+  # postgres:
+  #   image: pgvector/pgvector:pg16
+  #   container_name: rag_postgres
+  #   restart: unless-stopped
+  #   environment:
+  #     POSTGRES_DB: ${POSTGRES_DB:-rag_agent}
+  #     POSTGRES_USER: ${POSTGRES_USER:-rag_user}
+  #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rag_pass_2026}
+  #     TZ: Asia/Shanghai
+  #   volumes:
+  #     - postgres_data:/var/lib/postgresql/data
+  #     - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+  #   ports:
+  #     - "5432:5432"
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-rag_user} -d ${POSTGRES_DB:-rag_agent}"]
+  #     interval: 5s
+  #     timeout: 5s
+  #     retries: 10
+
+  # redis:
+  #   image: redis:7-alpine
+  #   container_name: rag_redis
+  #   restart: unless-stopped
+  #   volumes:
+  #     - redis_data:/data
+  #   ports:
+  #     - "6379:6379"
+  #   command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_DB_PASSWORD}"]
+  #   healthcheck:
+  #     test: ["CMD", "redis-cli", "-a", "${REDIS_DB_PASSWORD}", "ping"]
+  #     interval: 5s
+  #     timeout: 5s
+  #     retries: 5
+
+  django:
+    build: .
+    container_name: rag_django
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DJANGO_SETTINGS_MODULE: rag_project.settings
+      PG_DB_HOST: postgres
+      REDIS_DB_HOST: redis
+      TZ: Asia/Shanghai
+    volumes:
+      - .:/app
+      - static_data:/app/staticfiles
+      - media_data:/app/media
+    ports:
+      - "8000:8000"
+    command: ["/app/entrypoint.sh"]
+    networks:
+      - data_network
+
+  celery-worker:
+    build: .
+    container_name: rag_celery_worker
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DJANGO_SETTINGS_MODULE: rag_project.settings
+      PG_DB_HOST: postgres
+      REDIS_DB_HOST: redis
+      TZ: Asia/Shanghai
+    volumes:
+      - .:/app
+      - media_data:/app/media
+    command: ["celery", "-A", "rag_project", "worker", "-l", "info", "-Q", "default,parse,memory,email", "--concurrency=1"]
+    networks:
+      - data_network
+
+  celery-beat:
+    build: .
+    container_name: rag_celery_beat
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DJANGO_SETTINGS_MODULE: rag_project.settings
+      PG_DB_HOST: postgres
+      REDIS_DB_HOST: redis
+      TZ: Asia/Shanghai
+    volumes:
+      - .:/app
+    command: ["celery", "-A", "rag_project", "beat", "-l", "info"]
+    networks:
+      - data_network
+
+  # nginx:
+  #   build: ./nginx
+  #   container_name: rag_nginx
+  #   restart: unless-stopped
+  #   depends_on:
+  #     - backend
+  #   ports:
+  #     - "80:80"
+  #   volumes:
+  #     - static_data:/usr/share/nginx/static:ro
+  #     - media_data:/usr/share/nginx/media:ro
+
+volumes:
+  # postgres_data:
+  # redis_data:
+  static_data:
+  media_data:
+
+networks:
+  data_network:
+    external: true

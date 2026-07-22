@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>知库 Agent · 企业智能知识库平台</title>
+  <link rel="stylesheet" href="/static/css/common.css">
+  <style>
+    .home-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:16px;padding:24px 0}
+    .home-card{
+      display:flex;align-items:center;gap:14px;
+      background:var(--white);border:1px solid var(--border);border-radius:var(--radius-lg);
+      padding:20px;cursor:pointer;transition:all 0.15s;text-decoration:none;color:var(--text);
+    }
+    .home-card:hover{border-color:var(--primary);box-shadow:var(--shadow-lg);transform:translateY(-1px)}
+    .home-card-icon{font-size:28px;width:48px;height:48px;display:flex;align-items:center;justify-content:center;background:var(--primary-light);border-radius:var(--radius);flex-shrink:0}
+    .home-card-info{min-width:0}
+    .home-card-title{font-size:15px;font-weight:600;margin-bottom:4px}
+    .home-card-desc{font-size:12px;color:var(--text-sub);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .home-section{margin-bottom:28px}
+    .home-section-title{font-size:16px;font-weight:600;color:var(--text);margin-bottom:12px;display:flex;align-items:center;gap:8px}
+  </style>
+</head>
+<body>
+  <div id="topnav-container"></div>
+
+  <div class="layout">
+    <div id="sidebar-container"></div>
+    <div class="main">
+      <div class="page-header">
+        <div class="page-title">工作台</div>
+        <div class="page-desc">知库 Agent 企业私有化多场景智能 RAG 知识库平台</div>
+      </div>
+
+      <!-- 工作台 -->
+      <div class="home-section">
+        <div class="home-section-title">📋 工作台</div>
+        <div class="home-grid">
+          <a href="/chat/" class="home-card">
+            <div class="home-card-icon">💬</div>
+            <div class="home-card-info">
+              <div class="home-card-title">智能聊天</div>
+              <div class="home-card-desc">基于 RAG 的多轮问答，支持多知识库检索</div>
+            </div>
+          </a>
+          <a href="/upload/" class="home-card">
+            <div class="home-card-icon">📤</div>
+            <div class="home-card-info">
+              <div class="home-card-title">文档上传</div>
+              <div class="home-card-desc">上传 PDF / Word / MD，自动解析与向量化</div>
+            </div>
+          </a>
+        </div>
+      </div>
+
+      <!-- 管理后台 -->
+      <div class="home-section">
+        <div class="home-section-title">⚙️ 管理后台</div>
+        <div class="home-grid">
+          <a href="/admin-users/" class="home-card">
+            <div class="home-card-icon">👥</div>
+            <div class="home-card-info">
+              <div class="home-card-title">用户与角色</div>
+              <div class="home-card-desc">管理用户、角色与 RBAC 权限</div>
+            </div>
+          </a>
+          <a href="/admin-nodes/" class="home-card">
+            <div class="home-card-icon">🗂️</div>
+            <div class="home-card-info">
+              <div class="home-card-title">节点管理</div>
+              <div class="home-card-desc">知识库树形结构管理与维护</div>
+            </div>
+          </a>
+          <a href="/admin-analytics/" class="home-card">
+            <div class="home-card-icon">📊</div>
+            <div class="home-card-info">
+              <div class="home-card-title">反馈与报表</div>
+              <div class="home-card-desc">用户反馈收集与准确率分析</div>
+            </div>
+          </a>
+          <a href="/admin-audit/" class="home-card">
+            <div class="home-card-icon">🛡️</div>
+            <div class="home-card-info">
+              <div class="home-card-title">审计与安全</div>
+              <div class="home-card-desc">操作审计日志与安全策略</div>
+            </div>
+          </a>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="mask" class="mask"></div>
+  <div id="toast-wrap" class="toast-wrap"></div>
+
+  <script src="/static/js/common.js"></script>
+</body>
+</html>

@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>节点管理 · 知库 Agent</title>
+	<link rel="stylesheet" href="/static/css/common.css">
+	<link rel="stylesheet" href="/static/css/admin-nodes.css">
+</head>
+
+<body>
+	<div id="topnav-container"></div>
+
+	<div class="layout">
+		<div id="sidebar-container"></div>
+		<div class="main">
+			<div class="page-header">
+				<div class="breadcrumb"><a href="/chat/">首页</a><span class="sep">/</span>管理后台<span
+						class="sep">/</span>节点管理</div>
+				<div class="page-header-flex">
+					<div>
+						<div class="page-title">知识库节点管理</div>
+						<div class="page-desc">管理四大根节点下的知识库目录树，支持节点的增删改操作</div>
+					</div>
+					<div class="page-actions">
+						<button class="btn btn-primary" onclick="openNodeModal()">＋ 新增节点</button>
+					</div>
+				</div>
+			</div>
+
+			<div class="node-manage">
+				<div class="node-tree-panel">
+					<div class="panel-header">
+						<div class="panel-title">节点树</div>
+						<button class="btn-ghost btn-sm" onclick="expandAllTree()" title="展开全部"
+							style="padding:2px 6px">⛶</button>
+					</div>
+					<div class="panel-body">
+						<div class="tree" id="nodeMgrTree">
+							<div style="padding:20px;text-align:center;color:var(--text-sub)">加载中...</div>
+						</div>
+					</div>
+				</div>
+				<div class="node-detail-panel" id="nodeDetail">
+					<div style="padding:40px;text-align:center;color:var(--text-sub)">
+						<div style="font-size:48px;margin-bottom:12px">🗂️</div>
+						<div>请在左侧选择或创建一个节点</div>
+					</div>
+				</div>
+			</div>
+		</div>
+	</div>
+
+	<!-- 新增/编辑节点弹窗 -->
+	<div class="modal" id="nodeModal" style="max-width:560px">
+		<div class="modal-header">
+			<div class="modal-title" id="nodeModalTitle">新增节点</div>
+			<button class="modal-close" onclick="closeModal('nodeModal')">&times;</button>
+		</div>
+		<div class="modal-body" style="max-height:70vh;overflow-y:auto">
+			<input type="hidden" id="nodeId">
+
+			<!-- ===== 节点归属 ===== -->
+			<div class="form-section-title">节点归属</div>
+			<div class="form-row">
+				<div class="form-item" style="flex:1">
+					<label class="form-label">节点类型 <span class="required">*</span></label>
+					<select id="nodeType" class="select">
+						<option value="root">根节点</option>
+						<option value="folder">文件夹</option>
+						<option value="leaf">叶子节点</option>
+					</select>
+					<div class="form-hint">根节点为顶级目录，文件夹下可建子节点，叶子节点不可再建子节点</div>
+				</div>
+				<div class="form-item" style="flex:1">
+					<label class="form-label">上级节点 <span class="required" id="parentRequired"
+							style="display:none">*</span></label>
+					<select id="nodeParent" class="select">
+						<option value="">— 无（作为根节点）—</option>
+					</select>
+					<div class="form-hint" id="parentHint">选择"无"则创建为根节点；知识库分类将从上级节点继承</div>
+				</div>
+			</div>
+
+			<!-- ===== 基本信息 ===== -->
+			<div class="form-section-title">基本信息</div>
+			<div class="form-row">
+				<div class="form-item" style="flex:1">
+					<label class="form-label">节点名称 <span class="required">*</span></label>
+					<input id="nodeName" class="input" placeholder="例如：产品文档、后端服务" maxlength="128">
+				</div>
+				<div class="form-item" style="width:130px;flex-shrink:0">
+					<label class="form-label">显示顺序</label>
+					<input id="nodeOrder" class="input" type="number" value="0" min="0" max="9999">
+				</div>
+			</div>
+			<div class="form-hint" style="margin-top:-8px;margin-bottom:14px">数字越小越靠前，同级节点按此值升序排列，默认为 0</div>
+			<div class="form-item">
+				<label class="form-label">节点描述</label>
+				<textarea id="nodeDesc" class="textarea" placeholder="简要描述该节点的用途和包含的内容范围" rows="3"></textarea>
+			</div>
+		</div>
+		<div class="modal-footer">
+			<button class="btn" onclick="closeModal('nodeModal')">取消</button>
+			<button class="btn btn-primary" onclick="saveNode()">保存</button>
+		</div>
+	</div>
+
+	<div id="mask" class="mask"></div>
+	<div id="toast-wrap" class="toast-wrap"></div>
+
+	<script src="/static/js/common.js"></script>
+	<script src="/static/js/admin-nodes.js"></script>
+	<script>
+		// 页面级权限守卫：非超管/知识库运维拒访，通过则初始化页面
+		document.addEventListener('DOMContentLoaded', function () {
+			if (!isAdminOrOps()) {
+				document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;font-size:18px;color:var(--text-sub)"><div style="text-align:center"><div style="font-size:48px;margin-bottom:16px">🔒</div><div>无权限访问此页面</div><div style="margin-top:12px"><a href="/chat/" style="color:var(--primary)">返回首页</a></div></div></div>';
+				return;
+			}
+			initNodesPage();
+		});
+	</script>
+</body>
+
+</html>

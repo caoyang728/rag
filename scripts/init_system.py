@@ -4,12 +4,12 @@
 首次部署时运行，创建必要的账号、角色、权限、部门等基础数据
 
 使用方法：
-    python deploy/init_system.py
-    python deploy/init_system.py --config deploy/initial_data.yaml
-    python deploy/init_system.py --dry-run
+    python scripts/init_system.py
+    python scripts/init_system.py --config scripts/initial_data.yaml
+    python scripts/init_system.py --dry-run
 
 参数：
-    --config: 指定配置文件路径（默认: deploy/initial_data.yaml）
+    --config: 指定配置文件路径（默认: scripts/initial_data.yaml）
     --dry-run: 仅预览，不实际写入数据库
     --force: 强制覆盖已存在的数据
 """
@@ -397,7 +397,7 @@ def create_users(config, dry_run=False):
 
 def main():
     parser = argparse.ArgumentParser(description='系统初始化脚本')
-    parser.add_argument('--config', default='deploy/initial_data.yaml', help='配置文件路径')
+    parser.add_argument('--config', default='scripts/initial_data.yaml', help='配置文件路径')
     parser.add_argument('--dry-run', action='store_true', help='仅预览，不实际写入数据库')
     parser.add_argument('--force', action='store_true', help='强制覆盖已存在的数据')
     args = parser.parse_args()

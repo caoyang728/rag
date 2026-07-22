@@ -37,5 +37,6 @@ models/
 *.safetensors
 
 # Docker
+celerybeat-schedule*
 *.override.yml
 !docker-compose.override.yml.example

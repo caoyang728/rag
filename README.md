@@ -8,18 +8,18 @@
 
 ```bash
 # 1. 克隆仓库并进入根目录
-cd RAGDemo
+cd rag
 
 # 2. 复制并按需修改环境变量（LLM_API_KEY 至少要填一个真 key，否则走 stub）
 cp .env.example .env && vim .env
 
-# 3. 一键启动 web + celery + postgres + redis + nginx
+# 3. 一键启动 web + celery
 docker compose up -d --build
 
 # 首次启动后建议：
 docker compose exec web python manage.py migrate
 docker compose exec web python manage.py createsuperuser
-docker compose exec web python scripts/seed_demo.py   # 载入演示数据
+docker compose exec web python scripts/init_system.py   # 初始化系统数据
 ```
 
 启动完成后：
@@ -33,7 +33,7 @@ docker compose exec web python scripts/seed_demo.py   # 载入演示数据
 ## 二、目录结构
 
 ```
-RAGDemo/
+rag/
 ├── apps/
 │   ├── users/                  # 自定义 SysUser + RBAC（角色/权限/部门/团队）
 │   ├── knowledge/              # 节点树 + 文档 + 分块 + 多格式解析器
@@ -50,49 +50,58 @@ RAGDemo/
 │   └── system/                 # 系统配置 / Celery 任务日志 / LLM 调用日志
 ├── rag_project/                # Django 项目配置、根 URL、Celery、ASGI/WSGI
 ├── scripts/
-│   ├── seed_demo.py            # 演示数据初始化
-│   ├── init_db.sql             # pgvector 扩展 + 初始 schema
-│   └── init_db_remote.py       # 远程数据库初始化
+│   ├── init_system.py          # 系统初始化（角色/权限/部门/用户）
+│   └── initial_data.yaml       # 初始化数据配置
 ├── static/                     # 前端静态资源（开发源码）
 │   ├── css/                    # 公共 common.css + 各页面 page.css
-│   ├── js/                     # 页面模块：chat / upload / admin-analytics / admin-audit
-│   └── *.html                  # 各页面 HTML 入口
+│   ├── js/                     # API_SERVICE 通用请求 + 各页面模块
+│   │   ├── common.js           # 通用请求封装（含 token / 401 处理 / 流式）
+│   │   ├── chat.js             # 会话问答
+│   │   ├── upload.js           # 文档上传
+│   │   ├── login.js            # 登录
+│   │   ├── profile.js          # 个人资料
+│   │   ├── reset-password.js   # 修改密码
+│   │   ├── admin-users.js      # 用户管理
+│   │   ├── admin-rbac.js       # 角色权限管理
+│   │   ├── admin-nodes.js      # 知识节点管理
+│   │   ├── admin-analytics.js  # 统计分析
+│   │   └── admin-audit.js      # 审计日志
+│   ├── index.html              # 首页
+│   ├── chat.html               # 问答页
+│   ├── upload.html             # 文档上传页
+│   ├── login.html              # 登录页
+│   ├── profile.html            # 个人资料页
+│   ├── reset-password.html     # 修改密码页
+│   ├── admin-users.html        # 用户管理页
+│   ├── admin-rbac.html         # 角色权限管理页
+│   ├── admin-nodes.html        # 知识节点管理页
+│   ├── admin-analytics.html    # 统计分析页
+│   └── admin-audit.html        # 审计日志页
 ├── tests/                      # API 测试用例
 ├── nginx/                      # Nginx 反代
 ├── Dockerfile
 ├── docker-compose.yml
+├── entrypoint.sh               # 容器启动脚本
 ├── requirements.txt
+├── .env.example
 └── README.md
 ```
 
 ---
 
-## 三、十大技术亮点（代码位置一览）
-
-| # | 亮点 | 关键文件 |
-|---|------|----------|
-| 1 | **四类知识库根节点 + 三级可见性** —— 企业文档 / 代码知识库 / 通用推理 / 运维故障；私有/团队/公开/系统 | `apps/knowledge/models.py`（KnowledgeNode, Document.visibility） |
-| 2 | **多格式解析器 + 语义感知切片** —— PDF/DOCX/Code(AST)，切片保 section_path 溯源 | `apps/knowledge/parsers/*.py`、`apps/knowledge/chunker.py` |
-| 3 | **敏感信息脱敏** —— 身份证/手机/邮箱/AK 正则组合，命中写 `desensitized_hits` 元数据 | `apps/knowledge/desensitizer.py` |
-| 4 | **RRF 混合检索** —— 向量召回30 + BM25召回30 → RRF 融合 → Rerank Top5，两路并发执行 | `apps/retrieval/hybrid.py` |
-| 5 | **pgvector 向量库 + HNSW 索引** —— HNSW/IVFFlat 双索引选型建议在注释中 | `apps/retrieval/vector_store.py`、`scripts/init_db.sql` |
-| 6 | **四层记忆架构** —— Redis 短时 + 会话摘要 + 用户偏好 + 全局知识；定时提炼由 Celery 触发 | `apps/memory/manager.py`、`apps/memory/tasks.py` |
-| 7 | **复杂任务拆分（Agent）** —— LLM 输出 JSON 子任务列表，逐个检索+回答，最终合并 | `apps/agent/task_splitter.py`、`executor.py` |
-| 8 | **审计日志哈希链** —— sha256(prev_hash + row_payload) 链式存储 + 校验接口 | `apps/audit/models.py`、`apps/audit/views.py` |
-| 9 | **热点缓存 + 关键词权重** —— (question_hash, root_type, visibility_scope) 三键；BM25 按 weight_score 加权 | `apps/chat/models.py::HotQaCache`、`apps/analytics/models.py::KeywordWeight` |
-| 10 | **全链路可观测** —— 每条 QA 记录检索命中 chunk_id、分阶段耗时、Token、成本；LlmCallLog 独立表 | `apps/chat/models.py::QaRecord`、`apps/system/models.py::LlmCallLog` |
-
----
-
-## 四、核心 API 概览
+## 三、核心 API 概览
 
 | Method | Path | 说明 |
 |--------|------|------|
 | POST | `/api/v1/auth/login/` | 登录，返回 `{access, refresh, user}` |
 | POST | `/api/v1/auth/logout/` | 登出（refresh 加黑名单） |
-| GET/PATCH | `/api/v1/auth/profile/` | 当前用户资料 |
-| POST | `/api/v1/auth/change-password/` | 修改密码 |
+| GET/PATCH | `/api/v1/auth/profile/` | 当前用户资料（支持更新 real_name / avatar_url / phone） |
+| POST | `/api/v1/auth/reset-password/` | 修改密码 |
 | CRUD | `/api/v1/auth/users/` `/roles/` `/permissions/` `/departments/` `/teams/` | RBAC 管理 |
+| POST | `/api/v1/auth/users/{id}/toggle_status/` | 启用/禁用用户 |
+| GET | `/api/v1/auth/permissions/me/` | 当前用户权限 |
+| GET | `/api/v1/auth/permissions/approvers/` | 权限审批人列表 |
+| CRUD | `/api/v1/auth/permissions/applications/` | 权限申请 |
 | GET | `/api/v1/knowledge/nodes/tree/?root_type=` | 节点树 |
 | CRUD | `/api/v1/knowledge/nodes/` | 节点管理 |
 | POST | `/api/v1/knowledge/documents/upload/` | 文档上传（multipart，sha256 去重，异步解析） |
@@ -122,7 +131,7 @@ RAGDemo/
 
 ---
 
-## 五、技术栈
+## 四、技术栈
 
 | 层 | 选型 | 理由 |
 |-----|------|------|
@@ -138,7 +147,7 @@ RAGDemo/
 
 ---
 
-## 六、测试用例
+## 五、测试用例
 
 ```bash
 # 运行 API 测试（需先启动 Django 服务器）
@@ -147,7 +156,7 @@ python tests/test_api_simple.py
 
 ---
 
-## 七、二次开发建议
+## 六、二次开发建议
 
 1. **接入生产级向量库**：当前 `apps.retrieval.vector_store` 走 pgvector，可切换 Milvus/Qdrant，只改 `upsert_vector` / `vector_search` 两个函数。
 2. **接入正式 Rerank**：`apps.retrieval.rerank.rerank_docs` 已抽象签名，可换 BGE-Reranker-v2 或 Cohere API。
@@ -156,9 +165,9 @@ python tests/test_api_simple.py
 
 ---
 
-## 八、权限系统规则
+## 七、权限系统规则
 
-### 8.1 角色体系
+### 7.1 角色体系
 
 | 角色编码 | 角色名称 | 核心权限 |
 |---------|---------|---------|
@@ -171,7 +180,7 @@ python tests/test_api_simple.py
 | employee | 普通员工 | 个人文档CRUD+上传，部门/团队文档只读 |
 | readonly | 只读用户 | 仅文档只读权限 |
 
-### 8.2 文档可见性
+### 7.2 文档可见性
 
 | 可见性 | 说明 | 默认访问范围 |
 |--------|------|-------------|
@@ -180,7 +189,7 @@ python tests/test_api_simple.py
 | department | 部门文档 | 部门所有成员、部门经理、文档管理员、超级管理员 |
 | all | 全局文档 | 所有用户可读 |
 
-### 8.3 权限判定规则
+### 7.3 权限判定规则
 
 1. **超级管理员**：直接放行所有权限（除了迁移他人 personal 文档）
 2. **文档管理员**：全部文档权限（除了迁移他人 personal 文档）
@@ -188,13 +197,13 @@ python tests/test_api_simple.py
 4. **文档可见性匹配**：按可见性范围授权，无权限继承关系
 5. **临时授权**：检查 document_permission 表
 
-### 8.4 上传权限
+### 7.4 上传权限
 
 - 除 `readonly` 外，所有角色都有上传权限
 - 上传时可选择可见范围：all / department / team / personal
 - 上传者始终是文档的所有者
 
-### 8.5 文档迁移规则
+### 7.5 文档迁移规则
 
 1. **归属链**：文档的归属链由上传者决定，不可改变。归属链格式：部门 → 团队 → 上传者
 2. **迁移方向**：只能沿归属链向下迁移：all → department → team → personal
@@ -217,16 +226,3 @@ python tests/test_api_simple.py
 
 - 管理员可以 read 和 delete personal 文档（安全管理）
 - 管理员不能 edit、migrate、share personal 文档（保护个人隐私）
-
----
-
-## 九、目录里都有啥？
-
-- 12 个 Django app，覆盖用户/权限/知识库/检索/LLM/记忆/Agent/审计/安全/看板/通知/系统。
-- 50+ 条 REST API，覆盖登录、RBAC、节点树、上传、问答、反馈、拆分、审计、日报、健康检查。
-- 3 套文件解析器：PDF / DOCX / 代码（AST 抽取符号）。
-- 4 层记忆架构 + 混合检索 + 哈希链审计，构成本仓库的三大核心技术支柱。
-
----
-
-**Enjoy hacking. PR & Star welcome.**

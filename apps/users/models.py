@@ -152,11 +152,6 @@ class SysUser(AbstractBaseUser):
                 pass
         super().save(*args, **kwargs)
 
-    # ---- DRF/Admin 需要 ----
-    @property
-    def is_authenticated(self):
-        return True
-
     @property
     def is_active(self):
         return self.status == 'active' and not self.is_deleted
@@ -179,13 +174,14 @@ class SysUser(AbstractBaseUser):
         ).exists()
 
     @property
-    def is_superuser(self):
+    def is_super_admin(self):
+        """判断是否为超级管理员（使用自定义角色体系）"""
         return UserRole.objects.filter(
             user=self, role__code='super_admin'
         ).exists()
 
     def has_perm(self, perm, obj=None):
-        return self.is_superuser or has_permission(self, perm)
+        return self.is_super_admin or has_permission(self, perm)
 
     def has_module_perms(self, app_label):
         return self.is_staff

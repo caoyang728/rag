@@ -95,6 +95,7 @@ class Document(models.Model):
         ('desensitizing', 'desensitizing'),
         ('chunking', 'chunking'),
         ('embedding', 'embedding'),
+        ('embedding_failed', 'embedding_failed'),
         ('done', 'done'),
         ('failed', 'failed'),
     ]

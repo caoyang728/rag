@@ -15,7 +15,7 @@ from django.conf import settings
 from .vector_store import vector_search
 from .bm25 import bm25_search
 from .rerank import rerank_docs
-from apps.llm.embedding import get_embedding_client
+from apps.llm.embedding import get_embedding_client, EmbeddingException
 
 
 RRF_K = 60
@@ -62,7 +62,16 @@ def hybrid_search(query: str,
 
     # 1. 生成 query 向量
     embed_client = get_embedding_client()
-    qvec = embed_client.embed_one(query)
+    try:
+        qvec = embed_client.embed_one(query)
+    except EmbeddingException as e:
+        logger.error('[Hybrid] query embedding failed: %s', e)
+        raise
+    
+    # 检测零向量
+    if all(v == 0.0 for v in qvec):
+        logger.error('[Hybrid] query embedding returned zero vector')
+        raise EmbeddingException("embedding服务返回零向量，无法进行向量检索")
 
     stats = {}
 

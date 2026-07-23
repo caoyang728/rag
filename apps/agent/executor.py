@@ -20,6 +20,7 @@ from apps.retrieval.hybrid import hybrid_search
 from apps.llm.factory import get_llm
 from apps.llm.prompts import build_qa_messages
 from apps.system.models import LlmCallLog
+from apps.llm.embedding import EmbeddingException
 
 
 
@@ -34,7 +35,7 @@ def _hash(q: str) -> str:
 def _visibility_scope(user) -> str:
     if not user or not user.is_authenticated:
         return 'anonymous'
-    if getattr(user, 'is_superuser', False):
+    if getattr(user, 'is_super_admin', False):
         return 'super'
     return f'user_{user.id}'
 
@@ -77,9 +78,36 @@ def ask(user, question: str, session: Session,
             return execute_split(user, session, question, split, root_types=root_types)
 
     # 3. 混合检索
-    retrieval = hybrid_search(question, user, root_types=root_types, node_ids=node_ids, do_rerank=do_rerank)
-    chunks = retrieval['chunks']
-    r_stats = retrieval['stats']
+    try:
+        retrieval = hybrid_search(question, user, root_types=root_types, node_ids=node_ids, do_rerank=do_rerank)
+        chunks = retrieval['chunks']
+        r_stats = retrieval['stats']
+    except EmbeddingException as e:
+        logger.error('[Executor] embedding failed during search: %s', e)
+        # 返回错误提示给前端
+        answer = '当前向量服务暂时不可用，请稍后重试。'
+        answer_type = 'refused'
+        llm_stats = {}
+        citations = []
+        
+        # 落 QA 记录（记录错误）
+        qa = _persist_qa(
+            user=user, session=session, question=question, answer=answer,
+            citations=citations,
+            retrieval_hits=[], retrieval_scores=[],
+            stats={'latency_total_ms': int((time.time() - t0) * 1000)},
+            llm_stats=llm_stats, root_type=root_type, turn_index=turn_index,
+            answer_type=answer_type, is_hit_cache=False,
+        )
+        
+        return {
+            'qa_id': qa.id,
+            'answer': answer,
+            'citations': citations,
+            'chunks': [],
+            'is_hit_cache': False,
+            'stats': {'total_ms': int((time.time() - t0) * 1000), 'error': str(e)},
+        }
 
     # 4. 记忆加载
     mm = MemoryManager()
@@ -87,7 +115,7 @@ def ask(user, question: str, session: Session,
 
     # 5. LLM 生成
     if not chunks:
-        answer = '根据现有知识库资料，暂无法回答该问题。请补充上下文，或尝试其他关键词。'
+        answer = '当前选择的知识库范围内未找到相关资料。请尝试选择其他知识库节点，或调整搜索关键词。'
         answer_type = 'refused'
         llm_stats = {}
     else:

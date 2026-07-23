@@ -19,7 +19,7 @@ def build_permission_q(user, root_types: Optional[List[str]] = None,
     返回：Q(visibility=4) | Q(visibility=3) | Q(visibility=2, owner_team_id__in=user_teams) | Q(owner_id=user.id)
     """
     # 超管：直接 True
-    if user.is_authenticated and (user.is_superuser or _is_super(user)):
+    if user.is_authenticated and getattr(user, 'is_super_admin', False):
         q = Q()
     else:
         # 用户团队 id 列表（从 UserTeam）
@@ -48,14 +48,6 @@ def build_permission_q(user, root_types: Optional[List[str]] = None,
     return q
 
 
-def _is_super(user) -> bool:
-    """是否超管"""
-    try:
-        return user.user_roles.filter(role__code__in=['super_admin']).exists()
-    except Exception:
-        return False
-
-
 def _get_user_team_ids(user) -> List[int]:
     try:
         return list(user.user_teams.values_list('team_id', flat=True))
@@ -66,7 +58,7 @@ def _get_user_team_ids(user) -> List[int]:
 def build_permission_sql(user, root_types: Optional[List[str]] = None,
                          node_ids: Optional[List[int]] = None) -> Tuple[str, list]:
     """当需要直接写原生 SQL 时（如 pgvector 相似度检索），返回 (where_clause, params)"""
-    if user.is_authenticated and (user.is_superuser or _is_super(user)):
+    if user.is_authenticated and getattr(user, 'is_super_admin', False):
         base = '1=1'
         params: list = []
     else:

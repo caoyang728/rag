@@ -40,6 +40,9 @@ function initSearchFilter() {
 			loadUploadHistory(1);
 		});
 	}
+
+	// 启动上传历史持续刷新
+	startUploadHistoryPolling();
 }
 
 async function loadUploadHistory(page = 1) {
@@ -589,6 +592,8 @@ async function startUpload() {
 
 		if (uploadedDocIds.length > 0) {
 			startStatusPolling(uploadedDocIds);
+			// 确保上传历史持续刷新，直到所有文档完成
+			startUploadHistoryPolling();
 		}
 		finishUpload();
 	} catch (e) {
@@ -738,7 +743,7 @@ function stopStatusPolling() {
 }
 
 /* ============ 上传历史自动刷新 ============ */
-const PROCESSING_STATUSES = new Set(['pending', 'parsing', 'desensitizing', 'chunking', 'embedding']);
+const PROCESSING_STATUSES = new Set(['pending', 'parsing', 'desensitizing', 'chunking', 'embedding', 'embedding_failed']);
 let historyRefreshInterval = null;
 
 function scheduleUploadHistoryRefresh(docs) {
@@ -756,6 +761,28 @@ function clearHistoryRefresh() {
 		clearInterval(historyRefreshInterval);
 		historyRefreshInterval = null;
 	}
+}
+
+/**
+ * 启动上传历史持续刷新（页面加载时调用）
+ * 只要存在进行中的文档，就每10秒刷新一次
+ */
+function startUploadHistoryPolling() {
+	clearHistoryRefresh();
+	historyRefreshInterval = setInterval(() => {
+		try {
+			// 检查是否有进行中的文档
+			const hasProcessing = currentDocs?.some(d => PROCESSING_STATUSES.has(d.status));
+			if (hasProcessing) {
+				loadUploadHistory(uploadHistoryCurrentPage);
+			} else {
+				// 所有文档都已完成，停止刷新
+				clearHistoryRefresh();
+			}
+		} catch (e) {
+			console.warn('上传历史刷新失败:', e);
+		}
+	}, 10000);
 }
 
 document.addEventListener('beforeunload', () => {

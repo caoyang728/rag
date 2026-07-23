@@ -11,14 +11,21 @@ from pathlib import Path
 import dj_database_url
 from loguru import logger
 
+# 导入独立配置模块
+from .config import (
+    SecurityConfig, DatabaseConfig, RedisConfig, CeleryConfig,
+    CorsConfig, LLMConfig, EmbeddingConfig, LogConfig
+)
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# --- 初始化日志 ---
+LogConfig.setup_logger()
+
 # --- 安全 & 环境 ---
-SECRET_KEY = os.getenv('SECRET_KEY')
-if not SECRET_KEY:
-    raise RuntimeError("SECRET_KEY 环境变量必须设置，请在 .env 中配置")
-DEBUG = os.getenv('DEBUG', '0') == '1'
-ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', '*').split(',')
+SECRET_KEY = SecurityConfig.secret_key()
+DEBUG = SecurityConfig.debug()
+ALLOWED_HOSTS = SecurityConfig.allowed_hosts()
 
 # --- 应用注册 ---
 DJANGO_APPS = [
@@ -95,21 +102,9 @@ TEMPLATES = [
 WSGI_APPLICATION = 'rag_project.wsgi.application'
 ASGI_APPLICATION = 'rag_project.asgi.application'
 
-# --- 数据库 ---#   2. PG_DB_HOST / PG_DB_PORT / PG_DB_DATABASE / PG_DB_USER / PG_DB_PASSWORD（.env 分散式）
-def _build_database_url():
-    url = os.getenv('DATABASE_URL')
-    if url:
-        return url
-    host = os.getenv('PG_DB_HOST', 'localhost')
-    port = os.getenv('PG_DB_PORT', '5432')
-    db = os.getenv('PG_DB_DATABASE', 'rag_agent')
-    user = os.getenv('PG_DB_USER', 'rag_user')
-    password = os.getenv('PG_DB_PASSWORD', 'rag_pass_2026')
-    return f'postgres://{user}:{password}@{host}:{port}/{db}'
-
-DATABASE_URL = _build_database_url()
-# CONN_MAX_AGE: 连接保持时间（秒），从环境变量读取，默认 60 秒
-_conn_max_age = int(os.getenv('PG_CONN_MAX_AGE', '60'))
+# --- 数据库 ---
+DATABASE_URL = DatabaseConfig.build_url()
+_conn_max_age = DatabaseConfig.conn_max_age()
 DATABASES = {
     'default': dj_database_url.parse(DATABASE_URL, conn_max_age=_conn_max_age)
 }
@@ -193,26 +188,12 @@ SIMPLE_JWT = {
 }
 
 # --- CORS（开发放开）---
-CORS_ALLOW_ALL_ORIGINS = DEBUG
-CORS_ALLOWED_ORIGINS = os.getenv('CORS_ORIGINS', 'http://localhost,http://127.0.0.1').split(',')
+CORS_ALLOW_ALL_ORIGINS = CorsConfig.allow_all_origins()
+CORS_ALLOWED_ORIGINS = CorsConfig.allowed_origins()
 CORS_ALLOW_CREDENTIALS = True
 
 # --- Redis ---
-def _build_redis_url(db=0):
-    """优先读 REDIS_URL，否则从 REDIS_DB_* 拼接"""
-    url = os.getenv('REDIS_URL')
-    if url:
-        return url
-    host = os.getenv('REDIS_DB_HOST', '')
-    if not host:
-        return ''
-    port = os.getenv('REDIS_DB_PORT', '6379')
-    password = os.getenv('REDIS_DB_PASSWORD', '')
-    if password:
-        return f'redis://:{password}@{host}:{port}/{db}'
-    return f'redis://{host}:{port}/{db}'
-
-REDIS_URL = _build_redis_url(db=int(os.getenv('REDIS_DB_DB', '0')))
+REDIS_URL = RedisConfig.build_url(db=int(os.getenv('REDIS_DB_DB', '0')))
 
 # --- 缓存（自动降级为内存缓存）---
 if REDIS_URL:
@@ -231,8 +212,8 @@ else:
     }
 
 # --- Celery ---
-CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL', _build_redis_url(db=1) or 'redis://localhost:6379/1')
-CELERY_RESULT_BACKEND = os.getenv('CELERY_RESULT_BACKEND', _build_redis_url(db=2) or 'redis://localhost:6379/2')
+CELERY_BROKER_URL = CeleryConfig.broker_url()
+CELERY_RESULT_BACKEND = CeleryConfig.result_backend()
 CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
@@ -249,17 +230,28 @@ CELERY_TASK_QUEUES = {
 }
 
 # --- LLM ---
-LLM_API_KEY = os.getenv('LLM_API_KEY', '')
-LLM_BASE_URL = os.getenv('LLM_BASE_URL', 'https://api.deepseek.com/v1')
-LLM_MODEL = os.getenv('LLM_MODEL', 'deepseek-chat')
+# 支持双模型：基础模型（简单任务）和高级模型（复杂任务）
+LLM_API_KEY = LLMConfig.api_key()
+LLM_BASE_URL = LLMConfig.base_url()
+LLM_BASE_MODEL = LLMConfig.default_model()         # 基础模型（用于简单任务）
+LLM_ADVANCED_MODEL = LLMConfig.advanced_model()    # 高级模型（用于复杂任务）
 
-# --- Embedding ---
-EMBEDDING_DOCKER_URL = os.getenv('EMBEDDING_DOCKER_URL', '')
-EMBEDDING_DOCKER_TIMEOUT = int(os.getenv('EMBEDDING_DOCKER_TIMEOUT', '30'))
-EMBEDDING_API_KEY = os.getenv('EMBEDDING_API_KEY', '')
-EMBEDDING_API_URL = os.getenv('EMBEDDING_API_URL', 'https://open.bigmodel.cn/api/paas/v4')
-EMBEDDING_API_MODEL = os.getenv('EMBEDDING_API_MODEL', 'embedding-3')
-EMBEDDING_API_DIM = int(os.getenv('EMBEDDING_API_DIM', '1024'))
+# --- Embedding & Rerank ---
+# 使用通用变量名，支持切换不同平台
+EMBEDDING_API_KEY = EmbeddingConfig.api_key()
+EMBEDDING_BASE_URL = EmbeddingConfig.base_url()
+EMBEDDING_MODEL = EmbeddingConfig.model()
+EMBEDDING_DIM = EmbeddingConfig.dim()
+RERANK_MODEL = EmbeddingConfig.rerank_model()
+
+# --- Embedding Provider 切换开关 ---
+# docker: 优先使用 Docker Embedding 服务（本地部署）
+# api:    优先使用云 API（如 SiliconFlow）
+EMBEDDING_PROVIDER = EmbeddingConfig.provider()
+
+# --- Docker Embedding 配置（预留）---
+EMBEDDING_DOCKER_URL = EmbeddingConfig.docker_url()
+EMBEDDING_DOCKER_TIMEOUT = EmbeddingConfig.docker_timeout()
 
 # --- 图片存储模式 ---
 IMAGE_STORAGE_MODE = os.getenv('IMAGE_STORAGE_MODE', 'base64')  # base64 / oss

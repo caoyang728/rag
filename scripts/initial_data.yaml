@@ -13,7 +13,7 @@ users:
     email: admin@example.com
     real_name: 系统管理员
     password: Admin@1234
-    is_superadmin: true
+    role: super_admin
 
 # ------------------------------
 # 系统内置角色

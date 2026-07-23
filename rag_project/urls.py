@@ -29,14 +29,19 @@ def healthz(request):
     }
     try:
         from django.db import connection
-        with connection.cursor():
-            connection.execute("SELECT 1")
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT 1")
     except Exception as e:
         checks["database"] = f"failed: {str(e)[:50]}"
     
     try:
         import redis
-        r = redis.Redis(host=os.getenv('REDIS_DB_HOST', 'redis'), port=int(os.getenv('REDIS_DB_PORT', 6379)), decode_responses=True)
+        r = redis.Redis(
+            host=os.getenv('REDIS_DB_HOST', 'redis'),
+            port=int(os.getenv('REDIS_DB_PORT', 6379)),
+            password=os.getenv('REDIS_DB_PASSWORD', ''),
+            decode_responses=True
+        )
         r.ping()
     except Exception as e:
         checks["redis"] = f"failed: {str(e)[:50]}"

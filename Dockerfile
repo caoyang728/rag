@@ -12,12 +12,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# 系统依赖：gcc（安全网）/ libmagic（MIME检测）/ ca-certificates（HTTPS证书）/ tzdata（时区）
+# 系统依赖：gcc（安全网）/ libmagic（MIME检测）/ ca-certificates（HTTPS证书）/ tzdata（时区）/ 字体
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libmagic1 \
     ca-certificates \
     tzdata \
+    fonts-dejavu-core \
     && ln -sf /usr/share/zoneinfo/${TZ} /etc/localtime \
     && echo ${TZ} > /etc/timezone \
     && rm -rf /var/lib/apt/lists/*

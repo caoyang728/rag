@@ -100,8 +100,27 @@ class LoginView(APIView):
     def post(self, request):
         username = (request.data.get("username") or "").strip()
         password = request.data.get("password") or ""
+        captcha_id = request.data.get("captcha_id") or ""
+        captcha_code = request.data.get("captcha_code") or ""
+        
         if not username or not password:
             return Response({"detail": "用户名或密码不能为空"}, status=400)
+
+        # 验证码验证
+        from apps.security.views import verify_captcha
+        if not verify_captcha(captcha_id, captcha_code):
+            try:
+                from apps.security.models import LoginAttempt
+                LoginAttempt.objects.create(
+                    username=username[:64],
+                    user=None,
+                    ip=_client_ip(request),
+                    user_agent=request.META.get("HTTP_USER_AGENT", "")[:256],
+                    result="captcha_fail",
+                )
+            except Exception:
+                logger.exception("write LoginAttempt failed")
+            return Response({"detail": "验证码错误"}, status=401)
 
         user = User.objects.filter(username=username, is_deleted=False).first()
         if not user or not user.check_password(password):
@@ -126,6 +145,19 @@ class LoginView(APIView):
         user.last_login_at = timezone.now()
         user.last_login_ip = _client_ip(request)
         user.save(update_fields=["last_login_at", "last_login_ip"])
+
+        # 记录成功登录
+        try:
+            from apps.security.models import LoginAttempt
+            LoginAttempt.objects.create(
+                username=username[:64],
+                user=user,
+                ip=_client_ip(request),
+                user_agent=request.META.get("HTTP_USER_AGENT", "")[:256],
+                result="success",
+            )
+        except Exception:
+            logger.exception("write LoginAttempt failed")
 
         return Response({
             "access": str(refresh.access_token),

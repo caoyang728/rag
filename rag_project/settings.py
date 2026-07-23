@@ -108,12 +108,15 @@ def _build_database_url():
     return f'postgres://{user}:{password}@{host}:{port}/{db}'
 
 DATABASE_URL = _build_database_url()
+# CONN_MAX_AGE: 连接保持时间（秒），从环境变量读取，默认 60 秒
+_conn_max_age = int(os.getenv('PG_CONN_MAX_AGE', '60'))
 DATABASES = {
-    'default': dj_database_url.parse(DATABASE_URL, conn_max_age=600)
+    'default': dj_database_url.parse(DATABASE_URL, conn_max_age=_conn_max_age)
 }
 # 使用 psycopg (v3) 驱动
 DATABASES['default']['ENGINE'] = 'django.db.backends.postgresql'
-DATABASES['default']['CONN_MAX_AGE'] = 600
+DATABASES['default']['CONN_MAX_AGE'] = _conn_max_age
+DATABASES['default']['CONN_HEALTH_CHECKS'] = True  # 自动检测并关闭断开的连接
 DATABASES['default']['OPTIONS'] = {
     'connect_timeout': 10,
 }

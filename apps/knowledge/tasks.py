@@ -11,6 +11,7 @@ import time
 from typing import List
 
 from celery import shared_task
+from django.conf import settings
 
 from apps.knowledge.models import Document, DocumentChunk, CodeChunk
 from apps.knowledge.parsers.base import get_parser
@@ -68,7 +69,7 @@ def parse_document(document_id: int):
             if hits:
                 blk['content'] = new_content
                 blk.setdefault('extra', {})['desensitized_hits'] = hits
-                desensitized_count += len(hits)
+                desensitized_count += hits
         print(f"  脱敏完成，共处理 {desensitized_count} 个敏感信息")
 
         # 3. chunking

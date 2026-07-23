@@ -232,7 +232,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
 class DocumentUploadView(APIView):
     """
     POST /api/v1/knowledge/documents/upload/
-    multipart/form-data: file, node_id, [title], [visibility]
+    multipart/form-data: file, node_id, [title], [visibility], [force_upload]
     - sha256 去重
     - 存到 MEDIA_ROOT/documents/{uuid}_{name} 或 OSS
     - 触发 Celery 异步解析
@@ -269,17 +269,43 @@ class DocumentUploadView(APIView):
             total += len(c)
         file_hash = h.hexdigest()
 
-        exist = Document.objects.filter(file_hash=file_hash, is_deleted=False).first()
-        if exist:
+        force_upload = request.data.get("force_upload") in ("true", "True", "1", True)
+
+        # -- 未删除的相同文件 → 返回冲突信息 --
+        exist = Document.objects.filter(
+            file_hash=file_hash, is_deleted=False
+        ).select_related("owner").first()
+        if exist and not force_upload:
             return Response({
-                "document_id": exist.id,
-                "status": exist.status,
-                "detail": "文件已存在（sha256 去重）",
-                "dedup": True,
+                "conflict": "duplicate",
+                "existing": {
+                    "id": exist.id,
+                    "title": exist.title,
+                    "file_name": exist.file_name,
+                    "owner_name": exist.owner.username if exist.owner else "",
+                    "created_at": exist.created_at.strftime("%Y-%m-%d %H:%M"),
+                    "status": exist.status,
+                },
             }, status=200)
-        
-        deleted_exist = Document.objects.filter(file_hash=file_hash, is_deleted=True).first()
-        if deleted_exist:
+
+        # -- 已删除的相同文件 → 返回冲突信息 --
+        deleted_exist = Document.objects.filter(
+            file_hash=file_hash, is_deleted=True
+        ).select_related("owner").first()
+        if deleted_exist and not force_upload:
+            return Response({
+                "conflict": "deleted",
+                "existing": {
+                    "id": deleted_exist.id,
+                    "title": deleted_exist.title,
+                    "file_name": deleted_exist.file_name,
+                    "owner_name": deleted_exist.owner.username if deleted_exist.owner else "",
+                    "created_at": deleted_exist.created_at.strftime("%Y-%m-%d %H:%M"),
+                },
+            }, status=200)
+
+        # -- force_upload + 已删除相同文件 → 恢复 --
+        if force_upload and deleted_exist:
             with transaction.atomic():
                 deleted_exist.is_deleted = False
                 deleted_exist.node = node
@@ -287,14 +313,23 @@ class DocumentUploadView(APIView):
                 deleted_exist.visibility = visibility
                 deleted_exist.status = "pending"
                 deleted_exist.error_message = ""
-                deleted_exist.save(update_fields=["is_deleted", "node", "owner", "visibility", "status", "error_message", "updated_at"])
+                deleted_exist.save(update_fields=[
+                    "is_deleted", "node", "owner", "visibility",
+                    "status", "error_message", "updated_at",
+                ])
+            try:
+                from apps.knowledge.tasks import parse_document
+                parse_document.delay(deleted_exist.id)
+            except Exception as e:
+                logger.warning("celery unreachable for restored doc %s: %s", deleted_exist.id, str(e)[:200])
             return Response({
                 "document_id": deleted_exist.id,
                 "status": "pending",
                 "detail": "文件已恢复（sha256 匹配已删除记录）",
                 "dedup": True,
-            }, status=200)
+            }, status=201)
 
+        # -- 正常上传 / force_upload + 未删除相同文件（新建独立记录） --
         same_name_exist = Document.objects.filter(
             file_name=f.name[:256], node=node, is_deleted=False
         ).first()
@@ -343,7 +378,7 @@ class DocumentUploadView(APIView):
             "uuid": str(doc.uuid),
             "status": doc.status,
             "file_hash": file_hash,
-            "dedup": False,
+            "dedup": bool(exist),
             "celery_ok": celery_ok,
             "celery_error": celery_error,
             "version": doc.version,

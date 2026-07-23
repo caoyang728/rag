@@ -3,19 +3,12 @@ const NODE_API = '/api/v1/knowledge/nodes';
 let nodeTree = [];         // 树形结构
 let selectedNodeId = null; // 当前选中的节点 ID
 
-const ROOT_TYPE_MAP = {
-	company_doc: '企业文档',
-	code_kb: '代码知识库',
-	general_reasoning: '通用推理',
-	ops_fault: '运维故障',
-};
+// 动态加载的根类型映射
+let ROOT_TYPE_MAP = {};
+let ROOT_ICON_MAP = {};
 
-const ROOT_ICON_MAP = {
-	company_doc: '📁',
-	code_kb: '💻',
-	general_reasoning: '🧠',
-	ops_fault: '🛠️',
-};
+// 默认图标列表（按顺序分配给新根类型）
+const DEFAULT_ROOT_ICONS = ['📁', '💻', '🧠', '🛠️', '📚', '🔧', '📋', '📊', '🔍', '⭐'];
 
 
 function closeModal(id) {
@@ -32,9 +25,28 @@ function showModal(id) {
 	if (mask) mask.style.display = 'block';
 }
 
+/* ============ 动态加载根类型 ============ */
+function loadRootTypes() {
+	return api.getJson(NODE_API + '/root_types/').then(function (res) {
+		var types = res.root_types || [];
+		ROOT_TYPE_MAP = {};
+		ROOT_ICON_MAP = {};
+		types.forEach(function (t, index) {
+			ROOT_TYPE_MAP[t.code] = t.name;
+			ROOT_ICON_MAP[t.code] = DEFAULT_ROOT_ICONS[index % DEFAULT_ROOT_ICONS.length];
+		});
+	}).catch(function () {
+		// 降级为默认值（防止 API 不可用时页面完全崩溃）
+		ROOT_TYPE_MAP = { company_doc: '企业文档' };
+		ROOT_ICON_MAP = { company_doc: '📁' };
+	});
+}
+
 /* ============ 页面初始化 ============ */
 function initNodesPage() {
-	loadTree();
+	loadRootTypes().then(function () {
+		loadTree();
+	});
 }
 
 /* ============ 加载节点树 ============ */
@@ -196,7 +208,7 @@ function openNodeModal() {
 	document.getElementById('nodeOrder').value = '0';
 	document.getElementById('nodeModalTitle').textContent = '新增节点';
 	document.getElementById('parentRequired').style.display = 'none';
-	document.getElementById('parentHint').textContent = '根节点无需上级节点；知识库分类默认为"企业文档"';
+	document.getElementById('parentHint').textContent = '根节点无需上级节点；知识库分类从数据库动态获取';
 
 	// 复用已加载的 nodeTree 构建父节点列表
 	buildParentOptions(null);

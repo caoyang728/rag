@@ -31,11 +31,13 @@ class DocumentVector(models.Model):
     # ⭐ 向量核心字段：pgvector 1024 维（BGE-M3 输出维度）
     embedding = VectorField(dimensions=1024, help_text='BGE-M3 向量，1024 维')
 
-    # ⭐ 冗余权限字段（7个）：一次 WHERE 搞定权限过滤
-    visibility = models.SmallIntegerField(default=1, help_text='1私有 2团队 3公开 4系统级')
+    # ⭐ 冗余权限字段（8个）：一次 WHERE 搞定权限过滤
+    visibility = models.SmallIntegerField(default=1, help_text='1私有 2部门 3团队 4公开')
     owner_id = models.BigIntegerField(help_text='冗余：文档拥有者 user_id')
     owner_team_id = models.BigIntegerField(null=True, blank=True,
                                             help_text='冗余：上传者团队快照 id')
+    owner_department_id = models.BigIntegerField(null=True, blank=True,
+                                                 help_text='冗余：上传者部门快照 id')
     root_type = models.CharField(max_length=32, help_text='冗余：根节点类型')
     node_id = models.BigIntegerField(help_text='冗余：所属叶子节点 id')
     node_path = models.CharField(max_length=512, default='/',

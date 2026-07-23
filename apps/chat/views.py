@@ -16,6 +16,7 @@ from apps.chat.serializers import (
     SessionSerializer, QaRecordSerializer, QaFeedbackSerializer,
 )
 from apps.memory.models import Session
+from apps.knowledge.models import KnowledgeNode
 
 
 
@@ -66,10 +67,17 @@ class ChatAskView(APIView):
 
         session_id = request.data.get("session_id")
         mode = request.data.get("mode", "rag")  # rag / reasoning / mixed
-        root_types = request.data.get("root_types") or ["company_doc"]
+        root_types = request.data.get("root_types")
         node_ids = request.data.get("node_ids")
         use_cache = bool(request.data.get("use_cache", True))
         do_task_split = bool(request.data.get("do_task_split", False))
+
+        # 动态获取默认根类型
+        if not root_types or not root_types[0]:
+            default_root = KnowledgeNode.objects.filter(
+                node_type='root', is_deleted=False
+            ).first()
+            root_types = [default_root.root_type] if default_root else ['company_doc']
 
         # 会话
         if session_id:
@@ -81,7 +89,7 @@ class ChatAskView(APIView):
             session = Session.objects.create(
                 user=request.user,
                 title=question[:32],
-                root_type=root_types[0] if root_types else "company_doc",
+                root_type=root_types[0],
             )
 
         # 调用 executor

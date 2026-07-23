@@ -16,7 +16,13 @@ class DebugSearchView(APIView):
         q = (request.data.get("query") or "").strip()
         if not q:
             return Response({"detail": "query 必填"}, status=400)
-        root_types = request.data.get("root_types") or ["company_doc"]
+        root_types = request.data.get("root_types")
+        if not root_types or not root_types[0]:
+            from apps.knowledge.models import KnowledgeNode
+            default_root = KnowledgeNode.objects.filter(
+                node_type='root', is_deleted=False
+            ).first()
+            root_types = [default_root.root_type] if default_root else ['company_doc']
         do_rerank = bool(request.data.get("do_rerank", True))
         top_k = int(request.data.get("top_k") or 5)
 

@@ -100,10 +100,17 @@
 					<label class="form-label">可见范围 <span class="required">*</span></label>
 					<div class="upload-radio-group" id="visRadios">
 						<label class="upload-radio selected" onclick="pickVis(this)">
-							<input type="radio" name="vis" value="self" checked>
+							<input type="radio" name="vis" value="private" checked>
 							<div>
-								<div class="upload-radio-title">🔒 仅本人（Self）</div>
+								<div class="upload-radio-title">🔒 仅本人（Private）</div>
 								<div class="upload-radio-desc">仅上传者本人可检索，用于个人笔记、草稿</div>
+							</div>
+						</label>
+						<label class="upload-radio" onclick="pickVis(this)">
+							<input type="radio" name="vis" value="department">
+							<div>
+								<div class="upload-radio-title">🏢 部门可见（Department）</div>
+								<div class="upload-radio-desc">全部门成员可检索，用于部门规范和流程</div>
 							</div>
 						</label>
 						<label class="upload-radio" onclick="pickVis(this)">
@@ -114,16 +121,9 @@
 							</div>
 						</label>
 						<label class="upload-radio" onclick="pickVis(this)">
-							<input type="radio" name="vis" value="dept">
+							<input type="radio" name="vis" value="public">
 							<div>
-								<div class="upload-radio-title">🏢 部门可见（Dept）</div>
-								<div class="upload-radio-desc">全部门成员可检索，用于部门规范和流程</div>
-							</div>
-						</label>
-						<label class="upload-radio" onclick="pickVis(this)">
-							<input type="radio" name="vis" value="all">
-							<div>
-								<div class="upload-radio-title">🌐 全平台（All）</div>
+								<div class="upload-radio-title">🌐 公开（Public）</div>
 								<div class="upload-radio-desc">全公司可检索，用于公开规范和白皮书</div>
 							</div>
 						</label>

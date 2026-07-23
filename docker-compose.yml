@@ -56,7 +56,6 @@ services:
     volumes:
       - .:/app
       - static_data:/app/staticfiles
-      - media_data:/app/media
     ports:
       - "8000:8000"
     command: ["/app/entrypoint.sh"]
@@ -76,7 +75,6 @@ services:
       TZ: Asia/Shanghai
     volumes:
       - .:/app
-      - media_data:/app/media
     command: ["celery", "-A", "rag_project", "worker", "-l", "info", "-Q", "default,parse,memory,email", "--concurrency=1"]
     networks:
       - data_network
@@ -108,13 +106,12 @@ services:
   #     - "80:80"
   #   volumes:
   #     - static_data:/usr/share/nginx/static:ro
-  #     - media_data:/usr/share/nginx/media:ro
+  #     - ./media:/usr/share/nginx/media:ro
 
 volumes:
   # postgres_data:
   # redis_data:
   static_data:
-  media_data:
 
 networks:
   data_network:

@@ -16,6 +16,7 @@ document.addEventListener('DOMContentLoaded', () => {
 /* ============ 上传历史表格 ============ */
 let uploadHistorySearch = '';
 let uploadHistoryStatus = '';
+let currentDocs = [];
 
 async function initUploadPage() {
 	await loadUploadHistory();
@@ -56,6 +57,7 @@ async function loadUploadHistory(page = 1) {
 
 		const data = await api.getJson(url);
 		const docs = data.results || data;
+		currentDocs = docs;
 		uploadHistoryTotal = data.count || (docs.length || 0);
 		uploadHistoryCurrentPage = page;
 
@@ -85,6 +87,7 @@ async function loadUploadHistory(page = 1) {
     `).join('');
 
 		renderUploadPagination();
+		scheduleUploadHistoryRefresh(docs);
 	} catch (e) {
 		console.error('load upload history failed:', e);
 		tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--text-sub)">加载失败，请刷新重试</td></tr>';
@@ -135,6 +138,17 @@ function renderUploadPagination() {
 }
 
 async function viewDocument(docId) {
+	const doc = currentDocs.find(d => d.id === docId);
+	if (!doc) {
+		toast('文档不存在', 'error');
+		return;
+	}
+
+	if (doc.status === 'failed') {
+		toast('失败原因：' + (doc.error_message || '未知错误'), 'error');
+		return;
+	}
+
 	try {
 		const data = await api.getJson(`/api/v1/knowledge/documents/${docId}/chunks/`);
 		toast(`文档 ${docId} 共 ${data.total || 0} 个切片`, '');
@@ -346,10 +360,24 @@ function showUploadPanels() {
 }
 
 function hideUploadPanels() {
-	const panel = $('#uploadPanel');
-	const opts = $('#uploadOptions');
+	const panel = document.getElementById('uploadPanel');
+	const opts = document.getElementById('uploadOptions');
 	if (panel) panel.style.display = 'none';
 	if (opts) opts.style.display = 'none';
+}
+
+function hideUploadOptionsOnly() {
+	const opts = $('#uploadOptions');
+	if (opts) opts.style.display = 'none';
+}
+
+/* ============ 上传完成收尾 ============ */
+function finishUpload() {
+	hideUploadPanels();
+	pendingFiles = [];
+	$('#fileList').innerHTML = '';
+	updateFileCount();
+	loadUploadHistory();
 }
 
 /* ============ 清空列表 ============ */
@@ -360,9 +388,69 @@ function clearFileList() {
 	toast('已清空', '');
 }
 
+/* ============ 单文件上传（支持冲突重试） ============ */
+async function uploadSingleFile(info, nodeId, visibility, token, forceUpload = false) {
+	const bar = document.querySelector('#' + info.id + ' .file-item-progress-bar');
+
+	const formData = new FormData();
+	formData.append('file', info.file, info.name);
+	formData.append('node_id', nodeId);
+	formData.append('visibility', visibility);
+	if (forceUpload) {
+		formData.append('force_upload', 'true');
+	}
+
+	const xhr = new XMLHttpRequest();
+	uploadingXhrs.push(xhr);
+
+	try {
+		const responseData = await new Promise((resolve, reject) => {
+			xhr.upload.addEventListener('progress', (e) => {
+				if (e.lengthComputable && bar) {
+					const pct = Math.round((e.loaded / e.total) * 100);
+					bar.style.width = pct + '%';
+				}
+			});
+			xhr.addEventListener('load', () => {
+				if (xhr.status >= 200 && xhr.status < 300) {
+					const data = JSON.parse(xhr.responseText || '{}');
+					if (data.status === 'failed') {
+						reject(new Error(data.detail || '上传失败'));
+					} else {
+						resolve(data);
+					}
+				} else {
+					reject(new Error(xhr.status + ' ' + (JSON.parse(xhr.responseText || '{}').detail || xhr.statusText)));
+				}
+			});
+			xhr.addEventListener('error', () => reject(new Error('网络错误')));
+			xhr.open('POST', '/api/v1/knowledge/documents/upload/');
+			xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+			xhr.send(formData);
+		});
+
+		return responseData;
+	} finally {
+		uploadingXhrs = uploadingXhrs.filter(x => x !== xhr);
+	}
+}
+
 /* ============ 开始上传 ============ */
 let uploadingXhrs = [];
 let isUploading = false;
+
+function getUploadBtn() {
+	return document.querySelector('#uploadPanel .btn-primary');
+}
+
+function setUploadBtnDisabled(disabled) {
+	const btn = getUploadBtn();
+	if (btn) {
+		btn.disabled = disabled;
+		btn.style.opacity = disabled ? '0.6' : '';
+		btn.style.cursor = disabled ? 'not-allowed' : '';
+	}
+}
 
 async function startUpload() {
 	if (isUploading) { toast('上传进行中，请稍候', ''); return; }
@@ -377,6 +465,8 @@ async function startUpload() {
 	const token = localStorage.getItem('rag_access');
 	if (!token) { toast('请先登录', 'error'); return; }
 
+	toast('正在准备上传...', '');
+
 	try {
 		await checkCeleryStatusBeforeUpload();
 	} catch (e) {
@@ -387,7 +477,11 @@ async function startUpload() {
 	}
 
 	isUploading = true;
+	setUploadBtnDisabled(true);
 	uploadingXhrs = [];
+
+	// 隐藏上传选项面板
+	hideUploadOptionsOnly();
 
 	const total = pendingFiles.length;
 	let completedCount = 0;
@@ -405,33 +499,40 @@ async function startUpload() {
 		if (statusEl) statusEl.innerHTML = '<span class="tag tag-info">上传中</span>';
 
 		try {
-			const formData = new FormData();
-			formData.append('file', info.file, info.name);
-			formData.append('node_id', nodeId);
-			formData.append('visibility', visibility);
+			let responseData = await uploadSingleFile(info, nodeId, visibility, token);
 
-			const xhr = new XMLHttpRequest();
-			uploadingXhrs.push(xhr);
+			// -- 处理冲突响应：弹出确认对话框 --
+			while (responseData && responseData.conflict) {
+				const existing = responseData.existing;
+				let msg;
+				if (responseData.conflict === 'duplicate') {
+					msg = [
+						'已存在相同内容的文件：' + (existing.file_name || ''),
+						'上传者：' + (existing.owner_name || '未知'),
+						'上传时间：' + (existing.created_at || ''),
+						'',
+						'是否继续上传（将创建新记录）？'
+					].join('\n');
+				} else {
+					msg = [
+						'此文件「' + (existing.file_name || '') + '」之前已被删除',
+						'原上传者：' + (existing.owner_name || '未知'),
+						'原上传时间：' + (existing.created_at || ''),
+						'',
+						'是否恢复此文件并重新解析？'
+					].join('\n');
+				}
 
-			const responseData = await new Promise((resolve, reject) => {
-				xhr.upload.addEventListener('progress', (e) => {
-					if (e.lengthComputable && bar) {
-						const pct = Math.round((e.loaded / e.total) * 100);
-						bar.style.width = pct + '%';
-					}
-				});
-				xhr.addEventListener('load', () => {
-					if (xhr.status >= 200 && xhr.status < 300) {
-						resolve(JSON.parse(xhr.responseText || '{}'));
-					} else {
-						reject(new Error(xhr.status + ' ' + (JSON.parse(xhr.responseText || '{}').detail || xhr.statusText)));
-					}
-				});
-				xhr.addEventListener('error', () => reject(new Error('网络错误')));
-				xhr.open('POST', '/api/v1/knowledge/documents/upload/');
-				xhr.setRequestHeader('Authorization', 'Bearer ' + token);
-				xhr.send(formData);
-			});
+				if (!confirm(msg)) {
+					if (statusEl) statusEl.innerHTML = '<span class="tag tag-default">已跳过</span>';
+					if (metaEl) metaEl.innerHTML = info.type + ' · ' + formatSize(info.size) + ' · 已取消（文件已存在）';
+					return 'skipped';
+				}
+
+				// 用户确认，使用 force_upload 重新上传
+				if (statusEl) statusEl.innerHTML = '<span class="tag tag-info">确认上传</span>';
+				responseData = await uploadSingleFile(info, nodeId, visibility, token, true);
+			}
 
 			if (bar) bar.style.width = '100%';
 
@@ -446,15 +547,14 @@ async function startUpload() {
 			if (responseData.document_id) {
 				uploadedDocIds.push({ id: responseData.document_id, infoId: info.id });
 			}
-			return true;
+			return 'success';
 		} catch (err) {
 			if (statusEl) statusEl.innerHTML = '<span class="tag tag-danger">失败</span>';
 			if (metaEl) metaEl.innerHTML = info.type + ' · ' + formatSize(info.size) + ' · ' + err.message;
-			return false;
+			return 'failed';
 		} finally {
 			completedCount++;
 			updateGlobalProgress(completedCount, total);
-			uploadingXhrs = uploadingXhrs.filter(x => x !== xhr);
 		}
 	});
 
@@ -462,44 +562,49 @@ async function startUpload() {
 		const batch = uploadPromises.slice(i, i + maxConcurrent);
 		const results = await Promise.all(batch.map(fn => fn()));
 		results.forEach(r => {
-			if (r) successCount++;
+			if (r === 'success') successCount++;
+			else if (r === 'skipped') { /* 跳过，不计入成功/失败 */ }
 			else failCount++;
 		});
 
 		if (!isUploading) {
 			hideGlobalProgress();
+			setUploadBtnDisabled(false);
 			toast('上传已取消', '');
+			finishUpload();
 			return;
 		}
 	}
 
-	hideGlobalProgress();
-	isUploading = false;
+	try {
+		hideGlobalProgress();
+		isUploading = false;
+		setUploadBtnDisabled(false);
 
-	if (failCount === 0) {
-		toast('全部 ' + successCount + ' 个文件上传成功', 'success');
+		if (failCount === 0) {
+			toast('全部 ' + successCount + ' 个文件上传成功', 'success');
+		} else {
+			toast('上传完成：' + successCount + ' 成功，' + failCount + ' 失败', failCount === total ? 'error' : '');
+		}
+
 		if (uploadedDocIds.length > 0) {
 			startStatusPolling(uploadedDocIds);
 		}
-		pendingFiles = [];
-		$('#fileList').innerHTML = '';
-		updateFileCount();
-		loadUploadHistory();
-	} else {
-		toast('上传完成：' + successCount + ' 成功，' + failCount + ' 失败', failCount === total ? 'error' : '');
-		if (uploadedDocIds.length > 0) {
-			startStatusPolling(uploadedDocIds);
-		}
+		finishUpload();
+	} catch (e) {
+		toast('上传收尾异常: ' + e.message, 'error');
 	}
 }
 
 function cancelUpload() {
 	isUploading = false;
+	setUploadBtnDisabled(false);
 	uploadingXhrs.forEach(xhr => {
 		try { xhr.abort(); } catch (e) { }
 	});
 	uploadingXhrs = [];
 	hideGlobalProgress();
+	finishUpload();
 }
 
 function showGlobalProgress() {
@@ -632,10 +737,35 @@ function stopStatusPolling() {
 	}
 }
 
-document.addEventListener('beforeunload', stopStatusPolling);
+/* ============ 上传历史自动刷新 ============ */
+const PROCESSING_STATUSES = new Set(['pending', 'parsing', 'desensitizing', 'chunking', 'embedding']);
+let historyRefreshInterval = null;
+
+function scheduleUploadHistoryRefresh(docs) {
+	clearHistoryRefresh();
+	const hasProcessing = docs.some(d => PROCESSING_STATUSES.has(d.status));
+	if (hasProcessing) {
+		historyRefreshInterval = setInterval(() => {
+			loadUploadHistory(uploadHistoryCurrentPage);
+		}, 10000);
+	}
+}
+
+function clearHistoryRefresh() {
+	if (historyRefreshInterval) {
+		clearInterval(historyRefreshInterval);
+		historyRefreshInterval = null;
+	}
+}
+
+document.addEventListener('beforeunload', () => {
+	stopStatusPolling();
+	clearHistoryRefresh();
+});
 document.addEventListener('visibilitychange', () => {
 	if (document.hidden) {
 		stopStatusPolling();
+		clearHistoryRefresh();
 	}
 });
 

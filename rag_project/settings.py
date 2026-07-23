@@ -178,6 +178,7 @@ REST_FRAMEWORK = {
         'user': '600/min',
         'anon': '60/min',
         'login': '20/min',
+        'captcha': '30/min',
     },
     'EXCEPTION_HANDLER': 'apps.users.exceptions.custom_exception_handler',
 }

@@ -1,13 +1,161 @@
 """
-security views - IP 白/黑名单 & 登录尝试 & 敏感词
+security views - IP 白/黑名单 & 登录尝试 & 敏感词 & 验证码
 """
+import os
+import io
+import random
+import string
+import base64
 from loguru import logger
-from django.db.models import Q
-from rest_framework.permissions import IsAuthenticated, IsAdminUser
+
+from rest_framework.permissions import IsAuthenticated, IsAdminUser, AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.security.models import IpWhitelist, IpBlacklist, LoginAttempt, SensitiveWord
+
+
+def _get_redis():
+    """获取 Redis 连接（使用 Django settings 配置）"""
+    import redis
+    from django.conf import settings
+    redis_url = getattr(settings, 'REDIS_URL', '')
+    if redis_url:
+        return redis.Redis.from_url(redis_url, decode_responses=True)
+    # 降级：使用环境变量
+    return redis.Redis(
+        host=os.getenv('REDIS_DB_HOST', 'redis'),
+        port=int(os.getenv('REDIS_DB_PORT', 6379)),
+        password=os.getenv('REDIS_DB_PASSWORD', ''),
+        decode_responses=True,
+        db=int(os.getenv('REDIS_DB_CAPTCHA', '1'))
+    )
+
+
+def _generate_captcha_text(length=4):
+    """生成随机验证码文本"""
+    chars = string.ascii_uppercase + string.digits
+    return ''.join(random.choice(chars) for _ in range(length))
+
+
+def _generate_captcha_image(text):
+    """生成大字体验证码图片"""
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+        
+        # 创建画布（150x50）
+        width, height = 140, 41
+        image = Image.new('RGB', (width, height), color=(255, 255, 255))
+        draw = ImageDraw.Draw(image)
+        
+        # 使用较大字体（56px），适合 150x50 画布
+        font_size = 24
+        font = None
+        
+        # 优先使用项目内的字体文件（确保容器内可用）
+        project_font_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'static', 'fonts', 'DejaVuSans-Bold.ttf')
+        
+        font_paths = [
+            project_font_path,
+            '/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf',
+            '/usr/share/fonts/dejavu/DejaVuSans.ttf',
+            '/usr/share/fonts/dejavu/DejaVuSansMono-Bold.ttf',
+        ]
+        
+        for p in font_paths:
+            if os.path.exists(p):
+                try:
+                    font = ImageFont.truetype(p, font_size)
+                    break
+                except Exception as e:
+                    logger.debug(f"字体加载失败 {p}: {e}")
+        
+        # 如果所有字体都失败，使用字体名称搜索
+        if font is None:
+            font_names = ['DejaVuSans-Bold', 'DejaVuSans', 'DejaVuSansMono-Bold']
+            for name in font_names:
+                try:
+                    font = ImageFont.truetype(name, font_size)
+                    break
+                except Exception as e:
+                    logger.debug(f"字体加载失败 {name}: {e}")
+        
+        # 如果所有字体都失败，使用默认字体
+        if font is None:
+            font = ImageFont.load_default()
+            logger.warning(f"验证码使用默认字体，大小: {font.size}")
+        
+        # 计算字符位置，确保居中且不重叠
+        # 140px / 4字符 = 35px 每字符
+        char_spacing = 35
+        for i, char in enumerate(text):
+            char_bbox = font.getbbox(char)
+            char_w = char_bbox[2] - char_bbox[0]
+            char_h = char_bbox[3] - char_bbox[1]
+            x = i * char_spacing + (char_spacing - char_w) // 2
+            y = (height - char_h) // 2
+            draw.text((x, y), char, font=font, fill=(37, 99, 235))
+        
+        # 添加少量干扰线段（不影响辨认）
+        for _ in range(6):
+            x1, y1 = random.randint(0, width), random.randint(0, height)
+            x2, y2 = random.randint(0, width), random.randint(0, height)
+            draw.line((x1, y1, x2, y2), fill=(200, 200, 200), width=2)
+        
+        # 保存为 PNG
+        buf = io.BytesIO()
+        image.save(buf, format='PNG')
+        buf.seek(0)
+        return buf
+    except Exception as e:
+        logger.error(f"生成验证码图片失败: {e}")
+        return None
+
+
+class CaptchaView(APIView):
+    """GET /api/v1/security/captcha/ - 获取图形验证码"""
+    permission_classes = [AllowAny]
+    throttle_scope = "captcha"
+    
+    def get(self, request):
+        captcha_text = _generate_captcha_text()
+        image_buf = _generate_captcha_image(captcha_text)
+        
+        if image_buf is None:
+            return Response({"detail": "验证码生成失败"}, status=500)
+        
+        # 存储到 Redis，有效期 5 分钟
+        import uuid
+        captcha_id = str(uuid.uuid4())
+        r = _get_redis()
+        r.setex(f'captcha:{captcha_id}', 300, captcha_text)
+        
+        return Response({
+            "captcha_id": captcha_id,
+            "image_b64": base64.b64encode(image_buf.read()).decode('utf-8')
+        })
+
+
+def verify_captcha(captcha_id, captcha_code):
+    """验证验证码是否正确"""
+    if not captcha_id or not captcha_code:
+        return False
+    
+    # 验证码长度校验（防止超长攻击）
+    if len(captcha_code) > 10:
+        return False
+    
+    try:
+        r = _get_redis()
+        stored_code = r.get(f'captcha:{captcha_id}')
+        if stored_code:
+            # 验证后立即删除，防止重复使用
+            r.delete(f'captcha:{captcha_id}')
+            return stored_code.upper() == captcha_code.upper()
+    except Exception as e:
+        logger.error(f"验证码验证失败: {e}")
+    
+    return False
 
 
 

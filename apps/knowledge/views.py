@@ -174,7 +174,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         qs = super().get_queryset()
         user = self.request.user
-        if user.is_superuser:
+        if getattr(user, 'is_super_admin', False):
             return qs
         qs = qs.filter(
             models.Q(owner=user) |
@@ -203,7 +203,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def reparse(self, request, pk=None):
-        """重新解析"""
+        """重新解析（支持 embedding_failed 状态重试）"""
         doc = self.get_object()
         doc.status = "pending"
         doc.error_message = ""
@@ -216,7 +216,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
         return Response({"ok": True, "status": "pending"})
 
     def _has_permission(self, user, doc):
-        if user.is_superuser:
+        if getattr(user, 'is_super_admin', False):
             return True
         if doc.owner_id == user.id:
             return True
@@ -334,7 +334,7 @@ class DocumentUploadView(APIView):
             file_name=f.name[:256], node=node, is_deleted=False
         ).first()
         
-        file_path = self._save_file(f)
+        file_path = self._save_file(f, node)
         if not file_path:
             return Response({"detail": "文件存储失败"}, status=500)
 
@@ -384,12 +384,14 @@ class DocumentUploadView(APIView):
             "version": doc.version,
         }, status=201)
 
-    def _save_file(self, f):
-        from apps.knowledge.storage import get_document_storage
+    def _save_file(self, f, node):
+        from apps.knowledge.storage import get_document_storage, generate_node_storage_path
         storage = get_document_storage()
         safe_name = f.name.replace("/", "_").replace("\\", "_")
         fname = f"{uuid_lib.uuid4().hex}_{safe_name}"
-        return storage.save(fname, f)
+        # 生成节点存储路径
+        node_path = generate_node_storage_path(node)
+        return storage.save(fname, f, node_path)
 
 
 class DocumentChunksView(APIView):
@@ -397,12 +399,18 @@ class DocumentChunksView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, doc_id):
+        # 调试日志：确认用户认证状态
+        logger.info('[Chunks] request user: %s, is_authenticated: %s, is_super_admin: %s',
+                    request.user, request.user.is_authenticated, 
+                    getattr(request.user, 'is_super_admin', False))
+        
         try:
             doc = Document.objects.get(id=doc_id, is_deleted=False)
         except Document.DoesNotExist:
             return Response({"detail": "文档不存在"}, status=404)
         
         if not self._has_permission(request.user, doc):
+            logger.warning('[Chunks] user %s has no permission for doc %d', request.user, doc_id)
             return Response({"detail": "无权限查看此文档"}, status=403)
 
         chunks = DocumentChunk.objects.filter(document_id=doc_id).order_by("chunk_index")[:500]
@@ -414,7 +422,7 @@ class DocumentChunksView(APIView):
         })
 
     def _has_permission(self, user, doc):
-        if user.is_superuser:
+        if getattr(user, 'is_super_admin', False):
             return True
         if doc.owner_id == user.id:
             return True
@@ -499,9 +507,11 @@ class PendingDocsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        # 返回所有进行中的文档（不仅是 pending，还包括 parsing, embedding 等）
+        processing_statuses = ["pending", "parsing", "desensitizing", "chunking", "embedding", "embedding_failed"]
         pending_query = Document.objects.filter(
             is_deleted=False,
-            status__in=["pending"],
+            status__in=processing_statuses,
             owner=request.user
         ).order_by("-created_at")
         pending_count = pending_query.count()
@@ -514,9 +524,10 @@ class PendingDocsView(APIView):
 
     def post(self, request):
         """重新触发当前用户待处理文档的解析任务"""
+        # 支持重新触发 pending 和 embedding_failed 的文档
         pending_query = Document.objects.filter(
             is_deleted=False,
-            status__in=["pending"],
+            status__in=["pending", "embedding_failed"],
             owner=request.user
         )
         pending = list(pending_query)

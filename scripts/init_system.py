@@ -361,7 +361,6 @@ def create_users(config, dry_run=False):
         email = user_data['email']
         real_name = user_data.get('real_name', '')
         password = user_data['password']
-        is_superadmin = user_data.get('is_superadmin', False)
 
         try:
             if SysUser.objects.filter(username=username).exists():
@@ -370,7 +369,7 @@ def create_users(config, dry_run=False):
                 continue
 
             if not dry_run:
-                user = SysUser.objects.create_superuser(
+                user = SysUser.objects.create_user(
                     username=username,
                     email=email,
                     password=password
@@ -378,12 +377,14 @@ def create_users(config, dry_run=False):
                 user.real_name = real_name
                 user.save()
 
-                if is_superadmin:
+                # 处理角色分配
+                role_code = user_data.get('role')
+                if role_code:
                     try:
-                        super_admin_role = Role.objects.get(code='super_admin')
-                        UserRole.objects.get_or_create(user=user, role=super_admin_role)
+                        role = Role.objects.get(code=role_code)
+                        UserRole.objects.get_or_create(user=user, role=role)
                     except Role.DoesNotExist:
-                        logger.info(f'  ⚠️  super_admin 角色不存在，用户 "{username}" 将没有角色')
+                        logger.info(f'  ⚠️  角色 "{role_code}" 不存在，用户 "{username}" 将没有角色')
 
             logger.info(f'  ✅ 创建用户: {username} ({real_name})')
             created += 1

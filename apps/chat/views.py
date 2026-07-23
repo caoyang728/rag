@@ -104,14 +104,21 @@ class ChatAskView(APIView):
         # 会话轮次+1（原子更新）
         Session.objects.filter(id=session.id).update(turn_count=F('turn_count') + 1)
 
-        return Response({
+        response_data = {
             "message_id": result.get("qa_id"),
             "session_id": session.id,
             "answer": result.get("answer", ""),
             "citations": result.get("citations", []),
             "is_hit_cache": result.get("is_hit_cache", False),
             "stats": result.get("stats", {}),
-        })
+        }
+        
+        # 如果有错误信息，添加到响应中
+        stats = result.get("stats", {})
+        if stats.get("error"):
+            response_data["error"] = stats.get("error")
+        
+        return Response(response_data)
 
 
 class FeedbackView(APIView):

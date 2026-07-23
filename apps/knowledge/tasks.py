@@ -2,7 +2,7 @@
 文档解析 & 向量化 Celery 任务
 完整异步链
 task: parse_document -> desensitize -> chunk -> embed -> save
-状态机：pending -> parsing -> desensitizing -> chunking -> embedding -> done/failed
+状态机：pending -> parsing -> desensitizing -> chunking -> embedding -> done/failed/embedding_failed
 """
 from loguru import logger
 import os
@@ -20,6 +20,30 @@ from apps.knowledge.desensitizer import desensitize
 from apps.knowledge.storage import get_document_storage
 from apps.retrieval.vector_store import upsert_vector
 from apps.llm.embedding import get_embedding_client
+
+
+def _notify_admin_on_embedding_failure(doc: Document, error_msg: str):
+    """
+    预留邮件通知接口 - 当embedding失败时通知管理员
+    
+    当前实现：仅记录日志
+    后续可扩展：发送邮件/Slack/DingTalk等通知给运维人员
+    
+    :param doc: 失败的文档对象
+    :param error_msg: 错误信息
+    """
+    logger.error('[Embedding Notify] embedding失败，文档ID=%d, 文件名=%s, 错误=%s',
+                 doc.id, doc.file_name, error_msg)
+    
+    # TODO: 预留邮件发送接口
+    # 可在此处调用邮件发送服务，通知管理员及时排查问题
+    # 示例：
+    # from apps.system.mail import send_admin_notification
+    # send_admin_notification(
+    #     subject=f"【RAG系统】文档embedding失败 - {doc.file_name}",
+    #     body=f"文档ID: {doc.id}\n文件名: {doc.file_name}\n错误信息: {error_msg}\n"
+    #          f"上传时间: {doc.created_at}\n上传者: {doc.owner.username if doc.owner else '未知'}"
+    # )
 
 
 
@@ -129,7 +153,25 @@ def parse_document(document_id: int):
         client = get_embedding_client()
         print(f"  使用 embedding 客户端: {client.__class__.__name__}")
         print(f"  正在生成 {len(texts)} 个向量...")
-        embeddings = client.embed(texts)
+        
+        try:
+            embeddings = client.embed(texts)
+        except Exception as e:
+            # embedding失败，暂停向量化，标记文档状态
+            print(f"  embedding失败: {str(e)}")
+            logger.error('[Parse] doc=%d embedding failed: %s', doc.id, str(e))
+            
+            # 预留邮件通知接口
+            _notify_admin_on_embedding_failure(doc, str(e))
+            
+            # 标记文档状态为embedding_failed（暂停状态，可手动重试）
+            doc.status = 'embedding_failed'
+            doc.error_message = str(e)[:1000]
+            doc.save(update_fields=['status', 'error_message'])
+            
+            # 抛出异常，触发Celery重试机制
+            raise
+        
         print(f"  向量生成完成，维度: {len(embeddings[0]) if embeddings else 0}")
         assert len(embeddings) == len(chunk_objs)
 

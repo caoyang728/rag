@@ -50,6 +50,7 @@ class KnowledgeNodeCreateSerializer(serializers.ModelSerializer):
 class DocumentSerializer(serializers.ModelSerializer):
     node_name = serializers.CharField(source="node.name", read_only=True)
     owner_name = serializers.CharField(source="owner.username", read_only=True)
+    restored_by_name = serializers.CharField(source="restored_by.username", read_only=True)
 
     class Meta:
         model = Document
@@ -58,8 +59,10 @@ class DocumentSerializer(serializers.ModelSerializer):
             "file_size", "file_hash", "mime_type", "owner_id", "owner_name",
             "visibility", "root_type", "status", "error_message", "chunk_count",
             "version", "tags", "created_at", "updated_at",
+            "restored_at", "restored_by", "restored_by_name",
         ]
-        read_only_fields = ["uuid", "file_hash", "status", "chunk_count", "created_at", "updated_at"]
+        read_only_fields = ["uuid", "file_hash", "status", "chunk_count", "created_at", "updated_at",
+                           "restored_at", "restored_by"]
 
 
 class DocumentChunkSerializer(serializers.ModelSerializer):

@@ -87,6 +87,13 @@ def upsert_vector(chunk, embedding: List[float]) -> DocumentVector:
         team = UserTeam.objects.filter(user_id=doc.owner_id).first()
         owner_team_id = team.team_id if team else None
 
+    # 获取上传者部门 id
+    owner_department_id = None
+    if doc.owner_id:
+        from apps.users.models import SysUser
+        owner = SysUser.objects.filter(id=doc.owner_id).only('department_id').first()
+        owner_department_id = owner.department_id if owner else None
+
     # jieba 分词提取关键词
     keywords = _extract_keywords(chunk.content)
 
@@ -98,6 +105,7 @@ def upsert_vector(chunk, embedding: List[float]) -> DocumentVector:
             'visibility': doc.visibility,
             'owner_id': doc.owner_id,
             'owner_team_id': owner_team_id,
+            'owner_department_id': owner_department_id,
             'root_type': doc.root_type,
             'node_id': doc.node_id,
             'node_path': getattr(doc.node, 'path', '/') if doc.node else '/',

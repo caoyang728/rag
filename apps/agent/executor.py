@@ -51,7 +51,7 @@ def ask(user, question: str, session: Session,
     from apps.agent.task_splitter import maybe_split, execute_split
 
     t0 = time.time()
-    root_type = (root_types or ['company_doc'])[0]
+    root_type = root_types[0] if root_types else 'company_doc'
     turn_index = (session.turn_count or 0) + 1
 
     # 1. 热点缓存命中

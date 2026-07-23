@@ -9,15 +9,8 @@ from django.contrib.postgres.fields import ArrayField
 
 
 class KnowledgeNode(models.Model):
-    """B1 knowledge_node - 树形节点（根/中间/叶子）
-    支持四大根类型：company_doc/code_kb/general_reasoning/ops_fault"""
+    """B1 knowledge_node - 树形节点（根/中间/叶子）"""
 
-    ROOT_TYPE_CHOICES = [
-        ('company_doc', '企业文档'),
-        ('code_kb', '代码知识库'),
-        ('general_reasoning', '通用推理'),
-        ('ops_fault', '运维故障'),
-    ]
     NODE_TYPE_CHOICES = [
         ('root', 'root'),
         ('folder', 'folder'),
@@ -27,7 +20,25 @@ class KnowledgeNode(models.Model):
     id = models.BigAutoField(primary_key=True)
     parent = models.ForeignKey('self', null=True, blank=True, on_delete=models.CASCADE,
                                db_column='parent_id', related_name='children')
-    root_type = models.CharField(max_length=32, choices=ROOT_TYPE_CHOICES)
+    root_type = models.CharField(max_length=32)
+
+    @classmethod
+    def get_root_types(cls):
+        """动态获取所有根类型（从数据库查询）"""
+        # 获取所有唯一的 root_type，以及每个 root_type 对应的第一个节点名称
+        root_types = {}
+        for node in cls.objects.filter(
+            node_type='root', is_deleted=False
+        ).order_by('id'):
+            if node.root_type not in root_types:
+                root_types[node.root_type] = node.name
+        return list(root_types.items())
+
+    @classmethod
+    def get_root_type_choices(cls):
+        """获取根类型选择列表（用于表单）"""
+        return cls.get_root_types()
+
     node_type = models.CharField(max_length=16, choices=NODE_TYPE_CHOICES, default='folder')
     name = models.CharField(max_length=128)
     # path 冗余存 "/1/3/5/" 便于递归权限判定
@@ -110,9 +121,9 @@ class Document(models.Model):
     ]
     VISIBILITY_CHOICES = [
         (1, '私有'),
-        (2, '团队'),
-        (3, '公开'),
-        (4, '系统级'),
+        (2, '部门'),
+        (3, '团队'),
+        (4, '公开'),
     ]
 
     id = models.BigAutoField(primary_key=True)
@@ -144,6 +155,13 @@ class Document(models.Model):
     is_deleted = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    # 恢复审计字段
+    restored_at = models.DateTimeField(null=True, blank=True,
+                                        help_text='恢复时间（用于审计追溯）')
+    restored_by = models.ForeignKey('users.SysUser', null=True, blank=True,
+                                    on_delete=models.SET_NULL, db_column='restored_by',
+                                    related_name='restored_documents',
+                                    help_text='恢复人')
 
     class Meta:
         db_table = 'knowledge_document'

@@ -392,7 +392,7 @@ function clearFileList() {
 }
 
 /* ============ 单文件上传（支持冲突重试） ============ */
-async function uploadSingleFile(info, nodeId, visibility, token, forceUpload = false) {
+async function uploadSingleFile(info, nodeId, visibility, token, forceUpload = false, action = '') {
 	const bar = document.querySelector('#' + info.id + ' .file-item-progress-bar');
 
 	const formData = new FormData();
@@ -401,6 +401,9 @@ async function uploadSingleFile(info, nodeId, visibility, token, forceUpload = f
 	formData.append('visibility', visibility);
 	if (forceUpload) {
 		formData.append('force_upload', 'true');
+	}
+	if (action) {
+		formData.append('action', action);
 	}
 
 	const xhr = new XMLHttpRequest();
@@ -463,7 +466,7 @@ async function startUpload() {
 	if (!nodeId) { toast('请选择归属节点', 'error'); return; }
 
 	const visRadio = $('#visRadios .upload-radio.selected input');
-	const visibility = visRadio ? ['self', 'team', 'dept', 'all'].indexOf(visRadio.value) + 1 : 1;
+	const visibility = visRadio ? ['private', 'department', 'team', 'public'].indexOf(visRadio.value) + 1 : 1;
 
 	const token = localStorage.getItem('rag_access');
 	if (!token) { toast('请先登录', 'error'); return; }
@@ -507,34 +510,39 @@ async function startUpload() {
 			// -- 处理冲突响应：弹出确认对话框 --
 			while (responseData && responseData.conflict) {
 				const existing = responseData.existing;
-				let msg;
 				if (responseData.conflict === 'duplicate') {
-					msg = [
+					// 未删除的重复文件：二选项（继续/取消）
+					const msg = [
 						'已存在相同内容的文件：' + (existing.file_name || ''),
 						'上传者：' + (existing.owner_name || '未知'),
 						'上传时间：' + (existing.created_at || ''),
+						'状态：' + (existing.status || ''),
 						'',
 						'是否继续上传（将创建新记录）？'
 					].join('\n');
+
+					if (!confirm(msg)) {
+						if (statusEl) statusEl.innerHTML = '<span class="tag tag-default">已跳过</span>';
+						if (metaEl) metaEl.innerHTML = info.type + ' · ' + formatSize(info.size) + ' · 已取消（文件已存在）';
+						return 'skipped';
+					}
+
+					// 用户确认，使用 force_upload 重新上传
+					if (statusEl) statusEl.innerHTML = '<span class="tag tag-info">确认上传</span>';
+					responseData = await uploadSingleFile(info, nodeId, visibility, token, true);
 				} else {
-					msg = [
-						'此文件「' + (existing.file_name || '') + '」之前已被删除',
-						'原上传者：' + (existing.owner_name || '未知'),
-						'原上传时间：' + (existing.created_at || ''),
-						'',
-						'是否恢复此文件并重新解析？'
-					].join('\n');
-				}
+					// 已删除的文件：三选项（恢复/新建/取消）
+					const choice = showDeletedFileDialog(existing);
+					if (choice === 'cancel') {
+						if (statusEl) statusEl.innerHTML = '<span class="tag tag-default">已跳过</span>';
+						if (metaEl) metaEl.innerHTML = info.type + ' · ' + formatSize(info.size) + ' · 已取消（文件已存在）';
+						return 'skipped';
+					}
 
-				if (!confirm(msg)) {
-					if (statusEl) statusEl.innerHTML = '<span class="tag tag-default">已跳过</span>';
-					if (metaEl) metaEl.innerHTML = info.type + ' · ' + formatSize(info.size) + ' · 已取消（文件已存在）';
-					return 'skipped';
+					// 用户选择恢复或新建
+					if (statusEl) statusEl.innerHTML = '<span class="tag tag-info">' + (choice === 'restore' ? '恢复中' : '新建中') + '</span>';
+					responseData = await uploadSingleFile(info, nodeId, visibility, token, true, choice);
 				}
-
-				// 用户确认，使用 force_upload 重新上传
-				if (statusEl) statusEl.innerHTML = '<span class="tag tag-info">确认上传</span>';
-				responseData = await uploadSingleFile(info, nodeId, visibility, token, true);
 			}
 
 			if (bar) bar.style.width = '100%';
@@ -861,8 +869,8 @@ function fileTypeIcon(t) {
 }
 
 function visTag(v) {
-	const map = { 1: '仅本人', 2: '团队可见', 3: '部门可见', 4: '全平台' };
-	const tagMap = { 1: 'default', 2: 'primary', 3: 'info', 4: 'success' };
+	const map = { 1: '仅本人', 2: '部门可见', 3: '团队可见', 4: '公开' };
+	const tagMap = { 1: 'default', 2: 'info', 3: 'primary', 4: 'success' };
 	return `<span class="tag tag-${tagMap[v] || 'default'}">${map[v] || v}</span>`;
 }
 
@@ -870,5 +878,81 @@ function statusTag(s) {
 	const map = { 'done': 'success', 'parsing': 'warning', 'failed': 'danger', 'pending': 'default', 'desensitizing': 'warning', 'chunking': 'warning', 'embedding': 'warning' };
 	const labelMap = { 'done': '已完成', 'parsing': '解析中', 'failed': '失败', 'pending': '等待', 'desensitizing': '脱敏中', 'chunking': '切片中', 'embedding': '向量化中' };
 	return `<span class="tag tag-${map[s] || 'default'}">${labelMap[s] || s}</span>`;
+}
+
+/* ============ 已删除文件三选项对话框 ============ */
+function showDeletedFileDialog(existing) {
+	return new Promise((resolve) => {
+		// 创建对话框遮罩
+		const overlay = document.createElement('div');
+		overlay.style.cssText = `
+			position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+			background: rgba(0,0,0,0.5); z-index: 10000;
+			display: flex; align-items: center; justify-content: center;
+		`;
+		
+		// 创建对话框
+		const dialog = document.createElement('div');
+		dialog.style.cssText = `
+			background: white; border-radius: 12px; padding: 24px;
+			width: 420px; max-width: 90vw; box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+			font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+		`;
+		
+		dialog.innerHTML = `
+			<div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
+				<div style="width:40px;height:40px;border-radius:50%;background:#ff980015;display:flex;align-items:center;justify-content:center;font-size:20px">⚠️</div>
+				<div>
+					<div style="font-size:16px;font-weight:600;color:#333">文件已存在且已被删除</div>
+					<div style="font-size:13px;color:#999">检测到相同内容的文件之前已被删除</div>
+				</div>
+			</div>
+			<div style="background:#f8f9fa;border-radius:8px;padding:16px;margin-bottom:20px">
+				<div style="display:flex;justify-content:space-between;margin-bottom:8px">
+					<span style="color:#666">文件名</span>
+					<span style="font-weight:500">${escapeHtml(existing.file_name || '')}</span>
+				</div>
+				<div style="display:flex;justify-content:space-between;margin-bottom:8px">
+					<span style="color:#666">原上传者</span>
+					<span>${escapeHtml(existing.owner_name || '未知')}</span>
+				</div>
+				<div style="display:flex;justify-content:space-between">
+					<span style="color:#666">原上传时间</span>
+					<span>${existing.created_at || ''}</span>
+				</div>
+			</div>
+			<div style="display:flex;gap:12px">
+				<button id="btnCancel" style="flex:1;padding:10px;border:1px solid #ddd;border-radius:8px;background:white;color:#666;cursor:pointer;font-size:14px;transition:all 0.2s">取消</button>
+				<button id="btnCreateNew" style="flex:1;padding:10px;border:1px solid #2196f3;border-radius:8px;background:white;color:#2196f3;cursor:pointer;font-size:14px;transition:all 0.2s">新建记录</button>
+				<button id="btnRestore" style="flex:1;padding:10px;border:none;border-radius:8px;background:#2196f3;color:white;cursor:pointer;font-size:14px;transition:all 0.2s">恢复</button>
+			</div>
+		`;
+		
+		overlay.appendChild(dialog);
+		document.body.appendChild(overlay);
+		
+		// 添加按钮事件
+		const btnCancel = dialog.querySelector('#btnCancel');
+		const btnCreateNew = dialog.querySelector('#btnCreateNew');
+		const btnRestore = dialog.querySelector('#btnRestore');
+		
+		const closeAndResolve = (value) => {
+			document.body.removeChild(overlay);
+			resolve(value);
+		};
+		
+		btnCancel.addEventListener('click', () => closeAndResolve('cancel'));
+		btnCreateNew.addEventListener('click', () => closeAndResolve('create_new'));
+		btnRestore.addEventListener('click', () => closeAndResolve('restore'));
+		
+		// ESC 键关闭
+		const escHandler = (e) => {
+			if (e.key === 'Escape') {
+				closeAndResolve('cancel');
+				document.removeEventListener('keydown', escHandler);
+			}
+		};
+		document.addEventListener('keydown', escHandler);
+	});
 }
 

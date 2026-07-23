@@ -5,7 +5,7 @@ apps.users.models - 用户与权限域
 - sys_user / role / permission / role_permission / user_role
 - department / team / user_team
 
-⭐ 面试点：为什么不用 Django 默认 auth_user？
+不用 Django 默认 auth_user 的原因:
   - 字段大量扩展（真实姓名/部门/团队/密码策略/登录 IP 快照等）
   - 与自研 RBAC 深度耦合，AbstractBaseUser 更清爽
 """

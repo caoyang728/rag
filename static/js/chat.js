@@ -282,10 +282,17 @@ async function sendChat() {
 	scrollChatBottom();
 
 	try {
+		// 动态获取根类型（如果没有选中节点）
+		let rootTypes = [];
+		if (selectedScopeIds.size === 0) {
+			// 默认使用第一个根类型（由后端动态返回）
+			rootTypes = [];
+		}
+		
 		const body = {
 			question: text,
 			session_id: currentSessionId || undefined,
-			root_types: ['company_doc'],
+			root_types: rootTypes,
 			node_ids: [...selectedScopeIds].map(Number),
 			use_cache: true,
 			do_task_split: false

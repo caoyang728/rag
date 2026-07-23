@@ -8,18 +8,21 @@ from loguru import logger
 import os
 import tempfile
 import time
+import uuid
+import hashlib
 from typing import List
 
 from celery import shared_task
 from django.conf import settings
 
-from apps.knowledge.models import Document, DocumentChunk, CodeChunk
+from apps.knowledge.models import Document, DocumentChunk, CodeChunk, KnowledgeNode
 from apps.knowledge.parsers.base import get_parser
 from apps.knowledge.chunker import chunk_blocks
 from apps.knowledge.desensitizer import desensitize
-from apps.knowledge.storage import get_document_storage
+from apps.knowledge.storage import get_document_storage, generate_node_storage_path
 from apps.retrieval.vector_store import upsert_vector
 from apps.llm.embedding import get_embedding_client
+from apps.users.models import SysUser
 
 
 def _notify_admin_on_embedding_failure(doc: Document, error_msg: str):
@@ -218,3 +221,146 @@ def parse_document(document_id: int):
     finally:
         if temp_file and os.path.exists(temp_file.name):
             os.remove(temp_file.name)
+
+
+def _log_batch_import_failure(filename, node_name, error_msg):
+    """记录批量导入失败日志"""
+    log_dir = os.path.join(settings.BASE_DIR, 'logs')
+    os.makedirs(log_dir, exist_ok=True)
+    log_path = os.path.join(log_dir, 'batch_import_failed.log')
+    
+    from django.utils import timezone
+    timestamp = timezone.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    with open(log_path, 'a', encoding='utf-8') as f:
+        f.write(f"[{timestamp}] FILE: {filename} | NODE: {node_name} | ERROR: {error_msg}\n")
+
+
+@shared_task(name='knowledge.batch_import_single_file', queue='parse')
+def batch_import_single_file(temp_file_path, node_id, owner_id, visibility, owner_team_id, filename):
+    """
+    批量导入单个文件的 Celery 任务
+    
+    参数：
+        temp_file_path: 临时文件路径（脚本上传时创建）
+        node_id: 目标节点ID
+        owner_id: 上传者ID
+        visibility: 可见范围
+        owner_team_id: 团队ID
+        filename: 原始文件名
+    """
+    try:
+        # 1. 验证文件
+        if not os.path.exists(temp_file_path):
+            error_msg = f"临时文件不存在: {temp_file_path}"
+            logger.error(f'[BatchImport] {error_msg}')
+            _log_batch_import_failure(filename, f"node_id={node_id}", error_msg)
+            return {'ok': False, 'error': error_msg}
+        
+        # 2. 获取节点和上传者
+        try:
+            node = KnowledgeNode.objects.get(id=node_id, is_deleted=False)
+        except KnowledgeNode.DoesNotExist:
+            error_msg = f"节点不存在: {node_id}"
+            logger.error(f'[BatchImport] {error_msg}')
+            _log_batch_import_failure(filename, f"node_id={node_id}", error_msg)
+            return {'ok': False, 'error': error_msg}
+        
+        try:
+            owner = SysUser.objects.get(id=owner_id, is_deleted=False)
+        except SysUser.DoesNotExist:
+            error_msg = f"上传者不存在: {owner_id}"
+            logger.error(f'[BatchImport] {error_msg}')
+            _log_batch_import_failure(filename, node.name, error_msg)
+            return {'ok': False, 'error': error_msg}
+        
+        # 3. 计算文件哈希（去重）
+        file_hash = hashlib.sha256()
+        with open(temp_file_path, 'rb') as f:
+            for chunk in iter(lambda: f.read(8192), b''):
+                file_hash.update(chunk)
+        file_hash = file_hash.hexdigest()
+        
+        # 检查是否已存在
+        if Document.objects.filter(file_hash=file_hash, is_deleted=False).exists():
+            error_msg = "文件已存在（重复导入）"
+            logger.warning(f'[BatchImport] {error_msg}: {filename}')
+            _log_batch_import_failure(filename, node.name, error_msg)
+            # 删除临时文件
+            if os.path.exists(temp_file_path):
+                os.remove(temp_file_path)
+            return {'ok': False, 'error': error_msg}
+        
+        # 4. 获取文件大小和类型
+        file_size = os.path.getsize(temp_file_path)
+        
+        ext_map = {
+            '.txt': 'txt', '.md': 'md', '.markdown': 'md',
+            '.docx': 'docx', '.doc': 'docx', '.pdf': 'pdf',
+            '.json': 'json', '.xml': 'xml', '.csv': 'csv',
+            '.xlsx': 'xlsx', '.xls': 'xlsx',
+        }
+        ext = os.path.splitext(filename)[1].lower()
+        file_type = ext_map.get(ext, 'other')
+        
+        mime_map = {
+            '.txt': 'text/plain', '.md': 'text/markdown',
+            '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            '.doc': 'application/msword',
+            '.pdf': 'application/pdf',
+            '.json': 'application/json', '.xml': 'application/xml',
+            '.csv': 'text/csv',
+            '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            '.xls': 'application/vnd.ms-excel',
+        }
+        mime_type = mime_map.get(ext, 'application/octet-stream')
+        
+        # 5. 保存文件到目标位置
+        safe_name = filename.replace("/", "_").replace("\\", "_")
+        stored_filename = f"{uuid.uuid4().hex}_{safe_name}"
+        
+        node_path = generate_node_storage_path(node)
+        storage = get_document_storage()
+        
+        # 读取临时文件内容并保存
+        with open(temp_file_path, 'rb') as f:
+            file_path = storage.save(stored_filename, f, node_path)
+        
+        logger.info(f'[BatchImport] 文件已保存: {filename} -> {file_path}')
+        
+        # 6. 创建文档记录
+        doc = Document.objects.create(
+            node=node,
+            title=filename,
+            file_name=filename,
+            file_type=file_type,
+            file_size=file_size,
+            file_hash=file_hash,
+            file_path=file_path,
+            mime_type=mime_type,
+            owner=owner,
+            owner_team_id=owner_team_id,
+            visibility=visibility,
+            root_type=node.root_type,
+            status='pending',
+        )
+        
+        logger.info(f'[BatchImport] 文档记录已创建: {filename} (id={doc.id})')
+        
+        # 7. 删除临时文件
+        if os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+            logger.info(f'[BatchImport] 临时文件已删除: {temp_file_path}')
+        
+        # 8. 触发解析任务
+        parse_document.delay(doc.id)
+        
+        return {'ok': True, 'doc_id': doc.id, 'filename': filename}
+    
+    except Exception as e:
+        error_msg = str(e)[:1000]
+        logger.error(f'[BatchImport] 导入失败: {filename} - {error_msg}')
+        _log_batch_import_failure(filename, f"node_id={node_id}", error_msg)
+        
+        # 失败时保留临时文件，方便手动处理
+        return {'ok': False, 'error': error_msg}

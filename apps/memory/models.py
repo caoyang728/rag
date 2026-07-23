@@ -83,18 +83,10 @@ class GlobalMemory(models.Model):
     """D4 global_memory - 全局记忆（公司级知识/规则）
     scope_root_types 限定作用域"""
 
-    SCOPE_CHOICES = [
-        ('all', 'all'),
-        ('company_doc', 'company_doc'),
-        ('code_kb', 'code_kb'),
-        ('general_reasoning', 'general_reasoning'),
-        ('ops_fault', 'ops_fault'),
-    ]
-
     id = models.BigAutoField(primary_key=True)
     key = models.CharField(max_length=64, unique=True, help_text='记忆键，如 "company_rules"')
     content = models.TextField(help_text='记忆内容，直接拼进 System Prompt')
-    scope_root_types = ArrayField(models.CharField(max_length=32, choices=SCOPE_CHOICES),
+    scope_root_types = ArrayField(models.CharField(max_length=32),
                                    default=list, blank=True,
                                    help_text='作用于哪些根类型；空表示 all')
     priority = models.IntegerField(default=0, help_text='数值越大优先级越高')

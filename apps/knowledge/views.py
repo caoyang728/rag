@@ -83,6 +83,19 @@ class NodeTreeView(APIView):
         return Response({"tree": _build_tree(data), "total": len(data)})
 
 
+class RootTypesView(APIView):
+    """GET /api/v1/knowledge/nodes/root_types/ - 动态获取所有根类型"""
+    permission_classes = [IsAdminOrOps]
+
+    def get(self, request):
+        root_types = KnowledgeNode.get_root_type_choices()
+        return Response({
+            "root_types": [
+                {"code": rt[0], "name": rt[1]} for rt in root_types
+            ]
+        })
+
+
 class KnowledgeNodeViewSet(viewsets.ModelViewSet):
     """/api/v1/knowledge/nodes/ — 仅超级管理员和知识库运维可操作"""
     queryset = KnowledgeNode.objects.filter(is_deleted=False).order_by("path")
@@ -113,12 +126,18 @@ class KnowledgeNodeViewSet(viewsets.ModelViewSet):
         if node_type == "root" and parent:
             raise ValidationError({"parent": "根节点不能指定上级节点"})
 
-        # root_type: 有父节点则继承，无父节点则强制 root 类型并给默认分类
+        # root_type: 有父节点则继承，无父节点则强制 root 类型并从数据库获取默认值
         if parent:
             root_type = parent.root_type
         else:
             node_type = "root"
-            root_type = serializer.validated_data.get("root_type") or "company_doc"
+            root_type = serializer.validated_data.get("root_type")
+            if not root_type:
+                # 从数据库获取第一个根类型作为默认值
+                default_root = KnowledgeNode.objects.filter(
+                    node_type='root', is_deleted=False
+                ).first()
+                root_type = default_root.root_type if default_root else 'company_doc'
         depth = (parent.depth + 1) if parent else 0
         obj = serializer.save(depth=depth, node_type=node_type, root_type=root_type, created_by=self.request.user)
         # 更新 path（ID 零填充 4 位，确保按数值顺序排序）
@@ -179,8 +198,8 @@ class DocumentViewSet(viewsets.ModelViewSet):
         qs = qs.filter(
             models.Q(owner=user) |
             models.Q(visibility=4) |
-            models.Q(visibility=3) |
-            models.Q(visibility=2, owner_team_id__in=user.user_teams.values_list('team_id', flat=True))
+            models.Q(visibility=3, owner_team_id__in=user.user_teams.values_list('team_id', flat=True)) |
+            models.Q(visibility=2, owner__department_id=user.department_id)
         )
         return qs
 
@@ -223,9 +242,9 @@ class DocumentViewSet(viewsets.ModelViewSet):
         if doc.visibility == 4:
             return True
         if doc.visibility == 3:
-            return True
-        if doc.visibility == 2:
             return user.user_teams.filter(team_id=doc.owner_team_id).exists()
+        if doc.visibility == 2:
+            return doc.owner and doc.owner.department_id and user.department_id == doc.owner.department_id
         return False
 
 
@@ -270,6 +289,8 @@ class DocumentUploadView(APIView):
         file_hash = h.hexdigest()
 
         force_upload = request.data.get("force_upload") in ("true", "True", "1", True)
+        # action 参数：restore(恢复旧记录) / create_new(新建独立记录)
+        action = request.data.get("action")
 
         # -- 未删除的相同文件 → 返回冲突信息 --
         exist = Document.objects.filter(
@@ -304,19 +325,33 @@ class DocumentUploadView(APIView):
                 },
             }, status=200)
 
-        # -- force_upload + 已删除相同文件 → 恢复 --
-        if force_upload and deleted_exist:
+        # -- force_upload + 已删除相同文件 + action=restore → 恢复 --
+        # 恢复时：保存文件到新节点目录，更新所有字段，记录恢复审计信息
+        if force_upload and deleted_exist and action == "restore":
+            # 保存文件到新节点目录
+            file_path = self._save_file(f, node)
+            if not file_path:
+                return Response({"detail": "文件存储失败"}, status=500)
+            
+            from django.utils import timezone
             with transaction.atomic():
                 deleted_exist.is_deleted = False
                 deleted_exist.node = node
                 deleted_exist.owner = request.user
+                deleted_exist.owner_team_id = getattr(request.user, 'team_id', None)
                 deleted_exist.visibility = visibility
                 deleted_exist.status = "pending"
                 deleted_exist.error_message = ""
+                deleted_exist.file_path = file_path
+                deleted_exist.restored_at = timezone.now()
+                deleted_exist.restored_by = request.user
                 deleted_exist.save(update_fields=[
-                    "is_deleted", "node", "owner", "visibility",
-                    "status", "error_message", "updated_at",
+                    "is_deleted", "node", "owner", "owner_team_id", "visibility",
+                    "status", "error_message", "file_path",
+                    "restored_at", "restored_by", "updated_at",
                 ])
+            logger.info('[Upload] restored deleted document: id=%d, node_id=%d, owner=%s, restored_by=%s, file_path=%s',
+                        deleted_exist.id, node.id, request.user.username, request.user.username, file_path)
             try:
                 from apps.knowledge.tasks import parse_document
                 parse_document.delay(deleted_exist.id)
@@ -327,6 +362,7 @@ class DocumentUploadView(APIView):
                 "status": "pending",
                 "detail": "文件已恢复（sha256 匹配已删除记录）",
                 "dedup": True,
+                "restored": True,
             }, status=201)
 
         # -- 正常上传 / force_upload + 未删除相同文件（新建独立记录） --
@@ -391,7 +427,11 @@ class DocumentUploadView(APIView):
         fname = f"{uuid_lib.uuid4().hex}_{safe_name}"
         # 生成节点存储路径
         node_path = generate_node_storage_path(node)
-        return storage.save(fname, f, node_path)
+        logger.info('[Upload] saving file to node_path=%s, filename=%s, node_id=%d, node_name=%s',
+                    node_path, fname, node.id, node.name)
+        file_path = storage.save(fname, f, node_path)
+        logger.info('[Upload] file saved to: %s', file_path)
+        return file_path
 
 
 class DocumentChunksView(APIView):
@@ -429,9 +469,9 @@ class DocumentChunksView(APIView):
         if doc.visibility == 4:
             return True
         if doc.visibility == 3:
-            return True
-        if doc.visibility == 2:
             return user.user_teams.filter(team_id=doc.owner_team_id).exists()
+        if doc.visibility == 2:
+            return doc.owner and doc.owner.department_id and user.department_id == doc.owner.department_id
         return False
 
 

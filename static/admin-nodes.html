@@ -7,6 +7,7 @@
 	<title>节点管理 · 知库 Agent</title>
 	<link rel="stylesheet" href="/static/css/common.css">
 	<link rel="stylesheet" href="/static/css/admin-nodes.css">
+	<link rel="stylesheet" href="/static/css/multi-select.css">
 </head>
 
 <body>
@@ -14,39 +15,282 @@
 
 	<div class="layout">
 		<div id="sidebar-container"></div>
-		<div class="main">
+		<div class="main main-flex">
 			<div class="page-header">
-				<div class="breadcrumb"><a href="/chat/">首页</a><span class="sep">/</span>管理后台<span
-						class="sep">/</span>节点管理</div>
-				<div class="page-header-flex">
-					<div>
-						<div class="page-title">知识库节点管理</div>
-						<div class="page-desc">管理四大根节点下的知识库目录树，支持节点的增删改操作</div>
+				<div class="flex items-baseline justify-between">
+					<div class="flex items-baseline gap-10">
+						<div class="page-title">知识库</div>
+						<div class="page-subtitle">浏览知识库文档，按节点筛选；管理员可管理目录树节点</div>
 					</div>
 					<div class="page-actions">
-						<button class="btn btn-primary" onclick="openNodeModal()">＋ 新增节点</button>
+						<button class="btn btn-primary" id="btnNewNode" onclick="openNodeModal()">＋ 新增节点</button>
 					</div>
 				</div>
 			</div>
 
-			<div class="node-manage">
+			<div class="node-manage flex-1 min-h-0 overflow-hidden">
 				<div class="node-tree-panel">
 					<div class="panel-header">
 						<div class="panel-title">节点树</div>
-						<button class="btn-ghost btn-sm" onclick="expandAllTree()" title="展开全部"
-							style="padding:2px 6px">⛶</button>
+						<button class="btn-ghost btn-sm tree-expand-all" onclick="expandAllTree()" title="展开全部">⛶</button>
 					</div>
 					<div class="panel-body">
 						<div class="tree" id="nodeMgrTree">
-							<div style="padding:20px;text-align:center;color:var(--text-sub)">加载中...</div>
+							<div class="text-center text-sub" style="padding:20px">加载中...</div>
 						</div>
 					</div>
 				</div>
 				<div class="node-detail-panel" id="nodeDetail">
-					<div style="padding:40px;text-align:center;color:var(--text-sub)">
-						<div style="font-size:48px;margin-bottom:12px">🗂️</div>
+					<div class="empty" style="padding:40px">
+					<div class="empty-icon" style="font-size:48px">🗂️</div>
 						<div>请在左侧选择或创建一个节点</div>
 					</div>
+				</div>
+			</div>
+
+			<!-- ============ 文档列表区（默认隐藏，点击查看后展示） ============ -->
+			<div class="card doc-list-card hidden shrink-0" id="docListCard">
+				<div class="doc-list-toolbar">
+					<div class="doc-list-title">📄 文档列表
+						<span class="doc-list-count" id="docListCount"></span>
+					</div>
+					<div class="flex gap-8 items-center">
+						<button class="btn btn-sm" id="docListToggle" onclick="toggleDocList()">收起</button>
+					</div>
+				</div>
+				<div id="docListBody" class="hidden">
+					<div class="doc-filter-bar">
+						<input class="input" id="docSearch" style="width:220px" placeholder="🔍 搜索文件名/标题" oninput="onDocSearchInput()">
+						<select class="select" id="docStatusFilter" style="width:130px">
+							<option value="">全部状态</option>
+							<option value="done">已完成</option>
+							<option value="pending">等待</option>
+							<option value="parsing">解析中</option>
+							<option value="desensitizing">脱敏中</option>
+							<option value="chunking">切片中</option>
+							<option value="embedding">向量化中</option>
+							<option value="embedding_failed">向量化失败</option>
+							<option value="failed">失败</option>
+						</select>
+						<select class="select" id="docVisFilter" style="width:130px">
+							<option value="">全部可见范围</option>
+							<option value="1">个人</option>
+							<option value="2">部门/团队</option>
+							<option value="3">公开</option>
+						</select>
+						<select class="select" id="docTypeFilter" style="width:120px">
+							<option value="">全部类型</option>
+							<option value="pdf">PDF</option>
+							<option value="docx">Word</option>
+							<option value="markdown">Markdown</option>
+							<option value="txt">TXT</option>
+							<option value="code">代码</option>
+							<option value="config">配置</option>
+						</select>
+						<button class="btn btn-sm btn-primary" onclick="loadDocList(1)">查询</button>
+					</div>
+					<div class="table-container">
+						<table class="table">
+							<thead>
+								<tr>
+									<th>文件名</th>
+									<th>类型</th>
+									<th>上传人</th>
+									<th>可见范围</th>
+									<th>状态</th>
+									<th>上传时间</th>
+									<th style="width:240px">操作</th>
+								</tr>
+							</thead>
+							<tbody id="docListTbody"></tbody>
+						</table>
+					</div>
+					<div class="pagination" id="docPagination"></div>
+				</div>
+			</div>
+		</div>
+	</div>
+
+	<!-- ============ 文档预览弹窗（不可复制，支持分页） ============ -->
+	<div class="modal" id="docPreviewModal" style="max-width:860px">
+		<div class="modal-header">
+			<div class="modal-title" id="docPreviewTitle">文档预览</div>
+			<button class="modal-close" onclick="closeModal('docPreviewModal')">&times;</button>
+		</div>
+		<div class="modal-body overflow-y-auto" style="max-height:60vh">
+			<div id="docPreviewContent" class="doc-preview-content select-none"></div>
+		</div>
+		<div class="modal-footer hidden" id="docPreviewFooter">
+			<div class="flex items-center gap-8">
+				<span class="text-sm text-sub" id="docPreviewInfo"></span>
+				<button class="btn btn-sm" id="docPreviewPrev" onclick="previewDocPage(currentPreviewDocId, currentPreviewPage - 1)">‹ 上一页</button>
+				<span class="text-sm" id="docPreviewPage"></span>
+				<button class="btn btn-sm" id="docPreviewNext" onclick="previewDocPage(currentPreviewDocId, currentPreviewPage + 1)">下一页 ›</button>
+			</div>
+		</div>
+	</div>
+
+	<!-- ============ 编辑可视范围弹窗 ============ -->
+	<div class="modal" id="docVisModal" style="max-width:900px">
+		<div class="modal-header">
+			<div class="modal-title">编辑文档设置</div>
+			<button class="modal-close" onclick="closeModal('docVisModal')">&times;</button>
+		</div>
+		<div class="modal-body">
+			<input type="hidden" id="docVisId">
+			<div class="form-item mb-16">
+				<label class="form-label">可见范围</label>
+				<select class="select" id="docVisSelect" onchange="onDocVisChange()">
+					<option value="1">个人</option>
+					<option value="2">部门/团队</option>
+					<option value="3">公开</option>
+				</select>
+			</div>
+			<div class="hidden" id="docVisOrgRow">
+				<div class="multi-select-row">
+					<div class="multi-select" id="docVisDeptSelect">
+						<div class="multi-select-trigger" onclick="toggleMultiSelect('docVisDeptSelect')">
+							<span class="multi-select-label">请选择部门</span>
+							<span class="multi-select-count hidden" id="docVisDeptCount">0</span>
+							<span class="multi-select-arrow">▾</span>
+						</div>
+						<div class="multi-select-panel">
+							<div class="multi-select-header">
+								<input type="text" class="multi-select-search" placeholder="搜索部门..." oninput="docVisOnDeptSearch(this)">
+								<span class="multi-select-toggle-all" onclick="toggleMultiSelectAll('docVisDeptPanel')">全选</span>
+							</div>
+							<div class="multi-select-list" id="docVisDeptPanel"></div>
+						</div>
+					</div>
+					<div class="multi-select" id="docVisTeamSelect">
+						<div class="multi-select-trigger" onclick="toggleMultiSelect('docVisTeamSelect')">
+							<span class="multi-select-label">请先选择部门</span>
+							<span class="multi-select-count hidden" id="docVisTeamCount">0</span>
+							<span class="multi-select-arrow">▾</span>
+						</div>
+						<div class="multi-select-panel">
+							<div class="multi-select-header">
+								<input type="text" class="multi-select-search" placeholder="搜索团队..." oninput="docVisOnTeamSearch(this)">
+								<span class="multi-select-toggle-all" onclick="toggleMultiSelectAll('docVisTeamPanel')">全选</span>
+							</div>
+							<div class="multi-select-list" id="docVisTeamPanel"></div>
+						</div>
+					</div>
+				</div>
+				<div class="form-hint mt-8">选择部门后会自动选中该部门下的所有团队，可手动取消不需要的团队</div>
+			</div>
+			<div class="form-item">
+				<div class="flex gap-24 items-center">
+					<label class="checkbox"><input type="checkbox" id="docAllowShare"> 允许分享</label>
+					<label class="checkbox"><input type="checkbox" id="docAllowDownload"> 允许下载</label>
+				</div>
+				<div class="form-hint">分享即授予访问权限；下载权限隐含读取权限</div>
+			</div>
+		</div>
+		<div class="modal-footer">
+			<button class="btn-cancel" onclick="closeModal('docVisModal')">取消</button>
+			<button class="btn-save" onclick="saveDocVis()">保存</button>
+		</div>
+	</div>
+
+	<!-- ============ 分享弹窗 ============ -->
+	<div class="modal" id="docShareModal" style="max-width:480px">
+		<div class="modal-header">
+			<div class="modal-title">分享文档</div>
+			<button class="modal-close" onclick="closeModal('docShareModal')">&times;</button>
+		</div>
+		<div class="modal-body">
+			<input type="hidden" id="docShareId">
+			<div class="form-item mb-16">
+				<label class="form-label">目标用户名 <span class="required">*</span></label>
+				<input class="input" id="docShareUser" placeholder="输入用户名">
+			</div>
+			<div class="form-item mb-16">
+				<label class="form-label">授权类型</label>
+				<select class="select" id="docShareType">
+					<option value="read">读取（预览/对话检索）</option>
+					<option value="download">下载</option>
+					<option value="share">分享</option>
+				</select>
+			</div>
+			<div class="form-item">
+				<label class="form-label">有效期（可选）</label>
+				<input class="input" id="docShareExpiry" type="datetime-local">
+				<div class="form-hint">留空表示永久有效</div>
+			</div>
+		</div>
+		<div class="modal-footer">
+			<button class="btn-cancel" onclick="closeModal('docShareModal')">取消</button>
+			<button class="btn-save" onclick="submitShare()">分享</button>
+		</div>
+	</div>
+
+	<!-- ============ 申请权限弹窗 ============ -->
+	<div class="modal" id="docReqModal" style="max-width:480px">
+		<div class="modal-header">
+			<div class="modal-title">申请文档权限</div>
+			<button class="modal-close" onclick="closeModal('docReqModal')">&times;</button>
+		</div>
+		<div class="modal-body">
+			<input type="hidden" id="docReqId">
+			<div class="form-item mb-16">
+				<label class="form-label">申请类型</label>
+				<select class="select" id="docReqType">
+					<option value="read">读取（预览/对话检索）</option>
+					<option value="download">下载</option>
+					<option value="share">分享</option>
+				</select>
+			</div>
+			<div class="form-item">
+				<label class="form-label">申请理由</label>
+				<textarea class="textarea" id="docReqReason" rows="3" placeholder="简要说明申请原因"></textarea>
+			</div>
+		</div>
+		<div class="modal-footer">
+			<button class="btn-cancel" onclick="closeModal('docReqModal')">取消</button>
+			<button class="btn-save" onclick="submitRequest()">提交申请</button>
+		</div>
+	</div>
+
+	<!-- ============ 访问管理弹窗（查看/撤销授权 + 审批申请） ============ -->
+	<div class="modal" id="docAccessModal" style="max-width:760px">
+		<div class="modal-header">
+			<div class="modal-title">访问管理</div>
+			<button class="modal-close" onclick="closeModal('docAccessModal')">&times;</button>
+		</div>
+		<div class="modal-body overflow-y-auto" style="max-height:70vh">
+			<input type="hidden" id="docAccessId">
+			<div class="modal-content-inner">
+				<div class="form-section-title">已授权用户</div>
+				<div class="table-container">
+				<table class="table">
+					<thead>
+						<tr>
+							<th>用户</th>
+							<th>权限</th>
+							<th>来源</th>
+							<th>到期</th>
+							<th>状态</th>
+							<th style="width:90px">操作</th>
+						</tr>
+					</thead>
+					<tbody id="docGrantsBody"></tbody>
+				</table>
+			</div>
+			<div class="form-section-title">待审批申请</div>
+			<div class="table-container">
+				<table class="table">
+					<thead>
+						<tr>
+							<th>申请人</th>
+							<th>类型</th>
+							<th>理由</th>
+							<th>申请时间</th>
+							<th style="width:140px">操作</th>
+						</tr>
+					</thead>
+					<tbody id="docReqsBody"></tbody>
+				</table>
 				</div>
 			</div>
 		</div>
@@ -58,13 +302,13 @@
 			<div class="modal-title" id="nodeModalTitle">新增节点</div>
 			<button class="modal-close" onclick="closeModal('nodeModal')">&times;</button>
 		</div>
-		<div class="modal-body" style="max-height:70vh;overflow-y:auto">
+		<div class="modal-body overflow-y-auto" style="max-height:70vh">
 			<input type="hidden" id="nodeId">
 
 			<!-- ===== 节点归属 ===== -->
 			<div class="form-section-title">节点归属</div>
 			<div class="form-row">
-				<div class="form-item" style="flex:1">
+				<div class="form-item flex-1">
 					<label class="form-label">节点类型 <span class="required">*</span></label>
 					<select id="nodeType" class="select">
 						<option value="root">根节点</option>
@@ -73,9 +317,8 @@
 					</select>
 					<div class="form-hint">根节点为顶级目录，文件夹下可建子节点，叶子节点不可再建子节点</div>
 				</div>
-				<div class="form-item" style="flex:1">
-					<label class="form-label">上级节点 <span class="required" id="parentRequired"
-							style="display:none">*</span></label>
+				<div class="form-item flex-1">
+					<label class="form-label">上级节点 <span class="required hidden" id="parentRequired">*</span></label>
 					<select id="nodeParent" class="select">
 						<option value="">— 无（作为根节点）—</option>
 					</select>
@@ -86,11 +329,11 @@
 			<!-- ===== 基本信息 ===== -->
 			<div class="form-section-title">基本信息</div>
 			<div class="form-row">
-				<div class="form-item" style="flex:1">
+				<div class="form-item flex-1">
 					<label class="form-label">节点名称 <span class="required">*</span></label>
 					<input id="nodeName" class="input" placeholder="例如：产品文档、后端服务" maxlength="128">
 				</div>
-				<div class="form-item" style="width:130px;flex-shrink:0">
+				<div class="form-item shrink-0" style="width:130px">
 					<label class="form-label">显示顺序</label>
 					<input id="nodeOrder" class="input" type="number" value="0" min="0" max="9999">
 				</div>
@@ -102,22 +345,136 @@
 			</div>
 		</div>
 		<div class="modal-footer">
-			<button class="btn" onclick="closeModal('nodeModal')">取消</button>
-			<button class="btn btn-primary" onclick="saveNode()">保存</button>
+			<button class="btn-cancel" onclick="closeModal('nodeModal')">取消</button>
+			<button class="btn-save" onclick="saveNode()">保存</button>
 		</div>
 	</div>
 
 	<div id="mask" class="mask"></div>
 	<div id="toast-wrap" class="toast-wrap"></div>
 
+	<!-- ============ 模板片段 ============ -->
+	<template id="tmpl-node-detail">
+		<div class="flex justify-between items-center mb-16">
+			<div>
+				<div class="text-xl flex items-center gap-8">
+					<span class="nd-icon"></span> <span class="nd-name"></span>
+				</div>
+				<div class="text-sub text-sm mt-8">节点 ID：<span class="nd-id"></span> · 路径：<span class="nd-path"></span></div>
+			</div>
+			<div class="flex gap-8 nd-actions"></div>
+		</div>
+		<div class="grid-3 mb-24">
+			<div class="card nd-doc-card" style="padding:14px 16px;cursor:pointer" title="点击查看文档列表">
+				<div class="text-sub text-sm">文档总数</div>
+				<div class="flex items-center gap-8 mt-8">
+					<span class="text-2xl nd-doc-count"></span>
+					<span class="text-primary text-xs">📄 点击查看 →</span>
+				</div>
+			</div>
+			<div class="card" style="padding:14px 16px">
+				<div class="text-sub text-sm">子节点数</div>
+				<div class="text-2xl mt-8 nd-children-count"></div>
+			</div>
+			<div class="card" style="padding:14px 16px">
+				<div class="text-sub text-sm">节点类型</div>
+				<div class="text-2xl mt-8 nd-node-type-label"></div>
+			</div>
+		</div>
+		<div class="card">
+			<div class="card-title">基础信息</div>
+			<div class="grid-2" style="gap:14px 24px">
+				<div><div class="text-sub text-sm">节点名称</div><div class="fw-500 mt-4 nd-info-name"></div></div>
+				<div><div class="text-sub text-sm">根类型</div><div class="fw-500 mt-4 nd-info-root-type"></div></div>
+				<div><div class="text-sub text-sm">创建人</div><div class="fw-500 mt-4 nd-info-creator"></div></div>
+				<div><div class="text-sub text-sm">创建时间</div><div class="fw-500 mt-4 nd-info-created"></div></div>
+				<div><div class="text-sub text-sm">最后更新</div><div class="fw-500 mt-4 nd-info-updated"></div></div>
+				<div><div class="text-sub text-sm">上级节点</div><div class="fw-500 mt-4 nd-info-parent"></div></div>
+				<div><div class="text-sub text-sm">排序号</div><div class="fw-500 mt-4 nd-info-order"></div></div>
+				<div><div class="text-sub text-sm">深度</div><div class="fw-500 mt-4 nd-info-depth"></div></div>
+			</div>
+		</div>
+		<div class="card mt-16 nd-desc-card hidden">
+			<div class="card-title">描述</div>
+			<div class="text-sm nd-desc-text" style="line-height:1.6;white-space:pre-wrap"></div>
+		</div>
+	</template>
+
+	<template id="tmpl-doc-row">
+		<tr>
+			<td><span class="dr-file" style="display:inline-flex;align-items:center;gap:6px"></span></td>
+			<td><span class="tag dr-type"></span></td>
+			<td class="text-sub dr-owner"></td>
+			<td class="dr-vis"></td>
+			<td class="dr-status"></td>
+			<td class="text-sub dr-date"></td>
+			<td class="dr-actions"></td>
+		</tr>
+	</template>
+
+	<template id="tmpl-doc-pagination">
+		<span>共 <span class="pg-total">0</span> 条</span>
+		<button class="page-btn pg-prev">‹</button>
+		<span class="pg-numbers"></span>
+		<button class="page-btn pg-next">›</button>
+	</template>
+
+	<template id="tmpl-auth-dept-row">
+		<tr>
+			<td><span class="tag tag-primary">🏢 <span class="at-dept-name"></span></span></td>
+			<td><span class="tag tag-info">读取</span></td>
+			<td class="text-sub">部门权限</td>
+			<td class="text-sub">永久</td>
+			<td><span class="tag tag-success">有效</span></td>
+			<td>-</td>
+		</tr>
+	</template>
+
+	<template id="tmpl-auth-team-row">
+		<tr>
+			<td><span class="tag tag-primary">👥 <span class="at-team-name"></span></span></td>
+			<td><span class="tag tag-info">读取</span></td>
+			<td class="text-sub">团队权限</td>
+			<td class="text-sub">永久</td>
+			<td><span class="tag tag-success">有效</span></td>
+			<td>-</td>
+		</tr>
+	</template>
+
+	<template id="tmpl-auth-direct-row">
+		<tr>
+			<td class="at-user-name"></td>
+			<td><span class="tag tag-info at-action"></span></td>
+			<td class="text-sub at-source"></td>
+			<td class="text-sub at-expires"></td>
+			<td class="at-active-tag"></td>
+			<td class="at-revoke-btn"></td>
+		</tr>
+	</template>
+
+	<template id="tmpl-approval-row">
+		<tr>
+			<td class="ar-requester"></td>
+			<td><span class="tag tag-info ar-type"></span></td>
+			<td class="text-sub ar-reason" style="max-width:200px;word-break:break-all"></td>
+			<td class="text-sub ar-date"></td>
+			<td>
+				<button class="btn-link btn-sm ar-approve" style="color:var(--success)">批准</button>
+				<button class="btn-link btn-sm ar-reject" style="color:var(--danger)">驳回</button>
+			</td>
+		</tr>
+	</template>
+
 	<script src="/static/js/common.js"></script>
+	<script src="/static/js/multi-select.js"></script>
 	<script src="/static/js/admin-nodes.js"></script>
 	<script>
-		// 页面级权限守卫：非超管/知识库运维拒访，通过则初始化页面
+		// 所有登录用户可浏览文档；节点增删改仅管理员可用（按钮显隐控制）
 		document.addEventListener('DOMContentLoaded', function () {
+			// 非管理员隐藏节点管理入口
 			if (!isAdminOrOps()) {
-				document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;font-size:18px;color:var(--text-sub)"><div style="text-align:center"><div style="font-size:48px;margin-bottom:16px">🔒</div><div>无权限访问此页面</div><div style="margin-top:12px"><a href="/chat/" style="color:var(--primary)">返回首页</a></div></div></div>';
-				return;
+				var btn = document.getElementById('btnNewNode');
+				if (btn) btn.style.display = 'none';
 			}
 			initNodesPage();
 		});

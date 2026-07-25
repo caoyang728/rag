@@ -13,16 +13,13 @@ const DEFAULT_ROOT_ICONS = ['📁', '💻', '🧠', '🛠️', '📚', '🔧', '
 
 function closeModal(id) {
 	var el = document.getElementById(id);
-	if (el) el.style.display = 'none';
-	var mask = document.getElementById('mask');
-	if (mask) mask.style.display = 'none';
-}
-
-function showModal(id) {
-	var el = document.getElementById(id);
-	if (el) el.style.display = 'flex';
-	var mask = document.getElementById('mask');
-	if (mask) mask.style.display = 'block';
+	if (el) el.classList.remove('show');
+	// 检查是否还有其他弹窗打开
+	var activeModals = document.querySelectorAll('.modal.show');
+	if (activeModals.length === 0) {
+		var mask = document.getElementById('mask');
+		if (mask) mask.classList.remove('show');
+	}
 }
 
 /* ============ 动态加载根类型 ============ */
@@ -133,6 +130,13 @@ function selectNode(id, elm, e) {
 	document.querySelectorAll('.tree-item.selected').forEach(function (x) { x.classList.remove('selected'); });
 	elm.classList.add('selected');
 
+	// 切换节点时隐藏文档列表
+	var card = document.getElementById('docListCard');
+	if (card) card.classList.add('hidden');
+
+	// 同步文档列表的节点筛选（不自动展开）
+	setDocNodeFilter(id);
+
 	// 从后端加载节点详情
 	api.getJson(NODE_API + '/' + id + '/').then(function (node) {
 		renderNodeDetail(node);
@@ -142,7 +146,7 @@ function selectNode(id, elm, e) {
 	});
 }
 
-/* ============ 渲染节点详情 ============ */
+/* ============ 渲染节点详情（使用 tmpl-node-detail 模板） ============ */
 function renderNodeDetail(n) {
 	var rootTypeName = ROOT_TYPE_MAP[n.root_type] || n.root_type;
 	var icon = getNodeIcon(n);
@@ -150,49 +154,47 @@ function renderNodeDetail(n) {
 	var parentInfo = n.parent_id ? '节点#' + n.parent_id : '（根节点）';
 	var parentPath = n.path ? n.path.replace(/\/$/, '').replace(/\//g, ' / ').trim() : '/';
 
-	document.getElementById('nodeDetail').innerHTML =
-		'<div class="flex justify-between items-center mb-16">' +
-		'<div>' +
-		'<div class="text-xl" style="display:flex;align-items:center;gap:8px">' + icon + ' ' + escapeHtml(n.name) + '</div>' +
-		'<div class="text-sub text-sm mt-8">节点 ID：node-' + n.id + ' · 路径：' + escapeHtml(parentPath) + '</div>' +
-		'</div>' +
-		'<div class="flex gap-8">' +
-		'<button class="btn btn-sm" onclick="editNode(' + n.id + ')">\uD83D\uDCDD 编辑</button>' +
-		'<button class="btn btn-sm btn-danger" onclick="deleteNode(' + n.id + ')">\uD83D\uDDD1 删除节点</button>' +
-		'</div>' +
-		'</div>' +
-		'<div class="grid-3 mb-24">' +
-		'<div class="card" style="padding:14px 16px">' +
-		'<div class="text-sub text-sm">文档总数</div>' +
-		'<div class="text-2xl mt-8">' + (n.document_count || 0).toLocaleString() + '</div>' +
-		'</div>' +
-		'<div class="card" style="padding:14px 16px">' +
-		'<div class="text-sub text-sm">子节点数</div>' +
-		'<div class="text-2xl mt-8">' + (n.children_count || 0).toLocaleString() + '</div>' +
-		'</div>' +
-		'<div class="card" style="padding:14px 16px">' +
-		'<div class="text-sub text-sm">节点类型</div>' +
-		'<div class="text-2xl mt-8">' + escapeHtml(nodeTypeLabels[n.node_type] || n.node_type) + '</div>' +
-		'</div>' +
-		'</div>' +
-		'<div class="card">' +
-		'<div class="card-title">基础信息</div>' +
-		'<div class="grid-2" style="gap:14px 24px">' +
-		'<div><div class="text-sub text-sm">节点名称</div><div class="fw-500 mt-4">' + escapeHtml(n.name) + '</div></div>' +
-		'<div><div class="text-sub text-sm">根类型</div><div class="fw-500 mt-4">' + escapeHtml(rootTypeName) + '</div></div>' +
-		'<div><div class="text-sub text-sm">创建人</div><div class="fw-500 mt-4">' + escapeHtml(n.created_by_name || '—') + '</div></div>' +
-		'<div><div class="text-sub text-sm">创建时间</div><div class="fw-500 mt-4">' + formatDate(n.created_at) + '</div></div>' +
-		'<div><div class="text-sub text-sm">最后更新</div><div class="fw-500 mt-4">' + formatDate(n.updated_at) + '</div></div>' +
-		'<div><div class="text-sub text-sm">上级节点</div><div class="fw-500 mt-4">' + escapeHtml(parentInfo) + '</div></div>' +
-		'<div><div class="text-sub text-sm">排序号</div><div class="fw-500 mt-4">' + (n.order_no || 0) + '</div></div>' +
-		'<div><div class="text-sub text-sm">深度</div><div class="fw-500 mt-4">第' + n.depth + '层</div></div>' +
-		'</div>' +
-		'</div>' +
-		(n.description ?
-			'<div class="card mt-16">' +
-			'<div class="card-title">描述</div>' +
-			'<div class="text-sm" style="line-height:1.6;white-space:pre-wrap">' + escapeHtml(n.description) + '</div>' +
-			'</div>' : '');
+	var tmpl = document.getElementById('tmpl-node-detail');
+	var clone = tmpl.content.cloneNode(true);
+
+	clone.querySelector('.nd-icon').textContent = icon;
+	clone.querySelector('.nd-name').textContent = n.name;
+	clone.querySelector('.nd-id').textContent = 'node-' + n.id;
+	clone.querySelector('.nd-path').textContent = parentPath;
+
+	// 操作按钮
+	var actionsEl = clone.querySelector('.nd-actions');
+	if (isAdminOrOps()) {
+		actionsEl.innerHTML =
+			'<button class="btn btn-sm" onclick="editNode(' + n.id + ')">\uD83D\uDCDD 编辑</button>' +
+			'<button class="btn btn-sm btn-danger" onclick="deleteNode(' + n.id + ')">\uD83D\uDDD1 删除节点</button>';
+	}
+
+	// 统计卡片
+	clone.querySelector('.nd-doc-card').onclick = function () { viewNodeDocs(n.id); };
+	clone.querySelector('.nd-doc-count').textContent = (n.document_count || 0).toLocaleString();
+	clone.querySelector('.nd-children-count').textContent = (n.children_count || 0).toLocaleString();
+	clone.querySelector('.nd-node-type-label').textContent = nodeTypeLabels[n.node_type] || n.node_type;
+
+	// 基础信息
+	clone.querySelector('.nd-info-name').textContent = n.name;
+	clone.querySelector('.nd-info-root-type').textContent = rootTypeName;
+	clone.querySelector('.nd-info-creator').textContent = n.created_by_name || '—';
+	clone.querySelector('.nd-info-created').textContent = formatDate(n.created_at);
+	clone.querySelector('.nd-info-updated').textContent = formatDate(n.updated_at);
+	clone.querySelector('.nd-info-parent').textContent = parentInfo;
+	clone.querySelector('.nd-info-order').textContent = n.order_no || 0;
+	clone.querySelector('.nd-info-depth').textContent = '第' + n.depth + '层';
+
+	// 描述
+	if (n.description) {
+		clone.querySelector('.nd-desc-card').classList.remove('hidden');
+		clone.querySelector('.nd-desc-text').textContent = n.description;
+	}
+
+	var detail = document.getElementById('nodeDetail');
+	detail.innerHTML = '';
+	detail.appendChild(clone);
 }
 
 
@@ -207,7 +209,7 @@ function openNodeModal() {
 	document.getElementById('nodeDesc').value = '';
 	document.getElementById('nodeOrder').value = '0';
 	document.getElementById('nodeModalTitle').textContent = '新增节点';
-	document.getElementById('parentRequired').style.display = 'none';
+	document.getElementById('parentRequired').classList.add('hidden');
 	document.getElementById('parentHint').textContent = '根节点无需上级节点；知识库分类从数据库动态获取';
 
 	// 复用已加载的 nodeTree 构建父节点列表
@@ -222,11 +224,11 @@ function openNodeModal() {
 		if (ntype === 'root') {
 			parentSel.disabled = true;
 			parentSel.value = '';
-			reqStar.style.display = 'none';
+			reqStar.classList.add('hidden');
 			hint.textContent = '根节点无需上级节点；知识库分类默认为"企业文档"';
 		} else {
 			parentSel.disabled = false;
-			reqStar.style.display = 'inline';
+			reqStar.classList.remove('hidden');
 			hint.textContent = '必须选择一个上级节点；知识库分类将从上级节点继承';
 		}
 	};
@@ -245,7 +247,7 @@ function editNode(id) {
 
 		// 编辑时不允许改节点类型和父节点
 		document.getElementById('nodeType').disabled = true;
-		document.getElementById('parentRequired').style.display = 'none';
+		document.getElementById('parentRequired').classList.add('hidden');
 
 		// 父节点改为只读文本展示
 		buildParentOptions(node.parent_id);
@@ -379,4 +381,635 @@ function deleteNode(id) {
 	}).catch(function (e) {
 		toast(e.message, 'error');
 	});
+}
+
+
+/* ================================================================
+ * 文档列表（展示 / 分页 / 筛选 / 搜索 / 预览 / 下载 / 分享 /
+ *        申请权限 / 访问管理 / 编辑可视范围 / 删除）
+ * ================================================================ */
+var DOC_API = '/api/v1/knowledge/documents';
+var docListPage = 1;
+var docListTotal = 0;
+var docListNodeFilter = null;   // 当前节点筛选（null=全部）
+var docListCurrentDocs = [];    // 当前页文档数据（用于权限判定）
+var docListSearchTimeout = null;  // 搜索防抖定时器
+
+// 预览分页状态
+var currentPreviewDocId = null;
+var currentPreviewPage = 1;
+var currentPreviewTotalPages = 1;
+var currentPreviewTotalChars = 0;
+
+/* ---- 搜索输入防抖 ---- */
+function onDocSearchInput() {
+	if (docListSearchTimeout) clearTimeout(docListSearchTimeout);
+	docListSearchTimeout = setTimeout(function () {
+		loadDocList(1);
+	}, 300);
+}
+
+/* ---- 展开/收起文档列表 ---- */
+function toggleDocList() {
+	var card = document.getElementById('docListCard');
+	var body = document.getElementById('docListBody');
+	var btn = document.getElementById('docListToggle');
+	
+	if (card.classList.contains('hidden')) {
+		// 展开
+		card.classList.remove('hidden');
+		body.classList.remove('hidden');
+		if (btn) btn.textContent = '收起';
+		loadDocList(1);
+	} else {
+		// 收起
+		card.classList.add('hidden');
+		if (btn) btn.textContent = '展开';
+	}
+}
+
+/* ---- 从节点详情页点击"查看本节点文档" ---- */
+function viewNodeDocs(nodeId) {
+	setDocNodeFilter(nodeId);
+	// 显示文档列表卡片和内容区
+	var card = document.getElementById('docListCard');
+	if (card) card.classList.remove('hidden');
+	var body = document.getElementById('docListBody');
+	if (body) body.classList.remove('hidden');
+	// 更新按钮状态
+	var btn = document.getElementById('docListToggle');
+	if (btn) btn.textContent = '收起';
+	// 加载文档列表
+	loadDocList(1);
+	// 滚动到文档列表
+	if (card) card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+/* ---- 设置节点筛选 ---- */
+function setDocNodeFilter(nodeId) {
+	docListNodeFilter = nodeId;
+}
+
+/* ---- 加载文档列表 ---- */
+function loadDocList(page) {
+	docListPage = page || 1;
+	var params = ['discover=1', 'page=' + docListPage, 'page_size=20'];
+
+	var search = (document.getElementById('docSearch').value || '').trim();
+	if (search) params.push('search=' + encodeURIComponent(search));
+
+	var statusFilter = document.getElementById('docStatusFilter').value;
+	if (statusFilter) params.push('status=' + encodeURIComponent(statusFilter));
+
+	var visFilter = document.getElementById('docVisFilter').value;
+	if (visFilter) params.push('visibility=' + encodeURIComponent(visFilter));
+
+	var typeFilter = document.getElementById('docTypeFilter').value;
+	if (typeFilter) params.push('file_type=' + encodeURIComponent(typeFilter));
+
+	if (docListNodeFilter) params.push('node=' + docListNodeFilter);
+
+	var tbody = document.getElementById('docListTbody');
+	tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text-sub);padding:24px">加载中...</td></tr>';
+	
+	// 确保文档列表内容区可见
+	var body = document.getElementById('docListBody');
+	if (body) body.classList.remove('hidden');
+
+	api.getJson(DOC_API + '/?' + params.join('&')).then(function (data) {
+		var docs = data.results || data || [];
+		docListCurrentDocs = docs;
+		docListTotal = data.count || docs.length || 0;
+		renderDocList(docs);
+		renderDocPagination();
+		// 更新计数
+		var countEl = document.getElementById('docListCount');
+		if (countEl) countEl.textContent = '（共 ' + docListTotal + ' 条）';
+	}).catch(function (e) {
+		tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--danger);padding:24px">加载失败：' + escapeHtml(e.message || '') + '</td></tr>';
+	});
+}
+
+/* ---- 渲染文档表格（使用 tmpl-doc-row 模板） ---- */
+function renderDocList(docs) {
+	var tbody = document.getElementById('docListTbody');
+	if (!docs || docs.length === 0) {
+		tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text-sub);padding:24px">暂无文档</td></tr>';
+		return;
+	}
+
+	tbody.innerHTML = '';
+	var tmpl = document.getElementById('tmpl-doc-row');
+
+	docs.forEach(function (d) {
+		var clone = tmpl.content.cloneNode(true);
+		clone.querySelector('.dr-file').innerHTML = fileTypeIcon(d.file_type) + ' ' + escapeHtml(d.file_name);
+		clone.querySelector('.dr-type').textContent = d.file_type || '-';
+		clone.querySelector('.dr-owner').textContent = d.owner_name || '-';
+		clone.querySelector('.dr-vis').innerHTML = visTagHtml(d.visibility);
+		clone.querySelector('.dr-status').innerHTML = statusTagHtml(d.status);
+		clone.querySelector('.dr-date').textContent = formatDate(d.created_at);
+		clone.querySelector('.dr-actions').innerHTML = renderDocActions(d);
+		tbody.appendChild(clone);
+	});
+}
+
+/* ---- 渲染操作按钮（按权限） ---- */
+function renderDocActions(d) {
+	var actions = [];
+	// 预览：can_read 才可预览；否则显示"申请权限"
+	if (d.can_read) {
+		actions.push('<button class="btn-link btn-sm" onclick="previewDoc(' + d.id + ')">预览</button>');
+	} else {
+		actions.push('<button class="btn-link btn-sm" onclick="openReqModal(' + d.id + ')" style="color:var(--warning)">申请权限</button>');
+	}
+	// 分享（下载就等于可以分享，所以分享在前）
+	if (d.can_share) {
+		actions.push('<button class="btn-link btn-sm" onclick="openShareModal(' + d.id + ')">分享</button>');
+	}
+	// 下载
+	if (d.can_download) {
+		actions.push('<button class="btn-link btn-sm" onclick="downloadDoc(' + d.id + ')">下载</button>');
+	}
+	// 所有者/管理员：访问管理 + 编辑可视范围 + 删除
+	if (d.is_owner || d.is_manager) {
+		actions.push('<button class="btn-link btn-sm" onclick="openAccessModal(' + d.id + ')">访问管理</button>');
+		actions.push('<button class="btn-link btn-sm" onclick="openVisModal(' + d.id + ')">设置</button>');
+		actions.push('<button class="btn-link btn-sm" style="color:var(--danger)" onclick="deleteDoc(' + d.id + ')">删除</button>');
+	}
+	return '<div class="table-actions">' + actions.join('') + '</div>';
+}
+
+/* ---- 分页（使用 tmpl-doc-pagination 模板） ---- */
+function renderDocPagination() {
+	var container = document.getElementById('docPagination');
+	if (!container) return;
+	var pageSize = 10;
+	var totalPages = Math.max(1, Math.ceil(docListTotal / pageSize));
+	var page = docListPage;
+
+	if (docListTotal === 0) { container.innerHTML = ''; return; }
+
+	var tmpl = document.getElementById('tmpl-doc-pagination');
+	var clone = tmpl.content.cloneNode(true);
+
+	clone.querySelector('.pg-total').textContent = docListTotal;
+
+	var prev = clone.querySelector('.pg-prev');
+	if (page > 1) {
+		prev.onclick = function () { loadDocList(page - 1); };
+	} else {
+		prev.disabled = true;
+	}
+
+	var numbersEl = clone.querySelector('.pg-numbers');
+	var numsHtml = '';
+	for (var i = 1; i <= totalPages; i++) {
+		if (totalPages <= 7 || i === 1 || i === totalPages || (i >= page - 2 && i <= page + 2)) {
+			numsHtml += i === page
+				? '<button class="page-btn active">' + i + '</button>'
+				: '<button class="page-btn" onclick="loadDocList(' + i + ')">' + i + '</button>';
+		} else if (i === page - 3 || i === page + 3) {
+			numsHtml += '<span>...</span>';
+		}
+	}
+	numbersEl.innerHTML = numsHtml;
+
+	var next = clone.querySelector('.pg-next');
+	if (page < totalPages) {
+		next.onclick = function () { loadDocList(page + 1); };
+	} else {
+		next.disabled = true;
+	}
+
+	container.innerHTML = '';
+	container.appendChild(clone);
+}
+
+/* ================================================================
+ * 预览（不可复制，支持分页） — 拉取 raw_content 渲染纯文本
+ * ================================================================ */
+function previewDoc(id) {
+	currentPreviewDocId = id;
+	currentPreviewPage = 1;
+	currentPreviewTotalPages = 1;
+	currentPreviewTotalChars = 0;
+	previewDocPage(id, 1);
+}
+
+function previewDocPage(id, page) {
+	var titleEl = document.getElementById('docPreviewTitle');
+	var contentEl = document.getElementById('docPreviewContent');
+	var footerEl = document.getElementById('docPreviewFooter');
+	var infoEl = document.getElementById('docPreviewInfo');
+	var pageEl = document.getElementById('docPreviewPage');
+	var prevBtn = document.getElementById('docPreviewPrev');
+	var nextBtn = document.getElementById('docPreviewNext');
+
+	titleEl.textContent = '文档预览';
+	contentEl.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-sub)">加载中...</div>';
+	footerEl.classList.add('hidden');
+	showModal('docPreviewModal');
+
+	// 先尝试获取原始内容（支持分页）
+	api.getJson('/api/v1/knowledge/documents/' + id + '/raw_content/?page=' + page).then(function (data) {
+		if (!data.content || !data.content.trim()) {
+			contentEl.innerHTML = '<div class="doc-preview-disabled"><div class="doc-preview-disabled-icon">📭</div>文档无内容</div>';
+			return;
+		}
+		
+		// 更新分页状态
+		currentPreviewPage = data.current_page || 1;
+		currentPreviewTotalPages = data.total_pages || 1;
+		currentPreviewTotalChars = data.total_chars || 0;
+		
+		titleEl.textContent = '文档预览：' + escapeHtml(data.file_name || '') + '（不可复制）';
+		
+		// 使用 <pre> 保留原始格式，禁止复制
+		contentEl.innerHTML = '<pre class="doc-preview-content" style="white-space:pre-wrap;word-break:break-word;font-family:inherit">' + escapeHtml(data.content) + '</pre>';
+		
+		// 显示分页栏（当有多个页面时）
+		if (currentPreviewTotalPages > 1) {
+			footerEl.classList.remove('hidden');
+			infoEl.textContent = '共 ' + currentPreviewTotalChars.toLocaleString() + ' 字符';
+			pageEl.textContent = '第 ' + currentPreviewPage + ' / ' + currentPreviewTotalPages + ' 页';
+			prevBtn.disabled = currentPreviewPage <= 1;
+			nextBtn.disabled = currentPreviewPage >= currentPreviewTotalPages;
+		} else {
+			footerEl.classList.add('hidden');
+		}
+	}).catch(function (e) {
+		// 原始内容获取失败时，回退到 chunks（向量化数据）
+		console.warn('raw_content failed, fallback to chunks:', e);
+		api.getJson('/api/v1/knowledge/documents/' + id + '/chunks/').then(function (data) {
+			var chunks = data.chunks || [];
+			if (chunks.length === 0) {
+				contentEl.innerHTML = '<div class="doc-preview-disabled"><div class="doc-preview-disabled-icon">📭</div>暂无可预览的内容</div>';
+				return;
+			}
+			titleEl.textContent = '文档预览（' + data.total + ' 个切片，不可复制）';
+			contentEl.innerHTML = chunks.map(function (c, i) {
+				return '<div class="doc-chunk">' +
+					'<div class="doc-chunk-idx">片段 ' + (i + 1) + (c.section_path ? ' · ' + escapeHtml(c.section_path) : '') + '</div>' +
+					'<div>' + escapeHtml(c.content || '') + '</div>' +
+					'</div>';
+			}).join('');
+		}).catch(function (e2) {
+			contentEl.innerHTML = '<div class="doc-preview-disabled"><div class="doc-preview-disabled-icon">🔒</div>无权限查看或加载失败：' + escapeHtml(e2.message || '') + '</div>';
+		});
+	});
+}
+
+/* ================================================================
+ * 下载
+ * ================================================================ */
+function downloadDoc(id) {
+	var token = localStorage.getItem('rag_access');
+	if (!token) { toast('请先登录', 'error'); return; }
+	// 使用 fetch 携带 token，失败时提示
+	fetch('/api/v1/knowledge/documents/' + id + '/download/', {
+		headers: { 'Authorization': 'Bearer ' + token }
+	}).then(function (res) {
+		if (!res.ok) return res.json().then(function (d) { throw new Error(d.detail || '下载失败'); });
+		// OSS 跳转（302）或文件流
+		if (res.headers.get('content-type') && res.headers.get('content-type').indexOf('json') >= 0) {
+			return res.json();
+		}
+		return res.blob();
+	}).then(function (blob) {
+		if (blob instanceof Blob) {
+			var a = document.createElement('a');
+			a.href = URL.createObjectURL(blob);
+			a.download = '';
+			document.body.appendChild(a);
+			a.click();
+			a.remove();
+		} else {
+			// 可能是 OSS 签名 URL 跳转
+			if (blob && blob.url) window.open(blob.url, '_blank');
+		}
+	}).catch(function (e) {
+		toast(e.message || '下载失败', 'error');
+	});
+}
+
+/* ================================================================
+ * 分享弹窗
+ * ================================================================ */
+function openShareModal(id) {
+	document.getElementById('docShareId').value = id;
+	document.getElementById('docShareUser').value = '';
+	document.getElementById('docShareType').value = 'read';
+	document.getElementById('docShareExpiry').value = '';
+	showModal('docShareModal');
+}
+
+function submitShare() {
+	var id = document.getElementById('docShareId').value;
+	var toUser = document.getElementById('docShareUser').value.trim();
+	var accessType = document.getElementById('docShareType').value;
+	var expiry = document.getElementById('docShareExpiry').value;
+
+	if (!toUser) { toast('请输入目标用户名', 'warning'); return; }
+
+	var body = { to_username: toUser, access_type: accessType };
+	if (expiry) body.expires_at = expiry;
+
+	api.postJson(DOC_API + '/' + id + '/share/', body).then(function (res) {
+		closeModal('docShareModal');
+		toast('已分享给 ' + escapeHtml(res.to_user || '') + '（' + escapeHtml(res.access_type || '') + '）', 'success');
+	}).catch(function (e) {
+		toast(e.message || '分享失败', 'error');
+	});
+}
+
+/* ================================================================
+ * 申请权限弹窗
+ * ================================================================ */
+function openReqModal(id) {
+	document.getElementById('docReqId').value = id;
+	document.getElementById('docReqType').value = 'read';
+	document.getElementById('docReqReason').value = '';
+	showModal('docReqModal');
+}
+
+function submitRequest() {
+	var id = document.getElementById('docReqId').value;
+	var accessType = document.getElementById('docReqType').value;
+	var reason = document.getElementById('docReqReason').value.trim();
+
+	api.postJson(DOC_API + '/' + id + '/request_access/', {
+		access_type: accessType, reason: reason
+	}).then(function () {
+		closeModal('docReqModal');
+		toast('申请已提交，等待审批', 'success');
+	}).catch(function (e) {
+		toast(e.message || '申请失败', 'error');
+	});
+}
+
+/* ================================================================
+ * 访问管理弹窗（已授权 + 待审批）— 使用模板
+ * ================================================================ */
+function openAccessModal(id) {
+	document.getElementById('docAccessId').value = id;
+	showModal('docAccessModal');
+	loadDocGrants(id);
+	loadDocRequests(id);
+}
+
+function loadDocGrants(id) {
+	var tbody = document.getElementById('docGrantsBody');
+	tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text-sub)">加载中...</td></tr>';
+
+	api.getJson(DOC_API + '/' + id + '/access_grants/').then(function (data) {
+		if (!data) {
+			tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text-sub)">暂无授权记录</td></tr>';
+			return;
+		}
+		
+		var actionMap = { read: '读取', download: '下载', share: '分享', edit: '编辑', export: '导出' };
+		var sourceMap = { direct: '直接', share: '分享', request: '申请' };
+		tbody.innerHTML = '';
+		
+		// 显示部门授权
+		if (data.dept_grants && data.dept_grants.length > 0) {
+			var deptTpl = document.getElementById('tmpl-auth-dept-row');
+			data.dept_grants.forEach(function (dept) {
+				var clone = deptTpl.content.cloneNode(true);
+				clone.querySelector('.at-dept-name').textContent = dept.name;
+				tbody.appendChild(clone);
+			});
+		}
+		
+		// 显示团队授权
+		if (data.team_grants && data.team_grants.length > 0) {
+			var teamTpl = document.getElementById('tmpl-auth-team-row');
+			data.team_grants.forEach(function (team) {
+				var clone = teamTpl.content.cloneNode(true);
+				clone.querySelector('.at-team-name').textContent = team.name;
+				tbody.appendChild(clone);
+			});
+		}
+		
+		// 显示直接授权的用户
+		if (data.direct_grants && data.direct_grants.length > 0) {
+			var directTpl = document.getElementById('tmpl-auth-direct-row');
+			data.direct_grants.forEach(function (g) {
+				var clone = directTpl.content.cloneNode(true);
+				clone.querySelector('.at-user-name').textContent = g.granted_to_name || '-';
+				clone.querySelector('.at-action').textContent = actionMap[g.action] || g.action;
+				clone.querySelector('.at-source').textContent = sourceMap[g.source] || g.source || '-';
+				clone.querySelector('.at-expires').textContent = g.expires_at ? formatDate(g.expires_at) : '永久';
+				clone.querySelector('.at-active-tag').innerHTML = g.is_active
+					? '<span class="tag tag-success">有效</span>'
+					: '<span class="tag tag-danger">已撤销</span>';
+				clone.querySelector('.at-revoke-btn').innerHTML = g.is_active
+					? '<button class="btn-link btn-sm" style="color:var(--danger)" onclick="revokeGrant(' + id + ',' + g.id + ')">撤销</button>'
+					: '-';
+				tbody.appendChild(clone);
+			});
+		}
+		
+		if (tbody.children.length === 0) {
+			tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text-sub)">暂无授权记录</td></tr>';
+		}
+	}).catch(function (e) {
+		tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--danger)">加载失败</td></tr>';
+	});
+}
+
+function loadDocRequests(id) {
+	var tbody = document.getElementById('docReqsBody');
+	tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--text-sub)">加载中...</td></tr>';
+
+	// 拉取待审批申请（仅该文档）
+	api.getJson(DOC_API + '/pending_access_requests/').then(function (reqs) {
+		reqs = (reqs || []).filter(function (r) { return r.document_id == id && r.status === 'pending'; });
+		if (reqs.length === 0) {
+			tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--text-sub)">暂无待审批申请</td></tr>';
+			return;
+		}
+		var typeMap = { read: '读取', download: '下载', share: '分享' };
+		tbody.innerHTML = '';
+		var tpl = document.getElementById('tmpl-approval-row');
+		reqs.forEach(function (r) {
+			var clone = tpl.content.cloneNode(true);
+			clone.querySelector('.ar-requester').textContent = r.requester_name || '-';
+			clone.querySelector('.ar-type').textContent = typeMap[r.access_type] || r.access_type;
+			clone.querySelector('.ar-reason').textContent = r.reason || '-';
+			clone.querySelector('.ar-date').textContent = formatDate(r.created_at);
+			clone.querySelector('.ar-approve').onclick = function () { approveReq(r.id); };
+			clone.querySelector('.ar-reject').onclick = function () { rejectReq(r.id); };
+			tbody.appendChild(clone);
+		});
+	}).catch(function (e) {
+		tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--danger)">加载失败</td></tr>';
+	});
+}
+
+function revokeGrant(docId, grantId) {
+	if (!confirm('确认撤销该用户的访问权限？')) return;
+	api.postJson(DOC_API + '/' + docId + '/revoke_grant/', { grant_id: grantId }).then(function () {
+		toast('已撤销', 'success');
+		loadDocGrants(docId);
+	}).catch(function (e) {
+		toast(e.message || '撤销失败', 'error');
+	});
+}
+
+function approveReq(reqId) {
+	var docId = document.getElementById('docAccessId').value;
+	api.postJson(DOC_API + '/approve_access_request/', { request_id: reqId }).then(function () {
+		toast('已批准', 'success');
+		loadDocGrants(docId);
+		loadDocRequests(docId);
+	}).catch(function (e) {
+		toast(e.message || '操作失败', 'error');
+	});
+}
+
+function rejectReq(reqId) {
+	var docId = document.getElementById('docAccessId').value;
+	if (!confirm('确认驳回该申请？')) return;
+	api.postJson(DOC_API + '/reject_access_request/', { request_id: reqId }).then(function () {
+		toast('已驳回', 'success');
+		loadDocRequests(docId);
+	}).catch(function (e) {
+		toast(e.message || '操作失败', 'error');
+	});
+}
+
+/* ================================================================
+ * 编辑可视范围 / 下载分享开关
+ * ================================================================ */
+function onDocVisChange() {
+	var vis = document.getElementById('docVisSelect').value;
+	var row = document.getElementById('docVisOrgRow');
+	row.classList.toggle('hidden', vis !== '2');
+}
+
+var visDeptList = [];
+var visTeamList = [];
+var editRole = 'employee';
+
+function loadDeptTeamOptions(cb) {
+	if (visDeptList.length > 0 && visTeamList.length > 0) {
+		if (cb) cb();
+		return;
+	}
+	// 调用新 API 获取用户可选的部门/团队
+	api.getJson('/api/v1/knowledge/documents/allowed_visibility/').then(function (res) {
+		editRole = res.role || 'employee';
+		visDeptList = res.departments || [];
+		visTeamList = res.teams || [];
+		if (cb) cb();
+	}).catch(function (e) {
+		console.error('Failed to load allowed visibility:', e);
+		visDeptList = [];
+		visTeamList = [];
+		if (cb) cb();
+	});
+}
+
+// multi-select组件实例
+var docVisMultiSelect = null;
+
+function openVisModal(id) {
+	var doc = docListCurrentDocs.find(function (d) { return d.id === id; });
+	if (!doc) { toast('文档信息缺失', 'error'); return; }
+	document.getElementById('docVisId').value = id;
+	document.getElementById('docVisSelect').value = String(doc.visibility);
+	document.getElementById('docAllowDownload').checked = !!doc.allow_download;
+	document.getElementById('docAllowShare').checked = !!doc.allow_share;
+
+	loadDeptTeamOptions(function () {
+		var depts = doc.visibility_depts || [];
+		var teams = doc.visibility_teams || [];
+		// 兼容旧数据
+		if (!depts.length && doc.visibility_dept_id) depts = [doc.visibility_dept_id];
+		if (!teams.length && doc.visibility_team_id) teams = [doc.visibility_team_id];
+		
+		// 创建multi-select实例
+		docVisMultiSelect = createDeptTeamMultiSelect({
+			prefix: 'docVis',
+			deptList: visDeptList,
+			teamList: visTeamList
+		});
+		
+		docVisMultiSelect.renderDeptList(depts);
+		docVisMultiSelect.renderTeamList(teams, depts);
+		onDocVisChange();
+	});
+	showModal('docVisModal');
+}
+
+function saveDocVis() {
+	var id = document.getElementById('docVisId').value;
+	var vis = parseInt(document.getElementById('docVisSelect').value);
+	var body = {
+		visibility: vis,
+		allow_download: document.getElementById('docAllowDownload').checked,
+		allow_share: document.getElementById('docAllowShare').checked,
+	};
+	// 根据可见范围设置部门/团队（多选）
+	if (vis === 2) {
+		var depts = [];
+		document.querySelectorAll('#docVisDeptPanel input:checked').forEach(function (cb) {
+			depts.push(parseInt(cb.value));
+		});
+		var teams = [];
+		document.querySelectorAll('#docVisTeamPanel input:checked').forEach(function (cb) {
+			teams.push(parseInt(cb.value));
+		});
+		if (!depts.length && !teams.length) {
+			toast('请至少选择一个部门或团队', 'warning');
+			return;
+		}
+		body.visibility_depts = depts;
+		body.visibility_teams = teams;
+	} else {
+		body.visibility_depts = [];
+		body.visibility_teams = [];
+	}
+	api.patchJson(DOC_API + '/' + id + '/', body).then(function () {
+		closeModal('docVisModal');
+		toast('设置已保存', 'success');
+		loadDocList(docListPage);
+	}).catch(function (e) {
+		toast(e.message || '保存失败', 'error');
+	});
+}
+
+/* ================================================================
+ * 删除文档
+ * ================================================================ */
+function deleteDoc(id) {
+	if (!confirm('确认删除此文档？删除后不可恢复。')) return;
+	api.deleteJson(DOC_API + '/' + id + '/').then(function () {
+		toast('文档已删除', 'success');
+		loadDocList(docListPage);
+	}).catch(function (e) {
+		toast(e.message || '删除失败', 'error');
+	});
+}
+
+/* ================================================================
+ * 辅助：标签渲染
+ * ================================================================ */
+function fileTypeIcon(t) {
+	var map = { pdf: '📕', docx: '📄', markdown: '📝', txt: '📃', code: '💻', config: '⚙️', other: '📄' };
+	return map[t] || '📄';
+}
+
+function visTagHtml(v) {
+	var map = { 1: '私人', 2: '部门/团队', 3: '公开' };
+	var cls = { 1: 'default', 2: 'info', 3: 'primary', 4: 'success' };
+	return '<span class="tag tag-' + (cls[v] || 'default') + '">' + escapeHtml(map[v] || v) + '</span>';
+}
+
+function statusTagHtml(s) {
+	var cls = { done: 'success', parsing: 'warning', failed: 'danger', pending: 'default', desensitizing: 'warning', chunking: 'warning', embedding: 'warning', embedding_failed: 'danger' };
+	var label = { done: '已完成', parsing: '解析中', failed: '失败', pending: '等待', desensitizing: '脱敏中', chunking: '切片中', embedding: '向量化中', embedding_failed: '向量化失败' };
+	return '<span class="tag tag-' + (cls[s] || 'default') + '">' + escapeHtml(label[s] || s) + '</span>';
 }

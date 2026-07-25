@@ -1,66 +1,203 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
+
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>智能聊天 · 知库 Agent</title>
-  <link rel="stylesheet" href="/static/css/common.css">
-  <link rel="stylesheet" href="/static/css/chat.css">
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>智能聊天 · 知库 Agent</title>
+	<link rel="stylesheet" href="/static/css/common.css">
+	<link rel="stylesheet" href="/static/css/chat.css">
 </head>
+
 <body>
-  <div id="topnav-container"></div>
+	<div id="topnav-container"></div>
 
-  <!-- 知识库范围下拉面板（固定定位，在导航栏下方） -->
-  <div class="scope-dropdown" id="scopeDropdown">
-    <div class="scope-hint">💡 选择对应的范围，可以更精准的查询</div>
-    <div class="scope-quick-actions">
-      <button class="btn btn-sm" onclick="selectAllScopes()">全选</button>
-      <button class="btn btn-sm" onclick="clearAllScopes()">清空</button>
-    </div>
-    <div class="scope-list" id="scopeList"></div>
-  </div>
+	<!-- 知识库范围下拉面板（固定定位，在导航栏下方） -->
+	<div class="scope-dropdown" id="scopeDropdown">
+		<div class="scope-hint">💡 选择对应的范围，可以更精准的查询</div>
+		<div class="scope-quick-actions">
+			<button class="btn btn-sm" onclick="selectAllScopes()">全选</button>
+			<button class="btn btn-sm" onclick="clearAllScopes()">清空</button>
+		</div>
+		<div class="scope-list" id="scopeList"></div>
+	</div>
 
-  <div class="layout">
-    <div id="sidebar-container"></div>
+	<div class="layout">
+		<div id="sidebar-container"></div>
 
-    <div class="chat-main">
-      <div class="chat-header">
-        <div class="chat-title-input" id="chatTitle" style="display:none"></div>
-        <div class="flex gap-8 items-center">
-          <span class="tag tag-info">💡 已启用 4 层记忆</span>
-          <button class="btn btn-sm" onclick="newSession()">+ 新建会话</button>
-        </div>
-      </div>
+		<div class="chat-main">
+			<div class="chat-header">
+				<div class="chat-title-input hidden" id="chatTitle"></div>
+				<div class="flex gap-8 items-center">
+					<span class="tag tag-info">💡 已启用 4 层记忆</span>
+					<button class="btn btn-sm" onclick="newSession()">+ 新建会话</button>
+				</div>
+			</div>
 
-      <div class="chat-messages" id="chatMessages"></div>
+			<div class="chat-messages" id="chatMessages"></div>
 
-      <div class="chat-input-area">
-        <div class="chat-input-wrap">
-          <textarea class="chat-input" id="chatInput" placeholder="请输入你的问题，Shift + Enter 换行，Enter 发送…" onkeydown="handleChatKey(event)"></textarea>
-          <div class="chat-input-actions">
-            <button class="chat-send-btn" onclick="sendChat()">发送 ↵</button>
-          </div>
-        </div>
-      </div>
-    </div>
+			<div class="chat-input-area">
+				<div class="chat-input-wrap">
+					<textarea class="chat-input" id="chatInput" placeholder="请输入你的问题，Shift + Enter 换行，Enter 发送…"
+						onkeydown="handleChatKey(event)"></textarea>
+					<div class="chat-input-actions">
+						<button class="chat-send-btn" onclick="sendChat()">发送 ↵</button>
+					</div>
+				</div>
+			</div>
+		</div>
 
-    <!-- 历史会话右栏 -->
-    <aside class="chat-sessions">
-      <div class="panel-header">
-        <div class="panel-title">💬 历史会话</div>
-        <div class="session-search-wrap">
-          <input class="session-search-input" placeholder="搜索会话" id="sessionSearchInput" onkeydown="if(event.key==='Enter')searchSessions()" oninput="debounceSearch()">
-          <button class="session-search-btn" onclick="searchSessions()" title="搜索">🔍</button>
-        </div>
-      </div>
-      <div class="panel-body" id="sessionList"></div>
-    </aside>
-  </div>
+		<!-- 历史会话右栏 -->
+		<aside class="chat-sessions">
+			<div class="panel-header">
+				<div class="panel-title">💬 历史会话</div>
+				<div class="session-search-wrap">
+					<input class="session-search-input" placeholder="搜索会话" id="sessionSearchInput"
+						onkeydown="if(event.key==='Enter')searchSessions()" oninput="debounceSearch()">
+					<button class="session-search-btn" onclick="searchSessions()" title="搜索">🔍</button>
+				</div>
+			</div>
+			<div class="panel-body" id="sessionList"></div>
+		</aside>
+	</div>
 
-  <div id="mask" class="mask"></div>
-  <div id="toast-wrap" class="toast-wrap"></div>
+	<div id="mask" class="mask"></div>
+	<div id="toast-wrap" class="toast-wrap"></div>
 
-  <script src="/static/js/common.js"></script>
-  <script src="/static/js/chat.js"></script>
+	<script src="/static/js/common.js"></script>
+	<script src="/static/js/chat.js"></script>
+
+	<!-- ===== Template Fragments ===== -->
+	<!-- 1. 空状态页 -->
+	<template id="tmpl-chat-empty">
+		<div class="msg-wrap">
+			<div class="empty-state">
+				<div style="text-align:center;padding:60px 20px">
+					<div style="font-size:48px;margin-bottom:16px">💬</div>
+					<div style="font-size:18px;font-weight:600;margin-bottom:8px">欢迎使用智能聊天</div>
+					<div style="color:var(--text-sub);font-size:14px">选择知识库范围，开始提问吧</div>
+				</div>
+			</div>
+		</div>
+	</template>
+
+	<!-- 2. 知识库范围选择器节点 -->
+	<template id="tmpl-scope-node">
+		<label class="scope-item">
+			<input type="checkbox">
+			<span class="scope-label"></span>
+		</label>
+	</template>
+
+	<!-- 3. AI 思考中占位 -->
+	<template id="tmpl-ai-thinking">
+		<div class="msg-ai-avatar">AI</div>
+		<div class="msg-ai-content">
+			<div class="flex items-center gap-8 text-sub">
+				<div class="spinner"></div>正在检索知识库并思考中...
+			</div>
+		</div>
+	</template>
+
+	<!-- 4. 溯源来源卡片容器 -->
+	<template id="tmpl-source-block">
+		<div class="source-block">
+			<div class="source-header"></div>
+			<div class="source-list"></div>
+		</div>
+	</template>
+
+	<!-- 4b. 单条溯源来源卡片 -->
+	<template id="tmpl-source-card">
+		<div class="source-card">
+			<div class="source-card-title"></div>
+		</div>
+	</template>
+
+	<!-- 5. AI 回答完整内容区 -->
+	<template id="tmpl-ai-answer">
+		<div class="ai-answer-text"></div>
+		<div class="ai-source-area"></div>
+		<div class="feedback-bar">
+			<button class="feedback-btn feedback-good">👍 满意</button>
+			<button class="feedback-btn feedback-bad">👎 不满意</button>
+			<button class="feedback-btn feedback-detail-btn">💬 详细反馈</button>
+			<span style="flex:1"></span>
+			<span class="feedback-latency" style="font-size:11px;color:var(--text-sub)"></span>
+		</div>
+		<div class="feedback-detail"></div>
+	</template>
+
+	<!-- 6. 用户消息气泡 -->
+	<template id="tmpl-user-msg">
+		<div class="msg msg-user">
+			<div class="msg-user-content">
+				<div class="msg-user-bubble"></div>
+			</div>
+			<div class="msg-user-side">
+				<div class="msg-user-avatar"></div>
+				<div class="msg-time"></div>
+			</div>
+		</div>
+	</template>
+
+	<!-- 8. AI 消息完整元素 -->
+	<template id="tmpl-ai-msg">
+		<div class="msg msg-ai">
+			<div class="msg-ai-avatar">AI</div>
+			<div class="msg-ai-content">
+				<div class="ai-answer-text"></div>
+				<div class="ai-source-area"></div>
+				<div class="feedback-bar">
+					<button class="feedback-btn feedback-good">👍 满意</button>
+					<button class="feedback-btn feedback-bad">👎 不满意</button>
+					<button class="feedback-btn feedback-detail-btn">💬 详细反馈</button>
+					<span style="flex:1"></span>
+					<span class="feedback-latency" style="font-size:11px;color:var(--text-sub)"></span>
+				</div>
+				<div class="feedback-detail"></div>
+			</div>
+		</div>
+	</template>
+
+	<!-- 9. 详细反馈表单 -->
+	<template id="tmpl-feedback-form">
+		<textarea placeholder="请描述具体的问题或建议..."></textarea>
+		<div style="text-align:right;margin-top:6px">
+			<button class="btn btn-sm feedback-cancel-btn">取消</button>
+			<button class="btn btn-sm btn-primary feedback-submit-btn">提交反馈</button>
+		</div>
+	</template>
+
+	<!-- 10. 会话分组 -->
+	<template id="tmpl-session-group">
+		<div class="session-group-title"></div>
+		<div class="session-items-wrap"></div>
+	</template>
+
+	<!-- 10b. 单条会话项 -->
+	<template id="tmpl-session-item">
+		<div class="session-item">
+			<div class="session-title" title="点击编辑标题"></div>
+			<div class="session-preview"></div>
+			<div class="session-time"></div>
+			<div class="session-actions">
+				<button class="session-icon-btn btn-edit" title="编辑标题">✏️</button>
+				<button class="session-icon-btn btn-del" title="删除会话">✕</button>
+			</div>
+		</div>
+	</template>
+
+	<!-- 11. 消息列表包裹 -->
+	<template id="tmpl-message-item">
+		<div class="msg-wrap"></div>
+	</template>
+
+	<!-- 12. 错误消息 -->
+	<template id="tmpl-error-message">
+		<div class="error-text" style="color:var(--danger)"></div>
+		<div class="error-hint" style="font-size:12px;color:var(--text-sub);margin-top:8px;margin-bottom:12px"></div>
+	</template>
 </body>
+
 </html>

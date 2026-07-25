@@ -36,15 +36,13 @@ def vector_search(query_vector: List[float],
     """向量检索
     返回：[{
         'chunk_id','document_id','node_id','content','score',
-        'visibility','root_type','node_path','doc_title'(可空)
+        'visible_scope','root_type','node_path','doc_title'(可空)
     }] 按 score 降序（1 - 距离）"""
     t0 = time.time()
     ef = ef_search or settings.HNSW_EF_SEARCH
 
-    # ⭐ 权限过滤走 Django ORM 的 Q，避免手写 SQL
     q = build_permission_q(user, root_types=root_types, node_path_prefix=node_path_prefix, node_ids=node_ids)
 
-    # 走一次 connection 保证 SET LOCAL 生效
     with connection.cursor() as cur:
         _apply_ef_search(cur, ef)
 
@@ -53,13 +51,13 @@ def vector_search(query_vector: List[float],
         .filter(q)
         .annotate(distance=CosineDistance('embedding', query_vector))
         .order_by('distance')
-        .values('id', 'chunk_id', 'document_id', 'node_id', 'visibility',
+        .values('id', 'chunk_id', 'document_id', 'node_id', 'visible_scope',
                 'root_type', 'node_path', 'content_preview', 'chunk_type', 'distance')[:top_k]
     )
     results = []
     for row in qs:
         distance = float(row['distance'] or 0.0)
-        score = max(0.0, 1.0 - distance)  # cosine: distance=1-cos_sim
+        score = max(0.0, 1.0 - distance)
         results.append({
             'vector_id': row['id'],
             'chunk_id': row['chunk_id'],
@@ -67,7 +65,7 @@ def vector_search(query_vector: List[float],
             'node_id': row['node_id'],
             'content': row['content_preview'],
             'chunk_type': row['chunk_type'],
-            'visibility': row['visibility'],
+            'visible_scope': row['visible_scope'],
             'root_type': row['root_type'],
             'node_path': row['node_path'],
             'score': score,
@@ -82,19 +80,17 @@ def upsert_vector(chunk, embedding: List[float]) -> DocumentVector:
     从 chunk 反查冗余权限字段"""
     doc = chunk.document
     from apps.users.models import UserTeam
-    owner_team_id = doc.owner_team_id
-    if owner_team_id is None:
+    team_node_id = doc.team_node_id or doc.owner_team_id
+    if team_node_id is None:
         team = UserTeam.objects.filter(user_id=doc.owner_id).first()
-        owner_team_id = team.team_id if team else None
+        team_node_id = team.team_id if team else None
 
-    # 获取上传者部门 id
-    owner_department_id = None
-    if doc.owner_id:
-        from apps.users.models import SysUser
-        owner = SysUser.objects.filter(id=doc.owner_id).only('department_id').first()
-        owner_department_id = owner.department_id if owner else None
+    dept_node_id = doc.dept_node_id
+    if dept_node_id is None and doc.owner_id:
+        from apps.users.models import User
+        owner = User.objects.filter(id=doc.owner_id).only('department_id').first()
+        dept_node_id = owner.department_id if owner else None
 
-    # jieba 分词提取关键词
     keywords = _extract_keywords(chunk.content)
 
     vec, created = DocumentVector.objects.update_or_create(
@@ -102,10 +98,12 @@ def upsert_vector(chunk, embedding: List[float]) -> DocumentVector:
         defaults={
             'document_id': doc.id,
             'embedding': embedding,
-            'visibility': doc.visibility,
+            'visible_scope': doc.visible_scope,
+            'has_cross_team': doc.has_cross_team,
+            'has_allow_user': doc.has_allow_user,
             'owner_id': doc.owner_id,
-            'owner_team_id': owner_team_id,
-            'owner_department_id': owner_department_id,
+            'team_node_id': team_node_id,
+            'dept_node_id': dept_node_id,
             'root_type': doc.root_type,
             'node_id': doc.node_id,
             'node_path': getattr(doc.node, 'path', '/') if doc.node else '/',

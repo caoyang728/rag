@@ -16,7 +16,7 @@ class Session(models.Model):
     """D1 session - 会话主表"""
 
     id = models.BigAutoField(primary_key=True)
-    user = models.ForeignKey('users.SysUser', on_delete=models.CASCADE,
+    user = models.ForeignKey('users.User', on_delete=models.CASCADE,
                              db_column='user_id', related_name='sessions')
     title = models.CharField(max_length=256, default='新会话')
     root_type = models.CharField(max_length=32, default='company_doc',
@@ -62,7 +62,7 @@ class UserMemory(models.Model):
     存储用户偏好、常用查询模式、专业领域"""
 
     id = models.BigAutoField(primary_key=True)
-    user = models.OneToOneField('users.SysUser', on_delete=models.CASCADE,
+    user = models.OneToOneField('users.User', on_delete=models.CASCADE,
                                  db_column='user_id', related_name='memory')
     preferences = models.JSONField(default=dict, blank=True,
                                     help_text='偏好：{tone:"专业", length:"简洁", ...}')

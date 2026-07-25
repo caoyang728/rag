@@ -28,8 +28,9 @@ async function setAuditTab(tab) {
 	if (body) {
 		body.innerHTML = '<div style="text-align:center;padding:40px"><div class="spinner"></div> 加载中...</div>';
 		try {
-			const html = await renderAuditTab(tab);
-			body.innerHTML = html;
+			const fragment = await renderAuditTab(tab);
+			body.innerHTML = '';
+			body.appendChild(fragment);
 		} catch (e) {
 			console.error('render audit tab failed:', e);
 			body.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-sub)">加载失败，请刷新重试</div>';
@@ -79,41 +80,51 @@ async function renderAuditTab(tab) {
 			const logs = data.rows || [];
 			_auditDetailCache = logs;
 
-			return `
-        <div class="flex gap-8 mb-16" style="flex-wrap:wrap;align-items:center;padding:12px;background:var(--primary-light);border-radius:var(--radius);border:1px solid var(--border)">
-          <input class="input" style="width:180px" placeholder="🔍 用户名" value="${escapeHtml(auditFilter.username || '')}" onchange="auditFilter.username = this.value">
-          <select class="select" style="width:150px" onchange="auditFilter.action = this.value">
-            <option value="">全部操作类型</option><option value="login" ${auditFilter.action === 'login' ? 'selected' : ''}>登录</option><option value="upload_document" ${auditFilter.action === 'upload_document' ? 'selected' : ''}>上传</option><option value="delete_document" ${auditFilter.action === 'delete_document' ? 'selected' : ''}>删除</option><option value="update_user" ${auditFilter.action === 'update_user' ? 'selected' : ''}>用户变更</option><option value="toggle_user_status" ${auditFilter.action === 'toggle_user_status' ? 'selected' : ''}>启禁用</option><option value="export" ${auditFilter.action === 'export' ? 'selected' : ''}>导出</option><option value="create_node" ${auditFilter.action === 'create_node' ? 'selected' : ''}>知识库</option><option value="chat_ask" ${auditFilter.action === 'chat_ask' ? 'selected' : ''}>问答</option>
-          </select>
-          <input class="input" style="width:200px" placeholder="🌐 IP 地址" value="${escapeHtml(auditFilter.ip || '')}" onchange="auditFilter.ip = this.value">
-          <input class="input" type="date" style="width:150px" value="${auditFilter.startDate || ''}" onchange="auditFilter.startDate = this.value">
-          <span style="align-self:center">至</span>
-          <input class="input" type="date" style="width:150px" value="${auditFilter.endDate || ''}" onchange="auditFilter.endDate = this.value">
-          <button class="btn btn-primary btn-sm" onclick="loadAuditLogs()" style="width:72px">查询</button>
-          <button class="btn btn-sm" onclick="resetAuditFilter()" style="width:72px">重置</button>
-        </div>
-        <table class="table" style="border:1px solid var(--border);border-radius:var(--radius)">
-          <thead>
-            <tr><th>时间</th><th>用户</th><th>操作类型</th><th>资源</th><th>IP 地址</th><th>结果</th><th>详情</th></tr>
-          </thead>
-          <tbody>
-            ${logs.length === 0 ? '<tr><td colspan="7" style="text-align:center;padding:30px;color:var(--text-sub)">暂无审计日志</td></tr>' : logs.map((l, i) => `
-              <tr>
-                <td class="text-sub">${formatDate(l.created_at)}</td>
-                <td class="fw-500">${escapeHtml(l.actor_username || '-')}</td>
-                <td>${opTag(l.action)}</td>
-                <td>${formatResource(l.target_type, l.target_id)}</td>
-                <td><code style="background:var(--hover);padding:1px 5px;border-radius:3px;font-size:12px">${escapeHtml(l.ip_address || '-')}</code></td>
-                <td>${resultTag(l.result)}</td>
-                <td><button class="btn-link btn-sm" onclick="showAuditDetail(${i})">展开 ›</button></td>
-              </tr>
-            `).join('')}
-          </tbody>
-        </table>
-        <div class="pagination">${buildPagination(data, 'loadAuditPage')}</div>`;
+			const tmpl = document.getElementById('tmpl-audit-tab');
+			const frag = tmpl.content.cloneNode(true);
+
+			// Set filter values
+			frag.querySelector('.audit-filter-username').value = auditFilter.username || '';
+			frag.querySelector('.audit-filter-username').onchange = function() { auditFilter.username = this.value; };
+			frag.querySelector('.audit-filter-action').value = auditFilter.action || '';
+			frag.querySelector('.audit-filter-action').onchange = function() { auditFilter.action = this.value; };
+			frag.querySelector('.audit-filter-ip').value = auditFilter.ip || '';
+			frag.querySelector('.audit-filter-ip').onchange = function() { auditFilter.ip = this.value; };
+			frag.querySelector('.audit-filter-start').value = auditFilter.startDate || '';
+			frag.querySelector('.audit-filter-start').onchange = function() { auditFilter.startDate = this.value; };
+			frag.querySelector('.audit-filter-end').value = auditFilter.endDate || '';
+			frag.querySelector('.audit-filter-end').onchange = function() { auditFilter.endDate = this.value; };
+			frag.querySelector('.audit-btn-query').onclick = loadAuditLogs;
+			frag.querySelector('.audit-btn-reset').onclick = resetAuditFilter;
+
+			// Generate table rows
+			const tbody = frag.querySelector('.audit-tbody');
+			if (logs.length === 0) {
+				tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:30px;color:var(--text-sub)">暂无审计日志</td></tr>';
+			} else {
+				tbody.innerHTML = logs.map((l, i) => `
+					<tr>
+						<td class="text-sub">${formatDate(l.created_at)}</td>
+						<td class="fw-500">${escapeHtml(l.actor_username || '-')}</td>
+						<td>${opTag(l.action)}</td>
+						<td>${formatResource(l.target_type, l.target_id)}</td>
+						<td><code style="background:var(--hover);padding:1px 5px;border-radius:3px;font-size:12px">${escapeHtml(l.ip_address || '-')}</code></td>
+						<td>${resultTag(l.result)}</td>
+						<td><button class="btn-link btn-sm" onclick="showAuditDetail(${i})">展开 ›</button></td>
+					</tr>
+				`).join('');
+			}
+
+			// Set pagination
+			frag.querySelector('.audit-pagination').innerHTML = buildPagination(data, 'loadAuditPage');
+
+			return frag;
 		} catch (e) {
 			console.error('load audit logs failed:', e);
-			return '<div style="padding:20px;text-align:center;color:var(--text-sub)">加载失败</div>';
+			const div = document.createElement('div');
+			div.style.cssText = 'padding:20px;text-align:center;color:var(--text-sub)';
+			div.textContent = '加载失败';
+			return div;
 		}
 	}
 
@@ -123,28 +134,35 @@ async function renderAuditTab(tab) {
 			const items = data.rows || [];
 			_whitelistCache = items;
 
-			return `
-        <div class="flex justify-between mb-16">
-          <div class="text-sub text-sm">白名单外 IP 将直接返回 403，共 ${items.length} 条规则</div>
-          <button class="btn btn-primary btn-sm" onclick="showAddWhitelist()">＋ 新增白名单</button>
-        </div>
-        <table class="table" style="border:1px solid var(--border);border-radius:var(--radius)">
-          <thead><tr><th>IP / CIDR</th><th>说明</th><th>添加人</th><th>添加时间</th><th style="width:140px">操作</th></tr></thead>
-          <tbody>
-            ${items.length === 0 ? '<tr><td colspan="5" style="text-align:center;padding:20px;color:var(--text-sub)">暂无白名单</td></tr>' : items.map((x, i) => `
-              <tr>
-                <td><code style="background:var(--hover);padding:2px 6px;border-radius:3px">${escapeHtml(x.ip_or_cidr)}</code></td>
-                <td>${escapeHtml(x.description || '-')}</td>
-                <td>${escapeHtml(x.creator || '-')}</td>
-                <td class="text-sub">${formatDate(x.created_at)}</td>
-                <td><div class="table-actions"><button class="btn-link btn-sm" onclick="editWhitelist(${i})">编辑</button><button class="btn-link btn-sm" style="color:var(--danger)" onclick="deleteWhitelist(${x.id})">删除</button></div></td>
-              </tr>
-            `).join('')}
-          </tbody>
-        </table>`;
+			const tmpl = document.getElementById('tmpl-whitelist-tab');
+			const frag = tmpl.content.cloneNode(true);
+
+			// Set info count
+			frag.querySelector('.whitelist-info').textContent = '白名单外 IP 将直接返回 403，共 ' + items.length + ' 条规则';
+
+			// Generate table rows
+			const tbody = frag.querySelector('.whitelist-tbody');
+			if (items.length === 0) {
+				tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:20px;color:var(--text-sub)">暂无白名单</td></tr>';
+			} else {
+				tbody.innerHTML = items.map((x, i) => `
+					<tr>
+						<td><code style="background:var(--hover);padding:2px 6px;border-radius:3px">${escapeHtml(x.ip_or_cidr)}</code></td>
+						<td>${escapeHtml(x.description || '-')}</td>
+						<td>${escapeHtml(x.creator || '-')}</td>
+						<td class="text-sub">${formatDate(x.created_at)}</td>
+						<td><div class="table-actions"><button class="btn-link btn-sm" onclick="editWhitelist(${i})">编辑</button><button class="btn-link btn-sm" style="color:var(--danger)" onclick="deleteWhitelist(${x.id})">删除</button></div></td>
+					</tr>
+				`).join('');
+			}
+
+			return frag;
 		} catch (e) {
 			console.error('load whitelist failed:', e);
-			return '<div style="padding:20px;text-align:center;color:var(--text-sub)">加载失败</div>';
+			const div = document.createElement('div');
+			div.style.cssText = 'padding:20px;text-align:center;color:var(--text-sub)';
+			div.textContent = '加载失败';
+			return div;
 		}
 	}
 
@@ -153,29 +171,33 @@ async function renderAuditTab(tab) {
 			const data = await api.getJson('/api/v1/security/ip-blacklist/');
 			const items = data.rows || [];
 
-			return `
-        <div class="flex justify-between mb-16">
-          <div class="text-sub text-sm">黑名单 IP 将被永久拒绝访问，登录失败 5 次自动封禁 15 分钟</div>
-          <button class="btn btn-primary btn-sm" onclick="showAddBlacklist()">＋ 手动封禁</button>
-        </div>
-        <table class="table" style="border:1px solid var(--border);border-radius:var(--radius)">
-          <thead><tr><th>IP 地址</th><th>封禁原因</th><th>操作人</th><th>封禁时间</th><th>解封时间</th><th style="width:120px">操作</th></tr></thead>
-          <tbody>
-            ${items.length === 0 ? '<tr><td colspan="6" style="text-align:center;padding:20px;color:var(--text-sub)">暂无黑名单</td></tr>' : items.map(x => `
-              <tr>
-                <td><code style="background:var(--hover);padding:2px 6px;border-radius:3px">${escapeHtml(x.ip)}</code></td>
-                <td>${escapeHtml(x.reason === 'login_fail' ? '登录连续失败' : (x.reason === 'manual' ? '人工封禁' : escapeHtml(x.reason || '-')))}</td>
-                <td>${escapeHtml(x.detail || '系统自动')}</td>
-                <td class="text-sub">${formatDate(x.created_at)}</td>
-                <td class="text-sub">${x.expires_at ? formatDate(x.expires_at) : '<span class="tag tag-danger">永久</span>'}</td>
-                <td><button class="btn-link btn-sm" onclick="unblockIp(${x.id})">解封</button></td>
-              </tr>
-            `).join('')}
-          </tbody>
-        </table>`;
+			const tmpl = document.getElementById('tmpl-blacklist-tab');
+			const frag = tmpl.content.cloneNode(true);
+
+			// Generate table rows
+			const tbody = frag.querySelector('.blacklist-tbody');
+			if (items.length === 0) {
+				tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:20px;color:var(--text-sub)">暂无黑名单</td></tr>';
+			} else {
+				tbody.innerHTML = items.map(x => `
+					<tr>
+						<td><code style="background:var(--hover);padding:2px 6px;border-radius:3px">${escapeHtml(x.ip)}</code></td>
+						<td>${escapeHtml(x.reason === 'login_fail' ? '登录连续失败' : (x.reason === 'manual' ? '人工封禁' : escapeHtml(x.reason || '-')))}</td>
+						<td>${escapeHtml(x.detail || '系统自动')}</td>
+						<td class="text-sub">${formatDate(x.created_at)}</td>
+						<td class="text-sub">${x.expires_at ? formatDate(x.expires_at) : '<span class="tag tag-danger">永久</span>'}</td>
+						<td><button class="btn-link btn-sm" onclick="unblockIp(${x.id})">解封</button></td>
+					</tr>
+				`).join('');
+			}
+
+			return frag;
 		} catch (e) {
 			console.error('load blacklist failed:', e);
-			return '<div style="padding:20px;text-align:center;color:var(--text-sub)">加载失败</div>';
+			const div = document.createElement('div');
+			div.style.cssText = 'padding:20px;text-align:center;color:var(--text-sub)';
+			div.textContent = '加载失败';
+			return div;
 		}
 	}
 
@@ -187,37 +209,42 @@ async function renderAuditTab(tab) {
 			const data = await api.getJson(url);
 			const items = data.rows || [];
 
-			return `
-        <div class="flex justify-between mb-16">
-          <div class="text-sub text-sm">近 24 小时登录尝试记录，异常尝试将自动加入黑名单</div>
-          <div class="flex gap-8">
-            <select class="select" style="width:140px" onchange="filterLoginAttempts(this.value)">
-              <option value="" ${!window._loginResultFilter ? 'selected' : ''}>全部结果</option><option value="success" ${window._loginResultFilter === 'success' ? 'selected' : ''}>成功</option><option value="wrong_password" ${window._loginResultFilter === 'wrong_password' ? 'selected' : ''}>失败</option>
-            </select>
-            <button class="btn btn-sm" onclick="loadLoginAttempts()">刷新</button>
-          </div>
-        </div>
-        <table class="table" style="border:1px solid var(--border);border-radius:var(--radius)">
-          <thead><tr><th>时间</th><th>用户</th><th>IP 地址</th><th>User-Agent</th><th>结果</th><th>失败原因</th></tr></thead>
-          <tbody>
-            ${items.length === 0 ? '<tr><td colspan="6" style="text-align:center;padding:20px;color:var(--text-sub)">暂无登录记录</td></tr>' : items.map(x => `
-              <tr>
-                <td class="text-sub">${formatDate(x.created_at)}</td>
-                <td class="fw-500">${escapeHtml(x.username || '-')}</td>
-                <td><code style="background:var(--hover);padding:2px 6px;border-radius:3px">${escapeHtml(x.ip)}</code></td>
-                <td class="text-sub text-sm" style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(x.user_agent || '-')}</td>
-                <td>${x.result === 'success' ? '<span class="tag tag-success">✓ 成功</span>' : '<span class="tag tag-danger">✕ 失败</span>'}</td>
-                <td class="text-sub">${escapeHtml(x.result === 'wrong_password' ? '密码错误' : (x.result === 'user_not_found' ? '用户不存在' : (x.result === 'locked' ? '账户锁定' : '-')))}</td>
-              </tr>
-            `).join('')}
-          </tbody>
-        </table>`;
+			const tmpl = document.getElementById('tmpl-login-tab');
+			const frag = tmpl.content.cloneNode(true);
+
+			// Set filter select value
+			frag.querySelector('.login-filter-result').value = window._loginResultFilter || '';
+			frag.querySelector('.login-filter-result').onchange = function() { filterLoginAttempts(this.value); };
+
+			// Generate table rows
+			const tbody = frag.querySelector('.login-tbody');
+			if (items.length === 0) {
+				tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:20px;color:var(--text-sub)">暂无登录记录</td></tr>';
+			} else {
+				tbody.innerHTML = items.map(x => `
+					<tr>
+						<td class="text-sub">${formatDate(x.created_at)}</td>
+						<td class="fw-500">${escapeHtml(x.username || '-')}</td>
+						<td><code style="background:var(--hover);padding:2px 6px;border-radius:3px">${escapeHtml(x.ip)}</code></td>
+						<td class="text-sub text-sm" style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(x.user_agent || '-')}</td>
+						<td>${x.result === 'success' ? '<span class="tag tag-success">✓ 成功</span>' : '<span class="tag tag-danger">✕ 失败</span>'}</td>
+						<td class="text-sub">${escapeHtml(x.result === 'wrong_password' ? '密码错误' : (x.result === 'user_not_found' ? '用户不存在' : (x.result === 'locked' ? '账户锁定' : '-')))}</td>
+					</tr>
+				`).join('');
+			}
+
+			return frag;
 		} catch (e) {
 			console.error('load login attempts failed:', e);
-			return '<div style="padding:20px;text-align:center;color:var(--text-sub)">加载失败</div>';
+			const div = document.createElement('div');
+			div.style.cssText = 'padding:20px;text-align:center;color:var(--text-sub)';
+			div.textContent = '加载失败';
+			return div;
 		}
 	}
-	return '';
+
+	const div = document.createElement('div');
+	return div;
 }
 
 const _OP_TAG_MAP = { 'login': 'info', 'upload_document': 'primary', 'delete_document': 'danger', 'update_user': 'warning', 'toggle_user_status': 'warning', 'export': 'success', 'create_node': 'default', 'chat_ask': 'default', 'manage_whitelist': 'default', 'manage_blacklist': 'danger', 'logout': 'info', 'reset_password': 'warning', 'feedback': 'default', 'admin_users': 'warning', 'update_node': 'default', 'token_refresh': 'info' };
@@ -236,19 +263,22 @@ function showAuditDetail(idx) {
 	const l = _auditDetailCache[idx];
 	if (!l) return;
 	$('#modal-audit-title').textContent = '审计详情 · ' + (l.action || '审计记录');
-	$('#modal-audit-body').innerHTML = `
-    <div class="grid-2" style="gap:8px 20px;font-size:13px">
-      <div class="text-sub">时间</div><div>${formatDate(l.created_at)}</div>
-      <div class="text-sub">用户</div><div>${escapeHtml(l.actor_username || '-')}</div>
-      <div class="text-sub">操作</div><div>${escapeHtml(l.action || '-')}</div>
-      <div class="text-sub">资源</div><div>${formatResource(l.target_type, l.target_id)}</div>
-      <div class="text-sub">IP 地址</div><div><code>${escapeHtml(l.ip_address || '-')}</code></div>
-      <div class="text-sub">结果</div><div>${escapeHtml(l.result || '-')}</div>
-    </div>
-    <div class="mt-16">
-      <div class="text-sub text-sm mb-8">上下文 JSON</div>
-      <pre style="background:#0f172a;color:#e2e8f0;padding:12px 14px;border-radius:var(--radius);font-family:'Courier New',monospace;font-size:12px;line-height:1.6;overflow-x:auto" id="audit-json-block">${escapeHtml(JSON.stringify(l, null, 2))}</pre>
-    </div>`;
+
+	const tmpl = document.getElementById('tmpl-audit-detail');
+	const frag = tmpl.content.cloneNode(true);
+
+	frag.querySelector('.audit-detail-time').textContent = formatDate(l.created_at);
+	frag.querySelector('.audit-detail-user').textContent = l.actor_username || '-';
+	frag.querySelector('.audit-detail-action').textContent = l.action || '-';
+	frag.querySelector('.audit-detail-resource').textContent = formatResourceText(l.target_type, l.target_id);
+	frag.querySelector('.audit-detail-ip').innerHTML = '<code>' + escapeHtml(l.ip_address || '-') + '</code>';
+	frag.querySelector('.audit-detail-result').textContent = l.result || '-';
+	frag.querySelector('#audit-json-block').textContent = JSON.stringify(l, null, 2);
+
+	const body = $('#modal-audit-body');
+	body.innerHTML = '';
+	body.appendChild(frag);
+
 	showMask(true);
 	$('#modal-audit').classList.add('show');
 }
@@ -359,6 +389,14 @@ function formatResource(targetType, targetId) {
 	if (!type && !id) return '-';
 	if (!id) return escapeHtml(type);
 	return escapeHtml(type) + ': ' + escapeHtml(id);
+}
+
+function formatResourceText(targetType, targetId) {
+	const type = targetType || '';
+	const id = targetId ? String(targetId) : '';
+	if (!type && !id) return '-';
+	if (!id) return type;
+	return type + ': ' + id;
 }
 
 async function exportAuditLogs() {

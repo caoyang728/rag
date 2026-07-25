@@ -1,5 +1,24 @@
 /* ============ 聊天页面 ============ */
 
+/* ---- 模板工具函数 ---- */
+function tpl(id) {
+	return document.getElementById(id);
+}
+
+function htmlFromTpl(id, fillFn) {
+	const frag = tpl(id).content.cloneNode(true);
+	if (fillFn) fillFn(frag);
+	const wrapper = document.createElement('div');
+	wrapper.appendChild(frag);
+	return wrapper.innerHTML;
+}
+
+function elemFromTpl(id, fillFn) {
+	const frag = tpl(id).content.cloneNode(true);
+	if (fillFn) fillFn(frag);
+	return frag.firstElementChild;
+}
+
 /* ---- 知识库范围选择器状态 ---- */
 const SCOPE_STORAGE_KEY = 'rag_chat_scope';
 let scopeOpen = false;
@@ -64,16 +83,7 @@ function initChatPage() {
 }
 
 function renderEmptyState() {
-	return `
-    <div class="msg-wrap">
-      <div class="empty-state">
-        <div style="text-align:center;padding:60px 20px">
-          <div style="font-size:48px;margin-bottom:16px">💬</div>
-          <div style="font-size:18px;font-weight:600;margin-bottom:8px">欢迎使用智能聊天</div>
-          <div style="color:var(--text-sub);font-size:14px">选择知识库范围，开始提问吧</div>
-        </div>
-      </div>
-    </div>`;
+	return tpl('tmpl-chat-empty').innerHTML;
 }
 
 /* ---- 知识库范围选择器 ---- */
@@ -121,13 +131,15 @@ function renderScopeList(flat) {
 	if (!el) return;
 	el.innerHTML = flat.map(n => {
 		const cls = n.depth === 1 ? 'child' : (n.depth >= 2 ? 'grandchild' : '');
-		const checked = selectedScopeIds.has(n.id) ? 'checked' : '';
-		return `
-      <label class="scope-item ${cls}">
-        <input type="checkbox" ${checked} value="${n.id}" onchange="onScopeChange(this, '${n.id}')">
-        <span class="scope-label">${escapeHtml(n.name)}</span>
-      </label>
-    `;
+		return htmlFromTpl('tmpl-scope-node', (frag) => {
+			const label = frag.querySelector('label');
+			label.className = 'scope-item ' + cls;
+			const cb = frag.querySelector('input');
+			cb.value = n.id;
+			cb.setAttribute('onchange', "onScopeChange(this, '" + n.id + "')");
+			if (selectedScopeIds.has(n.id)) cb.setAttribute('checked', '');
+			frag.querySelector('.scope-label').textContent = n.name;
+		});
 	}).join('');
 }
 
@@ -235,8 +247,23 @@ function updateScopeBadge() {
 	} else if (cnt === 0) {
 		badge.textContent = '未选择';
 	} else {
-		badge.textContent = `已选 ${cnt}`;
+		badge.textContent = '已选 ' + cnt;
 	}
+}
+
+/* ---- 构建溯源来源 HTML ---- */
+function buildSourceHtml(citations) {
+	if (!citations || citations.length === 0) return '';
+	return htmlFromTpl('tmpl-source-block', (frag) => {
+		frag.querySelector('.source-header').textContent = '📎 溯源来源 · ' + citations.length + ' 条引用';
+		const list = frag.querySelector('.source-list');
+		list.innerHTML = citations.map(c => {
+			return htmlFromTpl('tmpl-source-card', (cardFrag) => {
+				const titleEl = cardFrag.querySelector('.source-card-title');
+				titleEl.innerHTML = escapeHtml(c.doc_title || '文档') + ' <span class="source-score">' + (c.score || 80).toFixed(0) + '%</span>';
+			});
+		}).join('');
+	});
 }
 
 /* ---- 发送消息 ---- */
@@ -262,7 +289,7 @@ async function sendChat() {
 	if (emptyState) emptyState.remove();
 
 	const now = new Date();
-	const time = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+	const time = String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0');
 	const uMsg = renderUserMessageElement(text, time);
 	msgs.appendChild(uMsg);
 	inp.value = '';
@@ -271,13 +298,7 @@ async function sendChat() {
 	const mid = 'm' + Date.now();
 	const aMsg = document.createElement('div');
 	aMsg.className = 'msg msg-ai';
-	aMsg.innerHTML = `
-    <div class="msg-ai-avatar">AI</div>
-    <div class="msg-ai-content">
-      <div style="display:flex;align-items:center;gap:8px;color:var(--text-sub)">
-        <div class="spinner"></div>正在检索知识库并思考中...
-      </div>
-    </div>`;
+	aMsg.innerHTML = tpl('tmpl-ai-thinking').innerHTML;
 	msgs.appendChild(aMsg);
 	scrollChatBottom();
 
@@ -288,7 +309,7 @@ async function sendChat() {
 			// 默认使用第一个根类型（由后端动态返回）
 			rootTypes = [];
 		}
-		
+
 		const body = {
 			question: text,
 			session_id: currentSessionId || undefined,
@@ -311,34 +332,28 @@ async function sendChat() {
 			if (chatTitle && !chatTitle.dataset.hasTitle) {
 				const title = text.slice(0, 30) + (text.length > 30 ? '...' : '');
 				chatTitle.textContent = title;
-				chatTitle.style.display = 'block';
+				chatTitle.classList.remove('hidden');
 				chatTitle.dataset.hasTitle = 'true';
 				updateSessionTitle(data.session_id, title);
 			}
 		}
 
 		const citations = data.citations || [];
-		const sourceHtml = citations.length > 0 ? `
-      <div class="source-block">
-        <div class="source-header">📎 溯源来源 · ${citations.length} 条引用</div>
-        <div class="source-list">
-          ${citations.map(c => `
-            <div class="source-card"><div class="source-card-title">${escapeHtml(c.doc_title || '文档')} <span class="source-score">${(c.score || 80).toFixed(0)}%</span></div></div>
-          `).join('')}
-        </div>
-      </div>` : '';
+		const sourceHtml = buildSourceHtml(citations);
 
-		aMsg.querySelector('.msg-ai-content').innerHTML = `
-      <div>${formatAnswer(data.answer || '')}</div>
-      ${sourceHtml}
-      <div class="feedback-bar">
-        <button class="feedback-btn" onclick="submitFeedback('${mid}', ${data.message_id}, 1)">👍 满意</button>
-        <button class="feedback-btn" onclick="submitFeedback('${mid}', ${data.message_id}, -1)">👎 不满意</button>
-        <button class="feedback-btn" onclick="toggleFeedbackDetail(this,'${mid}',${data.message_id})">💬 详细反馈</button>
-        <span style="flex:1"></span>
-        <span style="font-size:11px;color:var(--text-sub)">生成耗时 ${((data.stats?.total_ms || 0) / 1000).toFixed(2)}s</span>
-      </div>
-      <div class="feedback-detail" id="fbd-${mid}"></div>`;
+		const answerContent = aMsg.querySelector('.msg-ai-content');
+		answerContent.innerHTML = '';
+		const answerFrag = tpl('tmpl-ai-answer').content.cloneNode(true);
+		answerFrag.querySelector('.ai-answer-text').innerHTML = formatAnswer(data.answer || '');
+		if (sourceHtml) {
+			answerFrag.querySelector('.ai-source-area').innerHTML = sourceHtml;
+		}
+		answerFrag.querySelector('.feedback-good').setAttribute('onclick', "submitFeedback('" + mid + "', " + data.message_id + ", 1)");
+		answerFrag.querySelector('.feedback-bad').setAttribute('onclick', "submitFeedback('" + mid + "', " + data.message_id + ", -1)");
+		answerFrag.querySelector('.feedback-detail-btn').setAttribute('onclick', "toggleFeedbackDetail(this,'" + mid + "'," + data.message_id + ")");
+		answerFrag.querySelector('.feedback-latency').textContent = '生成耗时 ' + ((data.stats?.total_ms || 0) / 1000).toFixed(2) + 's';
+		answerFrag.querySelector('.feedback-detail').id = 'fbd-' + mid;
+		answerContent.appendChild(answerFrag);
 		scrollChatBottom();
 		initSessionList(true);
 		isSending = false;
@@ -351,9 +366,10 @@ async function sendChat() {
 		btn.dataset.retryText = text;
 		btn.addEventListener('click', retrySendChat);
 		const container = document.createElement('div');
-		container.innerHTML = `
-      <div style="color:var(--danger)">${isTimeout ? '请求超时，请稍后重试' : '发送失败：' + e.message}</div>
-      <div style="font-size:12px;color:var(--text-sub);margin-top:8px;margin-bottom:12px">${isTimeout ? '服务器响应时间过长，请检查网络或缩短提问内容' : '请检查网络连接或重试'}</div>`;
+		container.innerHTML = htmlFromTpl('tmpl-error-message', (frag) => {
+			frag.querySelector('.error-text').textContent = isTimeout ? '请求超时，请稍后重试' : '发送失败：' + e.message;
+			frag.querySelector('.error-hint').textContent = isTimeout ? '服务器响应时间过长，请检查网络或缩短提问内容' : '请检查网络连接或重试';
+		});
 		container.appendChild(btn);
 		aMsg.querySelector('.msg-ai-content').innerHTML = '';
 		aMsg.querySelector('.msg-ai-content').appendChild(container);
@@ -386,7 +402,7 @@ function formatAnswer(text) {
 		if (line.startsWith('```')) {
 			if (!inCodeBlock) {
 				codeLang = line.slice(3).trim().replace(/[^a-zA-Z0-9_-]/g, '');
-				result.push(`<pre><code class="${codeLang}">`);
+				result.push('<pre><code class="' + codeLang + '">');
 				inCodeBlock = true;
 			} else {
 				result.push('</code></pre>');
@@ -403,35 +419,35 @@ function formatAnswer(text) {
 
 		if (line.startsWith('### ')) {
 			if (inList) { result.push('</ul>'); inList = false; }
-			result.push(`<h5>${escapeHtml(line.slice(4))}</h5>`);
+			result.push('<h5>' + escapeHtml(line.slice(4)) + '</h5>');
 			continue;
 		}
 
 		if (line.startsWith('## ')) {
 			if (inList) { result.push('</ul>'); inList = false; }
-			result.push(`<h4>${escapeHtml(line.slice(3))}</h4>`);
+			result.push('<h4>' + escapeHtml(line.slice(3)) + '</h4>');
 			continue;
 		}
 
 		if (line.startsWith('# ')) {
 			if (inList) { result.push('</ul>'); inList = false; }
-			result.push(`<h3>${escapeHtml(line.slice(2))}</h3>`);
+			result.push('<h3>' + escapeHtml(line.slice(2)) + '</h3>');
 			continue;
 		}
 
 		if (line.startsWith('- ') || line.startsWith('* ') || line.match(/^\d+\./)) {
 			if (!inList) { result.push('<ul>'); inList = true; }
 			const content = line.replace(/^(- |\* |\d+\.\s*)/, '');
-			result.push(`<li>${escapeHtml(content)}</li>`);
+			result.push('<li>' + escapeHtml(content) + '</li>');
 			continue;
 		}
 
 		if (inList) { result.push('</ul>'); inList = false; }
 
 		if (line.startsWith('`') && line.endsWith('`')) {
-			result.push(`<p><code>${escapeHtml(line.slice(1, -1))}</code></p>`);
+			result.push('<p><code>' + escapeHtml(line.slice(1, -1)) + '</code></p>');
 		} else if (line.trim()) {
-			result.push(`<p>${escapeHtml(line)}</p>`);
+			result.push('<p>' + escapeHtml(line) + '</p>');
 		}
 	}
 
@@ -443,63 +459,31 @@ function formatAnswer(text) {
 
 /* ---- 消息渲染工具函数 ---- */
 function renderUserMessageElement(text, time) {
-	const uMsg = document.createElement('div');
-	uMsg.className = 'msg msg-user';
-	const avatarText = STATE.user.name.slice(0, 2);
-	uMsg.innerHTML = `
-    <div class="msg-user-content">
-      <div class="msg-user-bubble">${escapeHtml(text)}</div>
-    </div>
-    <div class="msg-user-side">
-      <div class="msg-user-avatar">${escapeHtml(avatarText)}</div>
-      <div class="msg-time">${time}</div>
-    </div>`;
-	return uMsg;
+	return elemFromTpl('tmpl-user-msg', (frag) => {
+		frag.querySelector('.msg-user-bubble').textContent = text;
+		frag.querySelector('.msg-user-avatar').textContent = STATE.user.name.slice(0, 2);
+		frag.querySelector('.msg-time').textContent = time;
+	});
 }
 
 function renderUserMessageHTML(text, time) {
-	const avatarText = STATE.user.name.slice(0, 2);
-	return `
-    <div class="msg msg-user">
-      <div class="msg-user-content">
-        <div class="msg-user-bubble">${escapeHtml(text)}</div>
-      </div>
-      <div class="msg-user-side">
-        <div class="msg-user-avatar">${escapeHtml(avatarText)}</div>
-        <div class="msg-time">${time}</div>
-      </div>
-    </div>`;
+	return renderUserMessageElement(text, time).outerHTML;
 }
 
 function renderAIMessageHTML(answer, citations, messageId, stats) {
-	const sourceHtml = citations && citations.length > 0 ? `
-    <div class="source-block">
-      <div class="source-header">📎 溯源来源 · ${citations.length} 条引用</div>
-      <div class="source-list">
-        ${citations.map(c => `
-          <div class="source-card"><div class="source-card-title">${escapeHtml(c.doc_title || '文档')} ${c.score !== undefined ? `<span class="source-score">${c.score.toFixed(0)}%</span>` : ''}</div></div>
-        `).join('')}
-      </div>
-    </div>` : '';
-
-	const latency = stats?.total_ms || stats?.latency_total_ms || 0;
-
-	return `
-    <div class="msg msg-ai">
-      <div class="msg-ai-avatar">AI</div>
-      <div class="msg-ai-content">
-        <div>${formatAnswer(answer || '')}</div>
-        ${sourceHtml}
-        <div class="feedback-bar">
-          <button class="feedback-btn" onclick="submitFeedback('m${messageId}', ${messageId}, 1)">👍 满意</button>
-          <button class="feedback-btn" onclick="submitFeedback('m${messageId}', ${messageId}, -1)">👎 不满意</button>
-          <button class="feedback-btn" onclick="toggleFeedbackDetail(this,'m${messageId}',${messageId})">💬 详细反馈</button>
-          <span style="flex:1"></span>
-          <span style="font-size:11px;color:var(--text-sub)">耗时 ${(latency / 1000).toFixed(2)}s</span>
-        </div>
-        <div class="feedback-detail" id="fbd-m${messageId}"></div>
-      </div>
-    </div>`;
+	return htmlFromTpl('tmpl-ai-msg', (frag) => {
+		frag.querySelector('.ai-answer-text').innerHTML = formatAnswer(answer || '');
+		const sourceHtml = buildSourceHtml(citations);
+		if (sourceHtml) {
+			frag.querySelector('.ai-source-area').innerHTML = sourceHtml;
+		}
+		frag.querySelector('.feedback-good').setAttribute('onclick', "submitFeedback('m" + messageId + "', " + messageId + ", 1)");
+		frag.querySelector('.feedback-bad').setAttribute('onclick', "submitFeedback('m" + messageId + "', " + messageId + ", -1)");
+		frag.querySelector('.feedback-detail-btn').setAttribute('onclick', "toggleFeedbackDetail(this,'m" + messageId + "'," + messageId + ")");
+		const latency = stats?.total_ms || stats?.latency_total_ms || 0;
+		frag.querySelector('.feedback-latency').textContent = '耗时 ' + (latency / 1000).toFixed(2) + 's';
+		frag.querySelector('.feedback-detail').id = 'fbd-m' + messageId;
+	});
 }
 
 /* ---- 反馈 ---- */
@@ -529,12 +513,10 @@ async function submitFeedback(mid, qaId, rating) {
 function toggleFeedbackDetail(btn, mid, qaId) {
 	const box = $('#fbd-' + mid);
 	if (!box.innerHTML) {
-		box.innerHTML = `
-      <textarea placeholder="请描述具体的问题或建议..."></textarea>
-      <div style="text-align:right;margin-top:6px">
-        <button class="btn btn-sm" onclick="closeFeedback('${mid}')">取消</button>
-        <button class="btn btn-sm btn-primary" onclick="submitDetailedFeedback('${mid}', ${qaId})">提交反馈</button>
-      </div>`;
+		box.innerHTML = htmlFromTpl('tmpl-feedback-form', (frag) => {
+			frag.querySelector('.feedback-cancel-btn').setAttribute('onclick', "closeFeedback('" + mid + "')");
+			frag.querySelector('.feedback-submit-btn').setAttribute('onclick', "submitDetailedFeedback('" + mid + "', " + qaId + ")");
+		});
 	}
 	box.classList.toggle('show');
 }
@@ -567,8 +549,8 @@ function closeFeedback(mid) { $('#fbd-' + mid).classList.remove('show'); }
 
 async function loadSessionMessages(id) {
 	try {
-		const data = await api.getJson(`/api/v1/chat/records/?session_id=${id}`);
-		const records = data.records || [];
+		const data = await api.getJson('/api/v1/chat/sessions/' + id + '/qa/');
+		const records = Array.isArray(data) ? data : (data.records || []);
 
 		const msgs = $('#chatMessages');
 		if (msgs) {
@@ -582,7 +564,7 @@ async function loadSessionMessages(id) {
 
 async function updateSessionTitle(sessionId, title) {
 	try {
-		await api.patchJson(`/api/v1/chat/sessions/${sessionId}/`, { title: title });
+		await api.patchJson('/api/v1/chat/sessions/' + sessionId + '/', { title: title });
 	} catch (e) {
 		console.error('update session title failed:', e);
 	}
@@ -599,7 +581,7 @@ async function initSessionList(skipLoadMessages = false) {
 	try {
 		let url = '/api/v1/chat/sessions/';
 		if (currentSearchKeyword) {
-			url += `?search=${encodeURIComponent(currentSearchKeyword)}`;
+			url += '?search=' + encodeURIComponent(currentSearchKeyword);
 		}
 		const data = await api.getJson(url);
 		const sessions = data.results || data;
@@ -625,29 +607,38 @@ async function initSessionList(skipLoadMessages = false) {
 			return acc;
 		}, {});
 
-		el.innerHTML = Object.entries(grouped).map(([group, items]) => `
-      <div class="session-group-title">${group}</div>
-      ${items.map(s => `
-        <div class="session-item ${s.id == currentSessionId ? 'active' : ''}" onclick="switchSession(${s.id},this)" data-id="${s.id}">
-          <div class="session-title" id="sessionTitle-${s.id}" onblur="saveSessionTitle(${s.id}, this)" onkeydown="if(event.key==='Enter'){this.blur();event.preventDefault()}" title="点击编辑标题">${escapeHtml(s.title)}</div>
-          <div class="session-preview">${escapeHtml(s.preview || '')}</div>
-          <div class="session-time">${formatSessionTime(s.last_active_at || s.created_at)}</div>
-          <div class="session-actions">
-              <button class="session-icon-btn btn-edit" onclick="event.stopPropagation();editSessionTitle(${s.id})" title="编辑标题">✏️</button>
-              <button class="session-icon-btn btn-del" onclick="event.stopPropagation();delSession(this,${s.id})" title="删除会话">✕</button>
-            </div>
-        </div>
-      `).join('')}
-    `).join('');
+		el.innerHTML = Object.entries(grouped).map(([group, items]) => {
+			return htmlFromTpl('tmpl-session-group', (frag) => {
+				frag.querySelector('.session-group-title').textContent = group;
+				const itemsWrap = frag.querySelector('.session-items-wrap');
+				itemsWrap.innerHTML = items.map(s => {
+					return htmlFromTpl('tmpl-session-item', (itemFrag) => {
+						const item = itemFrag.querySelector('.session-item');
+						item.dataset.id = s.id;
+						if (s.id == currentSessionId) item.classList.add('active');
+						item.setAttribute('onclick', 'switchSession(' + s.id + ',this)');
+						const titleEl = itemFrag.querySelector('.session-title');
+						titleEl.id = 'sessionTitle-' + s.id;
+						titleEl.setAttribute('onblur', 'saveSessionTitle(' + s.id + ', this)');
+						titleEl.setAttribute('onkeydown', "if(event.key==='Enter'){this.blur();event.preventDefault()}");
+						titleEl.textContent = s.title;
+						itemFrag.querySelector('.session-preview').textContent = s.preview || '';
+						itemFrag.querySelector('.session-time').textContent = formatSessionTime(s.last_active_at || s.created_at);
+						itemFrag.querySelector('.btn-edit').setAttribute('onclick', 'event.stopPropagation();editSessionTitle(' + s.id + ')');
+						itemFrag.querySelector('.btn-del').setAttribute('onclick', 'event.stopPropagation();delSession(this,' + s.id + ')');
+					});
+				}).join('');
+			});
+		}).join('');
 
 		if (currentSessionId) {
-			const activeItem = el.querySelector(`.session-item[data-id="${currentSessionId}"]`);
+			const activeItem = el.querySelector('.session-item[data-id="' + currentSessionId + '"]');
 			if (activeItem) {
 				const titleEl = activeItem.querySelector('.session-title');
 				const chatTitle = $('#chatTitle');
 				if (chatTitle) {
 					chatTitle.textContent = titleEl ? titleEl.textContent : '新会话';
-					chatTitle.style.display = 'block';
+					chatTitle.classList.remove('hidden');
 				}
 				if (!skipLoadMessages) {
 					loadSessionMessages(currentSessionId);
@@ -674,7 +665,7 @@ function debounceSearch() {
 }
 
 function editSessionTitle(id) {
-	const titleEl = document.getElementById(`sessionTitle-${id}`);
+	const titleEl = document.getElementById('sessionTitle-' + id);
 	if (!titleEl) return;
 	titleEl.contentEditable = true;
 	titleEl.focus();
@@ -697,7 +688,7 @@ async function saveSessionTitle(sessionId, el) {
 	}
 
 	try {
-		await api.patchJson(`/api/v1/chat/sessions/${sessionId}/`, { title: newTitle });
+		await api.patchJson('/api/v1/chat/sessions/' + sessionId + '/', { title: newTitle });
 		toast('标题已更新', 'success');
 	} catch (e) {
 		console.error('save title failed:', e);
@@ -727,13 +718,13 @@ async function switchSession(id, elm) {
 	if (chatTitle) {
 		const titleEl = elm.querySelector('.session-title');
 		chatTitle.textContent = titleEl ? titleEl.textContent : '新会话';
-		chatTitle.style.display = 'block';
+		chatTitle.classList.remove('hidden');
 		delete chatTitle.dataset.hasTitle;
 	}
 
 	try {
-		const data = await api.getJson(`/api/v1/chat/records/?session_id=${id}`);
-		const records = data.records || [];
+		const data = await api.getJson('/api/v1/chat/sessions/' + id + '/qa/');
+		const records = Array.isArray(data) ? data : (data.records || []);
 
 		const msgs = $('#chatMessages');
 		if (msgs) {
@@ -751,20 +742,22 @@ function renderMessagesFromRecords(records) {
 	if (!records || records.length === 0) {
 		return renderEmptyState();
 	}
-	return `
-    <div class="msg-wrap">
-      ${records.map(r => `
-        ${renderUserMessageHTML(r.question, formatSessionTime(r.created_at))}
-        ${renderAIMessageHTML(r.answer, r.citations, r.id, { latency_total_ms: r.latency_total_ms })}
-      `).join('')}
-    </div>`;
+	const frag = tpl('tmpl-message-item').content.cloneNode(true);
+	const wrap = frag.querySelector('.msg-wrap');
+	wrap.innerHTML = records.map(r => {
+		return renderUserMessageHTML(r.question, formatSessionTime(r.created_at)) +
+			renderAIMessageHTML(r.answer, r.citations, r.id, { latency_total_ms: r.latency_total_ms });
+	}).join('');
+	const wrapper = document.createElement('div');
+	wrapper.appendChild(frag);
+	return wrapper.innerHTML;
 }
 
 async function delSession(icon, id) {
 	if (!confirm('确定删除此会话？删除后不可恢复。')) return;
 
 	try {
-		await api.deleteJson(`/api/v1/chat/sessions/${id}/`);
+		await api.deleteJson('/api/v1/chat/sessions/' + id + '/');
 		icon.closest('.session-item').remove();
 		toast('会话已删除', 'success');
 		if (currentSessionId == id) {
@@ -790,7 +783,7 @@ async function newSession() {
 		const chatTitle = $('#chatTitle');
 		if (chatTitle) {
 			chatTitle.textContent = '新会话';
-			chatTitle.style.display = 'block';
+			chatTitle.classList.remove('hidden');
 			delete chatTitle.dataset.hasTitle;
 		}
 

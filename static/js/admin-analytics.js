@@ -18,14 +18,6 @@ async function initAnalyticsPage() {
 	await loadBadFeedbacks();
 }
 
-/* ---- 通用弹窗 ---- */
-function showModal(id) {
-	const m = document.getElementById(id);
-	if (m) m.classList.add('show');
-	let mask = document.getElementById('mask');
-	if (mask) mask.classList.add('show');
-}
-
 /* ---- 概览统计 ---- */
 async function loadOverview() {
 	const kpiValues = $$('.kpi-value');
@@ -127,19 +119,19 @@ async function loadKeywords() {
 
 		const kwBody = $('#keywordsTableBody');
 		if (kwBody) {
-			kwBody.innerHTML = keywords.map(k => `
-        <tr>
-          <td class="fw-500">${escapeHtml(k.keyword)}</td>
-          <td><span class="tag ${k.weight_score > 1 ? 'tag-success' : (k.weight_score < 1 ? 'tag-warning' : '')}">×${k.weight_score.toFixed(1)}</span></td>
-          <td class="text-sub text-sm">${k.hit_count || 0} 次命中 · ${k.good_feedback || 0} 好评 · ${k.bad_feedback || 0} 差评</td>
-          <td>
-            <div class="table-actions">
-              <button class="btn-link btn-sm" onclick="adjustKeywordWeight(${k.id}, 0.1)">+0.1</button>
-              <button class="btn-link btn-sm" onclick="adjustKeywordWeight(${k.id}, -0.1)">-0.1</button>
-            </div>
-          </td>
-        </tr>
-      `).join('');
+			const kwTpl = tpl('tmpl-kw-row');
+			kwBody.innerHTML = keywords.map(k => {
+				const row = kwTpl.content.cloneNode(true).firstElementChild;
+				row.querySelectorAll('td')[0].textContent = escapeHtml(k.keyword);
+				const tag = row.querySelector('.tag');
+				tag.textContent = '×' + k.weight_score.toFixed(1);
+				if (k.weight_score > 1) tag.classList.add('tag-success');
+				else if (k.weight_score < 1) tag.classList.add('tag-warning');
+				row.querySelectorAll('td')[2].textContent = (k.hit_count || 0) + ' 次命中 · ' + (k.good_feedback || 0) + ' 好评 · ' + (k.bad_feedback || 0) + ' 差评';
+				row.querySelector('.incr').setAttribute('onclick', 'adjustKeywordWeight(' + k.id + ', 0.1)');
+				row.querySelector('.decr').setAttribute('onclick', 'adjustKeywordWeight(' + k.id + ', -0.1)');
+				return row.outerHTML;
+			}).join('');
 		}
 	} catch (e) {
 		const kwBody = $('#keywordsTableBody');
@@ -253,20 +245,20 @@ async function loadBadFeedbacks() {
 		if (fbList) {
 			fbList.innerHTML = feedbacks.map(f => {
 				const isResolved = f.status === 'resolved';
-				return `
-        <div style="padding:12px;background:#fef2f2;border-left:3px solid var(--danger);border-radius:var(--radius);font-size:13px">
-          <div class="fw-500 mb-8">Q: ${escapeHtml(f.question)}</div>
-          <div class="text-sub text-sm mb-8">A（摘要）: ${escapeHtml(f.answer)}</div>
-          <div style="padding:6px 8px;background:var(--white);border-radius:var(--radius-sm);color:var(--text)"><b>反馈：</b>${escapeHtml(f.comment || '无详细反馈')}</div>
-          <div class="flex justify-between mt-8">
-            <span class="text-sub text-sm">${escapeHtml(f.user)} · ${formatDate(f.created_at)}${isResolved ? ' · <span class="tag tag-success">已处理</span>' : ''}</span>
-            <div class="flex gap-4">
-              <button class="btn-link btn-sm" onclick="adjustKeywordWeightByFeedback(${f.id})">调整权重</button>
-              ${isResolved ? '' : `<button class="btn-link btn-sm" onclick="markFeedbackProcessed(${f.id})">已处理</button>`}
-            </div>
-          </div>
-        </div>
-      `}).join('');
+				return htmlFromTpl('tmpl-feedback-card', (frag) => {
+					const root = frag.firstElementChild;
+					root.querySelector('.fb-question').textContent = 'Q: ' + escapeHtml(f.question);
+					root.querySelector('.fb-answer').textContent = 'A（摘要）: ' + escapeHtml(f.answer);
+					root.querySelector('.fb-comment').innerHTML = '<b>反馈：</b>' + escapeHtml(f.comment || '无详细反馈');
+					root.querySelector('.fb-meta').innerHTML = escapeHtml(f.user) + ' · ' + formatDate(f.created_at) + (isResolved ? ' · <span class="tag tag-success">已处理</span>' : '');
+					root.querySelector('.adjust-btn').setAttribute('onclick', 'adjustKeywordWeightByFeedback(' + f.id + ')');
+					if (isResolved) {
+						root.querySelector('.process-btn').style.display = 'none';
+					} else {
+						root.querySelector('.process-btn').setAttribute('onclick', 'markFeedbackProcessed(' + f.id + ')');
+					}
+				});
+			}).join('');
 		}
 	} catch (e) {
 		const fbList = $('#feedbackList');

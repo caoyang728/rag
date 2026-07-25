@@ -14,7 +14,7 @@ class IpWhitelist(models.Model):
                                     help_text='单 IP 或 CIDR，如 10.0.0.0/8')
     description = models.CharField(max_length=128, blank=True, default='')
     is_enabled = models.BooleanField(default=True)
-    created_by = models.ForeignKey('users.SysUser', null=True, blank=True,
+    created_by = models.ForeignKey('users.User', null=True, blank=True,
                                     on_delete=models.SET_NULL, db_column='created_by')
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -63,7 +63,7 @@ class LoginAttempt(models.Model):
 
     id = models.BigAutoField(primary_key=True)
     username = models.CharField(max_length=64, blank=True, default='')
-    user = models.ForeignKey('users.SysUser', on_delete=models.SET_NULL, null=True, blank=True,
+    user = models.ForeignKey('users.User', on_delete=models.SET_NULL, null=True, blank=True,
                               db_column='user_id')
     ip = models.CharField(max_length=64, db_index=True)
     user_agent = models.CharField(max_length=256, blank=True, default='')

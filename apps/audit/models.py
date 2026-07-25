@@ -34,7 +34,7 @@ class AuditLog(models.Model):
     ]
 
     id = models.BigAutoField(primary_key=True)
-    actor = models.ForeignKey('users.SysUser', on_delete=models.SET_NULL, null=True, blank=True,
+    actor = models.ForeignKey('users.User', on_delete=models.SET_NULL, null=True, blank=True,
                               db_column='actor_id', related_name='audit_logs')
     actor_username = models.CharField(max_length=64, blank=True, default='',
                                        help_text='冗余：账号变名/删除时保留')

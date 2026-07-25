@@ -9,7 +9,10 @@ from django.contrib.postgres.fields import ArrayField
 
 
 class KnowledgeNode(models.Model):
-    """B1 knowledge_node - 树形节点（根/中间/叶子）"""
+    """B1 knowledge_node - 树形节点
+    层级：1=知识库(kb) / 2=部门(dept) / 3=团队(team) / 4+=业务分类(category, 支持无限子级)
+    权限仅到 team 级（node_level≤3），业务分类（node_level≥4）仅做分类用途
+    """
 
     NODE_TYPE_CHOICES = [
         ('root', 'root'),
@@ -21,33 +24,19 @@ class KnowledgeNode(models.Model):
     parent = models.ForeignKey('self', null=True, blank=True, on_delete=models.CASCADE,
                                db_column='parent_id', related_name='children')
     root_type = models.CharField(max_length=32)
-
-    @classmethod
-    def get_root_types(cls):
-        """动态获取所有根类型（从数据库查询）"""
-        # 获取所有唯一的 root_type，以及每个 root_type 对应的第一个节点名称
-        root_types = {}
-        for node in cls.objects.filter(
-            node_type='root', is_deleted=False
-        ).order_by('id'):
-            if node.root_type not in root_types:
-                root_types[node.root_type] = node.name
-        return list(root_types.items())
-
-    @classmethod
-    def get_root_type_choices(cls):
-        """获取根类型选择列表（用于表单）"""
-        return cls.get_root_types()
-
     node_type = models.CharField(max_length=16, choices=NODE_TYPE_CHOICES, default='folder')
+    node_level = models.SmallIntegerField(default=4,
+                                           help_text='节点层级: 1=kb 2=dept 3=team 4+=业务分类（≥4 支持无限子级，仅团队组长可管理）')
     name = models.CharField(max_length=128)
-    # path 冗余存 "/1/3/5/" 便于递归权限判定
-    path = models.CharField(max_length=512, default='/')
+    path = models.CharField(max_length=512, default='/',
+                             help_text='冗余路径 /kb_id/dept_id/team_id/cat_id/...（支持无限级业务分类）')
     depth = models.SmallIntegerField(default=0)
     description = models.TextField(blank=True, default='')
     order_no = models.IntegerField(default=0)
     is_deleted = models.BooleanField(default=False)
-    created_by = models.ForeignKey('users.SysUser', null=True, blank=True,
+    ref_id = models.BigIntegerField(null=True, blank=True,
+                                     help_text='关联源对象 ID：node_level=2 存 dept.id，node_level=3 存 team.id')
+    created_by = models.ForeignKey('users.User', null=True, blank=True,
                                     on_delete=models.SET_NULL, db_column='created_by',
                                     related_name='created_nodes')
     created_at = models.DateTimeField(auto_now_add=True)
@@ -88,7 +77,7 @@ class NodePermissionOverride(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        db_table = 'knowledge_node_permission_override'
+        db_table = 'knowledge_node_permission'
         unique_together = [('node', 'subject_type', 'subject_id', 'action')]
         indexes = [
             models.Index(fields=['subject_type', 'subject_id'], name='idx_npo_subject'),
@@ -97,8 +86,9 @@ class NodePermissionOverride(models.Model):
 
 class Document(models.Model):
     """B3 document - 文档元数据
-    visibility 三级可见（1私有/2团队/3公开/4系统级） + file_hash 唯一防重复上传
-    owner_team_id 快照防止团队变动导致的权限泄露"""
+    visible_scope 三档: team(仅归属团队) / dept(归属全部门) / public(全公司)
+    所有文档归属团队节点，上传自动填充 kb/dept/team，仅 category 手动选
+    """
 
     STATUS_CHOICES = [
         ('pending', 'pending'),
@@ -119,17 +109,35 @@ class Document(models.Model):
         ('config', 'config'),
         ('other', 'other'),
     ]
-    VISIBILITY_CHOICES = [
-        (1, '私有'),
-        (2, '部门'),
-        (3, '团队'),
-        (4, '公开'),
+    VISIBLE_SCOPE_CHOICES = [
+        ('team', '仅归属团队'),
+        ('dept', '归属全部门'),
+        ('public', '全公司公开'),
+    ]
+    AUDIT_STATUS_CHOICES = [
+        ('pending_team', '待团队组长一审'),
+        ('pending_compliance', '待合规二审'),
+        ('rejected', '审核驳回'),
+        ('passed', '双审通过'),
+        ('archived', '归档'),
+        ('deleted', '逻辑删除'),
+    ]
+    SECRET_LEVEL_CHOICES = [
+        (1, '普通'),
+        (2, '内部'),
+        (3, '机密'),
+        (4, '绝密'),
     ]
 
     id = models.BigAutoField(primary_key=True)
     uuid = models.UUIDField(default=uuid_lib.uuid4, editable=False, unique=True)
+    # 固定4层节点归属
+    kb_node_id = models.BigIntegerField(null=True, blank=True, help_text='一级知识库节点ID')
+    dept_node_id = models.BigIntegerField(null=True, blank=True, help_text='二级部门节点ID（归属，不可变）')
+    team_node_id = models.BigIntegerField(null=True, blank=True, help_text='三级团队节点ID（归属，不可变）')
+    category_node_id = models.BigIntegerField(null=True, blank=True, help_text='四级业务分类节点ID')
     node = models.ForeignKey(KnowledgeNode, on_delete=models.PROTECT, db_column='node_id',
-                             related_name='documents')
+                             related_name='documents', help_text='关联节点（category_node）')
     title = models.CharField(max_length=256)
     file_name = models.CharField(max_length=256)
     file_type = models.CharField(max_length=16, choices=FILE_TYPE_CHOICES)
@@ -139,26 +147,34 @@ class Document(models.Model):
     file_path = models.CharField(max_length=512, blank=True, default='',
                                  help_text='本地存储路径或 OSS URL')
     mime_type = models.CharField(max_length=64, blank=True, default='')
-    # ⭐ 权限冗余字段：便于检索时 SQL 一次过滤
-    owner = models.ForeignKey('users.SysUser', on_delete=models.PROTECT, db_column='owner_id',
+    # 权限冗余字段
+    owner = models.ForeignKey('users.User', on_delete=models.PROTECT, db_column='owner_id',
                               related_name='owned_documents')
     owner_team_id = models.BigIntegerField(null=True, blank=True,
                                             help_text='上传者所在团队快照，防止团队变动导致权限漂移')
-    visibility = models.SmallIntegerField(choices=VISIBILITY_CHOICES, default=1)
+    visible_scope = models.CharField(max_length=16, choices=VISIBLE_SCOPE_CHOICES, default='team')
+    secret_level = models.SmallIntegerField(choices=SECRET_LEVEL_CHOICES, default=1,
+                                             help_text='密级 1普通~4绝密，4禁止public')
+    audit_status = models.CharField(max_length=32, choices=AUDIT_STATUS_CHOICES, default='pending_team')
+    has_deny_user = models.BooleanField(default=False, help_text='是否有黑名单用户（加速检索跳过黑名单查询）')
+    has_cross_team = models.BooleanField(default=False, help_text='是否有跨团队授权（加速检索跳过跨团队查询）')
+    has_allow_user = models.BooleanField(default=False, help_text='是否有个人白名单（加速检索跳过白名单查询）')
+    allow_download = models.BooleanField(default=False, help_text='是否允许下载该文档')
+    allow_share = models.BooleanField(default=False, help_text='是否允许分享该文档')
     root_type = models.CharField(max_length=32, help_text='冗余：根节点类型，加速检索过滤')
-    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default='pending')
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default='pending',
+                               help_text='处理状态: pending/parsing/.../done/failed')
     error_message = models.TextField(blank=True, default='')
     chunk_count = models.IntegerField(default=0)
     version = models.IntegerField(default=1)
     tags = ArrayField(models.CharField(max_length=32), default=list, blank=True)
     extra = models.JSONField(default=dict, blank=True)
     is_deleted = models.BooleanField(default=False)
+    delete_time = models.DateTimeField(null=True, blank=True, help_text='逻辑删除时间')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    # 恢复审计字段
-    restored_at = models.DateTimeField(null=True, blank=True,
-                                        help_text='恢复时间（用于审计追溯）')
-    restored_by = models.ForeignKey('users.SysUser', null=True, blank=True,
+    restored_at = models.DateTimeField(null=True, blank=True, help_text='恢复时间（用于审计追溯）')
+    restored_by = models.ForeignKey('users.User', null=True, blank=True,
                                     on_delete=models.SET_NULL, db_column='restored_by',
                                     related_name='restored_documents',
                                     help_text='恢复人')
@@ -166,10 +182,14 @@ class Document(models.Model):
     class Meta:
         db_table = 'knowledge_document'
         indexes = [
+            models.Index(fields=['kb_node_id'], name='idx_doc_kb_node'),
+            models.Index(fields=['dept_node_id'], name='idx_doc_dept_node'),
+            models.Index(fields=['team_node_id'], name='idx_doc_team_node'),
             models.Index(fields=['node'], name='idx_doc_node'),
             models.Index(fields=['owner'], name='idx_doc_owner'),
+            models.Index(fields=['audit_status'], name='idx_doc_audit_status'),
             models.Index(fields=['status'], name='idx_doc_status'),
-            models.Index(fields=['visibility', 'root_type'], name='idx_doc_visroot'),
+            models.Index(fields=['visible_scope', 'root_type'], name='idx_doc_visroot'),
             models.Index(fields=['file_hash'], name='idx_doc_hash'),
         ]
 
@@ -284,7 +304,7 @@ class ImageResource(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        db_table = 'knowledge_image_resource'
+        db_table = 'knowledge_image'
         indexes = [
             models.Index(fields=['document'], name='idx_img_doc'),
             models.Index(fields=['storage_mode'], name='idx_img_mode'),
@@ -302,3 +322,68 @@ class ImageResource(models.Model):
 
     def __str__(self):
         return f'Image<{self.id}>{self.storage_mode}'
+
+
+class DocOperationLog(models.Model):
+    """知识库操作日志 — 只追加不删不改，完整审计链
+    记录文档/节点的敏感操作，用于审计追溯。
+    """
+    ACTION_CHOICES = [
+        # 文档操作
+        ('doc_create', '上传文档'),
+        ('doc_delete', '删除文档'),
+        ('doc_visibility_change', '修改可见范围'),
+        ('doc_download', '下载文档'),
+        ('doc_reparse', '重新解析'),
+        ('doc_restore', '恢复文档'),
+        # 节点操作
+        ('node_create', '创建节点'),
+        ('node_update', '修改节点'),
+        ('node_delete', '删除节点'),
+        # 审核操作
+        ('doc_audit_team_pass', '团队一审通过'),
+        ('doc_audit_team_reject', '团队一审驳回'),
+        ('doc_audit_compliance_pass', '合规二审通过'),
+        ('doc_audit_compliance_reject', '合规二审驳回'),
+        # 权限操作
+        ('doc_grant', '授权（白名单/跨团队）'),
+        ('doc_revoke', '撤销授权'),
+        ('doc_grant_expire', '授权到期'),
+        ('doc_deny_add', '添加黑名单'),
+        ('doc_deny_remove', '移除黑名单'),
+        ('doc_archive', '归档文档'),
+        ('doc_physical_destroy', '物理销毁'),
+    ]
+
+    id = models.BigAutoField(primary_key=True)
+    action = models.CharField(max_length=32, choices=ACTION_CHOICES, db_index=True)
+    operator = models.ForeignKey('users.User', on_delete=models.SET_NULL,
+                                 null=True, blank=True, db_column='operator_id',
+                                 related_name='+')
+    operator_name = models.CharField(max_length=128, blank=True, default='')
+    # 关联目标
+    document = models.ForeignKey(Document, on_delete=models.SET_NULL,
+                                 null=True, blank=True, db_column='document_id',
+                                 related_name='+')
+    node = models.ForeignKey(KnowledgeNode, on_delete=models.SET_NULL,
+                             null=True, blank=True, db_column='node_id',
+                             related_name='+')
+    # 详情
+    detail = models.JSONField(default=dict, blank=True,
+                              help_text='操作详情，如变更前后的值、目标用户等')
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    user_agent = models.CharField(max_length=512, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        db_table = 'knowledge_doc_operation_log'
+        indexes = [
+            models.Index(fields=['action', 'created_at']),
+            models.Index(fields=['document', '-created_at']),
+            models.Index(fields=['node', '-created_at']),
+            models.Index(fields=['operator', '-created_at']),
+        ]
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'OpLog<{self.id}>{self.action}:{self.operator_name}'

@@ -1,1 +1,10 @@
 /* 审计日志与安全 — 主要使用通用 tabs/table 样式 */
+
+#auditBody {
+	padding: 12px;
+	flex: 1;
+	min-height: 0;
+	display: flex;
+	flex-direction: column;
+	overflow: hidden;
+}

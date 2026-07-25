@@ -15,28 +15,24 @@
 	<div class="layout">
 		<div id="sidebar-container"></div>
 		<div class="main">
-			<div class="page-header">
-				<div class="breadcrumb"><a href="/chat/">首页</a><span class="sep">/</span>管理后台<span
-						class="sep">/</span>反馈与报表</div>
-				<div class="page-header-flex">
-					<div>
-						<div class="page-title">反馈与准确率报表</div>
-						<div class="page-desc">监控召回准确率、响应耗时与用户反馈趋势，驱动持续优化</div>
+			<div class="page-header flex items-center justify-between">
+				<div class="flex items-baseline gap-10">
+					<div class="page-title">反馈与准确率报表</div>
+					<div class="page-subtitle">监控召回准确率、响应耗时与用户反馈趋势，驱动持续优化</div>
+				</div>
+				<div class="page-actions">
+					<div class="flex gap-4"
+						style="background:var(--white);border:1px solid var(--border);border-radius:var(--radius);padding:2px">
+						<button class="btn btn-sm btn-ghost" onclick="setTimeRange('today')">今日</button>
+						<button class="btn btn-sm btn-primary" onclick="setTimeRange('week')">本周</button>
+						<button class="btn btn-sm btn-ghost" onclick="setTimeRange('month')">本月</button>
+						<button class="btn btn-sm btn-ghost" onclick="showCustomDateRange()">自定义</button>
 					</div>
-					<div class="page-actions">
-						<div class="flex gap-4"
-							style="background:var(--white);border:1px solid var(--border);border-radius:var(--radius);padding:2px">
-							<button class="btn btn-sm btn-ghost" onclick="setTimeRange('today')">今日</button>
-							<button class="btn btn-sm btn-primary" onclick="setTimeRange('week')">本周</button>
-							<button class="btn btn-sm btn-ghost" onclick="setTimeRange('month')">本月</button>
-							<button class="btn btn-sm btn-ghost" onclick="showCustomDateRange()">自定义</button>
-						</div>
-						<select class="select" style="width:180px" id="reportRootType"
-							onchange="loadOverview();loadTrend();loadKeywords();loadBadFeedbacks()">
-							<option value="">全部节点</option>
-						</select>
-						<button class="btn" onclick="exportReport()">📥 导出报表</button>
-					</div>
+					<select class="select" style="width:180px" id="reportRootType"
+						onchange="loadOverview();loadTrend();loadKeywords();loadBadFeedbacks()">
+						<option value="">全部节点</option>
+					</select>
+					<button class="btn" onclick="exportReport()">📥 导出报表</button>
 				</div>
 			</div>
 
@@ -100,8 +96,7 @@
 				</div>
 				<div class="card">
 					<div class="card-title">👎 差评反馈明细</div>
-					<div id="feedbackList"
-						style="display:flex;flex-direction:column;gap:12px;max-height:520px;overflow-y:auto"></div>
+					<div id="feedbackList" class="flex flex-col gap-12 overflow-y-auto" style="max-height:520px"></div>
 				</div>
 			</div>
 		</div>
@@ -156,13 +151,45 @@
 			</div>
 		</div>
 		<div class="modal-footer">
-			<button class="btn" onclick="closeAllOverlays()">取消</button>
-			<button class="btn btn-primary" onclick="submitNewKeyword()">确定新增</button>
+			<button class="btn-cancel" onclick="closeAllOverlays()">取消</button>
+			<button class="btn-save" onclick="submitNewKeyword()">确定新增</button>
 		</div>
 	</div>
 
 	<script src="/static/js/common.js"></script>
 	<script src="/static/js/admin-analytics.js"></script>
+
+	<!-- ===== Template Fragments ===== -->
+	<!-- 关键词表格行 -->
+	<template id="tmpl-kw-row">
+		<tr>
+			<td class="fw-500"></td>
+			<td><span class="tag"></span></td>
+			<td class="text-sub text-sm"></td>
+			<td>
+				<div class="table-actions">
+					<button class="btn-link btn-sm incr">+0.1</button>
+					<button class="btn-link btn-sm decr">-0.1</button>
+				</div>
+			</td>
+		</tr>
+	</template>
+
+	<!-- 差评反馈卡片 -->
+	<template id="tmpl-feedback-card">
+		<div class="feedback-item" style="padding:12px;background:#fef2f2;border-left:3px solid var(--danger);border-radius:var(--radius);font-size:13px">
+			<div class="fw-500 mb-8 fb-question"></div>
+			<div class="text-sub text-sm mb-8 fb-answer"></div>
+			<div class="fb-comment" style="padding:6px 8px;background:var(--white);border-radius:var(--radius-sm);color:var(--text)"></div>
+			<div class="flex justify-between mt-8">
+				<span class="text-sub text-sm fb-meta"></span>
+				<div class="flex gap-4">
+					<button class="btn-link btn-sm adjust-btn">调整权重</button>
+					<button class="btn-link btn-sm process-btn">已处理</button>
+				</div>
+			</div>
+		</div>
+	</template>
 </body>
 
 </html>

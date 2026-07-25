@@ -55,7 +55,7 @@ os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'rag_project.settings')
 django.setup()
 
 from apps.knowledge.models import KnowledgeNode
-from apps.users.models import SysUser, Team
+from apps.users.models import User, Team
 from apps.knowledge.tasks import batch_import_single_file
 
 # 文件大小限制：100MB
@@ -161,8 +161,8 @@ def import_documents(args):
     # 获取上传者
     if args.owner:
         try:
-            owner = SysUser.objects.get(username=args.owner)
-        except SysUser.DoesNotExist:
+            owner = User.objects.get(username=args.owner)
+        except User.DoesNotExist:
             print(f"[ERROR] 上传者不存在: {args.owner}")
             return 1
     else:
@@ -170,7 +170,7 @@ def import_documents(args):
         sa_role = Role.objects.filter(code='super_admin').first()
         if sa_role:
             sa_user_ids = UserRole.objects.filter(role=sa_role).values_list('user_id', flat=True)
-            owner = SysUser.objects.filter(id__in=sa_user_ids, is_deleted=False).first()
+            owner = User.objects.filter(id__in=sa_user_ids, is_deleted=False).first()
         else:
             owner = None
         

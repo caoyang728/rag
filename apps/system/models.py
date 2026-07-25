@@ -22,7 +22,7 @@ class SystemConfig(models.Model):
     value_type = models.CharField(max_length=8, choices=VALUE_TYPE_CHOICES, default='string')
     description = models.CharField(max_length=256, blank=True, default='')
     is_secret = models.BooleanField(default=False, help_text='加密存储的敏感项')
-    updated_by = models.ForeignKey('users.SysUser', null=True, blank=True,
+    updated_by = models.ForeignKey('users.User', null=True, blank=True,
                                     on_delete=models.SET_NULL, db_column='updated_by')
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -76,7 +76,7 @@ class LlmCallLog(models.Model):
     model = models.CharField(max_length=64, default='deepseek-chat')
     scene = models.CharField(max_length=32, default='qa',
                               help_text='qa/task_split/memory_refine/embedding/rerank')
-    user = models.ForeignKey('users.SysUser', on_delete=models.SET_NULL, null=True,
+    user = models.ForeignKey('users.User', on_delete=models.SET_NULL, null=True,
                               blank=True, db_column='user_id')
     prompt_tokens = models.IntegerField(default=0)
     completion_tokens = models.IntegerField(default=0)
@@ -106,7 +106,7 @@ class DataExportLog(models.Model):
     ]
 
     id = models.BigAutoField(primary_key=True)
-    user = models.ForeignKey('users.SysUser', on_delete=models.SET_NULL, null=True,
+    user = models.ForeignKey('users.User', on_delete=models.SET_NULL, null=True,
                               db_column='user_id')
     export_type = models.CharField(max_length=32,
                                     help_text='qa_records/audit/users/documents')

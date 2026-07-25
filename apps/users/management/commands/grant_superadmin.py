@@ -1,5 +1,5 @@
 from django.core.management.base import BaseCommand
-from apps.users.models import SysUser, Role, UserRole
+from apps.users.models import User, Role, UserRole
 
 
 class Command(BaseCommand):
@@ -15,9 +15,9 @@ class Command(BaseCommand):
         )
 
         if options['username']:
-            users = SysUser.objects.filter(username=options['username'])
+            users = User.objects.filter(username=options['username'])
         else:
-            users = SysUser.objects.all()
+            users = User.objects.all()
 
         updated = 0
         skipped = 0

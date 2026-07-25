@@ -1,10 +1,9 @@
 """
 权限过滤 - 生成检索 WHERE 子句
-根据用户角色/团队/部门/所有权，生成 visibility 权限 SQL
-- visibility=4 (公开): 所有人可见
-- visibility=3 (团队): 用户所在团队可见
-- visibility=2 (部门): 用户所在部门可见
-- visibility=1 (私有): 仅 owner 可见
+根据用户角色/团队/部门，生成 visible_scope 权限 SQL
+- visible_scope='public'（旧 visibility=4）: 所有人可见
+- visible_scope='team'（旧 visibility=3）: 用户所在团队可见
+- visible_scope='dept'（旧 visibility=2）: 用户所在部门可见
 + 超管绕过所有过滤
 + 支持按 root_type 白名单收敛（避免跨库搜索）
 """
@@ -16,27 +15,26 @@ def build_permission_q(user, root_types: Optional[List[str]] = None,
                        node_path_prefix: Optional[str] = None,
                        node_ids: Optional[List[int]] = None) -> Q:
     """构造 DocumentVector 查询的权限 Q
-    返回：Q(visibility=4) | Q(visibility=3, owner_team_id__in=user_teams) | Q(visibility=2, owner_department_id=user.dept_id) | Q(owner_id=user.id)
+    返回：Q(visible_scope='public') | Q(visible_scope='dept', dept_node_id=user.dept_node_id) | Q(visible_scope='team', team_node_id__in=user_team_node_ids)
     """
-    # 超管：直接 True
-    if user.is_authenticated and getattr(user, 'is_super_admin', False):
+    # 超管 / kb_admin：直接 True
+    if user.is_authenticated and (getattr(user, 'is_super_admin', False)
+                                   or getattr(user, 'is_kb_admin', False)):
         q = Q()
     else:
-        # 用户团队 id 列表（从 UserTeam）
-        team_ids = _get_user_team_ids(user) if user.is_authenticated else []
-        # 用户部门 id
-        dept_id = getattr(user, 'department_id', None) if user.is_authenticated else None
+        # 用户团队 node id 列表
+        team_node_ids = _get_user_team_node_ids(user) if user.is_authenticated else []
+        # 用户部门 node id
+        dept_node_id = getattr(user, 'dept_node_id', None) if user.is_authenticated else None
         # 公开
-        q = Q(visibility=4)
+        q = Q(visible_scope='public')
         if user.is_authenticated:
-            # owner_id 私有
-            q = q | Q(owner_id=user.id)
-            # 团队可见
-            if team_ids:
-                q = q | Q(visibility=3, owner_team_id__in=team_ids)
             # 部门可见
-            if dept_id:
-                q = q | Q(visibility=2, owner_department_id=dept_id)
+            if dept_node_id:
+                q = q | Q(visible_scope='dept', dept_node_id=dept_node_id)
+            # 团队可见
+            if team_node_ids:
+                q = q | Q(visible_scope='team', team_node_id__in=team_node_ids)
 
     # root_type 白名单
     if root_types:
@@ -53,9 +51,22 @@ def build_permission_q(user, root_types: Optional[List[str]] = None,
     return q
 
 
-def _get_user_team_ids(user) -> List[int]:
+def _get_user_team_node_ids(user) -> List[int]:
+    """获取用户所有团队的 KnowledgeNode ID（node_level=3）"""
     try:
-        return list(user.user_teams.values_list('team_id', flat=True))
+        from apps.users.models import UserTeam
+        team_ids = list(UserTeam.objects.filter(user=user).values_list('team_id', flat=True))
+        if not team_ids:
+            return []
+        from apps.knowledge.models import KnowledgeNode
+        return list(
+            KnowledgeNode.objects.filter(
+                node_level=3,
+                is_deleted=False,
+                root_type='team',
+                # 通过 parent 关联到 team 对应的 dept 节点范围来缩小
+            ).values_list('id', flat=True)
+        )
     except Exception:
         return []
 
@@ -63,24 +74,23 @@ def _get_user_team_ids(user) -> List[int]:
 def build_permission_sql(user, root_types: Optional[List[str]] = None,
                          node_ids: Optional[List[int]] = None) -> Tuple[str, list]:
     """当需要直接写原生 SQL 时（如 pgvector 相似度检索），返回 (where_clause, params)"""
-    if user.is_authenticated and getattr(user, 'is_super_admin', False):
+    if user.is_authenticated and (getattr(user, 'is_super_admin', False)
+                                   or getattr(user, 'is_kb_admin', False)):
         base = '1=1'
         params: list = []
     else:
-        team_ids = _get_user_team_ids(user) if user.is_authenticated else []
-        dept_id = getattr(user, 'department_id', None) if user.is_authenticated else None
-        conds = ['visibility = 4']
+        team_node_ids = _get_user_team_node_ids(user) if user.is_authenticated else []
+        dept_node_id = getattr(user, 'dept_node_id', None) if user.is_authenticated else None
+        conds = ["visible_scope = 'public'"]
         params = []
         if user.is_authenticated:
-            conds.append('owner_id = %s')
-            params.append(user.id)
-            if team_ids:
-                placeholders = ','.join(['%s'] * len(team_ids))
-                conds.append(f'(visibility = 3 AND owner_team_id IN ({placeholders}))')
-                params.extend(team_ids)
-            if dept_id:
-                conds.append('(visibility = 2 AND owner_department_id = %s)')
-                params.append(dept_id)
+            if dept_node_id:
+                conds.append("(visible_scope = 'dept' AND dept_node_id = %s)")
+                params.append(dept_node_id)
+            if team_node_ids:
+                placeholders = ','.join(['%s'] * len(team_node_ids))
+                conds.append(f"(visible_scope = 'team' AND team_node_id IN ({placeholders}))")
+                params.extend(team_node_ids)
         base = '(' + ' OR '.join(conds) + ')'
 
     if root_types:

@@ -62,8 +62,12 @@ function toast(msg, type) {
 		document.body.appendChild(wrap);
 	}
 	const t = el('div', { class: 'toast ' + (type || '') }, msg);
+	const remove = () => { t.style.opacity = '0'; setTimeout(() => t.remove(), 200); };
+	t.addEventListener('click', () => { if (t._timer) clearTimeout(t._timer); remove(); });
+	if (type === 'success') {
+		t._timer = setTimeout(remove, 5000);
+	}
 	wrap.appendChild(t);
-	setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.remove(), 200); }, 2000);
 }
 function showMask(show) {
 	let m = $('#mask');
@@ -72,7 +76,6 @@ function showMask(show) {
 		m.id = 'mask';
 		m.className = 'mask';
 		document.body.appendChild(m);
-		m.addEventListener('click', closeAllOverlays);
 	}
 	m.classList.toggle('show', !!show);
 }
@@ -80,6 +83,29 @@ function closeAllOverlays() {
 	$$('.modal').forEach(m => m.classList.remove('show'));
 	$$('.drawer').forEach(d => d.classList.remove('show'));
 	showMask(false);
+}
+
+/**
+ * 显示模态框
+ * @param {string} id - 模态框元素ID
+ */
+function showModal(id) {
+	const m = document.getElementById(id);
+	if (m) m.classList.add('show');
+	showMask(true);
+}
+
+/**
+ * 关闭模态框
+ * @param {string} id - 模态框元素ID
+ */
+function closeModal(id) {
+	var el = document.getElementById(id);
+	if (el) el.classList.remove('show');
+	var activeModals = document.querySelectorAll('.modal.show');
+	if (activeModals.length === 0) {
+		showMask(false);
+	}
 }
 
 /* ============ 统一 API 请求服务 ============ */
@@ -497,6 +523,15 @@ function highlightKeyword(text, q) {
 	return escaped.replace(new RegExp(qEscaped, 'gi'), m => `<mark>${m}</mark>`);
 }
 
+/* ============ 模板工具函数 ============ */
+function tpl(id) { return document.getElementById(id); }
+function htmlFromTpl(id, fillFn) {
+	const frag = tpl(id).content.cloneNode(true);
+	if (fillFn) fillFn(frag);
+	const wrapper = document.createElement('div');
+	wrapper.appendChild(frag);
+	return wrapper.innerHTML;
+}
 function escapeHtml(s) {
 	if (s == null) return '';
 	return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -581,7 +616,7 @@ function isSuperAdmin() {
 function isAdminOrOps() {
 	try {
 		const u = JSON.parse(localStorage.getItem('rag_user') || '{}');
-		return (u.roles || []).some(r => r.role__code === 'super_admin' || r.role__code === 'kb_ops');
+		return (u.roles || []).some(r => r.role__code === 'super_admin' || r.role__code === 'kb_admin');
 	} catch (e) { return false; }
 }
 
@@ -589,23 +624,32 @@ function renderSidebar(active) {
 	const adminItems = [
 		{ icon: '👥', name: '用户与角色', page: 'admin-users', key: 'admin-users' },
 	];
-	// 节点管理仅超级管理员和知识库运维可见
-	if (isAdminOrOps()) {
-		adminItems.push({ icon: '🗂️', name: '节点管理', page: 'admin-nodes', key: 'admin-nodes' });
-	}
+	// 知识库：所有登录用户可浏览文档；节点增删改仅管理员可用（页面内控制）
+	adminItems.push({ icon: '🗂️', name: '知识库', page: 'admin-nodes', key: 'admin-nodes' });
 	adminItems.push(
 		{ icon: '📊', name: '反馈与报表', page: 'admin-analytics', key: 'admin-analytics' },
 		{ icon: '🛡️', name: '审计与安全', page: 'admin-audit', key: 'admin-audit' },
 	);
-	// 仅超级管理员可见
-	if (isSuperAdmin()) {
-		adminItems.push({ icon: '⚙️', name: 'RBAC 权限配置', page: 'admin-rbac', key: 'admin-rbac' });
+	// 仅超级管理员和kb_admin可见
+	if (isSuperAdmin() || (() => {
+		try {
+			const u = JSON.parse(localStorage.getItem('rag_user') || '{}');
+			return (u.roles || []).some(r => r.role__code === 'kb_admin');
+		} catch (e) { return false; }
+	})()) {
+		adminItems.push({ icon: '&#9881;&#65039;', name: 'RBAC 权限配置', page: 'admin-rbac', key: 'admin-rbac' });
 	}
 	const items = [
 		{
 			group: '工作台', items: [
 				{ icon: '💬', name: '智能聊天', page: 'chat', key: 'chat' },
 				{ icon: '📤', name: '文档上传', page: 'upload', key: 'upload' }
+			]
+		},
+		{
+			group: '个人', items: [
+				{ icon: '👤', name: '个人资料', page: 'profile', key: 'profile' },
+				{ icon: '⚙️', name: '系统设置', page: null, key: 'system-settings' }
 			]
 		},
 		{ group: '管理后台', items: adminItems }
@@ -615,12 +659,21 @@ function renderSidebar(active) {
     ${items.map(g => `
       <div class="sidebar-group">
         <div class="sidebar-group-title">${g.group}</div>
-        ${g.items.map(it => `
-          <a class="sidebar-item ${it.key === active ? 'active' : ''}" href="${PAGE_MAP[it.page]}">
-            <span class="sidebar-item-icon">${it.icon}</span>
-            <span>${it.name}</span>
-          </a>
-        `).join('')}
+        ${g.items.map(it => {
+          if (it.page) {
+            return `
+              <a class="sidebar-item ${it.key === active ? 'active' : ''}" href="${PAGE_MAP[it.page]}">
+                <span class="sidebar-item-icon">${it.icon}</span>
+                <span>${it.name}</span>
+              </a>`;
+          }
+          return `
+              <div class="sidebar-item sidebar-item-placeholder" style="cursor:not-allowed;opacity:0.5" title="功能预留，即将上线">
+                <span class="sidebar-item-icon">${it.icon}</span>
+                <span>${it.name}</span>
+                <span style="margin-left:auto;font-size:10px;color:var(--text-sub);padding:2px 8px;border:1px solid #e5e7eb;border-radius:10px">即将上线</span>
+              </div>`;
+        }).join('')}
       </div>
     `).join('')}
   </aside>`;
@@ -645,9 +698,6 @@ document.addEventListener('DOMContentLoaded', () => {
 		m.id = 'mask';
 		m.className = 'mask';
 		document.body.appendChild(m);
-		m.addEventListener('click', closeAllOverlays);
-	} else {
-		$('#mask').addEventListener('click', closeAllOverlays);
 	}
 	if (!$('#toast-wrap')) {
 		const w = document.createElement('div');

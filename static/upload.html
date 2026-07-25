@@ -7,6 +7,7 @@
 	<title>文档上传 · 知库 Agent</title>
 	<link rel="stylesheet" href="/static/css/common.css">
 	<link rel="stylesheet" href="/static/css/upload.css">
+	<link rel="stylesheet" href="/static/css/multi-select.css">
 </head>
 
 <body>
@@ -18,27 +19,23 @@
 		<div id="sidebar-container"></div>
 		<div class="main">
 			<div class="page-header">
-				<div class="breadcrumb"><a href="/chat/">首页</a><span class="sep">/</span><a href="#">工作台</a><span
-						class="sep">/</span>文档上传</div>
 				<div class="page-header-flex">
-					<div>
+					<div class="flex items-baseline gap-10">
 						<div class="page-title">文档上传</div>
-						<div class="page-desc">支持 PDF / Word / MD / TXT / 源代码 / YML / JSON 六大类文档，自动脱敏与向量化入库</div>
+						<div class="page-subtitle">支持 PDF / Word / MD / TXT / 源代码 / YML / JSON 六大类文档，自动脱敏与向量化入库</div>
 					</div>
 					<div id="celeryStatus" class="flex items-center gap-12">
-						<span class="tag tag-default" style="display:flex;align-items:center;gap:6px">
+						<span class="tag tag-default flex items-center gap-6">
 							<span id="celeryIcon">⏳</span>
 							<span id="celeryText">检查文档解析服务状态...</span>
 						</span>
-						<button class="btn btn-sm btn-warning" id="retryPendingBtn" onclick="retryPendingDocs()"
-							style="display:none">🔄 重试待处理文档</button>
+						<button class="btn btn-sm btn-warning hidden" id="retryPendingBtn" onclick="retryPendingDocs()">🔄 重试待处理文档</button>
 					</div>
 				</div>
 			</div>
-			<div class="upload-drop" id="dropZone" style="position:relative">
-				<input type="file" id="fileInput" multiple
-					accept=".pdf,.doc,.docx,.md,.txt,.py,.js,.ts,.java,.go,.rs,.yml,.yaml,.json,.xml,.conf,.cfg,.ini,.toml,.sh,.bat,.ps1"
-					style="position:absolute;inset:0;opacity:0;cursor:pointer;z-index:5">
+			<div class="upload-drop relative" id="dropZone">
+				<input type="file" id="fileInput" multiple class="upload-input"
+					accept=".pdf,.doc,.docx,.md,.txt,.py,.js,.ts,.java,.go,.rs,.yml,.yaml,.json,.xml,.conf,.cfg,.ini,.toml,.sh,.bat,.ps1">
 				<div class="upload-drop-icon">📤</div>
 				<div class="upload-drop-title">拖拽文件到此处，或<span class="text-primary">点击选择上传</span></div>
 				<div class="upload-drop-desc">支持批量上传，单个文件最大 100 MB，建议单批次不超过 20 个文件</div>
@@ -53,7 +50,7 @@
 				</div>
 			</div>
 
-			<div class="card mt-16" id="uploadPanel" style="display:none">
+			<div class="card mt-16 hidden" id="uploadPanel">
 				<div class="card-title flex justify-between items-center">
 					<span>本次上传文件（<span id="fileCount">0</span>）</span>
 					<div class="flex gap-8">
@@ -68,66 +65,97 @@
 				</div>
 			</div>
 
-			<div class="upload-options" id="uploadOptions" style="display:none">
-				<div class="grid-2" style="gap:24px">
+			<div class="upload-options hidden" id="uploadOptions">
+				<div class="grid-2 gap-24">
 					<div>
 						<label class="form-label">归属节点 <span class="required">*</span></label>
-						<select class="select" id="nodeSelect">
-							<option value="">-- 请选择归属节点 --</option>
-						</select>
+						<div class="flex items-center gap-12">
+							<select class="select" id="nodeSelect" style="flex:1;min-width:180px">
+								<option value="">-- 请选择归属节点 --</option>
+							</select>
+							<label class="checkbox"><input type="checkbox" id="chkAutoDesensitize" checked><span>自动脱敏（手机号 / 身份证 / 密钥 / IP）</span></label>
+						</div>
 						<div class="form-hint">上传后可在节点管理中调整归属</div>
 					</div>
 					<div>
-						<label class="form-label">自动化选项</label>
-						<div style="display:flex;flex-direction:column;gap:8px;padding:6px 0">
-							<label class="checkbox"><input type="checkbox" checked><span>🔒 自动脱敏（手机号 / 身份证 / 密钥 / 内网
-									IP）</span></label>
-							<label class="checkbox"><input type="checkbox" checked><span>🧠 自动切片 + 向量化入库（BGE
-									Embedding）</span></label>
-							<label class="checkbox"><input type="checkbox"><span>📧 处理完成后邮件通知</span></label>
-							<label class="checkbox">
-								<input type="checkbox" id="chkOverwrite">
+						<label class="form-label">文档权限设置</label>
+						<div class="grid-2 gap-16">
+							<label class="checkbox" style="align-items:flex-start">
+								<input type="checkbox" id="chkAllowShare">
 								<div>
-									<span>♻️ 相同文件名自动覆盖旧版本</span>
-									<div class="form-hint" style="margin-top:2px">本人上传的同名文件将直接覆盖；非本人的文件覆盖需原上传人或管理员确认
-									</div>
+									<span>🔗 允许分享</span>
+									<div class="form-hint" style="margin-top:2px">所有者/管理员可将文档分享给指定用户</div>
+								</div>
+							</label>
+							<label class="checkbox" style="align-items:flex-start">
+								<input type="checkbox" id="chkAllowDownload">
+								<div>
+									<span>📥 允许下载</span>
+									<div class="form-hint" style="margin-top:2px">有读取权限的用户可下载原文件</div>
 								</div>
 							</label>
 						</div>
 					</div>
 				</div>
-				<div style="margin-top:20px">
-					<label class="form-label">可见范围 <span class="required">*</span></label>
-					<div class="upload-radio-group" id="visRadios">
-						<label class="upload-radio selected" onclick="pickVis(this)">
-							<input type="radio" name="vis" value="private" checked>
-							<div>
-								<div class="upload-radio-title">🔒 仅本人（Private）</div>
-								<div class="upload-radio-desc">仅上传者本人可检索，用于个人笔记、草稿</div>
+				<div class="mt-16">
+				<label class="form-label">可见范围 <span class="required">*</span></label>
+				<div class="upload-radio-group" id="visRadios">
+					<label class="upload-radio selected" onclick="pickVis(this)">
+						<input type="radio" name="vis" value="private" checked>
+						<div>
+							<div class="upload-radio-title">🔒 个人（Private）</div>
+							<div class="upload-radio-desc">仅上传者本人可检索，用于个人笔记、草稿</div>
+						</div>
+					</label>
+					<label class="upload-radio" onclick="pickVis(this)">
+						<input type="radio" name="vis" value="org">
+						<div>
+							<div class="upload-radio-title">🏢 部门/团队（Org）</div>
+							<div class="upload-radio-desc">指定部门和团队成员可检索，用于共享资料</div>
+						</div>
+					</label>
+					<label class="upload-radio" onclick="pickVis(this)">
+						<input type="radio" name="vis" value="public">
+						<div>
+							<div class="upload-radio-title">🌐 公开（Public）</div>
+							<div class="upload-radio-desc">全公司可检索，用于公开规范和白皮书</div>
+						</div>
+					</label>
+				</div>
+				<!-- 部门/团队选择（选择部门/团队时显示） -->
+				<div class="hidden" id="uploadOrgSelect">
+					<div class="multi-select-row">
+						<div class="multi-select" id="uploadDeptSelect">
+							<div class="multi-select-trigger" onclick="toggleMultiSelect('uploadDeptSelect')">
+								<span class="multi-select-label">请选择部门</span>
+								<span class="multi-select-count hidden" id="uploadDeptCount">0</span>
+								<span class="multi-select-arrow">▾</span>
 							</div>
-						</label>
-						<label class="upload-radio" onclick="pickVis(this)">
-							<input type="radio" name="vis" value="department">
-							<div>
-								<div class="upload-radio-title">🏢 部门可见（Department）</div>
-								<div class="upload-radio-desc">全部门成员可检索，用于部门规范和流程</div>
+							<div class="multi-select-panel">
+								<div class="multi-select-header">
+									<input type="text" class="multi-select-search" placeholder="搜索部门..." oninput="uploadOnDeptSearch(this)">
+									<span class="multi-select-toggle-all" onclick="toggleMultiSelectAll('uploadDeptPanel')">全选</span>
+								</div>
+								<div class="multi-select-list" id="uploadDeptPanel"></div>
 							</div>
-						</label>
-						<label class="upload-radio" onclick="pickVis(this)">
-							<input type="radio" name="vis" value="team">
-							<div>
-								<div class="upload-radio-title">👥 团队可见（Team）</div>
-								<div class="upload-radio-desc">同团队成员可检索，用于团队共享资料</div>
+						</div>
+						<div class="multi-select" id="uploadTeamSelect">
+							<div class="multi-select-trigger" onclick="toggleMultiSelect('uploadTeamSelect')">
+								<span class="multi-select-label">请先选择部门</span>
+								<span class="multi-select-count hidden" id="uploadTeamCount">0</span>
+								<span class="multi-select-arrow">▾</span>
 							</div>
-						</label>
-						<label class="upload-radio" onclick="pickVis(this)">
-							<input type="radio" name="vis" value="public">
-							<div>
-								<div class="upload-radio-title">🌐 公开（Public）</div>
-								<div class="upload-radio-desc">全公司可检索，用于公开规范和白皮书</div>
+							<div class="multi-select-panel">
+								<div class="multi-select-header">
+									<input type="text" class="multi-select-search" placeholder="搜索团队..." oninput="uploadOnTeamSearch(this)">
+									<span class="multi-select-toggle-all" onclick="toggleMultiSelectAll('uploadTeamPanel')">全选</span>
+								</div>
+								<div class="multi-select-list" id="uploadTeamPanel"></div>
 							</div>
-						</label>
+						</div>
 					</div>
+					<div class="form-hint mt-8">选择部门后会自动选中该部门下的所有团队，可手动取消不需要的团队</div>
+				</div>
 				</div>
 			</div>
 
@@ -169,7 +197,94 @@
 	<div id="mask" class="mask"></div>
 	<div id="toast-wrap" class="toast-wrap"></div>
 
+	<!-- ====== 模板 ====== -->
+	<template id="tmpl-upload-row">
+		<tr>
+			<td><span class="flex items-center gap-6"><span class="up-row-icon"></span> <span class="up-row-name"></span></span></td>
+			<td><span class="tag up-row-type"></span></td>
+			<td class="text-sub up-row-node"></td>
+			<td class="up-row-owner"></td>
+			<td class="up-row-vis"></td>
+			<td class="up-row-status"></td>
+			<td class="text-sub up-row-time"></td>
+			<td>
+				<div class="table-actions">
+					<button class="btn-link btn-sm up-row-view">查看</button>
+					<button class="btn-link btn-sm up-row-reparse">重传</button>
+					<button class="btn-link btn-sm text-danger up-row-delete">删除</button>
+				</div>
+			</td>
+		</tr>
+	</template>
+
+	<template id="tmpl-upload-pagination">
+		<span class="up-pag-total">共 <span class="up-pag-total-num"></span> 条</span>
+		<button class="page-btn up-pag-prev">‹</button>
+		<div class="up-pag-pages"></div>
+		<button class="page-btn up-pag-next">›</button>
+	</template>
+
+	<template id="tmpl-file-item">
+		<div class="file-item">
+			<div class="file-item-icon up-fi-icon"></div>
+			<div class="file-item-info">
+				<div class="file-item-name up-fi-name"></div>
+				<div class="file-item-meta up-fi-meta"></div>
+			</div>
+			<div class="file-item-progress"><div class="file-item-progress-bar"></div></div>
+			<div class="file-item-status"><span class="tag">等待中</span></div>
+			<button class="btn-link btn-sm text-danger up-fi-remove">✕</button>
+		</div>
+	</template>
+
+	<template id="tmpl-upload-progress">
+		<div class="global-progress" style="margin-top:12px;padding:12px;background:var(--primary-light);border-radius:var(--radius)">
+			<div class="flex justify-between items-center" style="margin-bottom:8px">
+				<span style="font-size:13px;color:var(--text-primary)">整体上传进度</span>
+				<button class="btn-link btn-sm text-danger up-prog-cancel">取消上传</button>
+			</div>
+			<div class="up-prog-bar-bg" style="width:100%;height:6px;background:var(--border);border-radius:3px;overflow:hidden">
+				<div class="up-prog-bar-fill" style="height:100%;background:var(--primary);transition:width 0.3s ease;width:0%"></div>
+			</div>
+			<div class="up-prog-text" style="text-align:right;font-size:11.5px;color:var(--text-sub);margin-top:4px">0/0</div>
+		</div>
+	</template>
+
+	<template id="tmpl-conflict-dialog">
+		<div class="conflict-overlay" style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:10000;display:flex;align-items:center;justify-content:center">
+			<div class="conflict-dialog" style="background:white;border-radius:12px;padding:24px;width:420px;max-width:90vw;box-shadow:0 10px 40px rgba(0,0,0,0.2);font-family:system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+				<div class="flex items-center gap-12" style="margin-bottom:16px">
+					<div style="width:40px;height:40px;border-radius:50%;background:#ff980015;display:flex;align-items:center;justify-content:center;font-size:20px">⚠️</div>
+					<div>
+						<div style="font-size:16px;font-weight:600;color:#333">文件已存在且已被删除</div>
+						<div style="font-size:13px;color:#999">检测到相同内容的文件之前已被删除</div>
+					</div>
+				</div>
+				<div style="background:#f8f9fa;border-radius:8px;padding:16px;margin-bottom:20px">
+					<div class="flex justify-between" style="margin-bottom:8px">
+						<span style="color:#666">文件名</span>
+						<span class="con-filename" style="font-weight:500"></span>
+					</div>
+					<div class="flex justify-between" style="margin-bottom:8px">
+						<span style="color:#666">原上传者</span>
+						<span class="con-owner"></span>
+					</div>
+					<div class="flex justify-between">
+						<span style="color:#666">原上传时间</span>
+						<span class="con-time"></span>
+					</div>
+				</div>
+				<div class="flex gap-12">
+					<button class="con-btn-cancel" style="flex:1;padding:10px;border:1px solid #ddd;border-radius:8px;background:white;color:#666;cursor:pointer;font-size:14px;transition:all 0.2s">取消</button>
+					<button class="con-btn-new" style="flex:1;padding:10px;border:1px solid #2196f3;border-radius:8px;background:white;color:#2196f3;cursor:pointer;font-size:14px;transition:all 0.2s">新建记录</button>
+					<button class="con-btn-restore" style="flex:1;padding:10px;border:none;border-radius:8px;background:#2196f3;color:white;cursor:pointer;font-size:14px;transition:all 0.2s">恢复</button>
+				</div>
+			</div>
+		</div>
+	</template>
+
 	<script src="/static/js/common.js"></script>
+	<script src="/static/js/multi-select.js"></script>
 	<script src="/static/js/upload.js"></script>
 </body>
 

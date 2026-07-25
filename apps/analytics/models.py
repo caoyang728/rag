@@ -22,7 +22,7 @@ class KeywordWeight(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        db_table = 'keyword_weight'
+        db_table = 'analytics_keyword_weight'
         unique_together = [('keyword', 'root_type')]
         indexes = [
             models.Index(fields=['keyword'], name='idx_kw_kw'),
@@ -51,7 +51,7 @@ class AccuracyReport(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        db_table = 'accuracy_report'
+        db_table = 'analytics_accuracy_report'
         indexes = [
             models.Index(fields=['-report_date'], name='idx_ar_date'),
         ]

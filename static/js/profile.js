@@ -70,7 +70,7 @@ function setProfileMenu(m) {
 		it.classList.toggle('active', menuKeys[i] === m);
 	});
 	const box = $('#profileContent');
-	if (box) box.innerHTML = renderProfileContent(m);
+	if (box) renderProfileContent(m, box);
 	// 权限页加载异步数据
 	if (m === 'permissions') {
 		loadMyPermissions();
@@ -79,137 +79,99 @@ function setProfileMenu(m) {
 }
 
 /* ============ 基本信息 ============ */
-function renderBasicTab() {
-	const joinedAt = STATE.user.created_at ? formatDate(STATE.user.created_at) : '';
-	return `
-      <div class="card-title">基本信息</div>
-      <div class="flex gap-24 items-center mb-24" style="padding:16px;background:var(--primary-light);border-radius:var(--radius-lg)">
-        <div class="avatar avatar-lg" style="background:linear-gradient(135deg,#2563eb,#1e40af)">${escapeHtml(STATE.user.avatar)}</div>
-        <div class="flex-1">
-          <div class="text-xl">${escapeHtml(STATE.user.name)}</div>
-          <div class="text-sub mt-4">${escapeHtml(STATE.user.role)} · ${escapeHtml(STATE.user.dept)} / ${escapeHtml(STATE.user.team)}</div>
-          <div class="text-sub text-sm mt-4">用户ID ${STATE.user.id || ''}${joinedAt ? ' · 加入时间 ' + joinedAt : ''}</div>
-        </div>
-        <button class="btn" onclick="toast('更换头像功能开发中','')">📷 更换头像</button>
-      </div>
-      <div class="grid-2" style="gap:16px 24px">
-        <div class="form-item">
-          <label class="form-label">姓名</label>
-          <input class="input" id="profileName" value="${escapeHtml(STATE.user.name)}">
-        </div>
-        <div class="form-item">
-          <label class="form-label">企业邮箱</label>
-          <input class="input" value="${escapeHtml(STATE.user.email)}" readonly>
-          <div class="form-hint">企业邮箱不可修改，如需变更请联系管理员</div>
-        </div>
-        <div class="form-item">
-          <label class="form-label">部门</label>
-          <input class="input" value="${escapeHtml(STATE.user.dept)}" disabled>
-        </div>
-        <div class="form-item">
-          <label class="form-label">团队</label>
-          <input class="input" value="${escapeHtml(STATE.user.team)}" disabled>
-        </div>
-        <div class="form-item">
-          <label class="form-label">手机号</label>
-          <input class="input" id="profilePhone" value="${escapeHtml(STATE.user.phone || '')}" placeholder="请输入手机号">
-        </div>
-        <div class="form-item">
-          <label class="form-label">角色</label>
-          <input class="input" value="${escapeHtml(STATE.user.role)}" disabled>
-        </div>
-      </div>
-      <div class="mt-16">
-        <button class="btn btn-primary" onclick="saveProfile()">保存修改</button>
-      </div>`;
+function renderBasicTab(box) {
+	const tmpl = document.getElementById('tmpl-profile-basic');
+	box.innerHTML = '';
+	box.appendChild(tmpl.content.cloneNode(true));
+
+	const u = STATE.user;
+	const joinedAt = u.created_at ? formatDate(u.created_at) : '';
+
+	const avatarEl = box.querySelector('#pf-avatar');
+	if (avatarEl) avatarEl.textContent = escapeHtml(u.avatar);
+
+	const nameEl = box.querySelector('#pf-name');
+	if (nameEl) nameEl.textContent = escapeHtml(u.name);
+
+	const roleDeptEl = box.querySelector('#pf-role-dept');
+	if (roleDeptEl) roleDeptEl.textContent = escapeHtml(u.role) + ' · ' + escapeHtml(u.dept) + ' / ' + escapeHtml(u.team);
+
+	const metaEl = box.querySelector('#pf-meta');
+	if (metaEl) {
+		let meta = '用户ID ' + (u.id || '');
+		if (joinedAt) meta += ' · 加入时间 ' + joinedAt;
+		metaEl.textContent = meta;
+	}
+
+	const nameInput = box.querySelector('#profileName');
+	if (nameInput) nameInput.value = u.name || '';
+
+	const emailInput = box.querySelector('#pf-email');
+	if (emailInput) emailInput.value = u.email || '';
+
+	const deptInput = box.querySelector('#pf-dept');
+	if (deptInput) deptInput.value = u.dept || '';
+
+	const teamInput = box.querySelector('#pf-team');
+	if (teamInput) teamInput.value = u.team || '';
+
+	const phoneInput = box.querySelector('#profilePhone');
+	if (phoneInput) phoneInput.value = u.phone || '';
+
+	const roleInput = box.querySelector('#pf-role');
+	if (roleInput) roleInput.value = u.role || '';
 }
 
 /* ============ 我的记忆 ============ */
-function renderMemoryTab() {
-	const tags = (STATE.memoryTags || []).map(t =>
+function renderMemoryTab(box) {
+	const tmpl = document.getElementById('tmpl-profile-memory');
+	box.innerHTML = '';
+	box.appendChild(tmpl.content.cloneNode(true));
+
+	// 职业标签
+	const tagsHTML = (STATE.memoryTags || []).map(t =>
 		`<span class="tag tag-primary tag-closable" onclick="removeMemoryTag(this)" data-tag="${escapeHtml(t)}">${escapeHtml(t)} <span class="tag-close">×</span></span>`
 	).join('');
+	const tagsBtn = box.querySelector('#memoryTagsWrap button');
+	if (tagsBtn && tagsHTML) tagsBtn.insertAdjacentHTML('beforebegin', tagsHTML);
 
-	const searchTypes = (STATE.memorySearchTypes || []).map(t =>
+	// 常用检索类型
+	const searchTypesHTML = (STATE.memorySearchTypes || []).map(t =>
 		`<span class="tag tag-info tag-closable" onclick="removeMemorySearchType(this)" data-tag="${escapeHtml(t)}">${escapeHtml(t)} <span class="tag-close">×</span></span>`
 	).join('');
+	const searchBtn = box.querySelector('#memorySearchTypesWrap button');
+	if (searchBtn && searchTypesHTML) searchBtn.insertAdjacentHTML('beforebegin', searchTypesHTML);
 
+	// 输出偏好
 	const outputPref = (STATE.memoryPreferences && STATE.memoryPreferences.output_preference) || '';
+	const outputEl = box.querySelector('#memoryOutputPref');
+	if (outputEl) outputEl.value = outputPref;
 
+	// 已提炼的偏好
 	const profileLines = STATE.memoryProfileText
 		? STATE.memoryProfileText.split('\n').filter(l => l.trim()).map(l => `• ${escapeHtml(l)}`).join('<br>')
 		: '暂无自动提炼的偏好数据，系统每 24 小时基于你的行为异步提炼一次';
-
-	return `
-      <div class="flex justify-between items-center mb-16">
-        <div class="card-title" style="margin:0">🧠 我的记忆（用户永久层）</div>
-        <button class="btn btn-danger btn-sm" onclick="clearAllMemory()">🗑 清空记忆</button>
-      </div>
-      <div style="padding:12px 14px;background:#fef9c3;border-left:3px solid var(--warning);border-radius:var(--radius);margin-bottom:20px;font-size:13px;line-height:1.6">
-        💡 <b>四层记忆机制</b>：短时（Redis）→ 会话（PG）→ <b>用户永久（此处）</b> → 全局系统。个人记忆会影响 AI 对你的回答偏好，仅你本人可见。
-      </div>
-      <div class="form-item">
-        <label class="form-label">职业标签</label>
-        <div class="mt-8" id="memoryTagsWrap">
-          ${tags}
-          <button class="btn btn-sm" style="padding:2px 8px" onclick="addMemoryTag()">+ 添加</button>
-        </div>
-        <div class="form-hint">AI 会结合职业标签给出更专业的回答</div>
-      </div>
-      <div class="form-item">
-        <label class="form-label">常用检索类型</label>
-        <div class="mt-8" id="memorySearchTypesWrap">
-          ${searchTypes}
-          <button class="btn btn-sm" style="padding:2px 8px" onclick="addMemorySearchType()">+ 添加</button>
-        </div>
-      </div>
-      <div class="form-item">
-        <label class="form-label">输出偏好</label>
-        <textarea class="textarea" id="memoryOutputPref" style="min-height:100px">${escapeHtml(outputPref)}</textarea>
-        <div class="form-hint">用自然语言描述你希望 AI 如何回答问题</div>
-      </div>
-      <div class="form-item">
-        <label class="form-label">已提炼的偏好（系统自动生成）</label>
-        <div style="background:var(--hover);padding:12px 14px;border-radius:var(--radius);font-size:13px;line-height:1.7;color:var(--text-sub)" id="profileTextDisplay">
-          ${profileLines}
-        </div>
-        <div class="form-hint">系统每 24 小时基于你的行为异步提炼一次</div>
-      </div>
-      <div class="mt-16">
-        <button class="btn btn-primary" onclick="saveMemory()">保存记忆</button>
-      </div>`;
+	const displayEl = box.querySelector('#profileTextDisplay');
+	if (displayEl) displayEl.innerHTML = profileLines;
 }
 
-/* ============ 权限（已有实现保留不变） ============ */
-function renderPermissionsTab() {
-	return `
-      <div class="flex justify-between items-center mb-16">
-        <div class="card-title" style="margin:0">🔑 我的权限</div>
-        <button class="btn btn-primary btn-sm" onclick="openPermissionApplyModal()">＋ 申请权限</button>
-      </div>
-      <div style="padding:12px 14px;background:var(--primary-light);border-radius:var(--radius);margin-bottom:16px;font-size:13px;line-height:1.7">
-        💡 <b>权限说明</b><br>
-        • 当前你拥有的权限由所分配的角色决定（RBAC）<br>
-        • 如需更高或额外权限，请提交申请并选择对应的审批人<br>
-        • 团队级 → 团队负责人 / 部门经理；部门级 → 部门经理 / 知识库运维；全平台 → 知识库运维 / 超级管理员
-      </div>
-      <div class="card-title" style="font-size:14px;margin-bottom:8px">已分配角色</div>
-      <div id="myRolesList" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:20px">
-        <span class="text-sub text-sm">加载中...</span>
-      </div>
-      <div class="card-title" style="font-size:14px;margin-bottom:8px">权限明细（按模块分组）</div>
-      <div id="myPermissionsList" style="display:flex;flex-direction:column;gap:12px;margin-bottom:20px">
-        <span class="text-sub text-sm">加载中...</span>
-      </div>
-      <div class="card-title" style="font-size:14px;margin-bottom:8px">我的申请记录</div>
-      <div id="myApplicationsList" style="display:flex;flex-direction:column;gap:8px">
-        <span class="text-sub text-sm">加载中...</span>
-      </div>`;
+/* ============ 权限 ============ */
+function renderPermissionsTab(box) {
+	const tmpl = document.getElementById('tmpl-profile-perms');
+	box.innerHTML = '';
+	box.appendChild(tmpl.content.cloneNode(true));
 }
 
 /* ============ 邮件订阅 ============ */
-function renderEmailTab() {
+function renderEmailTab(box) {
+	const tmpl = document.getElementById('tmpl-profile-subscription');
+	box.innerHTML = '';
+	box.appendChild(tmpl.content.cloneNode(true));
+
 	const subs = STATE.subscriptions || {};
+	const hintEl = box.querySelector('#sub-email-hint');
+	if (hintEl) hintEl.innerHTML = '📬 订阅内容将发送至 <b>' + escapeHtml(STATE.user.email) + '</b>，可随时取消订阅';
+
 	const items = [
 		{ key: 'node_update', icon: '📁', title: '订阅知识库节点更新', desc: '当你关注的节点有新文档上传时，每天汇总一次发送邮件' },
 		{ key: 'system_notice', icon: '🚨', title: '系统告警通知', desc: '上传失败、账号异常登录、权限变更等重要事件即时告警' },
@@ -217,71 +179,31 @@ function renderEmailTab() {
 		{ key: 'keyword_alert', icon: '🔍', title: '关键词命中通知', desc: '当有新文档包含你关注的关键词时立即通知' },
 	];
 
-	const checkboxes = items.map(item => {
-		const checked = subs[item.key] && subs[item.key].is_enabled ? 'checked' : '';
-		return `
-        <label class="checkbox" style="padding:14px;border:1px solid var(--border);border-radius:var(--radius);align-items:flex-start">
-          <input type="checkbox" ${checked} style="margin-top:2px" data-subkey="${item.key}">
-          <div>
-            <div class="fw-500">${item.icon} ${item.title}</div>
-            <div class="text-sub text-sm mt-4">${item.desc}</div>
-          </div>
-        </label>`;
-	}).join('');
-
-	return `
-      <div class="card-title">📧 邮件订阅偏好</div>
-      <div style="padding:12px 14px;background:var(--primary-light);border-radius:var(--radius);margin-bottom:20px;font-size:13px;line-height:1.6">
-        📬 订阅内容将发送至 <b>${escapeHtml(STATE.user.email)}</b>，可随时取消订阅
-      </div>
-      <div style="display:flex;flex-direction:column;gap:14px">
-        ${checkboxes}
-      </div>
-      <div class="mt-16">
-        <button class="btn btn-primary" onclick="saveSubscriptions()">保存偏好</button>
-      </div>`;
+	const checkboxesEl = box.querySelector('#sub-checkboxes');
+	if (checkboxesEl) {
+		checkboxesEl.innerHTML = items.map(item => {
+			const checked = subs[item.key] && subs[item.key].is_enabled ? 'checked' : '';
+			return '<label class="checkbox" style="padding:14px;border:1px solid var(--border);border-radius:var(--radius);align-items:flex-start">' +
+				'<input type="checkbox" ' + checked + ' style="margin-top:2px" data-subkey="' + item.key + '">' +
+				'<div><div class="fw-500">' + item.icon + ' ' + item.title + '</div>' +
+				'<div class="text-sub text-sm mt-4">' + item.desc + '</div></div></label>';
+		}).join('');
+	}
 }
 
 /* ============ 修改密码 ============ */
-function renderPwdTab() {
-	return `
-      <div class="card-title">🔐 修改密码</div>
-      <div style="max-width:480px">
-        <div class="form-item">
-          <label class="form-label">当前密码</label>
-          <input class="input" type="password" id="oldPwd" placeholder="请输入当前密码">
-        </div>
-        <div class="form-item">
-          <label class="form-label">新密码</label>
-          <input class="input" type="password" id="newPwd" placeholder="至少 8 位，包含大小写字母和数字" oninput="updatePwdStrength(this.value)">
-          <div class="password-strength" id="pwdStrength"><div class="bar"></div><div class="bar"></div><div class="bar"></div></div>
-          <div class="password-hint" id="pwdHint">密码强度：待输入</div>
-        </div>
-        <div class="form-item">
-          <label class="form-label">确认新密码</label>
-          <input class="input" type="password" id="confirmPwd" placeholder="再次输入新密码">
-        </div>
-        <div style="padding:12px;background:var(--hover);border-radius:var(--radius);font-size:12px;line-height:1.7;color:var(--text-sub)">
-          <b>密码安全要求：</b><br>
-          • 至少 8 位，最多 32 位<br>
-          • 必须包含大写字母、小写字母和数字<br>
-          • 建议包含特殊字符（! @ # $ % ^ &amp; *）<br>
-          • 不能与旧密码相同<br>
-          • 修改后需重新登录
-        </div>
-        <div class="mt-16">
-          <button class="btn btn-primary" onclick="changePassword()">确认修改</button>
-        </div>
-      </div>`;
+function renderPwdTab(box) {
+	const tmpl = document.getElementById('tmpl-profile-password');
+	box.innerHTML = '';
+	box.appendChild(tmpl.content.cloneNode(true));
 }
 
-function renderProfileContent(m) {
-	if (m === 'basic') return renderBasicTab();
-	if (m === 'memory') return renderMemoryTab();
-	if (m === 'permissions') return renderPermissionsTab();
-	if (m === 'email') return renderEmailTab();
-	if (m === 'pwd') return renderPwdTab();
-	return '';
+function renderProfileContent(m, box) {
+	if (m === 'basic') { renderBasicTab(box); return; }
+	if (m === 'memory') { renderMemoryTab(box); return; }
+	if (m === 'permissions') { renderPermissionsTab(box); return; }
+	if (m === 'email') { renderEmailTab(box); return; }
+	if (m === 'pwd') { renderPwdTab(box); return; }
 }
 
 /* ============ 保存基本信息 ============ */
@@ -547,20 +469,23 @@ async function loadMyPermissions() {
 		if (permsBox) {
 			const groups = data.permission_groups || {};
 			const keys = Object.keys(groups);
+			permsBox.innerHTML = '';
 			if (keys.length === 0) {
 				permsBox.innerHTML = '<span class="text-sub text-sm">暂无显式权限（仅继承默认 read 权限）</span>';
 			} else {
-				permsBox.innerHTML = keys.map(mod => {
+				const cardTmpl = document.getElementById('tmpl-perm-module');
+				keys.forEach(mod => {
 					const items = groups[mod];
 					const label = MODULE_LABELS[mod] || mod;
-					return `
-            <div style="padding:12px;border:1px solid var(--border);border-radius:var(--radius);background:var(--white)">
-              <div style="font-weight:600;margin-bottom:8px;font-size:13px">${escapeHtml(label)} 模块</div>
-              <div style="display:flex;flex-wrap:wrap;gap:6px">
-                ${items.map(it => `<span class="tag tag-sm" style="background:var(--primary-light);color:var(--primary)">${escapeHtml(it.action)} · ${(it.scopes || []).map(s => SCOPE_LABELS[s] || s).join(',')}</span>`).join('')}
-              </div>
-            </div>`;
-				}).join('');
+					const clone = cardTmpl.content.cloneNode(true);
+					clone.querySelector('.perm-mod-title').textContent = label + ' 模块';
+					clone.querySelector('.perm-mod-tags').innerHTML = items.map(it =>
+						'<span class="tag tag-sm" style="background:var(--primary-light);color:var(--primary)">' +
+						escapeHtml(it.action) + ' · ' + (it.scopes || []).map(s => SCOPE_LABELS[s] || s).join(',') +
+						'</span>'
+					).join('');
+					permsBox.appendChild(clone);
+				});
 			}
 		}
 	} catch (e) {
@@ -576,24 +501,40 @@ async function loadPermissionApplications() {
 	try {
 		const data = await api.getJson('/api/v1/auth/permissions/applications/');
 		const rows = data.rows || [];
+		box.innerHTML = '';
 		if (rows.length === 0) {
 			box.innerHTML = '<div style="padding:14px;background:var(--hover);border-radius:var(--radius);font-size:13px;color:var(--text-sub);text-align:center">暂无申请记录</div>';
 			return;
 		}
-		box.innerHTML = rows.map(a => `
-      <div style="padding:10px 12px;border:1px solid var(--border);border-radius:var(--radius);background:var(--white)">
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
-          <div style="font-weight:500;font-size:13px"><code style="background:var(--hover);padding:1px 5px;border-radius:3px;font-size:12px">${escapeHtml(a.permission_code || '—')}</code></div>
-          <span class="tag tag-sm ${APP_STATUS_COLORS[a.status] || ''}">${APP_STATUS_LABELS[a.status] || a.status}</span>
-        </div>
-        <div class="text-sub text-sm" style="margin-bottom:4px">
-          范围：${SCOPE_LABELS[a.applied_scope] || a.applied_scope} · 审批人：${escapeHtml(a.approver_name)} · ${formatDate(a.created_at)}
-        </div>
-        <div class="text-sub text-sm">理由：${escapeHtml(a.reason || '—')}</div>
-        ${a.reviewer_comment ? `<div class="text-sub text-sm" style="margin-top:4px;color:var(--primary)">审批意见：${escapeHtml(a.reviewer_comment)}</div>` : ''}
-        ${a.status === 'pending' ? `<div style="margin-top:6px"><button class="btn btn-sm" style="color:var(--danger)" onclick="withdrawApplication(${a.id})">撤回申请</button></div>` : ''}
-      </div>
-    `).join('');
+		const cardTmpl = document.getElementById('tmpl-perm-request');
+		rows.forEach(a => {
+			const clone = cardTmpl.content.cloneNode(true);
+
+			clone.querySelector('.perm-app-code').innerHTML = '<code style="background:var(--hover);padding:1px 5px;border-radius:3px;font-size:12px">' + escapeHtml(a.permission_code || '—') + '</code>';
+
+			const statusEl = clone.querySelector('.perm-app-status');
+			statusEl.textContent = APP_STATUS_LABELS[a.status] || a.status;
+			const statusCls = APP_STATUS_COLORS[a.status] || '';
+			if (statusCls) statusEl.classList.add(statusCls);
+
+			clone.querySelector('.perm-app-scope').textContent = '范围：' + (SCOPE_LABELS[a.applied_scope] || a.applied_scope) + ' · 审批人：' + escapeHtml(a.approver_name) + ' · ' + formatDate(a.created_at);
+
+			clone.querySelector('.perm-app-reason').textContent = '理由：' + (a.reason || '—');
+
+			if (a.reviewer_comment) {
+				const commentEl = clone.querySelector('.perm-app-comment');
+				commentEl.textContent = '审批意见：' + escapeHtml(a.reviewer_comment);
+				commentEl.style.display = '';
+			}
+
+			if (a.status === 'pending') {
+				const actionsEl = clone.querySelector('.perm-app-actions');
+				actionsEl.innerHTML = '<button class="btn btn-sm" style="color:var(--danger)" onclick="withdrawApplication(' + a.id + ')">撤回申请</button>';
+				actionsEl.style.display = '';
+			}
+
+			box.appendChild(clone);
+		});
 	} catch (e) {
 		console.error('load applications failed:', e);
 		box.innerHTML = '<span class="text-sub text-sm" style="color:var(--danger)">加载失败</span>';

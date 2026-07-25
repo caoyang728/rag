@@ -7,18 +7,19 @@
 ## 一、快速启动
 
 ```bash
-# 1. 克隆仓库并进入根目录
 cd rag
 
-# 2. 复制并按需修改环境变量（LLM_API_KEY 至少要填一个真 key，否则走 stub）
+# 1. 配置环境变量
 cp .env.example .env && vim .env
 
-# 3. 一键启动 web + celery
+# 2. 一键启动
 docker compose up -d --build
 
-# 首次启动后建议：
-docker compose exec django python manage.py createsuperuser
-docker compose exec django python scripts/init_system.py   # 初始化系统数据
+# 3. 执行数据库迁移（首次部署）
+docker compose exec django python manage.py migrate
+
+# 4. 初始化系统数据（角色、权限、部门、团队、用户）
+docker compose exec django python scripts/init_system.py
 ```
 
 启动完成后：
@@ -34,12 +35,22 @@ docker compose exec django python scripts/init_system.py   # 初始化系统数�
 ```
 rag/
 ├── apps/
-│   ├── users/                  # 自定义 SysUser + RBAC（角色/权限/部门/团队）
-│   ├── knowledge/              # 节点树 + 文档 + 分块 + 多格式解析器
+│   ├── users/                  # 用户系统（User + RBAC 权限 + 部门/团队 + 文档级权限）
+│   │   ├── models.py           # User(AbstractBaseUser), Department, Team, Role, Permission + DocDenyUser/DocAllowUser/DocCrossTeam/AccessApplication
+│   │   ├── signals.py          # 部门/团队变更 → 自动同步 KnowledgeNode 树 + 缓存失效
+│   │   └── views.py            # 部门/团队 CRUD（含删除保护：有成员/有文档→禁止删除）
+│   ├── knowledge/              # 知识节点 + 文档 + 切片 + 多格式解析器
+│   │   ├── models.py           # KnowledgeNode(固定4层树) + Document + DocumentChunk + CodeChunk + ImageResource + DocOperationLog
+│   │   ├── access.py           # resolve_doc_access() — 7 步优先级权限判定
+│   │   ├── node_sync.py        # 部门/团队 ↔ KnowledgeNode 双向同步 + 子树文档计数
 │   │   ├── parsers/            # pdf/docx/code 三套解析器
-│   │   ├── storage.py          # 文档存储抽象层（本地/OSS，按节点路径存储）
+│   │   ├── storage.py          # 文档存储抽象层（local/OSS，按节点路径存储）
 │   │   └── tasks.py            # Celery 任务（解析、向量化、批量导入）
-│   ├── retrieval/              # 向量库 + BM25 + 混合检索（RRF 融合）+ Rerank
+│   ├── retrieval/              # pgvector 向量检索 + BM25 关键词 + 混合检索（RRF 融合）+ Rerank
+│   │   ├── models.py           # DocumentVector（pgvector HNSW 索引 + 权限冗余字段）
+│   │   ├── vector_store.py     # 向量检索封装（cosine 距离 + hnsw.ef_search 会话级调节）
+│   │   ├── bm25.py             # BM25 关键词检索（jieba 分词 + keyword_weight 加权）
+│   │   └── permission.py       # build_permission_q() — 检索级权限过滤
 │   ├── llm/                    # DeepSeek Provider + 抽象工厂 + Prompt 模板
 │   ├── memory/                 # 四层记忆（short/session/user/global）
 │   ├── agent/                  # 问答编排 + 任务拆分 + 流式回答
@@ -50,16 +61,17 @@ rag/
 │   ├── notification/           # 邮件订阅 / 发送日志
 │   └── system/                 # 系统配置 / Celery 任务日志 / LLM 调用日志
 ├── rag_project/                # Django 项目配置、根 URL、Celery、ASGI/WSGI
+├── docs/
+│   └── permission-design.md    # 权限体系设计文档（最终方案）
 ├── scripts/
-│   ├── init_system.py          # 系统初始化（角色/权限/部门/用户）
+│   ├── init_system.py          # 系统初始化（角色/权限/部门/团队/用户）
 │   ├── initial_data.yaml       # 初始化数据配置
-│   ├── batch_import_docs.py    # 批量导入文档（双阶段异步导入）
-│   └── upload/                 # 批量导入的文件存放目录
+│   └── batch_import_docs.py    # 批量导入文档（双阶段异步导入）
 ├── static/                     # 前端静态资源（开发源码）
 │   ├── css/                    # 公共 common.css + 各页面 page.css
 │   ├── fonts/                  # 字体文件（验证码使用 DejaVuSans-Bold.ttf）
 │   ├── js/                     # API_SERVICE 通用请求 + 各页面模块
-│   │   ├── common.js           # 通用请求封装（含 token / 401 处理 / 流式）
+│   │   ├── common.js           # 通用请求封装（含 token / 401 处理 / 流式 / 侧边栏渲染）
 │   │   ├── chat.js             # 会话问答
 │   │   ├── upload.js           # 文档上传（含恢复/新建三选项对话框）
 │   │   ├── login.js            # 登录（含验证码）
@@ -71,9 +83,9 @@ rag/
 │   │   ├── admin-analytics.js  # 统计分析
 │   │   └── admin-audit.js      # 审计日志
 │   ├── index.html              # 首页
+│   ├── login.html              # 登录页
 │   ├── chat.html               # 问答页
 │   ├── upload.html             # 文档上传页
-│   ├── login.html              # 登录页
 │   ├── profile.html            # 个人资料页
 │   ├── reset-password.html     # 修改密码页
 │   ├── admin-users.html        # 用户管理页
@@ -94,46 +106,61 @@ rag/
 
 ## 三、核心 API 概览
 
+### 认证 & 用户
+
 | Method | Path | 说明 |
 |--------|------|------|
 | POST | `/api/v1/auth/login/` | 登录（含验证码），返回 `{access, refresh, user}` |
 | POST | `/api/v1/auth/logout/` | 登出（refresh 加黑名单） |
-| GET/PATCH | `/api/v1/auth/profile/` | 当前用户资料（支持更新 real_name / avatar_url / phone） |
+| GET/PATCH | `/api/v1/auth/profile/` | 当前用户资料 |
 | POST | `/api/v1/auth/reset-password/` | 修改密码 |
-| CRUD | `/api/v1/auth/users/` `/roles/` `/permissions/` `/departments/` `/teams/` | RBAC 管理 |
-| POST | `/api/v1/auth/users/{id}/toggle_status/` | 启用/禁用用户 |
-| GET | `/api/v1/auth/permissions/me/` | 当前用户权限 |
-| GET | `/api/v1/auth/permissions/approvers/` | 权限审批人列表 |
-| CRUD | `/api/v1/auth/permissions/applications/` | 权限申请 |
-| GET | `/api/v1/security/captcha/` | 获取验证码图片（Canvas 绘制，140×41，6 干扰线） |
-| GET | `/api/v1/knowledge/nodes/tree/?root_type=` | 节点树 |
+| CRUD | `/api/v1/users/` | 用户管理 |
+| POST | `/api/v1/users/{id}/toggle_status/` | 启用/禁用用户 |
+| CRUD | `/api/v1/departments/` | 部门管理（自动同步知识节点树） |
+| CRUD | `/api/v1/teams/` | 团队管理（自动同步知识节点树） |
+| CRUD | `/api/v1/roles/` `/permissions/` | 角色/权限管理 |
+| GET | `/api/v1/permissions/me/` | 当前用户权限 |
+| CRUD | `/api/v1/access-applications/` | 文档访问权限申请 |
+
+### 知识库
+
+| Method | Path | 说明 |
+|--------|------|------|
+| GET | `/api/v1/knowledge/nodes/tree/?root_type=` | 节点树（含各节点文档数） |
 | GET | `/api/v1/knowledge/nodes/root_types/` | 动态获取根类型列表 |
-| CRUD | `/api/v1/knowledge/nodes/` | 节点管理 |
-| POST | `/api/v1/knowledge/documents/upload/` | 文档上传（multipart，sha256 去重，异步解析，支持恢复/新建） |
-| GET | `/api/v1/knowledge/documents/` | 文档列表 |
+| CRUD | `/api/v1/knowledge/nodes/` | 节点管理（Level 1-3 写保护，Level 4+ 自由管理） |
+| POST | `/api/v1/knowledge/documents/upload/` | 文档上传（sha256 去重，异步解析） |
+| GET | `/api/v1/knowledge/documents/` | 文档列表（支持 discover 模式） |
 | GET | `/api/v1/knowledge/documents/{id}/` | 文档详情 |
 | GET | `/api/v1/knowledge/documents/pending/` | 待处理文档列表（轮询状态） |
 | GET | `/api/v1/knowledge/documents/{id}/chunks/` | 文档分块列表 |
+| GET/PATCH | `/api/v1/knowledge/documents/{id}/visibility/` | 查看/修改文档可见范围 |
 | POST | `/api/v1/knowledge/documents/{id}/reparse/` | 重新解析 |
 | DELETE | `/api/v1/knowledge/documents/{id}/` | 删除文档 |
-| GET | `/api/v1/knowledge/celery/status/` | Celery 状态检查 |
-| POST | `/api/v1/chat/ask/` | **核心问答接口** `{session_id, question, root_types, use_cache, do_task_split}` |
+| GET | `/api/v1/knowledge/documents/{id}/raw/` | 文档原文预览（50MB 限制，分页） |
+
+### 检索 & 问答
+
+| Method | Path | 说明 |
+|--------|------|------|
+| POST | `/api/v1/chat/ask/` | **核心问答接口**（含流式） |
 | POST | `/api/v1/chat/feedback/` | 提交问答反馈 |
 | CRUD | `/api/v1/chat/sessions/` | 会话管理 |
-| GET | `/api/v1/chat/records/?session_id=` | 问答历史 |
+| GET | `/api/v1/chat/sessions/{id}/qa/` | 问答历史（按 turn_index 升序） |
 | POST | `/api/v1/agent/task/plan/` | 复杂任务拆分预览 |
 | POST | `/api/v1/agent/task/run/` | 拆分并执行 |
-| POST | `/api/v1/retrieval/search/` | 检索调试 |
-| GET | `/api/v1/memory/context/` | 记忆上下文调试 |
+| POST | `/api/v1/retrieval/search/` | 检索调试接口 |
+
+### 审计 & 安全 & 系统
+
+| Method | Path | 说明 |
+|--------|------|------|
+| GET | `/api/v1/security/captcha/` | 验证码图片（140×41，6 干扰线，30次/分钟限流） |
 | GET | `/api/v1/audit/logs/` | 审计日志列表 |
 | POST | `/api/v1/audit/verify-chain/` | 哈希链完整性校验 |
 | GET | `/api/v1/analytics/overview/` | 概览统计 |
 | GET | `/api/v1/analytics/trend/?days=` | 趋势报表 |
-| GET | `/api/v1/analytics/keywords/` | 关键词权重 Top |
-| GET | `/api/v1/analytics/bad-feedbacks/` | 差评列表 |
-| GET | `/api/v1/security/ip-whitelist/` | IP 白名单 |
-| GET | `/api/v1/security/ip-blacklist/` | IP 黑名单 |
-| GET | `/api/v1/security/login-attempts/` | 登录尝试记录 |
+| GET | `/api/v1/security/ip-whitelist/` `/ip-blacklist/` | IP 黑白名单 |
 | GET | `/api/v1/system/health/` | 健康检查 |
 | GET | `/api/v1/system/stats/` | 首页看板 |
 
@@ -147,25 +174,133 @@ rag/
 | 鉴权 | rest_framework_simplejwt | JWT 无状态，配合 refresh + blacklist |
 | 异步 | Celery 5.4 + Redis | 文档解析、记忆提炼、日报、批量导入都走队列 |
 | DB | PostgreSQL 16 + pgvector | 结构化 + 向量一站式，避免额外维护 Milvus |
-| 缓存 | Redis 7 | 短时记忆 / 会话 / 验证码 / Celery broker |
-| LLM | DeepSeek Chat/Reasoner | 国内合规 + 成本可控；Provider 抽象保留切换 GPT/Claude 空间 |
-| 嵌入 | BGE-M3 (SiliconFlow) | 高性能中文嵌入模型，通过环境变量配置 |
+| 缓存 | Redis 7 | 短时记忆 / 会话 / 验证码 / Celery broker / 权限缓存 |
+| LLM | DeepSeek Chat/Reasoner | 国内合规 + 成本可控；Provider 抽象保留切换空间 |
+| 嵌入 | BGE-M3 (SiliconFlow) | 高性能中文嵌入模型，1024 维 |
 | Rerank | BGE-Reranker-v2 (SiliconFlow) | 轻量级重排序模型 |
 | 前端 | 原生 JS + Hash 路由（极简 SPA） | 演示够用；生产可换 Vue/React |
 
 ---
 
-## 五、文档存储架构
+## 五、数据库表概览
 
-### 5.1 存储模式
+### 用户与权限（users）
+
+| 模型 | 表名 | 说明 |
+|------|------|------|
+| User | `user_account` | 用户实体（AUTH_USER_MODEL） |
+| Department | `user_department` | 部门（自引用树） |
+| Team | `user_team` | 团队（FK → Department） |
+| Role | `user_role_list` | 角色清单（6 种内置角色） |
+| Permission | `user_permission_list` | 权限项清单（`module:action:scope` 格式） |
+| RolePermission | `user_role_permission_rel` | 角色↔权限关联 |
+| UserRole | `user_account_role_rel` | 用户↔角色关联 |
+| UserTeam | `user_account_team_rel` | 用户↔团队关联 |
+| DocDenyUser | `doc_deny_user` | 文档黑名单（物理删除） |
+| DocAllowUser | `doc_allow_user` | 文档个人白名单（含 expire_time） |
+| DocCrossTeam | `doc_cross_team` | 跨团队授权（含 expire_time） |
+| AccessApplication | `access_application` | 统一权限申请单（双轨：申请拉 + 授权推） |
+
+### 知识库（knowledge）
+
+| 模型 | 表名 | 说明 |
+|------|------|------|
+| KnowledgeNode | `knowledge_node` | 固定 4 层树（KB→部门→团队→分类），Level 4+ 无限层级 |
+| Document | `knowledge_document` | 文档元数据（visible_scope 三档，audit_status 双审状态） |
+| DocumentChunk | `knowledge_document_chunk` | 文档切片 |
+| CodeChunk | `knowledge_code_chunk` | 代码切片（AST 解析） |
+| ImageResource | `knowledge_image` | 图片资源（base64/OSS 双存储） |
+| DocOperationLog | `knowledge_doc_operation_log` | 文档操作审计日志（20 种 action） |
+
+### 检索（retrieval）
+
+| 模型 | 表名 | 说明 |
+|------|------|------|
+| DocumentVector | `retrieval_doc_vector` | pgvector HNSW 索引 + 权限冗余字段 |
+
+---
+
+## 六、权限系统规则
+
+### 6.1 角色体系（6 种）
+
+| 角色编码 | 角色名称 | 核心职责 |
+|---------|---------|---------|
+| super_admin | 超级管理员 | 全部配置权限、绕过双审直接发布、可物理销毁文档 |
+| kb_admin | 知识库管理员 | 全部文档管理权限（CRUD/审核/授权/删除），无用户管理 |
+| user_admin | 用户管理员 | 全部用户管理（CRUD/角色/部门/团队），系统配置 |
+| dept_manager | 部门负责人 | 管辖本部门全部团队、审批扩大可见范围申请 |
+| team_leader | 团队组长 | 本团队文档一审、管理文档、调整可见范围、收回对外权限 |
+| compliance_reviewer | 文档审核员 | 专职合规风控、敏感内容二审、无日常检索问答权限 |
+| employee | 普通员工 | 检索权限内已审核文档、上传发起双审工单、发起权限申请 |
+| readonly | 只读员工 | 检索已发布文档、禁止上传 |
+
+### 6.2 节点结构（固定 4 层 + 自定义分类）
+
+```
+一级：知识库根节点 (kb root)
+  └─ 二级：部门节点 (dept)           ← 由 Department 生命周期自动管理
+      └─ 三级：团队节点 (team)       ← 由 Team 生命周期自动管理
+          └─ 四级+：业务分类 (category) ← 由团队组长手动管理，无层级上限
+```
+
+- Level 1-3（KB/部门/团队）：不可通过节点 API 直接 CRUD，由部门/团队生命周期自动同步
+- Level 4+（业务分类）：通过节点 API 自由创建/修改/删除（删除时需节点下无文档）
+
+### 6.3 文档可见范围（三档）
+
+| 可见范围 | 含义 | 默认访问者 |
+|---------|------|-----------|
+| team | 仅归属团队 | 同团队成员 + 所有者 + 管理员 |
+| dept | 归属全部门 | 同部门所有成员 + 所有者 + 管理员 |
+| public | 全公司公开 | 所有登录用户 |
+
+### 6.4 文档双层审核流程
+
+```
+上传 → 系统预检 → 待团队组长一审 (pending_team)
+                      ↓
+           待合规审核员二审 (pending_compliance)
+                      ↓
+              双审通过 (passed) → 可被检索
+```
+
+super_admin 可绕过双审直接发布。
+
+### 6.5 访问权限判定（7 步优先级，命中即停）
+
+1. 黑名单拦截 → 全部拒绝（最高优先级）
+2. visible_scope='public' → 放行
+3. visible_scope='dept' 且同部门 → 放行
+4. visible_scope='team' 且同团队 → 放行
+5. 跨团队授权命中（DocCrossTeam，未过期）→ 放行
+6. 个人白名单命中（DocAllowUser，未过期）→ 放行
+7. 否则拒绝
+
+所有者（owner）和管理员（super_admin/kb_admin）始终拥有全部权限。
+
+### 6.6 权限申请双轨制
+
+- **轨道 1（申请拉取）**：用户提交 AccessApplication → 审批 → 插入白名单/跨团队记录
+- **轨道 2（授权推送）**：组长/管理员直接操作 DocAllowUser/DocCrossTeam 表
+
+### 6.7 部门/团队删除保护
+
+- **删除团队**：团队下无成员 AND 团队节点及子树下无文档 → 允许；否则提示具体数字
+- **删除部门**：部门下无用户 AND 无团队 → 允许；否则提示具体数字
+- **删除分类节点（Level 4+）**：该节点及全部子孙节点下无文档 → 允许
+
+---
+
+## 七、文档存储架构
+
+### 7.1 存储模式
 
 通过环境变量 `DOCUMENT_STORAGE_MODE` 切换：
 - `local`：本地文件系统（默认）
 - `oss`：云 OSS / MinIO
 
-### 5.2 按节点路径存储
-
-文件按知识库节点结构存储，便于运维管理：
+### 7.2 按节点路径存储
 
 ```
 media/documents/
@@ -174,76 +309,37 @@ media/documents/
         └── {uuid}_{filename}  # 文档文件
 ```
 
-### 5.3 文档恢复机制
+### 7.3 安全措施
 
-当上传已删除的文件时，系统提供三选项对话框：
-- **恢复**：恢复旧记录，更新文件位置、上传者、团队，记录 `restored_at` 和 `restored_by` 审计字段
-- **新建记录**：创建独立新记录，不关联旧记录
-- **取消**：放弃上传
+- MIME 类型验证（python-magic 库，防止文件类型绕过）
+- 文件名净化（django.utils.text.get_valid_filename，去除路径分隔符和控制字符）
+- sha256 文件哈希去重，防止重复上传
+- raw_content 预览 50MB 限制 + 分页
 
 ---
 
-## 六、批量导入
-
-### 6.1 使用方法
+## 八、批量导入
 
 ```bash
-# 默认：私有可见，超级管理员上传
+# 默认：team 可见，超级管理员上传
 docker compose exec django python scripts/batch_import_docs.py
 
-# 部门可见
-docker compose exec django python scripts/batch_import_docs.py --visibility department --department-code R&D
-
-# 部门可见，指定上传者
-docker compose exec django python scripts/batch_import_docs.py --visibility department --department-code R&D --owner user1
-
-# 团队可见
-docker compose exec django python scripts/batch_import_docs.py --visibility team --team-code RAG-PROJ
-
-# 所有人可见
+# 指定可见范围
 docker compose exec django python scripts/batch_import_docs.py --visibility public
-```
 
-### 6.2 工作原理（双阶段导入）
-
-```
-阶段一（脚本）：扫描目录 → 创建临时文件 → 发送到 Celery 队列
-阶段二（Celery）：验证 → 保存文件到目标位置 → 创建记录 → 触发解析 → 删除临时文件
-```
-
-- 文件大小限制：100MB
-- 支持的文件类型：.txt, .md, .docx, .pdf, .json, .xml, .csv, .xlsx
-- 失败日志：`logs/batch_import_failed.log`
-- 失败时保留临时文件（`temp/batch_import/`），方便手动处理
-
-### 6.3 目录结构映射
-
-```
-scripts/upload/
-├── 研发技术/
-│   ├── Django/
-│   │   └── tutorial.md
-│   └── Python/
-│       └── basics.md
-└── 行政办公/
-    └── employee_handbook.md
-
-→ 自动创建/复用节点：研发技术 → Django/Python，行政办公
-```
-
-### 6.4 辅助命令
-
-```bash
-# 列出所有可用节点
+# 列出可用节点/部门
 docker compose exec django python scripts/batch_import_docs.py --list-nodes
-
-# 列出所有可用部门
 docker compose exec django python scripts/batch_import_docs.py --list-departments
 ```
 
+**工作原理（双阶段导入）**：
+- 阶段一（脚本）：扫描目录 → 创建临时文件 → 发送到 Celery 队列
+- 阶段二（Celery）：验证 → 保存到目标位置 → 创建记录 → 触发解析 → 删除临时文件
+- 100MB 文件大小限制，失败时保留临时文件便于手动处理
+
 ---
 
-## 七、环境变量配置
+## 九、环境变量配置
 
 ```ini
 # --- Django 基础 ---
@@ -257,130 +353,48 @@ POSTGRES_USER=rag_user
 POSTGRES_PASSWORD=rag_pass_2026
 PG_DB_HOST=localhost
 PG_DB_PORT=5432
-PG_DB_DATABASE=rag_agent
-PG_DB_USER=rag_user
-PG_DB_PASSWORD=rag_pass_2026
 
 # --- Redis ---
 REDIS_DB_HOST=localhost
 REDIS_DB_PORT=6379
-REDIS_DB_PASSWORD=
-REDIS_DB_DB=0
 
-# --- LLM 配置（支持双模型）---
-LLM_API_KEY=sk-your-llm-api-key-here
+# --- LLM ---
+LLM_API_KEY=sk-your-api-key
 LLM_BASE_URL=https://api.deepseek.com
-LLM_BASE_MODEL=deepseek-v4-flash         # 基础模型
-LLM_ADVANCED_MODEL=deepseek-v4-pro       # 高级模型
-LLM_TIMEOUT=60
+LLM_BASE_MODEL=deepseek-v4-flash
+LLM_ADVANCED_MODEL=deepseek-v4-pro
 
 # --- Embedding & Rerank ---
-EMBEDDING_API_KEY=sk-your-embedding-api-key-here
+EMBEDDING_API_KEY=sk-your-embedding-key
 EMBEDDING_BASE_URL=https://api.siliconflow.cn/v1
 EMBEDDING_MODEL=BAAI/bge-m3
 EMBEDDING_DIM=1024
 RERANK_MODEL=BAAI/bge-reranker-v2-m3
 
-# --- Embedding Provider 切换开关 ---
-# docker: 优先使用 Docker Embedding 服务, API 兜底
-# api:    优先使用云 API, 本地 docker 兜底
-EMBEDDING_PROVIDER=docker
+# --- Embedding Provider ---
+EMBEDDING_PROVIDER=docker     # docker / api
 
-# --- Docker Embedding 配置（本地部署时使用）---
-# EMBEDDING_DOCKER_URL=http://localhost:8080/embed
-# EMBEDDING_DOCKER_TIMEOUT=30
-
-# --- 文档存储配置 ---
-DOCUMENT_STORAGE_MODE=local          # local / oss
-DOCUMENT_RETENTION_ENABLED=1         # 是否保留原始文件（1保留/0删除）
-DOCUMENT_MAX_SIZE_MB=100             # 单个文件最大大小（MB）
-
-# --- OSS 配置（DOCUMENT_STORAGE_MODE=oss 时必填）---
-# OSS_ENDPOINT=https://oss-cn-hangzhou.aliyuncs.com
-# OSS_ACCESS_KEY_ID=your-access-key-id
-# OSS_ACCESS_KEY_SECRET=your-access-key-secret
-# OSS_BUCKET_NAME=your-bucket-name
-# OSS_REGION=oss-cn-hangzhou
+# --- 文档存储 ---
+DOCUMENT_STORAGE_MODE=local   # local / oss
+DOCUMENT_MAX_SIZE_MB=100
 ```
 
----
-
-## 八、权限系统规则
-
-### 8.1 角色体系
-
-| 角色编码 | 角色名称 | 核心权限 |
-|---------|---------|---------|
-| super_admin | 超级管理员 | 所有权限，含系统配置、人员管理、文档管理 |
-| kb_admin | 知识库管理员 | 所有文档的管理权限，无人员管理 |
-| audit_admin | 审计管理员 | 审计日志查看权限 |
-| user_admin | 用户管理员 | 用户管理权限 |
-| dept_manager | 部门经理 | 部门内人员管理，部门级文档管理 |
-| team_leader | 组长 | 团队内人员管理，团队级文档管理 |
-| employee | 普通员工 | 个人文档CRUD+上传，部门/团队文档只读 |
-| readonly | 只读用户 | 仅文档只读权限 |
-
-### 8.2 文档可见性
-
-| 可见性 | 级别 | 说明 | 默认访问范围 |
-|--------|------|------|-------------|
-| 私有 (private) | 1 | 个人文档 | 仅所有者、文档管理员、超级管理员 |
-| 部门 (department) | 2 | 部门文档 | 部门所有成员、部门经理、文档管理员、超级管理员 |
-| 团队 (team) | 3 | 团队文档 | 团队所有成员、组长、文档管理员、超级管理员 |
-| 公开 (public) | 4 | 全局文档 | 所有用户可读 |
-
-### 8.3 权限判定规则
-
-1. **超级管理员**：直接放行所有权限（除了迁移他人 personal 文档）
-2. **文档管理员**：全部文档权限（除了迁移他人 personal 文档）
-3. **文档所有者**：对自己上传的文档拥有完整操作权限（无论可见范围）
-4. **文档可见性匹配**：按可见性范围授权，无权限继承关系
-5. **临时授权**：检查 document_permission 表
-
-### 8.4 上传权限
-
-- 除 `readonly` 外，所有角色都有上传权限
-- 上传时可选择可见范围：private / department / team / public
-- 上传者始终是文档的所有者
-
-### 8.5 文档迁移规则
-
-1. **归属链**：文档的归属链由上传者决定，不可改变。归属链格式：部门 → 团队 → 上传者
-2. **迁移方向**：只能沿归属链向下迁移：public → department → team → private
-3. **跨域限制**：不能将文档迁移到上传者归属链之外的部门/团队
-4. **所有者不变**：文档的 owner 始终是上传者，迁移时不可改变
-5. **迁移权限**：
-   - super_admin/kb_admin：可迁移到上传者归属链内的任意级别
-   - dept_manager：可迁移到本部门内的团队或个人级别
-   - team_leader：可迁移到本组内的个人级别
-   - owner：可迁移到归属链内的任意级别
-
-### 8.6 public 文档管理权限
-
-- public 文档的管理权仅限于上传者的归属链内
-- 部门经理只能管理本部门员工上传的 public 文档
-- 组长只能管理本组员工上传的 public 文档
-- 其他部门/团队的人只有 read 权限
-
-### 8.7 private 文档保护
-
-- 管理员可以 read 和 delete private 文档（安全管理）
-- 管理员不能 edit、migrate、share private 文档（保护个人隐私）
+完整变量列表见 `.env.example`。
 
 ---
 
-## 九、测试用例
+## 十、测试
 
 ```bash
-# 运行 API 测试（需先启动 Django 服务器）
 docker compose exec django python tests/test_api_simple.py
 ```
 
 ---
 
-## 十、二次开发建议
+## 十一、二次开发建议
 
-1. **接入生产级向量库**：当前 `apps.retrieval.vector_store` 走 pgvector，可切换 Milvus/Qdrant，只改 `upsert_vector` / `vector_search` 两个函数。
-2. **接入正式 Rerank**：`apps.retrieval.rerank.rerank_docs` 已抽象签名，可换 BGE-Reranker-v2 或 Cohere API。
-3. **多租户**：`SysUser` 已有 `department`，`Document` 已有 `visibility` + `owner_team_id` 快照，扩展 tenant_id 即可。
-4. **前端替换**：`static/` 目录是极简演示，正式项目建议直接 Vue3 + Element Plus 重写。
+1. **检索向量库**：当前走 pgvector，可切换 Milvus/Qdrant，只改 `upsert_vector` / `vector_search`
+2. **Rerank**：已抽象签名 `rerank_docs`，可换 Cohere API
+3. **多租户**：`Document` 已有 `dept_node_id`/`team_node_id`，扩展 tenant_id 即可
+4. **前端替换**：`static/` 为极简演示，正式项目建议 Vue3 + Element Plus
+5. **双路审批（TODO）**：kb_admin + user_admin 联合审批关键操作，避免单人权限过大

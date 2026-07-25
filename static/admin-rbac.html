@@ -1,98 +1,171 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
+
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>RBAC 权限配置 · 知库 Agent</title>
-  <link rel="stylesheet" href="/static/css/common.css">
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>RBAC 权限配置 · 知库 Agent</title>
+	<link rel="stylesheet" href="/static/css/common.css">
 </head>
+
 <body>
-  <div id="topnav-container"></div>
-  <div class="layout">
-    <div id="sidebar-container"></div>
-    <div class="main">
-      <div class="page-header">
-        <div class="breadcrumb"><a href="/chat/">首页</a><span class="sep">/</span>管理后台<span class="sep">/</span>RBAC 权限配置</div>
-        <div>
-          <div class="page-title">RBAC 权限配置</div>
-          <div class="page-subtitle">管理组织架构（部门/团队）</div>
-        </div>
-      </div>
+	<div id="topnav-container"></div>
+	<div class="layout">
+		<div id="sidebar-container"></div>
+		<div class="main main-flex">
+			<div class="page-header">
+				<div class="flex items-baseline gap-10">
+					<div class="page-title">RBAC 权限配置</div>
+					<div class="page-subtitle">管理组织架构（部门/团队）</div>
+				</div>
+			</div>
 
-      <!-- ===== 部门管理 ===== -->
-      <div class="card">
-        <div class="flex items-center justify-between mb-16">
-          <div class="card-title" style="margin-bottom:0">部门管理</div>
-          <button class="btn btn-primary btn-sm" onclick="openDeptModal()">＋ 新增部门</button>
-        </div>
-        <div id="deptList"></div>
-      </div>
+			<!-- ===== 部门管理 ===== -->
+			<div class="card flex flex-col overflow-hidden" style="flex:1;min-height:0">
+				<div class="flex items-center justify-between mb-16 shrink-0">
+					<div class="card-title mb-0">部门管理</div>
+					<button class="btn btn-primary btn-sm" id="btnAddDept" onclick="openDeptModal()">＋ 新增部门</button>
+				</div>
+				<div id="deptList" class="card-scroll"></div>
+			</div>
 
 
-    </div>
-  </div>
+		</div>
+	</div>
 
-  <!-- ===== 部门/团队 Modal ===== -->
-  <div class="modal" id="deptModal" style="max-width:480px">
-      <div class="modal-header">
-        <div class="modal-title" id="deptModalTitle">新增部门</div>
-        <button class="modal-close" onclick="closeModal('deptModal')">&times;</button>
-      </div>
-      <div class="modal-body">
-        <input type="hidden" id="deptId">
-        <div class="form-item">
-          <label class="form-label">部门名称 <span class="required">*</span></label>
-          <input id="deptName" class="input" placeholder="如: 研发中心">
-        </div>
-        <div class="form-item">
-          <label class="form-label">编码 <span class="form-hint">（留空自动生成拼音首字母）</span></label>
-          <input id="deptCode" class="input" placeholder="如: yfzx">
-        </div>
-        <div id="deptTeamsSection" style="display:none;border-top:1px solid var(--border);padding-top:12px;margin-top:12px">
-          <div class="flex items-center justify-between mb-8">
-            <label class="form-label" style="margin:0">下属团队</label>
-            <button class="btn btn-primary btn-sm" onclick="openTeamModal(document.getElementById('deptId').value)">＋ 新增团队</button>
-          </div>
-          <div id="deptTeamsList" style="display:flex;flex-wrap:wrap;gap:6px"></div>
-        </div>
-      </div>
-      <div class="modal-footer">
-        <button class="btn" onclick="closeModal('deptModal')">取消</button>
-        <button class="btn btn-primary" onclick="saveDept()">保存</button>
-      </div>
-  </div>
+	<!-- ===== 部门 Modal ===== -->
+	<div class="modal" id="deptModal" style="max-width:540px">
+		<div class="modal-header">
+			<div class="modal-title" id="deptModalTitle">新增部门</div>
+			<button class="modal-close" onclick="closeModal('deptModal')">&times;</button>
+		</div>
+		<div class="modal-body overflow-y-auto" style="max-height:70vh">
+			<input type="hidden" id="deptId">
+			<div class="form-item">
+				<label class="form-label">部门名称 <span class="required">*</span></label>
+				<input id="deptName" class="input" placeholder="如: 研发部">
+			</div>
+			<div class="form-item">
+				<label class="form-label">编码 <span class="form-hint">（留空自动生成拼音首字母）</span></label>
+				<input id="deptCode" class="input" placeholder="如: yfb">
+			</div>
+			<div class="form-item">
+				<label class="form-label">部门经理</label>
+				<div class="relative">
+					<input id="deptLeaderSearch" class="input" placeholder="搜索用户姓名..." autocomplete="off"
+						oninput="searchDeptLeader()" onfocus="searchDeptLeader()">
+					<div id="deptLeaderResults" class="hidden" style="position:absolute;top:100%;left:0;right:0;z-index:10;
+                 background:var(--white);border:1px solid var(--border);border-radius:var(--radius);
+                 max-height:200px;overflow-y:auto;box-shadow:var(--shadow-lg);margin-top:2px"></div>
+				</div>
+				<input type="hidden" id="deptLeaderId">
+				<div id="deptLeaderSelected" class="text-sub text-sm" style="margin-top:4px"></div>
+			</div>
+			<div id="deptTeamsSection" class="hidden"
+			style="border-top:1px solid var(--border);padding-top:12px;margin-top:12px">
+				<div class="flex items-center justify-between mb-8">
+					<label class="form-label m-0">下属团队</label>
+					<button class="btn btn-primary btn-sm"
+						onclick="openTeamModal(document.getElementById('deptId').value)">＋ 新增团队</button>
+				</div>
+				<div id="deptTeamsList" class="flex flex-wrap gap-6"></div>
+			</div>
+		</div>
+		<div class="modal-footer">
+			<button class="btn-cancel" onclick="closeModal('deptModal')">取消</button>
+			<button class="btn-save" onclick="saveDept()">保存</button>
+		</div>
+	</div>
 
-  <!-- ===== 团队 Modal ===== -->
-  <div class="modal" id="teamModal" style="max-width:400px">
-      <div class="modal-header">
-        <div class="modal-title" id="teamModalTitle">新增团队</div>
-        <button class="modal-close" onclick="closeModal('teamModal')">&times;</button>
-      </div>
-      <div class="modal-body">
-        <input type="hidden" id="teamId">
-        <input type="hidden" id="teamDeptId">
-        <div class="form-item">
-          <label class="form-label">团队名称 <span class="required">*</span></label>
-          <input id="teamName" class="input" placeholder="如: AI 平台组">
-        </div>
-        <div class="form-item">
-          <label class="form-label">编码 <span class="form-hint">（留空自动生成，含部门前缀）</span></label>
-          <input id="teamCode" class="input" placeholder="如: yfzx_aiptz">
-        </div>
-        <div class="form-item">
-          <label class="form-label">描述</label>
-          <input id="teamDesc" class="input" placeholder="团队描述">
-        </div>
-      </div>
-      <div class="modal-footer">
-        <button class="btn" onclick="closeModal('teamModal')">取消</button>
-        <button class="btn btn-primary" onclick="saveTeam()">保存</button>
-      </div>
-  </div>
+	<!-- ===== 团队 Modal ===== -->
+	<div class="modal" id="teamModal" style="max-width:460px">
+		<div class="modal-header">
+			<div class="modal-title" id="teamModalTitle">新增团队</div>
+			<button class="modal-close" onclick="closeModal('teamModal')">&times;</button>
+		</div>
+		<div class="modal-body">
+			<input type="hidden" id="teamId">
+			<input type="hidden" id="teamDeptId">
+			<div class="form-item">
+				<label class="form-label">团队名称 <span class="required">*</span></label>
+				<input id="teamName" class="input" placeholder="如: AI 平台组">
+			</div>
+			<div class="form-item">
+				<label class="form-label">编码 <span class="form-hint">（留空自动生成，含部门前缀）</span></label>
+				<input id="teamCode" class="input" placeholder="如: yfzx_aiptz">
+			</div>
+			<div class="form-item">
+				<label class="form-label">描述</label>
+				<input id="teamDesc" class="input" placeholder="团队描述">
+			</div>
+			<div class="form-item">
+				<label class="form-label">团队组长</label>
+				<div class="relative">
+					<input id="teamLeaderSearch" class="input" placeholder="搜索团队内用户姓名..." autocomplete="off"
+						oninput="searchTeamLeader()" onfocus="searchTeamLeader()">
+					<div id="teamLeaderResults" class="hidden" style="position:absolute;top:100%;left:0;right:0;z-index:10;
+                 background:var(--white);border:1px solid var(--border);border-radius:var(--radius);
+                 max-height:200px;overflow-y:auto;box-shadow:var(--shadow-lg);margin-top:2px"></div>
+				</div>
+				<input type="hidden" id="teamLeaderId">
+				<div id="teamLeaderSelected" class="text-sub text-sm" style="margin-top:4px"></div>
+			</div>
+		</div>
+		<div class="modal-footer">
+			<button class="btn-cancel" onclick="closeModal('teamModal')">取消</button>
+			<button class="btn-save" onclick="saveTeam()">保存</button>
+		</div>
+	</div>
 
-  <div id="mask" class="mask"></div>
-  <div id="toast-wrap" class="toast-wrap"></div>
-  <script src="/static/js/common.js"></script>
-  <script src="/static/js/admin-rbac.js"></script>
+	<div id="mask" class="mask"></div>
+	<div id="toast-wrap" class="toast-wrap"></div>
+
+	<!-- ===== 模板 ===== -->
+	<template id="tmpl-no-permission">
+		<div class="flex items-center justify-center flex-col" style="height:100vh;color:var(--text-sub)">
+			<div style="font-size:48px;margin-bottom:16px">&#128274;</div>
+			<div style="font-size:16px">仅超级管理员和用户管理员可访问此页面</div>
+			<a href="/chat/" style="margin-top:16px;color:var(--primary)">返回首页</a>
+		</div>
+	</template>
+
+	<template id="tmpl-dept-card">
+		<div class="dept-card" style="border:1px solid var(--border);border-radius:8px;padding:12px 16px;margin-bottom:8px">
+			<div class="flex items-center justify-between">
+				<div>
+					<span style="font-weight:600;font-size:15px">__NAME__</span>
+					<span class="text-sub text-sm" style="margin-left:8px">__CODE__</span>
+					<span class="tag tag-sm" style="margin-left:8px;background:var(--bg-sub)">__USER_COUNT__ 人</span>
+					__LEADER_INFO__
+				</div>
+				<div class="flex gap-6">
+					<button class="btn btn-sm btn-outline" onclick="openDeptModal(__ID__)">编辑</button>
+					<button class="btn btn-sm btn-outline" style="color:var(--danger)" onclick="deleteDept(__ID__,'__NAME_ESC__')">删除</button>
+				</div>
+			</div>
+			__TEAMS_HTML__
+		</div>
+	</template>
+
+	<template id="tmpl-user-search-result">
+		<div class="flex items-center gap-8" style="padding:8px 14px;font-size:13px;cursor:pointer"
+			onmousedown="__ONCLICK__"
+			onmouseover="this.style.background='var(--primary-light)'" onmouseout="this.style.background=''">
+			<span style="font-weight:500">__NAME__</span>
+			<span class="text-sub text-sm">__EMAIL__</span>
+		</div>
+	</template>
+
+	<template id="tmpl-team-tag">
+		<span class="tag tag-closable" style="padding:4px 10px;font-size:13px">
+			__NAME____LEADER__
+			<button class="tag-close-btn" onclick="editTeam(__DEPT_ID__,__TEAM_ID__)" title="编辑" style="font-size:12px;margin:0 2px">&#9998;</button>
+			<button class="tag-close-btn" onclick="deleteTeam(__TEAM_ID__,'__NAME_ESC__')" title="删除" style="color:var(--danger)">&#215;</button>
+		</span>
+	</template>
+
+	<script src="/static/js/common.js"></script>
+	<script src="/static/js/admin-rbac.js"></script>
 </body>
+
 </html>

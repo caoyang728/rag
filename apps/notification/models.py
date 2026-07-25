@@ -18,14 +18,14 @@ class EmailSubscription(models.Model):
     ]
 
     id = models.BigAutoField(primary_key=True)
-    user = models.ForeignKey('users.SysUser', on_delete=models.CASCADE,
+    user = models.ForeignKey('users.User', on_delete=models.CASCADE,
                              db_column='user_id', related_name='subscriptions')
     category = models.CharField(max_length=32, choices=CATEGORY_CHOICES)
     is_enabled = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        db_table = 'email_subscription'
+        db_table = 'notification_email_subscription'
         unique_together = [('user', 'category')]
 
 
@@ -51,7 +51,7 @@ class EmailSendLog(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        db_table = 'email_send_log'
+        db_table = 'notification_email_send_log'
         indexes = [
             models.Index(fields=['status', '-created_at'], name='idx_esl_status'),
         ]

@@ -22,7 +22,7 @@ from apps.knowledge.desensitizer import desensitize
 from apps.knowledge.storage import get_document_storage, generate_node_storage_path
 from apps.retrieval.vector_store import upsert_vector
 from apps.llm.embedding import get_embedding_client
-from apps.users.models import SysUser
+from apps.users.models import User
 
 
 def _notify_admin_on_embedding_failure(doc: Document, error_msg: str):
@@ -267,8 +267,8 @@ def batch_import_single_file(temp_file_path, node_id, owner_id, visibility, owne
             return {'ok': False, 'error': error_msg}
         
         try:
-            owner = SysUser.objects.get(id=owner_id, is_deleted=False)
-        except SysUser.DoesNotExist:
+            owner = User.objects.get(id=owner_id, is_deleted=False)
+        except User.DoesNotExist:
             error_msg = f"上传者不存在: {owner_id}"
             logger.error(f'[BatchImport] {error_msg}')
             _log_batch_import_failure(filename, node.name, error_msg)

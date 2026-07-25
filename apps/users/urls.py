@@ -21,7 +21,7 @@ urlpatterns = [
     # 个人权限查看 / 权限申请
     path("permissions/me/", views.MyPermissionsView.as_view()),
     path("permissions/approvers/", views.PermissionApproversView.as_view()),
-    path("permissions/applications/", views.PermissionApplicationView.as_view()),
-    path("permissions/applications/<int:pk>/withdraw/", views.PermissionApplicationWithdrawView.as_view()),
+    path("permissions/applications/", views.AccessApplicationView.as_view()),
+    path("permissions/applications/<int:pk>/withdraw/", views.AccessApplicationWithdrawView.as_view()),
     path("", include(router.urls)),
 ]

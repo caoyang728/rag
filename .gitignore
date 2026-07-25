@@ -18,10 +18,11 @@ staticfiles/
 .env.local
 .env.production
 
-# IDE
+# IDE / AI
 .idea/
 .vscode/
 *.swp
+AGENTS.md
 
 # 系统
 .DS_Store

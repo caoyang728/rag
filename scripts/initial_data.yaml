@@ -21,49 +21,51 @@ users:
 roles:
   - code: super_admin
     name: 超级管理员
-    description: 系统超级管理员，拥有所有权限
-    is_builtin: true
-
-  - code: kb_admin
-    name: 知识库管理员
-    description: 拥有所有文档的管理权限
-    is_builtin: true
-
-  - code: audit_admin
-    name: 审计管理员
-    description: 审计日志查看权限
-    is_builtin: true
-
-  - code: user_admin
-    name: 用户管理员
-    description: 用户管理权限
+    description: 全部配置权限、绕过双审直接发布、可物理销毁文档
     is_builtin: true
 
   - code: dept_manager
-    name: 部门经理
-    description: 必须归属某个部门，管理部门成员及部门级文档
+    name: 部门负责人
+    description: 管辖本部门全部团队、审批扩大可见范围申请
     is_builtin: true
 
   - code: team_leader
-    name: 组长
-    description: 必须归属某个团队，管理团队成员及团队级文档
+    name: 团队组长
+    description: 本团队文档一审、管理文档、调整可见范围、直接收回对外权限
+    is_builtin: true
+
+  - code: compliance_reviewer
+    name: 文档审核员
+    description: 专职合规风控、敏感内容二审校验、无日常检索问答权限
     is_builtin: true
 
   - code: employee
     name: 普通员工
-    description: 个人文档CRUD+上传，部门/团队文档只读
+    description: 检索已审核文档、上传发起双审工单、发起权限申请
     is_builtin: true
 
   - code: readonly
-    name: 只读用户
-    description: 仅文档只读权限
+    name: 只读员工
+    description: 检索已发布文档、发起read权限申请、禁止上传
+    is_builtin: true
+
+  # ---- 权限拆分（超级管理员权力拆分，避免单人权限过大） ----
+  # TODO: 后续可实现双路校验（super_admin + kb_admin / user_admin 联合审批关键操作）
+  - code: kb_admin
+    name: 知识库管理员
+    description: 管理全部文档（CRUD/审核/授权/删除/恢复），可操作节点树。注：不包含用户管理权限
+    is_builtin: true
+
+  - code: user_admin
+    name: 用户管理员
+    description: 管理全部用户（CRUD/角色分配/部门团队），可配置系统参数。注：不包含文档管理权限
     is_builtin: true
 
 # ------------------------------
 # 系统内置权限
 # ------------------------------
 permissions:
-  # 知识库权限
+  # 知识库权限 - read
   - code: knowledge:read:all
     name: 知识库全局只读
     module: knowledge
@@ -82,12 +84,7 @@ permissions:
     action: read
     scope: team
 
-  - code: knowledge:read:personal
-    name: 知识库个人只读
-    module: knowledge
-    action: read
-    scope: personal
-
+  # 知识库权限 - upload
   - code: knowledge:upload:all
     name: 全局上传文档
     module: knowledge
@@ -106,63 +103,64 @@ permissions:
     action: upload
     scope: team
 
-  - code: knowledge:upload:personal
-    name: 个人上传文档
-    module: knowledge
-    action: upload
-    scope: personal
-
-  - code: knowledge:edit:all
-    name: 全局编辑文档
-    module: knowledge
-    action: edit
-    scope: all
-
-  - code: knowledge:delete:all
-    name: 全局删除文档
-    module: knowledge
-    action: delete
-    scope: all
-
-  - code: knowledge:export:all
-    name: 全局导出文档
-    module: knowledge
-    action: export
-    scope: all
-
-  - code: knowledge:share:all
-    name: 全局分享文档
-    module: knowledge
-    action: share
-    scope: all
-
+  # 知识库权限 - manage
   - code: knowledge:manage:all
-    name: 知识库管理
+    name: 全局文档管理
     module: knowledge
     action: manage
     scope: all
+
+  - code: knowledge:manage:department
+    name: 部门文档管理
+    module: knowledge
+    action: manage
+    scope: department
+
+  - code: knowledge:manage:team
+    name: 团队文档管理
+    module: knowledge
+    action: manage
+    scope: team
+
+  # 知识库权限 - download
+  - code: knowledge:download:all
+    name: 全局下载文档
+    module: knowledge
+    action: download
+    scope: all
+
+  - code: knowledge:download:department
+    name: 部门下载文档
+    module: knowledge
+    action: download
+    scope: department
+
+  - code: knowledge:download:team
+    name: 团队下载文档
+    module: knowledge
+    action: download
+    scope: team
 
   # 用户管理权限
-  - code: user:manage:all
-    name: 用户管理
+  - code: user:manage_users:all
+    name: 全局用户管理
     module: user
-    action: manage
+    action: manage_users
     scope: all
 
-  - code: user:read:all
-    name: 用户查看
+  - code: user:manage_users:department
+    name: 部门用户管理
     module: user
-    action: read
-    scope: all
+    action: manage_users
+    scope: department
 
-  # 审计权限
-  - code: audit:read:all
-    name: 审计日志查看
-    module: audit
-    action: read
-    scope: all
+  - code: user:manage_users:team
+    name: 团队用户管理
+    module: user
+    action: manage_users
+    scope: team
 
-  # 系统权限
+  # 系统配置权限
   - code: system:config:all
     name: 系统配置
     module: system
@@ -176,124 +174,113 @@ role_permissions:
   super_admin:
     - knowledge:read:all
     - knowledge:upload:all
-    - knowledge:edit:all
-    - knowledge:delete:all
-    - knowledge:export:all
-    - knowledge:share:all
     - knowledge:manage:all
-    - user:manage:all
-    - user:read:all
-    - audit:read:all
+    - knowledge:download:all
+    - user:manage_users:all
     - system:config:all
-
-  kb_admin:
-    - knowledge:read:all
-    - knowledge:upload:all
-    - knowledge:edit:all
-    - knowledge:delete:all
-    - knowledge:export:all
-    - knowledge:share:all
-    - knowledge:manage:all
-
-  audit_admin:
-    - audit:read:all
-    - knowledge:read:all
-
-  user_admin:
-    - user:manage:all
-    - user:read:all
-    - knowledge:read:all
 
   dept_manager:
     - knowledge:read:all
     - knowledge:upload:all
-    - knowledge:edit:all
-    - knowledge:delete:all
-    - knowledge:export:all
-    - knowledge:share:all
-    - user:manage:all
-    - user:read:all
+    - knowledge:manage:department
+    - knowledge:download:all
+    - user:manage_users:department
 
   team_leader:
     - knowledge:read:all
     - knowledge:upload:all
-    - knowledge:edit:all
-    - knowledge:delete:all
-    - knowledge:export:all
-    - knowledge:share:all
-    - user:manage:all
-    - user:read:all
+    - knowledge:manage:team
+    - knowledge:download:all
+    - user:manage_users:team
+
+  compliance_reviewer:
+    - knowledge:upload:all
 
   employee:
     - knowledge:read:all
     - knowledge:upload:all
-    - knowledge:edit:personal
-    - knowledge:delete:personal
-    - knowledge:export:personal
-    - knowledge:share:personal
 
   readonly:
     - knowledge:read:all
 
+  # kb_admin：管文档不管用户，权限对标 super_admin 的知识库部分
+  kb_admin:
+    - knowledge:read:all
+    - knowledge:upload:all
+    - knowledge:manage:all
+    - knowledge:download:all
+
+  # user_admin：管用户不管文档，权限对标 super_admin 的用户管理部分
+  user_admin:
+    - user:manage_users:all
+    - system:config:all
+
 # ------------------------------
-# 初始部门结构
+# 初始部门 & 团队（2 层扁平：部门 → 团队）
 # ------------------------------
 departments:
-  - name: 公司总部
-    code: HQ
-    sort_order: 1
-    children:
-      - name: 研发部
-        code: RD
-        sort_order: 10
-        children:
-          - name: 后端开发组
-            code: RD-BE
-            sort_order: 100
-          - name: 前端开发组
-            code: RD-FE
-            sort_order: 101
-          - name: AI算法组
-            code: RD-AI
-            sort_order: 102
+  - name: 研发部
+    code: RD
+    sort_order: 10
 
-      - name: 产品部
-        code: PM
-        sort_order: 20
-        children:
-          - name: 产品经理组
-            code: PM-MGR
-            sort_order: 200
-          - name: UI设计组
-            code: PM-UI
-            sort_order: 201
+  - name: 产品部
+    code: PM
+    sort_order: 20
 
-      - name: 运营部
-        code: OP
-        sort_order: 30
-        children:
-          - name: 内容运营组
-            code: OP-CONTENT
-            sort_order: 300
-          - name: 用户运营组
-            code: OP-USER
-            sort_order: 301
+  - name: 运营部
+    code: OP
+    sort_order: 30
 
-      - name: 行政人事部
-        code: HR
-        sort_order: 40
-        children:
-          - name: 招聘组
-            code: HR-REC
-            sort_order: 400
-          - name: 培训组
-            code: HR-TRN
-            sort_order: 401
+  - name: 行政人事部
+    code: HR
+    sort_order: 40
 
-# ------------------------------
-# 初始团队
-# ------------------------------
 teams:
+  - name: 后端开发组
+    code: RD-BE
+    description: 后端研发团队
+    department: 研发部
+
+  - name: 前端开发组
+    code: RD-FE
+    description: 前端研发团队
+    department: 研发部
+
+  - name: AI算法组
+    code: RD-AI
+    description: AI算法研发团队
+    department: 研发部
+
+  - name: 产品经理组
+    code: PM-MGR
+    description: 产品经理团队
+    department: 产品部
+
+  - name: UI设计组
+    code: PM-UI
+    description: UI/UX设计团队
+    department: 产品部
+
+  - name: 内容运营组
+    code: OP-CONTENT
+    description: 内容运营团队
+    department: 运营部
+
+  - name: 用户运营组
+    code: OP-USER
+    description: 用户运营团队
+    department: 运营部
+
+  - name: 招聘组
+    code: HR-REC
+    description: 招聘团队
+    department: 行政人事部
+
+  - name: 培训组
+    code: HR-TRN
+    description: 培训团队
+    department: 行政人事部
+
   - name: RAG项目组
     code: RAG-PROJ
     description: RAG知识库平台项目组
@@ -303,7 +290,3 @@ teams:
     code: SEC-DATA
     description: 数据安全与合规团队
     department: 研发部
-
-  - name: 跨部门协作组
-    code: CROSS-DEP
-    description: 跨部门协作团队

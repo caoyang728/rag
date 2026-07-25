@@ -34,7 +34,7 @@ class QaRecord(models.Model):
     uuid = models.UUIDField(default=uuid_lib.uuid4, editable=False, unique=True)
     session = models.ForeignKey(Session, on_delete=models.CASCADE,
                                  db_column='session_id', related_name='qa_records')
-    user = models.ForeignKey('users.SysUser', on_delete=models.SET_NULL, null=True,
+    user = models.ForeignKey('users.User', on_delete=models.SET_NULL, null=True,
                               db_column='user_id', related_name='qa_records')
     turn_index = models.IntegerField(default=0, help_text='会话内轮次')
 
@@ -76,7 +76,7 @@ class QaRecord(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        db_table = 'qa_record'
+        db_table = 'chat_qa_record'
         indexes = [
             models.Index(fields=['session', 'turn_index'], name='idx_qa_sess_turn'),
             models.Index(fields=['user', '-created_at'], name='idx_qa_user_time'),
@@ -107,7 +107,7 @@ class QaFeedback(models.Model):
     id = models.BigAutoField(primary_key=True)
     qa_record = models.OneToOneField(QaRecord, on_delete=models.CASCADE,
                                       db_column='qa_id', related_name='feedback')
-    user = models.ForeignKey('users.SysUser', on_delete=models.CASCADE,
+    user = models.ForeignKey('users.User', on_delete=models.CASCADE,
                               db_column='user_id', related_name='feedbacks')
     rating = models.SmallIntegerField(default=0, help_text='1好评 -1差评 0中性')
     tags = ArrayField(models.CharField(max_length=32), default=list, blank=True,
@@ -119,7 +119,7 @@ class QaFeedback(models.Model):
     resolved_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
-        db_table = 'qa_feedback'
+        db_table = 'chat_feedback'
         indexes = [
             models.Index(fields=['status', '-created_at'], name='idx_fb_status_time'),
             models.Index(fields=['rating'], name='idx_fb_rating'),
@@ -139,13 +139,15 @@ class HotQaCache(models.Model):
     question = models.TextField()
     answer = models.TextField()
     citations = models.JSONField(default=list, blank=True)
+    cited_doc_ids = ArrayField(models.BigIntegerField(), default=list, blank=True,
+                                help_text='回答引用的文档 ID 列表，用于缓存命中后权限校验')
     hit_count = models.IntegerField(default=0)
     last_hit_at = models.DateTimeField(auto_now=True)
     expires_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        db_table = 'hot_qa_cache'
+        db_table = 'chat_hot_qa_cache'
         unique_together = [('question_hash', 'root_type', 'visibility_scope')]
         indexes = [
             models.Index(fields=['-hit_count'], name='idx_hot_hits'),
@@ -176,4 +178,4 @@ class TaskDecomposition(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        db_table = 'task_decomposition'
+        db_table = 'chat_task_decomposition'

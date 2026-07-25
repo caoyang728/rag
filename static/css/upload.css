@@ -44,3 +44,5 @@
 .file-item-progress{width:120px;height:4px;background:var(--border);border-radius:2px;overflow:hidden}
 .file-item-progress-bar{height:100%;background:var(--primary);transition:width 0.3s ease;width:0%}
 .file-item-status{min-width:80px;text-align:right}
+
+.upload-input{position:absolute;inset:0;opacity:0;cursor:pointer;z-index:5}

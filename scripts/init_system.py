@@ -134,11 +134,11 @@ def check_table_exists(table_name):
 
 def import_models():
     try:
-        from apps.users.models import SysUser, Role, Permission, RolePermission, UserRole, Department, Team
-        logger.info('✅ 模型导入成功')
-        return SysUser, Role, Permission, RolePermission, UserRole, Department, Team
+        from apps.users.models import User, Role, Permission, RolePermission, UserRole, Department, Team
+        logger.info('模型导入成功')
+        return User, Role, Permission, RolePermission, UserRole, Department, Team
     except Exception as e:
-        logger.info(f'❌ 模型导入失败: {e}')
+        logger.info(f'模型导入失败: {e}')
         traceback.print_exc()
         return None
 
@@ -200,7 +200,7 @@ def create_permissions(config, dry_run=False):
         name = perm_data['name']
         module = perm_data.get('module', '')
         action = perm_data.get('action', 'read')
-        scope = perm_data.get('scope', 'personal')
+        scope = perm_data.get('scope', 'team')
         description = perm_data.get('description', '')
 
         try:
@@ -271,37 +271,28 @@ def create_departments(config, dry_run=False):
     created = 0
     skipped = 0
 
-    def create_dept_tree(depts, parent=None):
-        nonlocal created, skipped
-        for dept_data in depts:
-            code = dept_data['code']
-            name = dept_data['name']
-            sort_order = dept_data.get('sort_order', 0)
-            children = dept_data.get('children', [])
+    for dept_data in depts_config:
+        code = dept_data['code']
+        name = dept_data['name']
+        sort_order = dept_data.get('sort_order', 0)
 
-            try:
-                if Department.objects.filter(code=code).exists():
-                    logger.info(f'  ⏭️  部门 "{code}" 已存在，跳过')
-                    skipped += 1
-                    dept = Department.objects.get(code=code)
-                else:
-                    if not dry_run:
-                        dept = Department.objects.create(
-                            name=name,
-                            code=code,
-                            parent=parent,
-                            sort_order=sort_order
-                        )
-                    logger.info(f'  ✅ 创建部门: {code} - {name}')
-                    created += 1
+        try:
+            if Department.objects.filter(code=code).exists():
+                logger.info(f'  ⏭️  部门 "{code}" 已存在，跳过')
+                skipped += 1
+            else:
+                if not dry_run:
+                    Department.objects.create(
+                        name=name,
+                        code=code,
+                        sort_order=sort_order
+                    )
+                logger.info(f'  ✅ 创建部门: {code} - {name}')
+                created += 1
+        except Exception as e:
+            logger.info(f'  ❌ 创建部门 "{code}" 失败: {e}')
+            traceback.print_exc()
 
-                if children:
-                    create_dept_tree(children, parent=dept)
-            except Exception as e:
-                logger.info(f'  ❌ 创建部门 "{code}" 失败: {e}')
-                traceback.print_exc()
-
-    create_dept_tree(depts_config)
     logger.info(f'  总计: 创建 {created} 个，跳过 {skipped} 个')
     return created
 
@@ -351,7 +342,7 @@ def create_teams(config, dry_run=False):
 
 def create_users(config, dry_run=False):
     logger.info('\n=== 创建用户 ===')
-    from apps.users.models import SysUser, Role, UserRole
+    from apps.users.models import User, Role, UserRole
     users_config = config.get('users', [])
     created = 0
     skipped = 0
@@ -363,13 +354,13 @@ def create_users(config, dry_run=False):
         password = user_data['password']
 
         try:
-            if SysUser.objects.filter(username=username).exists():
-                logger.info(f'  ⏭️  用户 "{username}" 已存在，跳过')
+            if User.objects.filter(username=username).exists():
+                logger.info(f'用户 "{username}" 已存在，跳过')
                 skipped += 1
                 continue
 
             if not dry_run:
-                user = SysUser.objects.create_user(
+                user = User.objects.create_user(
                     username=username,
                     email=email,
                     password=password
@@ -428,7 +419,7 @@ def main():
         sys.exit(1)
 
     logger.info('\n--- 步骤4: 检查角色表 ---')
-    if not check_table_exists('system_role_list'):
+    if not check_table_exists('user_role_list'):
         logger.info('❌ 角色表不存在，请先运行迁移命令')
         sys.exit(1)
     logger.info('✅ 角色表存在')

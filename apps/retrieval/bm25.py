@@ -49,7 +49,7 @@ def bm25_search(query: str,
         kw_q = kw_q | Q(content_preview__icontains=tok)
     qs = (DocumentVector.objects.filter(perm_q).filter(kw_q)
           .values('id', 'chunk_id', 'document_id', 'node_id',
-                  'visibility', 'root_type', 'node_path',
+                  'visible_scope', 'root_type', 'node_path',
                   'content_preview', 'chunk_type', 'keywords')[:candidate_pool])
     candidates = list(qs)
     if not candidates:
@@ -74,7 +74,7 @@ def bm25_search(query: str,
             'vector_id': c['id'], 'chunk_id': c['chunk_id'],
             'document_id': c['document_id'], 'node_id': c['node_id'],
             'content': c['content_preview'], 'chunk_type': c['chunk_type'],
-            'visibility': c['visibility'], 'root_type': c['root_type'],
+            'visible_scope': c['visible_scope'], 'root_type': c['root_type'],
             'node_path': c['node_path'], 'score': s,
         })
     scored.sort(key=lambda x: x['score'], reverse=True)

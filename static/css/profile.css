@@ -1,7 +1,7 @@
 /* ============ 个人中心 ============ */
 .profile-layout{
-  display:flex;gap:16px;
-  height:calc(100vh - var(--nav-h) - 110px);
+  flex:1;min-height:0;
+  display:flex;overflow:hidden;gap:16px;
 }
 .profile-menu{
   width:220px;flex-shrink:0;

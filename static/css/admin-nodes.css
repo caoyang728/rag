@@ -1,38 +1,323 @@
 /* ============ 节点管理 ============ */
-.node-manage{display:flex;gap:16px;height:calc(100vh - var(--nav-h) - 40px)}
-.node-tree-panel{
-  width:340px;flex-shrink:0;
-  background:var(--white);border:1px solid var(--border);border-radius:var(--radius-lg);
-  display:flex;flex-direction:column;
+.node-manage {
+	display: flex;
+	gap: 16px;
+	height: min(560px, calc(100vh - var(--nav-h) - 40px));
+	min-height: 360px
 }
-.node-detail-panel{flex:1;background:var(--white);border:1px solid var(--border);border-radius:var(--radius-lg);padding:24px;overflow-y:auto}
+
+.node-tree-panel {
+	width: 340px;
+	flex-shrink: 0;
+	background: var(--white);
+	border: 1px solid var(--border);
+	border-radius: var(--radius-lg);
+	display: flex;
+	flex-direction: column;
+}
+
+.node-detail-panel {
+	flex: 1;
+	background: var(--white);
+	border: 1px solid var(--border);
+	border-radius: var(--radius-lg);
+	padding: 24px;
+	overflow-y: auto
+}
 
 /* 复用聊天页里的 tree 样式（此页也需要，为独立起见此处备份最小集） */
-.tree{padding:0 8px}
-.tree-node{margin-bottom:2px}
-.tree-item{
-  display:flex;align-items:center;gap:6px;
-  padding:6px 8px;border-radius:var(--radius-sm);
-  cursor:pointer;font-size:13px;color:var(--text);
-  user-select:none;
+.tree {
+	padding: 0 8px
 }
-.tree-item:hover{background:var(--hover)}
-.tree-item.selected{background:var(--primary-light);color:var(--primary)}
-.tree-toggle{width:16px;height:16px;display:inline-flex;align-items:center;justify-content:center;font-size:10px;color:var(--text-sub);transition:transform 0.15s;flex-shrink:0}
-.tree-toggle.expanded{transform:rotate(90deg)}
-.tree-toggle.leaf{visibility:hidden}
-.tree-icon{width:16px;text-align:center;flex-shrink:0}
-.tree-label{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.tree-count{font-size:11px;color:var(--text-sub)}
-.tree-children{margin-left:16px;display:none}
-.tree-children.expanded{display:block}
-.tree-root{font-weight:600}
-.tree-root .tree-icon{font-size:15px}
-.panel-header{
-  padding:14px 16px;
-  border-bottom:1px solid var(--border);
-  display:flex;justify-content:space-between;align-items:center;
-  flex-shrink:0;
+
+.tree-node {
+	margin-bottom: 2px
 }
-.panel-title{font-size:14px;font-weight:600}
-.panel-body{flex:1;overflow-y:auto;padding:12px 0}
+
+.tree-item {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 6px 8px;
+	border-radius: var(--radius-sm);
+	cursor: pointer;
+	font-size: 13px;
+	color: var(--text);
+	user-select: none;
+}
+
+.tree-item:hover {
+	background: var(--hover)
+}
+
+.tree-item.selected {
+	background: var(--primary-light);
+	color: var(--primary)
+}
+
+.tree-toggle {
+	width: 16px;
+	height: 16px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 10px;
+	color: var(--text-sub);
+	transition: transform 0.15s;
+	flex-shrink: 0
+}
+
+.tree-toggle.expanded {
+	transform: rotate(90deg)
+}
+
+.tree-toggle.leaf {
+	visibility: hidden
+}
+
+.tree-icon {
+	width: 16px;
+	text-align: center;
+	flex-shrink: 0
+}
+
+.tree-label {
+	flex: 1;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis
+}
+
+.tree-count {
+	font-size: 11px;
+	color: var(--text-sub)
+}
+
+.tree-children {
+	margin-left: 16px;
+	display: none
+}
+
+.tree-children.expanded {
+	display: block
+}
+
+.tree-root {
+	font-weight: 600
+}
+
+.tree-root .tree-icon {
+	font-size: 15px
+}
+
+.panel-header {
+	padding: 14px 16px;
+	border-bottom: 1px solid var(--border);
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	flex-shrink: 0;
+}
+
+.tree-expand-all {
+	padding: 2px 6px;
+}
+
+.panel-title {
+	font-size: 14px;
+	font-weight: 600
+}
+
+.panel-body {
+	flex: 1;
+	overflow-y: auto;
+	padding: 12px 0
+}
+
+/* ============ 文档列表区 ============ */
+.doc-list-card {
+	margin-top: 16px
+}
+
+.doc-list-toolbar {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	padding: 14px 20px;
+	border-bottom: 1px solid var(--border);
+}
+
+.doc-list-title {
+	font-size: 15px;
+	font-weight: 600;
+	display: flex;
+	align-items: center;
+	gap: 8px
+}
+
+.doc-list-count {
+	font-size: 12px;
+	color: var(--text-sub);
+	font-weight: 400
+}
+
+.doc-list-card .doc-filter-bar {
+	display: flex;
+	gap: 8px;
+	flex-wrap: wrap;
+	align-items: center;
+	padding: 14px 20px;
+	border-bottom: 1px solid var(--border);
+	background: var(--bg);
+}
+
+.doc-list-card .table-container {
+	margin: 0
+}
+
+.doc-list-card .pagination {
+	padding: 12px 20px;
+	border-top: 1px solid var(--border)
+}
+
+/* 文档预览（禁止复制） */
+.doc-preview-content {
+	font-size: 14px;
+	line-height: 1.8;
+	color: var(--text);
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+.doc-preview-content .doc-chunk {
+	margin-bottom: 14px;
+	padding-bottom: 14px;
+	border-bottom: 1px dashed var(--border)
+}
+
+.doc-preview-content .doc-chunk:last-child {
+	border-bottom: none
+}
+
+.doc-preview-content .doc-chunk-idx {
+	font-size: 12px;
+	color: var(--text-sub);
+	margin-bottom: 4px
+}
+
+.doc-preview-disabled {
+	text-align: center;
+	padding: 60px 20px;
+	color: var(--text-sub);
+}
+
+.doc-preview-disabled-icon {
+	font-size: 48px;
+	margin-bottom: 12px
+}
+
+/* 分页 */
+.page-btn {
+	min-width: 30px;
+	height: 30px;
+	padding: 0 8px;
+	border: 1px solid var(--border);
+	background: var(--white);
+	border-radius: var(--radius-sm);
+	cursor: pointer;
+	font-size: 13px;
+	color: var(--text);
+	transition: all .15s;
+}
+
+.page-btn:hover:not(:disabled) {
+	border-color: var(--primary);
+	color: var(--primary)
+}
+
+.page-btn.active {
+	background: var(--primary);
+	border-color: var(--primary);
+	color: #fff
+}
+
+.page-btn:disabled {
+	opacity: .5;
+	cursor: not-allowed
+}
+
+.pagination {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 13px;
+	color: var(--text-sub)
+}
+
+/* 表格操作按钮组 */
+.table-actions {
+	display: flex;
+	gap: 6px;
+	flex-wrap: wrap
+}
+
+.form-section-title {
+	font-size: 14px;
+	font-weight: 600;
+	margin: 8px 0 12px;
+	color: var(--text)
+}
+
+/* 弹窗内容内部容器 - 优化间距 */
+.modal-content-inner {
+	display: flex;
+	flex-direction: column;
+	gap: 16px;
+}
+
+.modal-content-inner .form-section-title {
+	margin: 0 0 8px;
+	padding-bottom: 6px;
+	border-bottom: 1px solid var(--border);
+}
+
+.modal-content-inner .table-container {
+	margin: 0;
+}
+
+/* 多选标签样式 */
+.checkbox-tag {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	padding: 4px 10px;
+	border: 1px solid var(--border);
+	background: var(--white);
+	border-radius: 20px;
+	cursor: pointer;
+	font-size: 13px;
+	color: var(--text);
+	transition: all .15s;
+}
+
+.checkbox-tag:hover {
+	border-color: var(--primary);
+	background: var(--primary-light)
+}
+
+.checkbox-tag input[type="checkbox"] {
+	margin: 0;
+	width: 14px;
+	height: 14px
+}
+
+.checkbox-tag input[type="checkbox"]:checked+span,
+.checkbox-tag input[type="checkbox"]:checked~span {
+	color: var(--primary)
+}
+
+/* 小按钮 */
+.btn-xs {
+	padding: 2px 8px;
+	font-size: 12px
+}

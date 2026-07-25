@@ -1,18 +1,16 @@
 """
 DRF 权限类 - 基于 has_permission + scope 检查
 
-角色体系 (8 种):
-  super_admin    - 超级管理员，拥有所有权限
-  kb_admin       - 知识库管理员，拥有所有文档管理权限，无人员管理
-  audit_admin    - 审计管理员，审计日志查看权限
-  user_admin     - 用户管理员，用户管理权限
-  dept_manager   - 部门经理，管理部门成员及部门级文档
-  team_leader    - 组长，管理团队成员及团队级文档
-  employee       - 普通员工，个人文档CRUD+上传，部门/团队文档只读
-  readonly       - 只读用户，仅文档只读权限
+角色体系 (6 种):
+  super_admin          - 超级管理员，全部配置权限、绕过双审直接发布、可物理销毁文档
+  dept_manager         - 部门负责人，管辖本部门全部团队、审批扩大可见范围申请
+  team_leader          - 团队组长，本团队文档一审、管理文档、调整可见范围、直接收回对外权限
+  compliance_reviewer  - 文档审核员，专职合规风控、敏感内容二审校验、无日常检索问答权限
+  employee             - 普通员工，检索已审核文档、上传发起双审工单、发起权限申请
+  readonly             - 只读员工，检索已发布文档、发起read权限申请、禁止上传
 
-权限范围 (4 级): all / department / team / personal（无继承关系）
-权限动作: read / upload / edit / delete / export / share / manage
+权限范围 (3 级): all / department / team
+权限动作: read / upload / manage / download / manage_users / config
 """
 from rest_framework.permissions import BasePermission
 from apps.users.models import has_permission, has_perm_for_scope, UserRole
@@ -45,22 +43,13 @@ class IsSuperAdmin(BasePermission):
         return UserRole.objects.filter(user=u, role__code='super_admin').exists()
 
 
-class IsAdminOrOps(BasePermission):
-    """超级管理员 或 知识库管理员"""
-    def has_permission(self, request, view):
-        u = request.user
-        if not u or not u.is_authenticated:
-            return False
-        return UserRole.objects.filter(user=u, role__code__in=['super_admin', 'kb_admin']).exists()
-
-
 class CanManageUsers(BasePermission):
-    """可以管理用户：super_admin / dept_manager / team_leader / user_admin"""
+    """可以管理用户：super_admin / dept_manager / team_leader"""
     def has_permission(self, request, view):
         u = request.user
         if not u or not u.is_authenticated:
             return False
-        return UserRole.objects.filter(user=u, role__code__in=['super_admin', 'dept_manager', 'team_leader', 'user_admin']).exists()
+        return UserRole.objects.filter(user=u, role__code__in=['super_admin', 'dept_manager', 'team_leader']).exists()
 
 
 class CanReadAudit(BasePermission):
@@ -75,7 +64,7 @@ class CanReadAudit(BasePermission):
 class RequireKnowledgePerm(BasePermission):
     """知识库操作权限：需要指定 action + scope"""
     default_action = 'read'
-    default_scope = 'personal'
+    default_scope = 'team'
 
     def has_permission(self, request, view):
         u = request.user
@@ -84,3 +73,12 @@ class RequireKnowledgePerm(BasePermission):
         action = getattr(view, 'knowledge_action', self.default_action)
         scope = getattr(view, 'knowledge_scope', self.default_scope)
         return has_perm_for_scope(u, action, scope)
+
+
+class IsAdminOrOps(BasePermission):
+    """节点 CRUD：超级管理员或知识库管理员可操作"""
+    def has_permission(self, request, view):
+        u = request.user
+        if not u or not u.is_authenticated:
+            return False
+        return UserRole.objects.filter(user=u, role__code__in=['super_admin', 'kb_admin']).exists()

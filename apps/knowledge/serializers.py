@@ -1,6 +1,7 @@
 """knowledge serializers"""
 from rest_framework import serializers
 from apps.knowledge.models import KnowledgeNode, Document, DocumentChunk
+from apps.knowledge.access import resolve_doc_access
 
 
 class KnowledgeNodeSerializer(serializers.ModelSerializer):
@@ -11,8 +12,9 @@ class KnowledgeNodeSerializer(serializers.ModelSerializer):
     class Meta:
         model = KnowledgeNode
         fields = [
-            "id", "parent_id", "root_type", "node_type", "name", "path", "depth",
-            "description", "order_no", "children_count", "document_count",
+            "id", "parent_id", "root_type", "node_type", "node_level",
+            "name", "path", "depth", "description", "order_no",
+            "children_count", "document_count",
             "created_by", "created_by_name", "created_at", "updated_at",
         ]
 
@@ -51,18 +53,49 @@ class DocumentSerializer(serializers.ModelSerializer):
     node_name = serializers.CharField(source="node.name", read_only=True)
     owner_name = serializers.CharField(source="owner.username", read_only=True)
     restored_by_name = serializers.CharField(source="restored_by.username", read_only=True)
+    # 权限标志（当前用户视角）
+    is_owner = serializers.SerializerMethodField()
+    is_manager = serializers.SerializerMethodField()
+    can_read = serializers.SerializerMethodField()
+    can_download = serializers.SerializerMethodField()
+    can_share = serializers.SerializerMethodField()
 
     class Meta:
         model = Document
         fields = [
             "id", "uuid", "node_id", "node_name", "title", "file_name", "file_type",
             "file_size", "file_hash", "mime_type", "owner_id", "owner_name",
-            "visibility", "root_type", "status", "error_message", "chunk_count",
-            "version", "tags", "created_at", "updated_at",
+            "kb_node_id", "dept_node_id", "team_node_id", "category_node_id",
+            "visible_scope", "secret_level", "audit_status",
+            "has_deny_user", "has_cross_team", "has_allow_user", "allow_download", "allow_share",
+            "root_type", "status", "error_message", "chunk_count", "version", "tags",
+            "is_deleted", "delete_time", "created_at", "updated_at",
             "restored_at", "restored_by", "restored_by_name",
+            "is_owner", "is_manager", "can_read", "can_download", "can_share",
         ]
-        read_only_fields = ["uuid", "file_hash", "status", "chunk_count", "created_at", "updated_at",
-                           "restored_at", "restored_by"]
+        read_only_fields = ["uuid", "file_hash", "status", "chunk_count",
+                            "created_at", "updated_at", "restored_at", "restored_by"]
+
+    def _access(self, obj):
+        request = self.context.get("request")
+        ctx = self.context.get("_user_ctx")
+        grants_map = self.context.get("_grants_map")
+        return resolve_doc_access(request.user if request else None, obj, ctx=ctx, grants_map=grants_map)
+
+    def get_is_owner(self, obj):
+        return self._access(obj)["is_owner"]
+
+    def get_is_manager(self, obj):
+        return self._access(obj)["is_manager"]
+
+    def get_can_read(self, obj):
+        return self._access(obj)["can_read"]
+
+    def get_can_download(self, obj):
+        return self._access(obj)["can_download"]
+
+    def get_can_share(self, obj):
+        return self._access(obj)["can_share"]
 
 
 class DocumentChunkSerializer(serializers.ModelSerializer):

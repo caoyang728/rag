@@ -11,6 +11,7 @@ router.register("documents", views.DocumentViewSet, basename="document")
 urlpatterns = [
     path("nodes/tree/", views.NodeTreeView.as_view()),
     path("nodes/root_types/", views.RootTypesView.as_view()),
+    path("documents/allowed_visibility/", views.AllowedVisibilityView.as_view()),
     path("documents/upload/", views.DocumentUploadView.as_view()),
     path("documents/<int:doc_id>/chunks/", views.DocumentChunksView.as_view()),
     path("documents/pending/", views.PendingDocsView.as_view()),

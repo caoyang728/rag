@@ -2,7 +2,6 @@
 
 /** 待上传的文件列表：{ id, file, name, size, type, icon } */
 let pendingFiles = [];
-let allNodes = [];
 let uploadHistoryCurrentPage = 1;
 let uploadHistoryTotal = 0;
 
@@ -42,7 +41,7 @@ function initSearchFilter() {
 	}
 
 	// 启动上传历史持续刷新
-	startUploadHistoryPolling();
+	scheduleUploadHistoryRefresh();
 }
 
 async function loadUploadHistory(page = 1) {
@@ -50,7 +49,7 @@ async function loadUploadHistory(page = 1) {
 	if (!tbody) return;
 
 	try {
-		let url = `/api/v1/knowledge/documents/?page=${page}&page_size=10`;
+		let url = `/api/v1/knowledge/documents/?page=${page}&page_size=20`;
 		if (uploadHistorySearch) {
 			url += `&search=${encodeURIComponent(uploadHistorySearch)}`;
 		}
@@ -65,35 +64,34 @@ async function loadUploadHistory(page = 1) {
 		uploadHistoryCurrentPage = page;
 
 		if (!docs || docs.length === 0) {
-			tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--text-sub)">暂无上传记录</td></tr>';
+			tbody.innerHTML = '<tr><td colspan="8" class="text-center text-sub">暂无上传记录</td></tr>';
 			renderUploadPagination();
 			return;
 		}
 
-		tbody.innerHTML = docs.map(h => `
-      <tr>
-        <td><span style="display:inline-flex;align-items:center;gap:6px">${fileTypeIcon(h.file_type)} ${escapeHtml(h.file_name)}</span></td>
-        <td><span class="tag">${fileTypeByExt(h.file_name)}</span></td>
-        <td class="text-sub">${escapeHtml(h.node_name || '-')}</td>
-        <td>${escapeHtml(h.owner_name || '-')}</td>
-        <td>${visTag(h.visibility)}</td>
-        <td>${statusTag(h.status)}</td>
-        <td class="text-sub">${formatDate(h.created_at)}</td>
-        <td>
-          <div class="table-actions">
-            <button class="btn-link btn-sm" onclick="viewDocument(${h.id})">查看</button>
-            <button class="btn-link btn-sm" onclick="reparseDocument(${h.id})">重传</button>
-            <button class="btn-link btn-sm" style="color:var(--danger)" onclick="deleteDocument(${h.id})">删除</button>
-          </div>
-        </td>
-      </tr>
-    `).join('');
+		const rowTpl = document.getElementById('tmpl-upload-row').content;
+		tbody.innerHTML = '';
+		docs.forEach(function (h) {
+			const row = document.importNode(rowTpl, true).querySelector('tr');
+			row.querySelector('.up-row-icon').textContent = fileTypeIcon(h.file_type);
+			row.querySelector('.up-row-name').textContent = h.file_name;
+			row.querySelector('.up-row-type').textContent = fileTypeByExt(h.file_name);
+			row.querySelector('.up-row-node').textContent = h.node_name || '-';
+			row.querySelector('.up-row-owner').textContent = h.owner_name || '-';
+			row.querySelector('.up-row-vis').innerHTML = visTag(h.visibility);
+			row.querySelector('.up-row-status').innerHTML = statusTag(h.status);
+			row.querySelector('.up-row-time').textContent = formatDate(h.created_at);
+			row.querySelector('.up-row-view').onclick = function () { viewDocument(h.id); };
+			row.querySelector('.up-row-reparse').onclick = function () { reparseDocument(h.id); };
+			row.querySelector('.up-row-delete').onclick = function () { deleteDocument(h.id); };
+			tbody.appendChild(row);
+		});
 
 		renderUploadPagination();
 		scheduleUploadHistoryRefresh(docs);
 	} catch (e) {
 		console.error('load upload history failed:', e);
-		tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--text-sub)">加载失败，请刷新重试</td></tr>';
+		tbody.innerHTML = '<tr><td colspan="8" class="text-center text-sub">加载失败，请刷新重试</td></tr>';
 	}
 }
 
@@ -103,7 +101,7 @@ function renderUploadPagination() {
 
 	const total = uploadHistoryTotal;
 	const page = uploadHistoryCurrentPage;
-	const pageSize = 10;
+	const pageSize = 20;
 	const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
 	if (total === 0) {
@@ -111,33 +109,44 @@ function renderUploadPagination() {
 		return;
 	}
 
-	let html = `<span>共 ${total} 条</span>`;
+	const tpl = document.getElementById('tmpl-upload-pagination').content;
+	const frag = document.importNode(tpl, true);
 
-	if (page > 1) {
-		html += `<button class="page-btn" onclick="loadUploadHistory(${page - 1})">‹</button>`;
+	frag.querySelector('.up-pag-total-num').textContent = total;
+
+	const prevBtn = frag.querySelector('.up-pag-prev');
+	if (page <= 1) {
+		prevBtn.disabled = true;
 	} else {
-		html += `<button class="page-btn" disabled>‹</button>`;
+		prevBtn.onclick = function () { loadUploadHistory(page - 1); };
 	}
 
-	for (let i = 1; i <= totalPages; i++) {
+	const pagesDiv = frag.querySelector('.up-pag-pages');
+	for (var i = 1; i <= totalPages; i++) {
 		if (totalPages <= 7 || i === 1 || i === totalPages || (i >= page - 2 && i <= page + 2)) {
-			if (i === page) {
-				html += `<button class="page-btn active">${i}</button>`;
-			} else {
-				html += `<button class="page-btn" onclick="loadUploadHistory(${i})">${i}</button>`;
+			var btn = document.createElement('button');
+			btn.className = 'page-btn' + (i === page ? ' active' : '');
+			btn.textContent = i;
+			if (i !== page) {
+				btn.onclick = (function (p) { return function () { loadUploadHistory(p); }; })(i);
 			}
+			pagesDiv.appendChild(btn);
 		} else if (i === page - 3 || i === page + 3) {
-			html += `<span>...</span>`;
+			var span = document.createElement('span');
+			span.textContent = '...';
+			pagesDiv.appendChild(span);
 		}
 	}
 
-	if (page < totalPages) {
-		html += `<button class="page-btn" onclick="loadUploadHistory(${page + 1})">›</button>`;
+	const nextBtn = frag.querySelector('.up-pag-next');
+	if (page >= totalPages) {
+		nextBtn.disabled = true;
 	} else {
-		html += `<button class="page-btn" disabled>›</button>`;
+		nextBtn.onclick = function () { loadUploadHistory(page + 1); };
 	}
 
-	container.innerHTML = html;
+	container.innerHTML = '';
+	container.appendChild(frag);
 }
 
 async function viewDocument(docId) {
@@ -320,18 +329,17 @@ function addFiles(fileList) {
 function renderFileItem(info) {
 	const list = $('#fileList');
 	const empty = $('#fileEmpty');
-	if (empty) empty.style.display = 'none';
+	if (empty) empty.classList.add('hidden');
 
-	const div = el('div', { class: 'file-item', id: info.id });
-	div.innerHTML = `
-    <div class="file-item-icon">${info.icon}</div>
-    <div class="file-item-info">
-      <div class="file-item-name" title="${escapeHtml(info.name)}">${escapeHtml(info.name)}</div>
-      <div class="file-item-meta">${info.type} · ${formatSize(info.size)} · 待上传</div>
-    </div>
-    <div class="file-item-progress"><div class="file-item-progress-bar"></div></div>
-    <div class="file-item-status"><span class="tag">等待中</span></div>
-    <button class="btn-link btn-sm" style="color:var(--danger)" onclick="removeFile('${info.id}')">✕</button>`;
+	const tpl = document.getElementById('tmpl-file-item').content;
+	const div = tpl.cloneNode(true).querySelector('.file-item');
+	div.id = info.id;
+	div.querySelector('.up-fi-icon').textContent = info.icon;
+	const nameEl = div.querySelector('.up-fi-name');
+	nameEl.textContent = info.name;
+	nameEl.title = info.name;
+	div.querySelector('.up-fi-meta').textContent = info.type + ' · ' + formatSize(info.size) + ' · 待上传';
+	div.querySelector('.up-fi-remove').onclick = function () { removeFile(info.id); };
 	list.appendChild(div);
 }
 
@@ -350,7 +358,7 @@ function updateFileCount() {
 	const c = $('#fileCount');
 	if (c) c.textContent = n;
 	const empty = $('#fileEmpty');
-	if (empty) empty.style.display = n ? 'none' : 'block';
+	if (empty) empty.classList.toggle('hidden', n > 0);
 	if (!n) hideUploadPanels();
 }
 
@@ -358,20 +366,15 @@ function updateFileCount() {
 function showUploadPanels() {
 	const panel = $('#uploadPanel');
 	const opts = $('#uploadOptions');
-	if (panel) panel.style.display = '';
-	if (opts) opts.style.display = '';
+	if (panel) panel.classList.remove('hidden');
+	if (opts) opts.classList.remove('hidden');
 }
 
 function hideUploadPanels() {
 	const panel = document.getElementById('uploadPanel');
 	const opts = document.getElementById('uploadOptions');
-	if (panel) panel.style.display = 'none';
-	if (opts) opts.style.display = 'none';
-}
-
-function hideUploadOptionsOnly() {
-	const opts = $('#uploadOptions');
-	if (opts) opts.style.display = 'none';
+	if (panel) panel.classList.add('hidden');
+	if (opts) opts.classList.add('hidden');
 }
 
 /* ============ 上传完成收尾 ============ */
@@ -392,13 +395,22 @@ function clearFileList() {
 }
 
 /* ============ 单文件上传（支持冲突重试） ============ */
-async function uploadSingleFile(info, nodeId, visibility, token, forceUpload = false, action = '') {
+async function uploadSingleFile(info, nodeId, visibility, token, allowDownload, allowShare, forceUpload = false, action = '', depts = [], teams = []) {
 	const bar = document.querySelector('#' + info.id + ' .file-item-progress-bar');
 
 	const formData = new FormData();
 	formData.append('file', info.file, info.name);
 	formData.append('node_id', nodeId);
 	formData.append('visibility', visibility);
+	formData.append('allow_download', allowDownload ? 'true' : 'false');
+	formData.append('allow_share', allowShare ? 'true' : 'false');
+	// 传递部门/团队列表
+	if (depts.length > 0) {
+		depts.forEach(function (id) { formData.append('visibility_depts', id); });
+	}
+	if (teams.length > 0) {
+		teams.forEach(function (id) { formData.append('visibility_teams', id); });
+	}
 	if (forceUpload) {
 		formData.append('force_upload', 'true');
 	}
@@ -466,7 +478,22 @@ async function startUpload() {
 	if (!nodeId) { toast('请选择归属节点', 'error'); return; }
 
 	const visRadio = $('#visRadios .upload-radio.selected input');
-	const visibility = visRadio ? ['private', 'department', 'team', 'public'].indexOf(visRadio.value) + 1 : 1;
+	const visValue = visRadio ? visRadio.value : 'private';
+	const visMap = { 'private': 1, 'org': 2, 'public': 3 };
+	const visibility = visMap[visValue] || 1;
+
+	const allowDownload = !!document.getElementById('chkAllowDownload')?.checked;
+	const allowShare = !!document.getElementById('chkAllowShare')?.checked;
+	
+	// 获取选中的部门/团队
+	const depts = [];
+	document.querySelectorAll('#uploadDeptPanel input:checked').forEach(function (cb) {
+		depts.push(parseInt(cb.value));
+	});
+	const teams = [];
+	document.querySelectorAll('#uploadTeamPanel input:checked').forEach(function (cb) {
+		teams.push(parseInt(cb.value));
+	});
 
 	const token = localStorage.getItem('rag_access');
 	if (!token) { toast('请先登录', 'error'); return; }
@@ -505,7 +532,7 @@ async function startUpload() {
 		if (statusEl) statusEl.innerHTML = '<span class="tag tag-info">上传中</span>';
 
 		try {
-			let responseData = await uploadSingleFile(info, nodeId, visibility, token);
+			let responseData = await uploadSingleFile(info, nodeId, visibility, token, allowDownload, allowShare, false, '', depts, teams);
 
 			// -- 处理冲突响应：弹出确认对话框 --
 			while (responseData && responseData.conflict) {
@@ -529,7 +556,7 @@ async function startUpload() {
 
 					// 用户确认，使用 force_upload 重新上传
 					if (statusEl) statusEl.innerHTML = '<span class="tag tag-info">确认上传</span>';
-					responseData = await uploadSingleFile(info, nodeId, visibility, token, true);
+					responseData = await uploadSingleFile(info, nodeId, visibility, token, allowDownload, allowShare, true);
 				} else {
 					// 已删除的文件：三选项（恢复/新建/取消）
 					const choice = showDeletedFileDialog(existing);
@@ -541,7 +568,7 @@ async function startUpload() {
 
 					// 用户选择恢复或新建
 					if (statusEl) statusEl.innerHTML = '<span class="tag tag-info">' + (choice === 'restore' ? '恢复中' : '新建中') + '</span>';
-					responseData = await uploadSingleFile(info, nodeId, visibility, token, true, choice);
+					responseData = await uploadSingleFile(info, nodeId, visibility, token, allowDownload, allowShare, true, choice, depts, teams);
 				}
 			}
 
@@ -561,7 +588,18 @@ async function startUpload() {
 			return 'success';
 		} catch (err) {
 			if (statusEl) statusEl.innerHTML = '<span class="tag tag-danger">失败</span>';
-			if (metaEl) metaEl.innerHTML = info.type + ' · ' + formatSize(info.size) + ' · ' + err.message;
+			// 获取详细错误信息
+			let errorMsg = err.message || '上传失败';
+			if (err.response) {
+				if (err.response.detail) {
+					errorMsg = err.response.detail;
+				} else if (typeof err.response === 'string') {
+					errorMsg = err.response;
+				} else if (err.response.error) {
+					errorMsg = err.response.error;
+				}
+			}
+			if (metaEl) metaEl.innerHTML = info.type + ' · ' + formatSize(info.size) + ' · ' + errorMsg;
 			return 'failed';
 		} finally {
 			completedCount++;
@@ -601,7 +639,7 @@ async function startUpload() {
 		if (uploadedDocIds.length > 0) {
 			startStatusPolling(uploadedDocIds);
 			// 确保上传历史持续刷新，直到所有文档完成
-			startUploadHistoryPolling();
+			scheduleUploadHistoryRefresh();
 		}
 		finishUpload();
 	} catch (e) {
@@ -617,7 +655,14 @@ function cancelUpload() {
 	});
 	uploadingXhrs = [];
 	hideGlobalProgress();
-	finishUpload();
+	// 重置文件列表中的进度条状态，保留文件供重新上传
+	const fileItems = document.querySelectorAll('.file-item');
+	fileItems.forEach(item => {
+		const bar = item.querySelector('.file-item-progress-bar');
+		if (bar) bar.style.width = '0%';
+		const status = item.querySelector('.file-item-status');
+		if (status) status.innerHTML = '<span class="tag tag-default">待上传</span>';
+	});
 }
 
 function showGlobalProgress() {
@@ -627,24 +672,16 @@ function showGlobalProgress() {
 	const existing = panel.querySelector('.global-progress');
 	if (existing) existing.remove();
 
-	const html = `
-    <div class="global-progress" style="margin-top:12px;padding:12px;background:var(--primary-light);border-radius:var(--radius)">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-        <span style="font-size:13px;color:var(--text-primary)">整体上传进度</span>
-        <button class="btn-link btn-sm" onclick="cancelUpload()" style="color:var(--danger)">取消上传</button>
-      </div>
-      <div style="width:100%;height:6px;background:var(--border);border-radius:3px;overflow:hidden">
-        <div id="globalProgressBar" style="height:100%;background:var(--primary);transition:width 0.3s ease;width:0%"></div>
-      </div>
-      <div id="globalProgressText" style="text-align:right;font-size:11.5px;color:var(--text-sub);margin-top:4px">0/${pendingFiles.length}</div>
-    </div>
-  `;
-	panel.insertAdjacentHTML('beforeend', html);
+	const tpl = document.getElementById('tmpl-upload-progress').content;
+	const frag = document.importNode(tpl, true);
+	frag.querySelector('.up-prog-cancel').onclick = cancelUpload;
+	frag.querySelector('.up-prog-text').textContent = '0/' + pendingFiles.length;
+	panel.appendChild(frag);
 }
 
 function updateGlobalProgress(done, total) {
-	const bar = $('#globalProgressBar');
-	const text = $('#globalProgressText');
+	const bar = document.querySelector('.global-progress .up-prog-bar-fill');
+	const text = document.querySelector('.global-progress .up-prog-text');
 	if (bar) bar.style.width = Math.round((done / total) * 100) + '%';
 	if (text) text.textContent = done + '/' + total;
 }
@@ -684,7 +721,7 @@ function updateCeleryStatusUI(ok, detail) {
 	}
 
 	if (retryBtn) {
-		retryBtn.style.display = ok ? 'none' : 'inline-flex';
+		retryBtn.classList.toggle('hidden', ok);
 	}
 }
 
@@ -693,7 +730,7 @@ async function checkPendingDocs() {
 		const data = await api.getJson('/api/v1/knowledge/documents/pending/');
 		const retryBtn = $('#retryPendingBtn');
 		if (retryBtn && data.total > 0) {
-			retryBtn.style.display = 'inline-flex';
+			retryBtn.classList.remove('hidden');
 			retryBtn.textContent = `🔄 重试 ${data.total} 个待处理文档`;
 		}
 	} catch (e) {
@@ -754,34 +791,38 @@ function stopStatusPolling() {
 const PROCESSING_STATUSES = new Set(['pending', 'parsing', 'desensitizing', 'chunking', 'embedding', 'embedding_failed']);
 let historyRefreshInterval = null;
 
-function scheduleUploadHistoryRefresh(docs) {
-	clearHistoryRefresh();
-	const hasProcessing = docs.some(d => PROCESSING_STATUSES.has(d.status));
-	if (hasProcessing) {
-		historyRefreshInterval = setInterval(() => {
-			loadUploadHistory(uploadHistoryCurrentPage);
-		}, 10000);
-	}
-}
-
-function clearHistoryRefresh() {
-	if (historyRefreshInterval) {
-		clearInterval(historyRefreshInterval);
-		historyRefreshInterval = null;
-	}
+/**
+ * 检查是否有进行中的文档
+ */
+function hasProcessingDocuments(docs) {
+	const targetDocs = docs || currentDocs;
+	return targetDocs?.some(d => PROCESSING_STATUSES.has(d.status));
 }
 
 /**
- * 启动上传历史持续刷新（页面加载时调用）
- * 只要存在进行中的文档，就每10秒刷新一次
+ * 启动/停止上传历史自动刷新
+ * - 如果有进行中的文档，每10秒刷新一次
+ * - 所有文档完成后自动停止
  */
-function startUploadHistoryPolling() {
+function scheduleUploadHistoryRefresh(docs) {
 	clearHistoryRefresh();
+	
+	// 如果传入了文档列表，立即检查是否需要刷新
+	if (docs && docs.length > 0) {
+		if (hasProcessingDocuments(docs)) {
+			startHistoryRefreshLoop();
+		}
+		return;
+	}
+	
+	// 没有传入文档列表，从currentDocs获取并启动持续检查
+	startHistoryRefreshLoop();
+}
+
+function startHistoryRefreshLoop() {
 	historyRefreshInterval = setInterval(() => {
 		try {
-			// 检查是否有进行中的文档
-			const hasProcessing = currentDocs?.some(d => PROCESSING_STATUSES.has(d.status));
-			if (hasProcessing) {
+			if (hasProcessingDocuments()) {
 				loadUploadHistory(uploadHistoryCurrentPage);
 			} else {
 				// 所有文档都已完成，停止刷新
@@ -791,6 +832,13 @@ function startUploadHistoryPolling() {
 			console.warn('上传历史刷新失败:', e);
 		}
 	}, 10000);
+}
+
+function clearHistoryRefresh() {
+	if (historyRefreshInterval) {
+		clearInterval(historyRefreshInterval);
+		historyRefreshInterval = null;
+	}
 }
 
 document.addEventListener('beforeunload', () => {
@@ -827,7 +875,55 @@ function pickVis(elm) {
 	$$('#visRadios .upload-radio').forEach(r => r.classList.remove('selected'));
 	elm.classList.add('selected');
 	elm.querySelector('input').checked = true;
+	
+	// 显示/隐藏部门/团队选择
+	var visValue = elm.querySelector('input').value;
+	var orgSelect = document.getElementById('uploadOrgSelect');
+	if (visValue === 'org') {
+		orgSelect.classList.remove('hidden');
+		loadUploadDeptTeamOptions();
+	} else {
+		orgSelect.classList.add('hidden');
+	}
 }
+
+var uploadDeptList = [];
+var uploadTeamList = [];
+
+function loadUploadDeptTeamOptions() {
+	if (uploadDeptList.length > 0 && uploadTeamList.length > 0) {
+		if (!uploadMultiSelect) {
+			uploadMultiSelect = createDeptTeamMultiSelect({
+				prefix: 'upload',
+				deptList: uploadDeptList,
+				teamList: uploadTeamList
+			});
+		}
+		uploadMultiSelect.renderDeptList([]);
+		uploadMultiSelect.renderTeamList([], []);
+		return;
+	}
+	// 调用新 API 获取用户可选的部门/团队
+	api.getJson('/api/v1/knowledge/documents/allowed_visibility/').then(function (res) {
+		uploadDeptList = res.departments || [];
+		uploadTeamList = res.teams || [];
+		uploadMultiSelect = createDeptTeamMultiSelect({
+			prefix: 'upload',
+			deptList: uploadDeptList,
+			teamList: uploadTeamList
+		});
+		uploadMultiSelect.renderDeptList([]);
+		uploadMultiSelect.renderTeamList([], []);
+	}).catch(function (e) {
+		console.error('Failed to load allowed visibility:', e);
+		// 降级为空列表
+		uploadDeptList = [];
+		uploadTeamList = [];
+	});
+}
+
+// multi-select组件实例
+var uploadMultiSelect = null;
 
 /* ============ 工具函数 ============ */
 function fileTypeByExt(name) {
@@ -883,69 +979,23 @@ function statusTag(s) {
 /* ============ 已删除文件三选项对话框 ============ */
 function showDeletedFileDialog(existing) {
 	return new Promise((resolve) => {
-		// 创建对话框遮罩
-		const overlay = document.createElement('div');
-		overlay.style.cssText = `
-			position: fixed; top: 0; left: 0; right: 0; bottom: 0;
-			background: rgba(0,0,0,0.5); z-index: 10000;
-			display: flex; align-items: center; justify-content: center;
-		`;
-		
-		// 创建对话框
-		const dialog = document.createElement('div');
-		dialog.style.cssText = `
-			background: white; border-radius: 12px; padding: 24px;
-			width: 420px; max-width: 90vw; box-shadow: 0 10px 40px rgba(0,0,0,0.2);
-			font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-		`;
-		
-		dialog.innerHTML = `
-			<div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
-				<div style="width:40px;height:40px;border-radius:50%;background:#ff980015;display:flex;align-items:center;justify-content:center;font-size:20px">⚠️</div>
-				<div>
-					<div style="font-size:16px;font-weight:600;color:#333">文件已存在且已被删除</div>
-					<div style="font-size:13px;color:#999">检测到相同内容的文件之前已被删除</div>
-				</div>
-			</div>
-			<div style="background:#f8f9fa;border-radius:8px;padding:16px;margin-bottom:20px">
-				<div style="display:flex;justify-content:space-between;margin-bottom:8px">
-					<span style="color:#666">文件名</span>
-					<span style="font-weight:500">${escapeHtml(existing.file_name || '')}</span>
-				</div>
-				<div style="display:flex;justify-content:space-between;margin-bottom:8px">
-					<span style="color:#666">原上传者</span>
-					<span>${escapeHtml(existing.owner_name || '未知')}</span>
-				</div>
-				<div style="display:flex;justify-content:space-between">
-					<span style="color:#666">原上传时间</span>
-					<span>${existing.created_at || ''}</span>
-				</div>
-			</div>
-			<div style="display:flex;gap:12px">
-				<button id="btnCancel" style="flex:1;padding:10px;border:1px solid #ddd;border-radius:8px;background:white;color:#666;cursor:pointer;font-size:14px;transition:all 0.2s">取消</button>
-				<button id="btnCreateNew" style="flex:1;padding:10px;border:1px solid #2196f3;border-radius:8px;background:white;color:#2196f3;cursor:pointer;font-size:14px;transition:all 0.2s">新建记录</button>
-				<button id="btnRestore" style="flex:1;padding:10px;border:none;border-radius:8px;background:#2196f3;color:white;cursor:pointer;font-size:14px;transition:all 0.2s">恢复</button>
-			</div>
-		`;
-		
-		overlay.appendChild(dialog);
-		document.body.appendChild(overlay);
-		
-		// 添加按钮事件
-		const btnCancel = dialog.querySelector('#btnCancel');
-		const btnCreateNew = dialog.querySelector('#btnCreateNew');
-		const btnRestore = dialog.querySelector('#btnRestore');
-		
+		const tpl = document.getElementById('tmpl-conflict-dialog').content;
+		const overlay = document.importNode(tpl, true).querySelector('.conflict-overlay');
+		const dialog = overlay.querySelector('.conflict-dialog');
+
+		dialog.querySelector('.con-filename').textContent = existing.file_name || '';
+		dialog.querySelector('.con-owner').textContent = existing.owner_name || '未知';
+		dialog.querySelector('.con-time').textContent = existing.created_at || '';
+
 		const closeAndResolve = (value) => {
 			document.body.removeChild(overlay);
 			resolve(value);
 		};
-		
-		btnCancel.addEventListener('click', () => closeAndResolve('cancel'));
-		btnCreateNew.addEventListener('click', () => closeAndResolve('create_new'));
-		btnRestore.addEventListener('click', () => closeAndResolve('restore'));
-		
-		// ESC 键关闭
+
+		dialog.querySelector('.con-btn-cancel').addEventListener('click', function () { closeAndResolve('cancel'); });
+		dialog.querySelector('.con-btn-new').addEventListener('click', function () { closeAndResolve('create_new'); });
+		dialog.querySelector('.con-btn-restore').addEventListener('click', function () { closeAndResolve('restore'); });
+
 		const escHandler = (e) => {
 			if (e.key === 'Escape') {
 				closeAndResolve('cancel');
@@ -953,6 +1003,8 @@ function showDeletedFileDialog(existing) {
 			}
 		};
 		document.addEventListener('keydown', escHandler);
+
+		document.body.appendChild(overlay);
 	});
 }
 

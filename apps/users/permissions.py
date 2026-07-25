@@ -44,12 +44,14 @@ class IsSuperAdmin(BasePermission):
 
 
 class CanManageUsers(BasePermission):
-    """可以管理用户：super_admin / dept_manager / team_leader"""
+    """可以管理用户：super_admin / user_admin / kb_admin / kb_ops / dept_manager / team_leader"""
     def has_permission(self, request, view):
         u = request.user
         if not u or not u.is_authenticated:
             return False
-        return UserRole.objects.filter(user=u, role__code__in=['super_admin', 'dept_manager', 'team_leader']).exists()
+        return UserRole.objects.filter(user=u, role__code__in=[
+            'super_admin', 'user_admin', 'kb_admin', 'kb_ops', 'dept_manager', 'team_leader'
+        ]).exists()
 
 
 class CanReadAudit(BasePermission):

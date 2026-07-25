@@ -29,6 +29,8 @@ _ACTION_MAP = [
     (re.compile(r'/api/v1/users/?$'), 'admin_users', 'user', 'user'),
     (re.compile(r'/api/v1/users/(\d+)/?$'), 'update_user', 'user', 'user'),
     (re.compile(r'/api/v1/users/(\d+)/toggle_status/?$'), 'toggle_user_status', 'user', 'user'),
+    (re.compile(r'/api/v1/users/(\d+)/assign_roles/?$'), 'assign_roles', 'user', 'user'),
+    (re.compile(r'/api/v1/users/batch_delete/?$'), 'batch_delete_user', 'user', 'user'),
     (re.compile(r'/api/v1/chat/ask/?$'), 'chat_ask', 'chat', 'chat'),
     (re.compile(r'/api/v1/feedback/?$'), 'feedback', 'chat', 'feedback'),
     (re.compile(r'/api/v1/export/?$'), 'export', 'export', 'export'),

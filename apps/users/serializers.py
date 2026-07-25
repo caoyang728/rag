@@ -122,7 +122,7 @@ class UserSerializer(serializers.ModelSerializer):
 
 
 class UserCreateSerializer(serializers.ModelSerializer):
-    password = serializers.CharField(write_only=True, min_length=8)
+    password = serializers.CharField(write_only=True, required=False, allow_blank=True)
     role_ids = serializers.ListField(child=serializers.IntegerField(), required=False, default=list)
     team_ids = serializers.ListField(child=serializers.IntegerField(), required=False, default=list)
     department_id = serializers.IntegerField(required=False, allow_null=True)

@@ -1,13 +1,10 @@
 /* ============ 用户与角色管理（弹窗版） ============ */
-let currentPage = 1, totalPages = 1, totalCount = 0, pageSize = 10;
+let currentPage = 1, totalPages = 1, totalCount = 0, pageSize = 20;
 let filterOptions = {};
-let tempCrossScopes = [];
-let tempScopePerms = {};  // { 'department_5': ['read','upload'], 'team_3': ['read','edit'] }
+let _loadSeq = 0;       // loadUsers 请求序列号，防止竞态
+let _filterLoadSeq = 0; // loadFilterOptions 请求序列号，防止竞态
 
 const $id = id => document.getElementById(id);
-
-const ALL_ACTIONS = ['read', 'upload', 'edit', 'delete', 'export', 'share'];
-const ACTION_LABELS = { read: '读', upload: '上传', edit: '编辑', delete: '删除', export: '导出', share: '分享' };
 
 /** 从 <template> 中获取 HTML 并替换 {{key}} 占位符 */
 function fillTemplate(templateId, data) {
@@ -24,7 +21,6 @@ function initUsersPage() {
 	const searchInput = $id('searchInput');
 	if (searchInput) {
 		searchInput.value = '';
-		searchInput.setAttribute('value', '');
 	}
 	loadFilterOptions();
 	loadUsers();
@@ -32,46 +28,89 @@ function initUsersPage() {
 
 async function loadFilterOptions(force = false) {
 	if (filterOptions.roles && !force) return;
+	const seq = ++_filterLoadSeq;
 	try {
-		filterOptions = await api.getJson('/api/v1/auth/users/form_options/');
+		const data = await api.getJson('/api/v1/auth/users/form_options/');
+		if (seq !== _filterLoadSeq) return; // 过时请求，忽略
+		const currentUserRoles = getUserRoles();
+
+		// 部门/团队筛选：组长和部门经理只看自己的范围
+		const isDeptManager = currentUserRoles.includes('dept_manager');
+		const isTeamLeader = currentUserRoles.includes('team_leader');
+		if (isDeptManager || isTeamLeader) {
+			const u = JSON.parse(localStorage.getItem('rag_user') || '{}');
+			const myDeptId = u.department_id;
+			if (myDeptId) {
+				// 仅保留自己的部门
+				data.departments = (data.departments || []).filter(d => d.id === myDeptId);
+				if (isTeamLeader) {
+					// 组长仅保留自己所在的团队
+					const myTeamIds = (u.teams || []).map(t => t.team__id);
+					data.teams = (data.teams || []).filter(t => myTeamIds.includes(t.id));
+				}
+			}
+		}
+
+		filterOptions = data;
 		const fDept = $id('filterDept');
 		fDept.innerHTML = '<option value="">全部部门</option>' +
-			(filterOptions.departments || []).map(d => `<option value="${d.id}">${d.name}</option>`).join('');
+			(filterOptions.departments || []).map(d => `<option value="${d.id}">${escapeHtml(d.name)}</option>`).join('');
 		const fRole = $id('filterRole');
 		fRole.innerHTML = '<option value="">全部角色</option>' +
-			(filterOptions.roles || []).map(r => `<option value="${r.id}">${r.name}</option>`).join('');
+			(filterOptions.roles || []).map(r => `<option value="${r.id}">${escapeHtml(r.name)}</option>`).join('');
 		const uDept = $id('userDept');
 		uDept.innerHTML = '<option value="">— 无 —</option>' +
-			(filterOptions.departments || []).map(d => `<option value="${d.id}">${d.name}</option>`).join('');
+			(filterOptions.departments || []).map(d => `<option value="${d.id}">${escapeHtml(d.name)}</option>`).join('');
 		populateRoleSelect(null);
 		populateTeamSelect(0, null);
-		renderScopePerms();
 	} catch (e) { console.error('加载筛选项失败:', e); }
 }
 
-async function searchUsers() {
+function searchUsers() {
 	currentPage = 1;
 	loadUsers();
 }
 
+let _searchTimer = null;
+function onSearchInput() {
+	clearTimeout(_searchTimer);
+	_searchTimer = setTimeout(() => searchUsers(), 300);
+}
+
+function onFilterDeptChange() {
+	const deptId = parseInt($id('filterDept').value) || 0;
+	const teams = filterOptions.teams || [];
+	const filtered = deptId ? teams.filter(t => t.department_id === deptId) : teams;
+	const sel = $id('filterTeam');
+	sel.innerHTML = '<option value="">全部团队</option>' +
+		filtered.map(t => `<option value="${t.id}">${escapeHtml(t.name)}</option>`).join('');
+	searchUsers();
+}
+
 async function loadUsers() {
+	const seq = ++_loadSeq;
 	const params = new URLSearchParams({ page: currentPage, page_size: pageSize });
 	const q = $id('searchInput').value.trim();
 	if (q) params.set('search', q);
 	const fd = $id('filterDept').value;
 	if (fd) params.set('department_id', fd);
+	const ft = $id('filterTeam').value;
+	if (ft) params.set('team_id', ft);
 	const fr = $id('filterRole').value;
 	if (fr) params.set('role_id', fr);
 	const fs = $id('filterStatus').value;
 	if (fs) params.set('status', fs);
 	try {
 		const data = await api.getJson(`/api/v1/auth/users/?${params}`);
+		if (seq !== _loadSeq) return;  // 过时请求，忽略
 		totalCount = data.count || 0;
 		totalPages = Math.ceil(totalCount / pageSize) || 1;
+		if (currentPage > totalPages) currentPage = 1;
 		renderTable(data.results || []);
 		renderPagination();
 	} catch (e) {
-		$id('userTable').innerHTML = '<tr><td colspan="8" class="text-sub" style="text-align:center;padding:28px">加载失败</td></tr>';
+		if (seq !== _loadSeq) return;
+		$id('userTable').innerHTML = '<tr><td colspan="9" class="text-sub" style="text-align:center;padding:28px">加载失败</td></tr>';
 		console.error(e);
 	}
 }
@@ -79,12 +118,13 @@ async function loadUsers() {
 function renderTable(users) {
 	const tbody = $id('userTable');
 	if (users.length === 0) {
-		tbody.innerHTML = '<tr><td colspan="8" class="text-sub text-sm text-center" style="padding:30px">暂无用户</td></tr>';
+		tbody.innerHTML = '<tr><td colspan="9" class="text-sub text-sm text-center" style="padding:30px">暂无用户</td></tr>';
 		return;
 	}
 	tbody.innerHTML = users.map(u => {
 		const roleNames = (u.roles || []).map(r => escapeHtml(r.role__name)).join(', ') || '—';
 		const deptName = escapeHtml(u.department_name) || '—';
+		const teamName = (u.teams || []).map(t => escapeHtml(t.team__name)).join(', ') || '—';
 		const statusTag = u.status === 'active'
 			? '<span class="tag tag-sm" style="background:#e8f5e9;color:#2e7d32">启用</span>'
 			: '<span class="tag tag-sm" style="background:#fce4ec;color:#c62828">禁用</span>';
@@ -95,6 +135,7 @@ function renderTable(users) {
 			real_name: escapeHtml(u.real_name) || '—',
 			email: escapeHtml(u.email) || '—',
 			dept_name: deptName,
+			team_name: teamName,
 			role_names: roleNames,
 			status_tag: statusTag,
 			toggle_label: toggleLabel,
@@ -139,7 +180,10 @@ function renderPagination() {
 	$id('paginationBtns').innerHTML = btns;
 }
 
-function goPage(p) { currentPage = p; loadUsers(); }
+function goPage(p) {
+	if (!Number.isInteger(p) || p < 1 || p > totalPages) return;
+	currentPage = p; loadUsers();
+}
 
 function toggleCheckAll() {
 	const checked = $id('checkAll').checked;
@@ -149,15 +193,19 @@ function toggleCheckAll() {
 async function batchExport() {
 	const ids = [...document.querySelectorAll('.user-check:checked')].map(c => c.value);
 	if (ids.length === 0) { toast('请先勾选用户', 'warning'); return; }
-	const blob = await api.post('/api/v1/auth/users/batch_export/', JSON.stringify({ ids })).then(r => r.blob());
-	downloadBlob(blob, 'users_export.csv');
-	toast('导出成功', 'success');
+	try {
+		const blob = await api.post('/api/v1/auth/users/batch_export/', JSON.stringify({ ids })).then(r => r.blob());
+		downloadBlob(blob, 'users_export.csv');
+		toast('导出成功', 'success');
+	} catch (e) { toast('导出失败: ' + escapeHtml(e.message), 'error'); }
 }
 
 async function exportAll() {
-	const blob = await api.post('/api/v1/auth/users/batch_export/', JSON.stringify({ ids: [] })).then(r => r.blob());
-	downloadBlob(blob, 'users_export.csv');
-	toast('导出成功', 'success');
+	try {
+		const blob = await api.post('/api/v1/auth/users/batch_export/', JSON.stringify({ ids: [] })).then(r => r.blob());
+		downloadBlob(blob, 'users_export.csv');
+		toast('导出成功', 'success');
+	} catch (e) { toast('导出失败: ' + escapeHtml(e.message), 'error'); }
 }
 
 function downloadBlob(blob, filename) {
@@ -188,65 +236,35 @@ async function toggleUserStatus(id) {
 	} catch (e) { toast('操作失败: ' + escapeHtml(e.message), 'error'); }
 }
 
-// ====================== 团队下拉框（参考部门样式） ======================
-function populateTeamSelect(deptId, selectedTeamId) {
-	const teams = filterOptions.teams || [];
-	const filtered = deptId ? teams.filter(t => t.department_id === deptId) : [];
-	const sel = $id('userDeptTeam');
-	if (!deptId) {
-		sel.innerHTML = '<option value="">请先选择部门</option>';
-		return;
-	}
-	if (filtered.length === 0) {
-		sel.innerHTML = '<option value="">该部门暂无团队</option>';
-		return;
-	}
-	sel.innerHTML = '<option value="">— 未选择 —</option>' +
-		filtered.map(t => `<option value="${t.id}" ${selectedTeamId === t.id ? 'selected' : ''}>${escapeHtml(t.name)}</option>`).join('');
-}
-
-function onTeamSelectChange() {
-	if ($id('userDeptTeam').disabled) return;
-	const teamId = parseInt($id('userDeptTeam').value) || 0;
-	// 清理旧团队 key
-	Object.keys(tempScopePerms).forEach(k => {
-		if (k.startsWith('team_')) delete tempScopePerms[k];
-	});
-	if (teamId) {
-		const roleId = parseInt($id('userRoleSelect').value) || 0;
-		const roles = filterOptions.roles || [];
-		const r = roles.find(r => r.id === roleId);
-		tempScopePerms[`team_${teamId}`] = getRoleTeamDefaultActions(r ? r.code : '');
-	}
-	renderScopePerms();
-}
-
 // ====================== 弹窗：新建/编辑用户 ======================
+function _getMyRoleInfo() {
+	const u = JSON.parse(localStorage.getItem('rag_user') || '{}');
+	const codes = getUserRoles();
+	return {
+		isSuper: codes.includes('super_admin'),
+		isDept: codes.includes('dept_manager'),
+		isTeam: codes.includes('team_leader'),
+		deptId: u.department_id || 0,
+		teamIds: (u.teams || []).map(t => t.team__id),
+	};
+}
+
 function openUserModal(id) {
 	$id('editUserId').value = '';
 	$id('userUsername').value = '';
 	$id('userRealName').value = '';
 	$id('userEmail').value = '';
-	$id('userPassword').value = '';
 	$id('userDept').value = '';
 	$id('userDeptTeam').innerHTML = '<option value="">请先选择部门</option>';
 	$id('userRoleSelect').value = '';
 	$id('userStatus').value = 'active';
-	$id('pwdLabel').innerHTML = '密码 <span class="required">*</span>';
-	$id('userPassword').style.display = '';
 	$id('userModalTitle').textContent = '新建用户';
-	$id('crossScopeSearch').value = '';
-	$id('crossScopeActions').classList.add('hidden');
-	$id('crossScopeResults').classList.add('hidden');
 	$id('rolePermSummary').textContent = '';
-	tempCrossScopes = [];
-	tempScopePerms = {};
 	$id('modalDeleteBtn').classList.add('hidden');
 
 	// 用户名：新建时可编辑，编辑时禁用
 	const usernameInput = $id('userUsername');
 	usernameInput.disabled = !!id;
-
 	if (id) {
 		usernameInput.style.background = 'var(--bg)';
 		usernameInput.style.color = 'var(--text-sub)';
@@ -255,45 +273,63 @@ function openUserModal(id) {
 		usernameInput.style.color = '';
 	}
 
-	populateRoleSelect(null);
+	populateRoleSelect(null, true);
 	populateTeamSelect(0, null);
-	renderScopePerms();
-	renderCrossScopes();
+
+	// 非超管创建用户时，锁定部门/团队
+	if (!id) {
+		const me = _getMyRoleInfo();
+		if (!me.isSuper) {
+			const deptSel = $id('userDept');
+			const teamSel = $id('userDeptTeam');
+			if (me.isTeam) {
+				// 组长：锁定部门，团队可选（仅限自己的团队）
+				deptSel.value = me.deptId;
+				deptSel.disabled = true;
+				if (me.teamIds.length === 1) {
+					populateTeamSelect(me.deptId, me.teamIds[0]);
+					teamSel.disabled = true;
+				} else {
+					populateTeamSelect(me.deptId, null);
+				}
+			} else if (me.isDept) {
+				// 部门经理：锁定部门，团队可选
+				deptSel.value = me.deptId;
+				deptSel.disabled = true;
+				populateTeamSelect(me.deptId, null);
+			}
+		}
+	}
 
 	if (id) {
 		$id('userModalTitle').textContent = '编辑用户';
 		$id('modalDeleteBtn').classList.remove('hidden');
-		$id('pwdLabel').textContent = '密码（留空不修改）';
-		$id('userPassword').placeholder = '留空不修改';
-		const loadUserData = () => api.getJson(`/api/v1/auth/users/${id}/`).then(u => {
-			$id('editUserId').value = u.id;
-			$id('userUsername').value = u.username;
-			$id('userRealName').value = u.real_name || '';
-			$id('userEmail').value = u.email || '';
-			const deptId = u.department_id || 0;
-			$id('userDept').value = deptId;
-			$id('userStatus').value = u.status || 'active';
-			const roleId = (u.roles && u.roles.length > 0) ? u.roles[0].role__id : null;
-			$id('userRoleSelect').value = roleId || '';
-			onRoleChange();
-			// 团队
-			const selectedTeamId = (u.teams && u.teams.length > 0) ? u.teams[0].team__id : null;
-			populateTeamSelect(deptId, selectedTeamId);
-
-			tempCrossScopes = (u.cross_scope_access || []).map(cs => ({
-				scope_type: cs.scope_type,
-				scope_id: cs.scope_id,
-				name: cs.department_name || cs.team_name || `${cs.scope_type}:${cs.scope_id}`,
-				actions: cs.actions ? cs.actions.split(',').map(s => s.trim()).filter(Boolean) : ['read']
-			}));
-			tempScopePerms = {};
-			(u.scope_permissions || []).forEach(sp => {
-				const key = `${sp.scope_type}_${sp.scope_id}`;
-				tempScopePerms[key] = sp.actions ? sp.actions.split(',').map(s => s.trim()).filter(Boolean) : ['read'];
-			});
-			renderScopePerms();
-			renderCrossScopes();
-		}).catch(e => console.error('获取用户详情失败:', e));
+		const me = _getMyRoleInfo();
+		const loadUserData = () => {
+			// 重新用 assignable_roles 填充（loadFilterOptions 可能覆盖了）
+			populateRoleSelect(null, true);
+			return api.getJson(`/api/v1/auth/users/${id}/`).then(u => {
+				$id('editUserId').value = u.id;
+				$id('userUsername').value = u.username;
+				$id('userRealName').value = u.real_name || '';
+				$id('userEmail').value = u.email || '';
+				const deptId = u.department_id || 0;
+				$id('userDept').value = deptId;
+				$id('userStatus').value = u.status || 'active';
+				const roleId = (u.roles && u.roles.length > 0) ? u.roles[0].role__id : null;
+				$id('userRoleSelect').value = roleId || '';
+				onRoleChange();
+				const selectedTeamId = (u.teams && u.teams.length > 0) ? u.teams[0].team__id : null;
+				populateTeamSelect(deptId, selectedTeamId);
+				// 防止越权：组长锁定部门和团队，部门经理锁定部门
+				const teamSel = $id('userDeptTeam');
+				const deptSel = $id('userDept');
+				if (!me.isSuper) {
+					if (me.isTeam) { deptSel.disabled = true; teamSel.disabled = true; }
+					else if (me.isDept) deptSel.disabled = true;
+				}
+			}).catch(e => console.error('获取用户详情失败:', e));
+		};
 		if (!filterOptions.roles) {
 			loadFilterOptions().then(loadUserData);
 		} else {
@@ -308,8 +344,8 @@ function openUserModal(id) {
 }
 
 // ====================== 角色下拉框 ======================
-function populateRoleSelect(selectedId) {
-	const roles = filterOptions.roles || [];
+function populateRoleSelect(selectedId, useAssignable = false) {
+	const roles = (useAssignable ? filterOptions.assignable_roles : filterOptions.roles) || [];
 	$id('userRoleSelect').innerHTML = '<option value="">— 无 —</option>' +
 		roles.map(r => `<option value="${r.id}" ${selectedId === r.id ? 'selected' : ''}>${escapeHtml(r.name)}</option>`).join('');
 }
@@ -317,10 +353,6 @@ function populateRoleSelect(selectedId) {
 function onRoleChange() {
 	renderRolePermSummary();
 	updateTeamDisabledState();
-	// 新建用户时自动应用角色默认权限；编辑时不覆盖已保存权限
-	if (!$id('editUserId').value) {
-		applyRoleDefaultPerms();
-	}
 }
 
 function renderRolePermSummary() {
@@ -344,354 +376,50 @@ function renderRolePermSummary() {
 	$id('rolePermSummary').innerHTML = `${r.name}: ${desc[r.code] || '自定义权限'}`;
 }
 
-function getRoleDefaultActions(roleCode) {
-	switch (roleCode) {
-		case 'dept_manager': return [...ALL_ACTIONS];
-		case 'team_leader': return ['read', 'upload'];
-		case 'employee': return ['read', 'upload'];
-		case 'readonly': return ['read'];
-		default: return ['read'];
-	}
-}
-
-function getRoleTeamDefaultActions(roleCode) {
-	if (roleCode === 'team_leader') return [...ALL_ACTIONS];
-	return getRoleDefaultActions(roleCode);
-}
-
-function applyRoleDefaultPerms() {
-	const roleId = parseInt($id('userRoleSelect').value) || 0;
-	const roles = filterOptions.roles || [];
-	const r = roles.find(r => r.id === roleId);
-	if (!r) return;
-
-	const deptId = parseInt($id('userDept').value) || 0;
-	const teamId = parseInt($id('userDeptTeam').value) || 0;
-
-	// 部门权限
-	if (deptId) {
-		tempScopePerms[`department_${deptId}`] = getRoleDefaultActions(r.code);
-	}
-
-	// 团队权限（部门经理禁用）
-	if (r.code === 'dept_manager') {
-		Object.keys(tempScopePerms).forEach(k => {
-			if (k.startsWith('team_')) delete tempScopePerms[k];
-		});
-	} else if (teamId) {
-		tempScopePerms[`team_${teamId}`] = getRoleTeamDefaultActions(r.code);
-	}
-	renderScopePerms();
-}
-
 function updateTeamDisabledState() {
 	const roleId = parseInt($id('userRoleSelect').value) || 0;
 	const roles = filterOptions.roles || [];
 	const r = roles.find(r => r.id === roleId);
 	const isDisabled = r && r.code === 'dept_manager';
-
 	$id('userDeptTeam').disabled = isDisabled;
-
-	const teamTrigger = document.querySelector('#permTeamSelect .multi-select-trigger');
-	if (teamTrigger) {
-		if (isDisabled) {
-			teamTrigger.classList.add('disabled');
-			const panel = document.querySelector('#permTeamSelect .multi-select-panel');
-			if (panel) panel.classList.remove('show');
-			teamTrigger.classList.remove('open');
-		} else {
-			teamTrigger.classList.remove('disabled');
-		}
-	}
-
-	if (isDisabled) {
-		const teamLabel = document.querySelector('#permTeamSelect .multi-select-label');
-		if (teamLabel) teamLabel.textContent = '不适用';
-	}
 }
 
 // ====================== 部门变更 ======================
 function onDeptChange() {
 	const deptId = parseInt($id('userDept').value) || 0;
-	// 重置团队下拉
 	populateTeamSelect(deptId, null);
-	// 清理旧部门/团队 key
-	Object.keys(tempScopePerms).forEach(k => {
-		if (k.startsWith('department_') || k.startsWith('team_')) delete tempScopePerms[k];
-	});
-	if (deptId) {
-		const roleId = parseInt($id('userRoleSelect').value) || 0;
-		const roles = filterOptions.roles || [];
-		const r = roles.find(r => r.id === roleId);
-		tempScopePerms[`department_${deptId}`] = getRoleDefaultActions(r ? r.code : '');
-	}
-	renderScopePerms();
 }
 
-// ====================== 文档权限渲染（multi-select 下拉框直接展示操作权限） ======================
-function renderScopePerms() {
-	const deptId = parseInt($id('userDept').value) || 0;
-	renderPermDeptPanel(deptId);
-	renderPermTeamPanel(deptId);
-}
-
-function renderPermDeptPanel(deptId) {
-	const panel = $id('permDeptPanel');
-
+// ====================== 团队下拉（弹窗内） ======================
+function populateTeamSelect(deptId, selectedTeamId) {
+	const teams = filterOptions.teams || [];
+	const filtered = deptId ? teams.filter(t => t.department_id === deptId) : [];
+	const sel = $id('userDeptTeam');
 	if (!deptId) {
-		panel.innerHTML = $id('tmpl-perm-dept-placeholder').innerHTML;
-		updatePermDeptCount();
+		sel.innerHTML = '<option value="">请先选择部门</option>';
 		return;
 	}
-
-	const key = `department_${deptId}`;
-	const actions = tempScopePerms[key] || ['read'];
-
-	panel.innerHTML = ALL_ACTIONS.map(a => {
-		return fillTemplate('tmpl-perm-dept-option', {
-			action: a,
-			checked: actions.includes(a) ? 'checked' : '',
-			label: ACTION_LABELS[a],
-		});
-	}).join('');
-	updatePermDeptCount();
-}
-
-function renderPermTeamPanel(deptId) {
-	const panel = $id('permTeamPanel');
-	const teamId = parseInt($id('userDeptTeam').value) || 0;
-
-	if (!deptId) {
-		panel.innerHTML = $id('tmpl-perm-team-placeholder-dept').innerHTML;
-		updatePermTeamCount();
+	if (filtered.length === 0) {
+		sel.innerHTML = '<option value="">该部门暂无团队</option>';
 		return;
 	}
-
-	if (!teamId) {
-		panel.innerHTML = $id('tmpl-perm-team-placeholder-team').innerHTML;
-		updatePermTeamCount();
-		return;
-	}
-
-	const key = `team_${teamId}`;
-	const actions = tempScopePerms[key] || ['read'];
-
-	panel.innerHTML = ALL_ACTIONS.map(a => {
-		return fillTemplate('tmpl-perm-team-option', {
-			action: a,
-			checked: actions.includes(a) ? 'checked' : '',
-			label: ACTION_LABELS[a],
-		});
-	}).join('');
-	updatePermTeamCount();
-}
-
-// 部门权限 action checkbox 变化
-function onPermDeptActionChg(cb, action) {
-	const deptId = parseInt($id('userDept').value) || 0;
-	if (!deptId) return;
-	const key = `department_${deptId}`;
-	if (!tempScopePerms[key]) tempScopePerms[key] = ['read'];
-	if (cb.checked) {
-		if (!tempScopePerms[key].includes(action)) tempScopePerms[key].push(action);
-	} else {
-		tempScopePerms[key] = tempScopePerms[key].filter(a => a !== action);
-	}
-	if (tempScopePerms[key].length === 0) tempScopePerms[key] = ['read'];
-	updatePermDeptCount();
-}
-
-function onPermDeptActionClick(row, e, action) {
-	if (e.target.tagName === 'INPUT') return;
-	const cb = row.querySelector('input');
-	cb.checked = !cb.checked;
-	onPermDeptActionChg(cb, action);
-}
-
-// 团队权限 action checkbox 变化
-function onPermTeamActionChg(cb, action) {
-	const teamId = parseInt($id('userDeptTeam').value) || 0;
-	if (!teamId) return;
-	const key = `team_${teamId}`;
-	if (!tempScopePerms[key]) tempScopePerms[key] = ['read'];
-	if (cb.checked) {
-		if (!tempScopePerms[key].includes(action)) tempScopePerms[key].push(action);
-	} else {
-		tempScopePerms[key] = tempScopePerms[key].filter(a => a !== action);
-	}
-	if (tempScopePerms[key].length === 0) tempScopePerms[key] = ['read'];
-	updatePermTeamCount();
-}
-
-function onPermTeamActionClick(row, e, action) {
-	if (e.target.tagName === 'INPUT') return;
-	const cb = row.querySelector('input');
-	cb.checked = !cb.checked;
-	onPermTeamActionChg(cb, action);
-}
-
-function updatePermDeptCount() {
-	const deptId = parseInt($id('userDept').value) || 0;
-	const key = `department_${deptId}`;
-	const actions = tempScopePerms[key] || [];
-	const count = actions.length;
-	const countEl = $id('permDeptCount');
-	const labelEl = document.querySelector('#permDeptSelect .multi-select-label');
-	if (!deptId) {
-		countEl.classList.add('hidden');
-		labelEl.textContent = '请先选择部门';
-	} else if (count > 0) {
-		countEl.textContent = count;
-		countEl.classList.remove('hidden');
-		labelEl.textContent = '已选 ' + count + ' 个权限';
-	} else {
-		countEl.classList.add('hidden');
-		labelEl.textContent = '选择操作权限';
-	}
-}
-
-function updatePermTeamCount() {
-	const teamId = parseInt($id('userDeptTeam').value) || 0;
-	const key = `team_${teamId}`;
-	const actions = tempScopePerms[key] || [];
-	const count = actions.length;
-	const countEl = $id('permTeamCount');
-	const labelEl = document.querySelector('#permTeamSelect .multi-select-label');
-	const trigger = document.querySelector('#permTeamSelect .multi-select-trigger');
-	const deptId = parseInt($id('userDept').value) || 0;
-	if (!deptId) {
-		countEl.classList.add('hidden');
-		labelEl.textContent = '请先选择部门';
-		trigger.classList.add('disabled');
-	} else if (!teamId) {
-		countEl.classList.add('hidden');
-		labelEl.textContent = '请先选择团队';
-		trigger.classList.add('disabled');
-	} else if (count > 0) {
-		countEl.textContent = count;
-		countEl.classList.remove('hidden');
-		labelEl.textContent = '已选 ' + count + ' 个权限';
-		trigger.classList.remove('disabled');
-	} else {
-		countEl.classList.add('hidden');
-		labelEl.textContent = '选择操作权限';
-		trigger.classList.remove('disabled');
-	}
-}
-
-// ====================== 跨域访问授权（搜索方案） ======================
-function searchCrossScope() {
-	const q = ($id('crossScopeSearch').value || '').trim().toLowerCase();
-	const resultsDiv = $id('crossScopeResults');
-	if (!q) { resultsDiv.classList.add('hidden'); return; }
-
-	const depts = (filterOptions.departments || []).filter(d => {
-		if (tempCrossScopes.some(cs => cs.scope_type === 'department' && cs.scope_id === d.id)) return false;
-		return d.name.toLowerCase().includes(q) || (d.code || '').toLowerCase().includes(q);
-	});
-	const deptMap = {};
-	(filterOptions.departments || []).forEach(d => { deptMap[d.id] = d.name; });
-	const teams = (filterOptions.teams || []).filter(t => {
-		if (tempCrossScopes.some(cs => cs.scope_type === 'team' && cs.scope_id === t.id)) return false;
-		return t.name.toLowerCase().includes(q) || (t.code || '').toLowerCase().includes(q);
-	});
-
-	let html = '';
-	if (depts.length === 0 && teams.length === 0) {
-		html = $id('tmpl-cross-result-empty').innerHTML;
-	} else {
-		depts.forEach(d => {
-			html += fillTemplate('tmpl-cross-result-dept', {
-				id: d.id,
-				name: escapeHtml(d.name),
-			});
-		});
-		teams.forEach(t => {
-			const deptName = deptMap[t.department_id] || '';
-			const displayName = deptName ? `${deptName}-${t.name}` : t.name;
-			html += fillTemplate('tmpl-cross-result-team', {
-				id: t.id,
-				name: escapeHtml(displayName),
-			});
-		});
-	}
-	resultsDiv.innerHTML = html;
-	resultsDiv.classList.remove('hidden');
-}
-
-function selectCrossScopeTarget(type, id, name) {
-	$id('crossScopePendingType').value = type;
-	$id('crossScopePendingId').value = id;
-	$id('crossScopePendingName').value = name;
-	$id('crossScopeSelectedLabel').textContent = `[${type === 'department' ? '部门' : '团队'}] ${name}`;
-	$id('crossScopeResults').classList.add('hidden');
-	$id('crossScopeSearch').value = name;
-	$id('crossScopeActionBoxes').innerHTML = ALL_ACTIONS.map(a => {
-		return fillTemplate('tmpl-cross-action-checkbox', {
-			action: a,
-			checked: a === 'read' ? 'checked' : '',
-			label: ACTION_LABELS[a],
-		});
-	}).join('');
-	$id('crossScopeActions').classList.remove('hidden');
-}
-
-function addCrossScope() {
-	const type = $id('crossScopePendingType').value;
-	const id = parseInt($id('crossScopePendingId').value);
-	const name = $id('crossScopePendingName').value;
-	if (!id) { toast('请先选择目标', 'warning'); return; }
-	const actions = [...document.querySelectorAll('.csa-check:checked')].map(c => c.value);
-	if (actions.length === 0) { toast('请至少选择一个动作', 'warning'); return; }
-	tempCrossScopes.push({ scope_type: type, scope_id: id, name, actions });
-	$id('crossScopeActions').classList.add('hidden');
-	$id('crossScopeSearch').value = '';
-	$id('crossScopeResults').classList.add('hidden');
-	renderCrossScopes();
-}
-
-function removeCrossScope(idx) {
-	tempCrossScopes.splice(idx, 1);
-	renderCrossScopes();
-	$id('crossScopeResults').classList.add('hidden');
-}
-
-function renderCrossScopes() {
-	if (tempCrossScopes.length === 0) {
-		$id('crossScopeList').innerHTML = $id('tmpl-cross-selected-empty').innerHTML;
-		return;
-	}
-	$id('crossScopeList').innerHTML = tempCrossScopes.map((cs, i) => {
-		const actionsStr = (cs.actions || ['read']).map(a => ACTION_LABELS[a] || a).join(', ');
-		return fillTemplate('tmpl-cross-selected-item', {
-			type_label: cs.scope_type === 'department' ? '部门' : '团队',
-			name: escapeHtml(cs.name),
-			actions_str: actionsStr,
-			index: i,
-		});
-	}).join('');
+	sel.innerHTML = '<option value="">— 未选择 —</option>' +
+		filtered.map(t => `<option value="${t.id}" ${selectedTeamId === t.id ? 'selected' : ''}>${escapeHtml(t.name)}</option>`).join('');
 }
 
 async function saveUser() {
 	const id = $id('editUserId').value;
-	const scpPerms = Object.entries(tempScopePerms).map(([key, actions]) => {
-		const [type, sid] = key.split('_');
-		return { scope_type: type, scope_id: parseInt(sid), actions: actions.join(',') };
-	});
 	const roleId = parseInt($id('userRoleSelect').value) || null;
 	const teamId = parseInt($id('userDeptTeam').value) || 0;
+	const deptId = $id('userDept').value ? parseInt($id('userDept').value) : null;
+
 	const base = {
 		real_name: $id('userRealName').value.trim(),
 		email: $id('userEmail').value.trim(),
-		department_id: $id('userDept').value ? parseInt($id('userDept').value) : null,
+		department_id: deptId,
 		status: $id('userStatus').value,
 		role_ids: roleId ? [roleId] : [],
 		team_ids: teamId ? [teamId] : [],
-		cross_scope_access: tempCrossScopes.map(cs => ({
-			scope_type: cs.scope_type, scope_id: cs.scope_id,
-			actions: (cs.actions || ['read']).join(',')
-		})),
-		scope_permissions: scpPerms,
 	};
 	// 新建时需验证用户名
 	if (!id) {
@@ -704,12 +432,6 @@ async function saveUser() {
 			await api.patchJson(`/api/v1/auth/users/${id}/`, base);
 			toast('用户已更新', 'success');
 		} else {
-			base.password = $id('userPassword').value;
-			if (!base.password) { toast('请输入密码', 'warning'); return; }
-			if (base.password.length < 8) { toast('密码至少8位', 'warning'); return; }
-			if (!/[A-Z]/.test(base.password)) { toast('密码需包含大写字母', 'warning'); return; }
-			if (!/[a-z]/.test(base.password)) { toast('密码需包含小写字母', 'warning'); return; }
-			if (!/\d/.test(base.password)) { toast('密码需包含数字', 'warning'); return; }
 			await api.postJson('/api/v1/auth/users/', base);
 			toast('用户已创建', 'success');
 		}
@@ -721,24 +443,4 @@ async function saveUser() {
 // 页面加载时自动初始化
 document.addEventListener('DOMContentLoaded', () => {
 	initUsersPage();
-
-	// 跨域搜索结果点击事件委托
-	document.getElementById('crossScopeResults').addEventListener('click', function (e) {
-		const item = e.target.closest('.cross-scope-item');
-		if (item) {
-			const type = item.getAttribute('data-type');
-			const id = item.getAttribute('data-id');
-			const name = item.getAttribute('data-name');
-			selectCrossScopeTarget(type, parseInt(id), name);
-		}
-	});
-});
-
-// 点击页面其他地方关闭跨域搜索下拉
-document.addEventListener('click', function (e) {
-	const srch = $id('crossScopeSearch');
-	const results = $id('crossScopeResults');
-	if (srch && results && !srch.contains(e.target) && !results.contains(e.target)) {
-		results.classList.add('hidden');
-	}
 });

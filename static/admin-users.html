@@ -31,9 +31,12 @@
 					</form>
 						<input id="searchInput" name="search_query_noname" class="input" placeholder="搜索用户"
 							style="width:180px" autocomplete="off" autocapitalize="off" autocorrect="off"
-							spellcheck="false" onkeydown="if(event.key==='Enter')searchUsers()">
-						<select id="filterDept" class="select" style="width:130px" onchange="searchUsers()">
+							spellcheck="false" oninput="onSearchInput()">
+						<select id="filterDept" class="select" style="width:130px" onchange="onFilterDeptChange()">
 							<option value="">全部部门</option>
+						</select>
+						<select id="filterTeam" class="select" style="width:130px" onchange="searchUsers()">
+							<option value="">全部团队</option>
 						</select>
 						<select id="filterRole" class="select" style="width:110px" onchange="searchUsers()">
 							<option value="">全部角色</option>
@@ -64,6 +67,7 @@
 							<th>姓名</th>
 							<th>邮箱</th>
 							<th>部门</th>
+							<th>团队</th>
 							<th>角色</th>
 							<th>状态</th>
 							<th style="width:180px">操作</th>
@@ -71,7 +75,7 @@
 					</thead>
 					<tbody id="userTable">
 						<tr>
-							<td colspan="8" class="text-sub text-sm text-center" style="padding:30px">加载中...</td>
+							<td colspan="9" class="text-sub text-sm text-center" style="padding:30px">加载中...</td>
 						</tr>
 					</tbody>
 				</table>
@@ -112,21 +116,6 @@
 					<label class="form-label">邮箱</label>
 					<input id="userEmail" class="input" type="email">
 				</div>
-				<form class="form-item flex-1">
-					<label class="form-label" id="pwdLabel">密码 <span class="required">*</span></label>
-					<input id="userPassword" class="input" type="password" placeholder="至少 8 位">
-				</form>
-			</div>
-
-			<!-- ===== 角色 + 状态 ===== -->
-			<div class="form-section-title">角色与状态</div>
-			<div class="form-row">
-				<div class="form-item flex-1">
-					<label class="form-label">角色</label>
-					<select id="userRoleSelect" class="select" onchange="onRoleChange()">
-						<option value="">— 无 —</option>
-					</select>
-				</div>
 				<div class="form-item flex-1">
 					<label class="form-label">状态</label>
 					<select id="userStatus" class="select">
@@ -135,85 +124,30 @@
 					</select>
 				</div>
 			</div>
-			<div id="rolePermSummary" class="text-sub text-sm" style="padding:4px 0"></div>
 
-			<!-- ===== 组织归属 + 文档权限 ===== -->
-			<div class="form-section-title">组织归属与文档权限</div>
-			<div class="org-section">
-				<!-- Row 1: 部门选择 | 部门文档权限 -->
-				<div class="flex gap-16" style="margin-bottom:10px">
-					<div class="form-item flex-1">
-						<label class="form-label">部门选择</label>
-						<select id="userDept" class="select" onchange="onDeptChange()">
-							<option value="">— 无 —</option>
-						</select>
-					</div>
-					<div class="form-item flex-1">
-						<label class="form-label">部门文档权限</label>
-						<div class="multi-select" id="permDeptSelect">
-							<div class="multi-select-trigger" onclick="toggleMultiSelect('permDeptSelect')">
-								<span class="multi-select-label">请先选择部门</span>
-								<span class="multi-select-count hidden" id="permDeptCount">0</span>
-								<span class="multi-select-arrow">▾</span>
-							</div>
-							<div class="multi-select-panel">
-								<div class="multi-select-list" id="permDeptPanel"></div>
-							</div>
-						</div>
+			<!-- ===== 角色与组织 ===== -->
+			<div class="form-section-title">角色与组织</div>
+			<div class="form-row">
+				<div class="form-item flex-1">
+					<label class="form-label">角色</label>
+					<select id="userRoleSelect" class="select" onchange="onRoleChange()">
+						<option value="">— 无 —</option>
+					</select>
 				</div>
+				<div class="form-item flex-1">
+					<label class="form-label">部门</label>
+					<select id="userDept" class="select" onchange="onDeptChange()">
+						<option value="">— 无 —</option>
+					</select>
 				</div>
-				<!-- Row 2: 团队选择 | 团队文档权限 -->
-				<div class="flex gap-16" style="margin-bottom:10px">
-					<div class="form-item flex-1">
-						<label class="form-label">团队选择</label>
-						<select id="userDeptTeam" class="select" onchange="onTeamSelectChange()">
-							<option value="">请先选择部门</option>
-						</select>
-					</div>
-					<div class="form-item flex-1">
-						<label class="form-label">团队文档权限</label>
-						<div class="multi-select" id="permTeamSelect">
-							<div class="multi-select-trigger" onclick="toggleMultiSelect('permTeamSelect')">
-								<span class="multi-select-label">请先选择部门</span>
-								<span class="multi-select-count hidden" id="permTeamCount">0</span>
-								<span class="multi-select-arrow">▾</span>
-							</div>
-							<div class="multi-select-panel">
-								<div class="multi-select-list" id="permTeamPanel"></div>
-							</div>
-						</div>
-					</div>
-				</div>
-				</div>
-
-			<!-- ===== 跨域访问授权 ===== -->
-			<div class="form-section-title">跨域访问授权 <span class="text-sub text-sm" style="font-weight:400">—
-					授予访问其他部门/团队文档的权限</span></div>
-			<div id="crossScopeSection" class="org-section" style="padding:12px">
-				<div id="crossScopeList" style="margin-bottom:10px"></div>
-				<div class="relative">
-					<input id="crossScopeSearch" class="input" placeholder="搜索部门或团队名称..." oninput="searchCrossScope()"
-						onfocus="searchCrossScope()" autocomplete="off" style="padding-right:30px">
-					<span
-						style="position:absolute;right:10px;top:50%;transform:translateY(-50%);color:var(--text-sub);pointer-events:none;font-size:13px">&#128269;</span>
-					<div id="crossScopeResults" class="hidden"
-						style="position:absolute;top:100%;left:0;right:0;z-index:10;background:var(--white);border:1px solid var(--border);border-radius:var(--radius);max-height:220px;overflow-y:auto;box-shadow:var(--shadow-lg);margin-top:2px"></div>
-				</div>
-				<div id="crossScopeActions" class="hidden"
-					style="margin-top:10px;padding:10px;background:var(--bg-main);border-radius:6px">
-					<div style="font-size:13px;font-weight:500;margin-bottom:6px">选择操作权限：<span
-							id="crossScopeSelectedLabel" style="color:var(--primary)"></span></div>
-					<div id="crossScopeActionBoxes" class="flex gap-16 flex-wrap"></div>
-					<div class="flex gap-8" style="margin-top:8px">
-						<input type="hidden" id="crossScopePendingType">
-						<input type="hidden" id="crossScopePendingId">
-						<input type="hidden" id="crossScopePendingName">
-						<button class="btn btn-primary btn-sm" onclick="addCrossScope()">确认添加</button>
-						<button class="btn btn-sm"
-							onclick="$id('crossScopeActions').classList.add('hidden');$id('crossScopeSearch').value=''">取消</button>
-					</div>
+				<div class="form-item flex-1">
+					<label class="form-label">团队</label>
+					<select id="userDeptTeam" class="select">
+						<option value="">请先选择部门</option>
+					</select>
 				</div>
 			</div>
+			<div id="rolePermSummary" class="text-sub text-sm" style="padding:4px 0"></div>
 		</div>
 		<div class="modal-footer">
 			<button class="btn-delete hidden mr-auto" id="modalDeleteBtn" onclick="deleteUserFromModal()">删除用户</button>
@@ -232,6 +166,7 @@
 			<td>{{real_name}}</td>
 			<td>{{email}}</td>
 			<td>{{dept_name}}</td>
+			<td>{{team_name}}</td>
 			<td><span class="text-sm">{{role_names}}</span></td>
 			<td>{{status_tag}}</td>
 			<td>
@@ -249,71 +184,6 @@
 
 	<template id="tmpl-pagination-ellipsis">
 		<span class="text-sub" style="padding:0 4px">...</span>
-	</template>
-
-	<template id="tmpl-perm-dept-placeholder">
-		<div style="padding:16px;text-align:center;color:var(--text-sub)">请先选择部门</div>
-	</template>
-
-	<template id="tmpl-perm-dept-option">
-		<div class="multi-select-option" onclick="onPermDeptActionClick(this, event, '{{action}}')">
-			<input type="checkbox" {{checked}} onchange="onPermDeptActionChg(this, '{{action}}')">
-			<span class="multi-select-option-text">{{label}}</span>
-		</div>
-	</template>
-
-	<template id="tmpl-perm-team-placeholder-dept">
-		<div style="padding:16px;text-align:center;color:var(--text-sub)">请先选择部门</div>
-	</template>
-
-	<template id="tmpl-perm-team-placeholder-team">
-		<div style="padding:16px;text-align:center;color:var(--text-sub)">请先选择团队</div>
-	</template>
-
-	<template id="tmpl-perm-team-option">
-		<div class="multi-select-option" onclick="onPermTeamActionClick(this, event, '{{action}}')">
-			<input type="checkbox" {{checked}} onchange="onPermTeamActionChg(this, '{{action}}')">
-			<span class="multi-select-option-text">{{label}}</span>
-		</div>
-	</template>
-
-	<template id="tmpl-cross-result-dept">
-		<div style="padding:8px 14px;font-size:13px;cursor:pointer;display:flex;align-items:center;gap:8px"
-			class="cross-scope-item" data-type="department" data-id="{{id}}" data-name="{{name}}"
-			onmouseover="this.style.background='var(--primary-light)'" onmouseout="this.style.background=''">
-			<span class="tag tag-sm" style="background:var(--primary-lighter);color:var(--primary)">部门</span> {{name}}
-		</div>
-	</template>
-
-	<template id="tmpl-cross-result-team">
-		<div style="padding:8px 14px;font-size:13px;cursor:pointer;display:flex;align-items:center;gap:8px"
-			class="cross-scope-item" data-type="team" data-id="{{id}}" data-name="{{name}}"
-			onmouseover="this.style.background='var(--primary-light)'" onmouseout="this.style.background=''">
-			<span class="tag tag-sm" style="background:#d1fae5;color:#065f46">团队</span> {{name}}
-		</div>
-	</template>
-
-	<template id="tmpl-cross-result-empty">
-		<div style="padding:10px 14px;font-size:13px;color:var(--text-sub)">无匹配结果</div>
-	</template>
-
-	<template id="tmpl-cross-action-checkbox">
-		<label style="display:inline-flex;align-items:center;gap:3px;font-size:13px;cursor:pointer;white-space:nowrap">
-			<input type="checkbox" value="{{action}}" {{checked}} class="csa-check" style="accent-color:var(--primary)">
-			{{label}}
-		</label>
-	</template>
-
-	<template id="tmpl-cross-selected-item">
-		<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;padding:6px 10px;background:var(--bg);border-radius:6px;font-size:13px">
-			<span style="font-weight:500">[{{type_label}}] {{name}}</span>
-			<span class="text-sub" style="font-size:12px">{{actions_str}}</span>
-			<button class="tag-close-btn" style="color:var(--danger);margin-left:auto" onclick="removeCrossScope({{index}})">×</button>
-		</div>
-	</template>
-
-	<template id="tmpl-cross-selected-empty">
-		<span class="text-sub text-sm">暂无跨域授权</span>
 	</template>
 
 	<div id="mask" class="mask"></div>

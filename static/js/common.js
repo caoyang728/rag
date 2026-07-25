@@ -179,6 +179,27 @@ const api = {
 		setTimeout(() => { window.location.href = '/login/'; }, 1500);
 	},
 
+	_formatError(data) {
+		// 如果有 details（字段校验错误），转为友好提示
+		if (data && data.details && typeof data.details === 'object') {
+			const msgs = [];
+			for (const [field, errors] of Object.entries(data.details)) {
+				const errList = Array.isArray(errors) ? errors : [errors];
+				for (const e of errList) {
+					const key = `${field}:${e}`;
+					// 常见字段错误映射
+					const map = {
+						'email:具有 email 的 user 已存在。': '该邮箱已被使用',
+						'username:具有 username 的 user 已存在。': '该用户名已被使用',
+					};
+					msgs.push(map[key] || `${field}: ${e}`);
+				}
+			}
+			return msgs.join('；');
+		}
+		return data ? (data.detail || data.message || '请求失败') : '请求失败';
+	},
+
 	async handleError(res) {
 		const status = res.status;
 		if (status === 403) {
@@ -189,7 +210,7 @@ const api = {
 			let detail = '请求失败';
 			try {
 				const data = await res.json();
-				detail = data.detail || JSON.stringify(data);
+				detail = this._formatError(data);
 			} catch (e) { }
 			throw new Error(detail);
 		}
@@ -606,44 +627,54 @@ async function loadNotifications() {
 }
 
 /* ============ 布局：侧边导航（管理页） ============ */
-function isSuperAdmin() {
+function getUserRoles() {
 	try {
 		const u = JSON.parse(localStorage.getItem('rag_user') || '{}');
-		return (u.roles || []).some(r => r.role__code === 'super_admin');
-	} catch (e) { return false; }
+		return (u.roles || []).map(r => r.role__code);
+	} catch (e) { return []; }
+}
+
+function hasAnyRole(...codes) {
+	const userRoles = getUserRoles();
+	return codes.some(c => userRoles.includes(c));
+}
+
+function isSuperAdmin() {
+	return hasAnyRole('super_admin');
 }
 
 function isAdminOrOps() {
-	try {
-		const u = JSON.parse(localStorage.getItem('rag_user') || '{}');
-		return (u.roles || []).some(r => r.role__code === 'super_admin' || r.role__code === 'kb_admin');
-	} catch (e) { return false; }
+	return hasAnyRole('super_admin', 'kb_admin');
 }
 
 function renderSidebar(active) {
-	const adminItems = [
-		{ icon: '👥', name: '用户与角色', page: 'admin-users', key: 'admin-users' },
-	];
+	// readonly 角色：隐藏文档上传
+	const isReadonly = hasAnyRole('readonly');
+	// 拥有管理权限的角色可见全部管理后台项
+	const isManagerRole = hasAnyRole('super_admin', 'kb_admin', 'kb_ops', 'dept_manager', 'team_leader');
+
+	const adminItems = [];
+	// 用户与角色、反馈与报表、审计与安全：仅管理角色可见
+	if (isManagerRole) {
+		adminItems.push({ icon: '👥', name: '用户与角色', page: 'admin-users', key: 'admin-users' });
+	}
 	// 知识库：所有登录用户可浏览文档；节点增删改仅管理员可用（页面内控制）
 	adminItems.push({ icon: '🗂️', name: '知识库', page: 'admin-nodes', key: 'admin-nodes' });
-	adminItems.push(
-		{ icon: '📊', name: '反馈与报表', page: 'admin-analytics', key: 'admin-analytics' },
-		{ icon: '🛡️', name: '审计与安全', page: 'admin-audit', key: 'admin-audit' },
-	);
-	// 仅超级管理员和kb_admin可见
-	if (isSuperAdmin() || (() => {
-		try {
-			const u = JSON.parse(localStorage.getItem('rag_user') || '{}');
-			return (u.roles || []).some(r => r.role__code === 'kb_admin');
-		} catch (e) { return false; }
-	})()) {
+	if (isManagerRole) {
+		adminItems.push(
+			{ icon: '📊', name: '反馈与报表', page: 'admin-analytics', key: 'admin-analytics' },
+			{ icon: '🛡️', name: '审计与安全', page: 'admin-audit', key: 'admin-audit' },
+		);
+	}
+	// RBAC 权限配置：仅超级管理员和kb_admin可见
+	if (isAdminOrOps()) {
 		adminItems.push({ icon: '&#9881;&#65039;', name: 'RBAC 权限配置', page: 'admin-rbac', key: 'admin-rbac' });
 	}
 	const items = [
 		{
 			group: '工作台', items: [
 				{ icon: '💬', name: '智能聊天', page: 'chat', key: 'chat' },
-				{ icon: '📤', name: '文档上传', page: 'upload', key: 'upload' }
+				...(isReadonly ? [] : [{ icon: '📤', name: '文档上传', page: 'upload', key: 'upload' }])
 			]
 		},
 		{

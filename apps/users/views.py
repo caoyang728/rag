@@ -525,6 +525,9 @@ class UserViewSet(viewsets.ModelViewSet):
                 valid_teams = [tid for tid in team_ids if Team.objects.filter(id=tid).exists() and tid not in existing_ut]
                 if valid_teams:
                     UserTeam.objects.bulk_create([UserTeam(user=user, team_id=tid) for tid in valid_teams])
+            # 同步 Team.leader_id / Department.leader_id
+            if role_ids:
+                self._sync_role_leader(user, set(role_ids))
         return Response(UserSerializer(user).data, status=201)
 
     # ---- 编辑用户 ----
@@ -598,6 +601,8 @@ class UserViewSet(viewsets.ModelViewSet):
                 to_add = new_role_ids - old_role_ids
                 if to_add:
                     UserRole.objects.bulk_create([UserRole(user=user, role_id=rid) for rid in to_add])
+                # 同步 Team.leader_id
+                self._sync_role_leader(user, new_role_ids)
             if team_ids is not None:
                 old_team_ids = set(UserTeam.objects.filter(user=user).values_list('team_id', flat=True))
                 new_team_ids = set(team_ids)
@@ -679,7 +684,31 @@ class UserViewSet(viewsets.ModelViewSet):
             UserRole.objects.filter(user=u).delete()
             for rid in role_ids:
                 UserRole.objects.create(user=u, role_id=rid)
+            # 同步 Team.leader_id / Department.leader_id
+            self._sync_role_leader(u, set(role_ids))
         return Response({"ok": True})
+
+    def _sync_role_leader(self, user, role_ids_set):
+        """分配/移除 team_leader / dept_manager 角色时，同步更新 Team.leader_id / Department.leader_id"""
+        role_code_map = dict(Role.objects.filter(
+            code__in=['team_leader', 'dept_manager']
+        ).values_list('id', 'code'))
+
+        has_tl = any(role_code_map.get(rid) == 'team_leader' for rid in role_ids_set)
+        has_dm = any(role_code_map.get(rid) == 'dept_manager' for rid in role_ids_set)
+
+        if has_tl:
+            user_team_ids = list(UserTeam.objects.filter(user=user).values_list('team_id', flat=True))
+            if user_team_ids:
+                Team.objects.filter(id__in=user_team_ids, leader__isnull=True).update(leader=user)
+        else:
+            Team.objects.filter(leader=user).update(leader=None)
+
+        if has_dm:
+            if user.department_id:
+                Department.objects.filter(id=user.department_id, leader__isnull=True).update(leader=user)
+        else:
+            Department.objects.filter(leader=user).update(leader=None)
 
     # ---- 导出单个用户 ----
     @action(detail=True, methods=["get"])

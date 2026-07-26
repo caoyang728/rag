@@ -513,9 +513,6 @@ async function startUpload() {
 	setUploadBtnDisabled(true);
 	uploadingXhrs = [];
 
-	// 隐藏上传选项面板
-	hideUploadOptionsOnly();
-
 	const total = pendingFiles.length;
 	let completedCount = 0;
 	let successCount = 0;
@@ -936,7 +933,8 @@ function fileTypeByExt(name) {
 		go: 'Go', rs: 'Rust', c: 'C', cpp: 'C++', h: 'C/C++ Header',
 		yml: 'YAML', yaml: 'YAML', json: 'JSON', xml: 'XML',
 		toml: 'TOML', ini: 'INI', conf: '配置', cfg: '配置',
-		sh: 'Shell', bat: 'Batch', ps1: 'PowerShell'
+		sh: 'Shell', bat: 'Batch', ps1: 'PowerShell',
+		css: 'CSS',
 	};
 	return map[ext] || ext.toUpperCase();
 }

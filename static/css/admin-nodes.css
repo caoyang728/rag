@@ -321,3 +321,125 @@
 	padding: 2px 8px;
 	font-size: 12px
 }
+
+/* ============ 统计卡片 ============ */
+.stat-card {
+	background: var(--white);
+	border: 1px solid var(--border);
+	border-radius: var(--radius-lg);
+	padding: 16px;
+	transition: border-color .15s, box-shadow .15s;
+}
+
+.stat-card:hover {
+	border-color: var(--primary);
+	box-shadow: 0 2px 8px rgba(0,0,0,.06);
+}
+
+.stat-card[title]:hover {
+	cursor: pointer;
+}
+
+.stat-card-label {
+	font-size: 12px;
+	color: var(--text-sub);
+	margin-bottom: 4px;
+}
+
+.stat-card-value {
+	font-size: 22px;
+	font-weight: 600;
+	color: var(--text);
+}
+
+.stat-card-link {
+	font-size: 11px;
+	color: var(--primary);
+}
+
+/* ============ 文档列表弹窗 ============ */
+.doc-list-modal-body {
+	max-height: calc(85vh - 100px);
+	overflow-y: auto;
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+}
+
+.doc-list-modal-body .table-container {
+	flex: 1;
+	min-height: 0;
+	overflow-y: auto;
+}
+
+/* 编辑文档设置弹窗 — 多选下拉面板突破弹窗裁剪 */
+#docVisModal,
+#docVisModal .modal-content,
+#docVisModal .modal-body { overflow: visible !important; }
+#docVisModal .multi-select-panel.show { z-index: 10010 !important; }
+
+/* ============ 文档归属信息卡片 ============ */
+.doc-ownership-card {
+	background: var(--bg);
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	padding: 16px;
+	margin-bottom: 20px;
+}
+
+.doc-ownership-header {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin-bottom: 12px;
+	padding-bottom: 10px;
+	border-bottom: 1px dashed var(--border);
+}
+
+.doc-ownership-icon {
+	font-size: 20px;
+	flex-shrink: 0;
+}
+
+.doc-ownership-name {
+	font-size: 15px;
+	font-weight: 600;
+	color: var(--text);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.doc-ownership-meta {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.doc-ownership-row {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-size: 13px;
+}
+
+.doc-ownership-label {
+	color: var(--text-sub);
+	min-width: 56px;
+	flex-shrink: 0;
+}
+
+.doc-ownership-value {
+	color: var(--text);
+}
+
+/* ============ 提示样式 ============ */
+.hint-warning {
+	background: #fff8e1;
+	border: 1px solid #ffc107;
+	border-radius: var(--radius-sm);
+	padding: 8px 12px;
+	font-size: 13px;
+	color: #8d6e00;
+	margin-bottom: 12px;
+}

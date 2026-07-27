@@ -37,6 +37,7 @@ def _sanitize_dict(d):
 from celery import shared_task
 from django.conf import settings
 from django.db import models
+from django.utils import timezone
 
 from apps.knowledge.models import Document, DocumentChunk, CodeChunk, KnowledgeNode, ImageResource
 from apps.knowledge.parsers.base import get_parser
@@ -275,6 +276,52 @@ def parse_document(document_id: int):
     finally:
         if temp_file and os.path.exists(temp_file.name):
             os.remove(temp_file.name)
+
+
+@shared_task(name='knowledge.cleanup_deleted_docs', queue='cleanup')
+def cleanup_deleted_docs(retention_days: int = 180):
+    """
+    清理已删除超过指定天数的文档物理文件（自动清理）
+    
+    默认180天：超过180天的已删除文档将被自动物理删除
+    
+    :param retention_days: 保留天数，超过此天数的已删除文档将被物理删除
+    """
+    cutoff_time = timezone.now() - timezone.timedelta(days=retention_days)
+    
+    deleted_docs = Document.objects.filter(
+        is_deleted=True,
+        delete_time__isnull=False,
+        delete_time__lt=cutoff_time,
+        file_path__isnull=False,
+        file_path__ne=''
+    )
+    
+    cleaned_count = 0
+    failed_count = 0
+    failed_paths = []
+    
+    storage = get_document_storage()
+    
+    for doc in deleted_docs:
+        try:
+            storage.delete(doc.file_path)
+            doc.file_path = ''
+            doc.save(update_fields=['file_path'])
+            cleaned_count += 1
+            logger.info('[Cleanup] Deleted file for doc=%d, file=%s', doc.id, doc.file_name)
+        except Exception as e:
+            failed_count += 1
+            failed_paths.append(f'{doc.id}:{doc.file_path}')
+            logger.exception('[Cleanup] Failed to delete file for doc=%d', doc.id)
+    
+    logger.info('[Cleanup] Completed: cleaned=%d, failed=%d', cleaned_count, failed_count)
+    return {
+        'ok': True,
+        'cleaned': cleaned_count,
+        'failed': failed_count,
+        'failed_paths': failed_paths[:20]
+    }
 
 
 def _log_batch_import_failure(filename, node_name, error_msg):

@@ -134,13 +134,33 @@
 				<div class="page-header-flex mb-12">
 					<div class="text-xl">📋 上传历史</div>
 					<div class="page-actions">
-						<input class="input" style="width:200px" placeholder="🔍 搜索文件名">
-						<select class="select" style="width:140px">
-							<option>全部状态</option>
-							<option>已完成</option>
-							<option>解析中</option>
-							<option>失败</option>
+						<input class="input" style="width:200px" id="searchInput" placeholder="🔍 搜索文件名/上传人">
+						<select class="select" id="filterFileType" style="width:100px" onchange="loadUploadHistory(1)">
+							<option value="">全部类型</option>
+							<option value="pdf">PDF</option>
+							<option value="docx">Word</option>
+							<option value="markdown">Markdown</option>
+							<option value="txt">TXT</option>
+							<option value="code">代码</option>
+							<option value="config">配置</option>
+							<option value="other">其他</option>
 						</select>
+						<select class="select" id="filterDept" style="width:120px" onchange="loadUploadHistory(1)">
+							<option value="">全部部门</option>
+						</select>
+						<select class="select" id="filterVisible" style="width:100px" onchange="loadUploadHistory(1)">
+							<option value="">全部可见范围</option>
+							<option value="team">仅团队</option>
+							<option value="dept">部门</option>
+							<option value="public">全公司</option>
+						</select>
+						<select class="select" id="filterStatus" style="width:90px" onchange="loadUploadHistory(1)">
+							<option value="">全部状态</option>
+							<option value="done">已完成</option>
+							<option value="parsing">解析中</option>
+							<option value="failed">失败</option>
+						</select>
+						<label class="checkbox"><input type="checkbox" id="showDeleted" onchange="toggleShowDeleted(this)">显示已删除</label>
 					</div>
 				</div>
 				<div class="table-container">
@@ -188,6 +208,17 @@
 			</td>
 		</tr>
 	</template>
+
+	<style>
+		.deleted-row {
+			opacity: 0.6;
+			background-color: #fef0f0 !important;
+		}
+		.deleted-row .up-row-name {
+			text-decoration: line-through;
+			color: #999;
+		}
+	</style>
 
 	<template id="tmpl-upload-pagination">
 		<span class="up-pag-total">共 <span class="up-pag-total-num"></span> 条</span>

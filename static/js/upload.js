@@ -14,12 +14,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
 /* ============ 上传历史表格 ============ */
 let uploadHistorySearch = '';
-let uploadHistoryStatus = '';
+let uploadHistoryIncludeDeleted = false;
 let currentDocs = [];
 
 async function initUploadPage() {
 	await loadUploadHistory();
 	initSearchFilter();
+	await loadFilterOptions();
 	const visRadio = document.querySelector('#visRow .upload-radio-inline.selected input');
 	if (visRadio && visRadio.value === 'org') {
 		await loadUploadDeptTeamOptions();
@@ -27,8 +28,7 @@ async function initUploadPage() {
 }
 
 function initSearchFilter() {
-	const searchInput = document.querySelector('.page-actions .input[placeholder*="搜索"]');
-	const statusSelect = document.querySelector('.page-actions .select');
+	const searchInput = $('#searchInput');
 
 	if (searchInput) {
 		searchInput.addEventListener('input', (e) => {
@@ -37,15 +37,30 @@ function initSearchFilter() {
 		});
 	}
 
-	if (statusSelect) {
-		statusSelect.addEventListener('change', (e) => {
-			uploadHistoryStatus = e.target.value === '全部状态' ? '' : e.target.value;
-			loadUploadHistory(1);
-		});
-	}
+	startUploadPolling();
+}
 
-	// 启动上传历史持续刷新
-	scheduleUploadHistoryRefresh();
+async function loadFilterOptions() {
+	try {
+		const deptSelect = $('#filterDept');
+		
+		if (deptSelect) {
+			const depts = await api.getJson('/api/v1/knowledge/documents/available_depts/');
+			depts.forEach(d => {
+				const opt = document.createElement('option');
+				opt.value = d.id;
+				opt.textContent = d.name;
+				deptSelect.appendChild(opt);
+			});
+		}
+	} catch (e) {
+		console.warn('加载筛选选项失败:', e);
+	}
+}
+
+function toggleShowDeleted(checkbox) {
+	uploadHistoryIncludeDeleted = checkbox.checked;
+	loadUploadHistory(1);
 }
 
 async function loadUploadHistory(page = 1) {
@@ -57,8 +72,30 @@ async function loadUploadHistory(page = 1) {
 		if (uploadHistorySearch) {
 			url += `&search=${encodeURIComponent(uploadHistorySearch)}`;
 		}
-		if (uploadHistoryStatus) {
-			url += `&status=${uploadHistoryStatus}`;
+		
+		const filterFileType = $('#filterFileType')?.value || '';
+		const filterDept = $('#filterDept')?.value || '';
+		const filterOwner = $('#filterOwner')?.value || '';
+		const filterVisible = $('#filterVisible')?.value || '';
+		const filterStatus = $('#filterStatus')?.value || '';
+		
+		if (filterFileType) {
+			url += `&file_type=${filterFileType}`;
+		}
+		if (filterDept) {
+			url += `&dept_id=${filterDept}`;
+		}
+		if (filterOwner) {
+			url += `&owner=${filterOwner}`;
+		}
+		if (filterVisible) {
+			url += `&visible_scope=${filterVisible}`;
+		}
+		if (filterStatus) {
+			url += `&status=${filterStatus}`;
+		}
+		if (uploadHistoryIncludeDeleted) {
+			url += `&include_deleted=true`;
 		}
 
 		const data = await api.getJson(url);
@@ -83,16 +120,48 @@ async function loadUploadHistory(page = 1) {
 			row.querySelector('.up-row-node').textContent = h.node_name || '-';
 			row.querySelector('.up-row-owner').textContent = h.owner_name || '-';
 			row.querySelector('.up-row-vis').innerHTML = visTag(h.visible_scope);
-			row.querySelector('.up-row-status').innerHTML = statusTag(h.status);
-			row.querySelector('.up-row-time').textContent = formatDate(h.created_at);
-			row.querySelector('.up-row-view').onclick = function () { viewDocument(h.id); };
-			row.querySelector('.up-row-reparse').onclick = function () { reparseDocument(h.id); };
-			row.querySelector('.up-row-delete').onclick = function () { deleteDocument(h.id); };
+			
+			if (h.is_deleted) {
+				row.classList.add('deleted-row');
+				row.querySelector('.up-row-status').innerHTML = '<span class="tag tag-danger">已删除</span>';
+				row.querySelector('.up-row-time').textContent = '删除于 ' + formatDate(h.delete_time);
+				row.querySelector('.up-row-view').onclick = null;
+				row.querySelector('.up-row-view').style.cursor = 'default';
+				row.querySelector('.up-row-reparse').onclick = null;
+				row.querySelector('.up-row-reparse').style.cursor = 'default';
+				row.querySelector('.up-row-delete').textContent = '🔄 恢复';
+				row.querySelector('.up-row-delete').onclick = function () { restoreDocument(h.id); };
+				
+				const daysSinceDelete = h.delete_time ? Math.floor((Date.now() - new Date(h.delete_time)) / (1000 * 60 * 60 * 24)) : 0;
+				const hasFilePath = h.file_path && h.file_path !== '';
+				
+				if (hasFilePath) {
+					if (daysSinceDelete >= 30) {
+						const hardDelBtn = document.createElement('button');
+						hardDelBtn.className = 'btn-link btn-sm text-red';
+						hardDelBtn.textContent = '🗑️ 物理删除';
+						hardDelBtn.onclick = function () { hardDeleteDocument(h.id); };
+						row.querySelector('.table-actions').appendChild(hardDelBtn);
+					} else {
+						const remaining = 30 - daysSinceDelete;
+						const hintSpan = document.createElement('span');
+						hintSpan.className = 'text-xs text-sub ml-4';
+						hintSpan.textContent = `(${remaining}天后可物理删除)`;
+						row.querySelector('.table-actions').appendChild(hintSpan);
+					}
+				}
+			} else {
+				row.querySelector('.up-row-status').innerHTML = statusTag(h.status);
+				row.querySelector('.up-row-time').textContent = formatDate(h.created_at);
+				row.querySelector('.up-row-view').onclick = function () { viewDocument(h.id); };
+				row.querySelector('.up-row-reparse').onclick = function () { reparseDocument(h.id); };
+				row.querySelector('.up-row-delete').onclick = function () { deleteDocument(h.id); };
+			}
 			tbody.appendChild(row);
 		});
 
 		renderUploadPagination();
-		scheduleUploadHistoryRefresh(docs);
+	startUploadPolling();
 	} catch (e) {
 		console.error('load upload history failed:', e);
 		tbody.innerHTML = '<tr><td colspan="8" class="text-center text-sub">加载失败，请刷新重试</td></tr>';
@@ -177,6 +246,28 @@ async function reparseDocument(docId) {
 	try {
 		await api.postJson(`/api/v1/knowledge/documents/${docId}/reparse/`, {});
 		toast('已触发重新解析', 'success');
+		loadUploadHistory();
+	} catch (e) {
+		toast(e.message || '操作失败', 'error');
+	}
+}
+
+async function restoreDocument(docId) {
+	if (!confirm('确定恢复此文档？')) return;
+	try {
+		await api.postJson(`/api/v1/knowledge/documents/${docId}/restore/`, {});
+		toast('文档已恢复', 'success');
+		loadUploadHistory();
+	} catch (e) {
+		toast(e.message || '操作失败', 'error');
+	}
+}
+
+async function hardDeleteDocument(docId) {
+	if (!confirm('⚠️ 警告：物理删除后无法恢复，确定继续？')) return;
+	try {
+		await api.postJson(`/api/v1/knowledge/documents/${docId}/hard_delete/`, {});
+		toast('物理删除成功', 'success');
 		loadUploadHistory();
 	} catch (e) {
 		toast(e.message || '操作失败', 'error');
@@ -317,10 +408,10 @@ function initDropZone() {
 
 /* ============ 文件过滤 ============ */
 const ALLOWED_EXTS = new Set([
-	'pdf', 'doc', 'docx', 'md', 'txt', 'rst',
+	'pdf', 'doc', 'docx', 'md', 'markdown', 'txt', 'rst',
 	'py', 'js', 'ts', 'jsx', 'tsx', 'java', 'go', 'rs', 'c', 'cpp', 'h',
 	'yml', 'yaml', 'json', 'xml', 'toml', 'ini', 'conf', 'cfg',
-	'sh', 'bat', 'ps1'
+	'sh', 'bat', 'ps1', 'css'
 ]);
 const MAX_FILE_SIZE_MB = 100;
 const MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024;
@@ -520,7 +611,7 @@ async function startUpload() {
 	const nodeId = $('#nodeSelect')?.value;
 	if (!nodeId) { toast('请选择归属节点', 'error'); return; }
 
-	const visRadio = $('#visRadios .upload-radio.selected input');
+	const visRadio = $('#visRow .upload-radio-inline.selected input');
 	const visValue = visRadio ? visRadio.value : 'org';
 	const visMap = { 'org': 'dept', 'public': 'public' };
 	const visibility = visMap[visValue] || 'dept';
@@ -642,9 +733,7 @@ async function startUpload() {
 		}
 
 		if (uploadedDocIds.length > 0) {
-			startStatusPolling(uploadedDocIds);
-			// 确保上传历史持续刷新，直到所有文档完成
-			scheduleUploadHistoryRefresh();
+			startUploadPolling();
 		}
 		finishUpload();
 	} catch (e) {
@@ -761,99 +850,44 @@ async function checkCeleryStatusBeforeUpload() {
 	}
 }
 
-/* ============ 状态轮询 ============ */
-let pollingInterval = null;
-
-function startStatusPolling(docIds) {
-	if (pollingInterval) clearInterval(pollingInterval);
-
-	pollingInterval = setInterval(async () => {
-		try {
-			const data = await api.getJson('/api/v1/knowledge/documents/pending/');
-			const pendingIds = new Set(data.documents?.map(d => d.id) || []);
-
-			const allDone = docIds.every(item => !pendingIds.has(item.id));
-			if (allDone) {
-				clearInterval(pollingInterval);
-				pollingInterval = null;
-				loadUploadHistory();
-				return;
-			}
-		} catch (e) {
-			console.warn('状态轮询失败:', e);
-		}
-	}, 5000);
-}
-
-function stopStatusPolling() {
-	if (pollingInterval) {
-		clearInterval(pollingInterval);
-		pollingInterval = null;
-	}
-}
-
-/* ============ 上传历史自动刷新 ============ */
+/* ============ 上传状态轮询（合并状态轮询和历史刷新）=========== */
 const PROCESSING_STATUSES = new Set(['pending', 'parsing', 'desensitizing', 'chunking', 'embedding', 'embedding_failed']);
-let historyRefreshInterval = null;
+let uploadPollingInterval = null;
 
-/**
- * 检查是否有进行中的文档
- */
 function hasProcessingDocuments(docs) {
 	const targetDocs = docs || currentDocs;
 	return targetDocs?.some(d => PROCESSING_STATUSES.has(d.status));
 }
 
-/**
- * 启动/停止上传历史自动刷新
- * - 如果有进行中的文档，每10秒刷新一次
- * - 所有文档完成后自动停止
- */
-function scheduleUploadHistoryRefresh(docs) {
-	clearHistoryRefresh();
+function startUploadPolling() {
+	if (uploadPollingInterval) clearInterval(uploadPollingInterval);
 
-	// 如果传入了文档列表，立即检查是否需要刷新
-	if (docs && docs.length > 0) {
-		if (hasProcessingDocuments(docs)) {
-			startHistoryRefreshLoop();
-		}
-		return;
-	}
-
-	// 没有传入文档列表，从currentDocs获取并启动持续检查
-	startHistoryRefreshLoop();
-}
-
-function startHistoryRefreshLoop() {
-	historyRefreshInterval = setInterval(() => {
+	uploadPollingInterval = setInterval(() => {
 		try {
 			if (hasProcessingDocuments()) {
 				loadUploadHistory(uploadHistoryCurrentPage);
 			} else {
-				// 所有文档都已完成，停止刷新
-				clearHistoryRefresh();
+				stopUploadPolling();
 			}
 		} catch (e) {
-			console.warn('上传历史刷新失败:', e);
+			console.warn('上传状态轮询失败:', e);
 		}
-	}, 10000);
+	}, 5000);
 }
 
-function clearHistoryRefresh() {
-	if (historyRefreshInterval) {
-		clearInterval(historyRefreshInterval);
-		historyRefreshInterval = null;
+function stopUploadPolling() {
+	if (uploadPollingInterval) {
+		clearInterval(uploadPollingInterval);
+		uploadPollingInterval = null;
 	}
 }
 
-document.addEventListener('beforeunload', () => {
-	stopStatusPolling();
-	clearHistoryRefresh();
+window.addEventListener('beforeunload', () => {
+	stopUploadPolling();
 });
 document.addEventListener('visibilitychange', () => {
 	if (document.hidden) {
-		stopStatusPolling();
-		clearHistoryRefresh();
+		stopUploadPolling();
 	}
 });
 

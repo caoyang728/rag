@@ -367,6 +367,7 @@ class AccessApplication(models.Model):
     ACTION_CHOICES = [
         ('read', '只读'),
         ('download', '下载'),
+        ('visibility_change', '修改可见范围'),
     ]
     STATUS_CHOICES = [
         ('pending', '待审批'),
@@ -380,7 +381,7 @@ class AccessApplication(models.Model):
     target_type = models.CharField(max_length=16, choices=TARGET_TYPE_CHOICES, default='doc')
     target_id = models.BigIntegerField(null=True, blank=True,
                                         help_text='doc_id / team_id / dept_id')
-    action = models.CharField(max_length=16, choices=ACTION_CHOICES, default='read')
+    action = models.CharField(max_length=32, choices=ACTION_CHOICES, default='read')
     reason = models.TextField(blank=True, default='', help_text='申请理由')
     status = models.CharField(max_length=16, choices=STATUS_CHOICES, default='pending')
     reviewer_comment = models.TextField(blank=True, default='', help_text='审批意见')
@@ -389,6 +390,13 @@ class AccessApplication(models.Model):
     reviewed_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    new_visibility = models.CharField(max_length=16, blank=True, default='',
+                                       help_text='仅 visibility_change 动作使用，新可见范围: team/dept/public')
+    need_double_approval = models.BooleanField(default=False,
+                                                help_text='向上调整可见范围时需要双层审批')
+    first_reviewed_by = models.ForeignKey(User, on_delete=models.SET_NULL,
+                                           null=True, blank=True, related_name='+')
+    first_reviewed_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         db_table = 'access_application'

@@ -20,6 +20,10 @@ let currentDocs = [];
 async function initUploadPage() {
 	await loadUploadHistory();
 	initSearchFilter();
+	const visRadio = document.querySelector('#visRow .upload-radio-inline.selected input');
+	if (visRadio && visRadio.value === 'org') {
+		await loadUploadDeptTeamOptions();
+	}
 }
 
 function initSearchFilter() {
@@ -78,7 +82,7 @@ async function loadUploadHistory(page = 1) {
 			row.querySelector('.up-row-type').textContent = fileTypeByExt(h.file_name);
 			row.querySelector('.up-row-node').textContent = h.node_name || '-';
 			row.querySelector('.up-row-owner').textContent = h.owner_name || '-';
-			row.querySelector('.up-row-vis').innerHTML = visTag(h.visibility);
+			row.querySelector('.up-row-vis').innerHTML = visTag(h.visible_scope);
 			row.querySelector('.up-row-status').innerHTML = statusTag(h.status);
 			row.querySelector('.up-row-time').textContent = formatDate(h.created_at);
 			row.querySelector('.up-row-view').onclick = function () { viewDocument(h.id); };
@@ -199,18 +203,66 @@ async function initNodeSelect() {
 		const data = await api.getJson('/api/v1/knowledge/nodes/tree/');
 		allNodes = data.tree || [];
 
+		const roles = getUserRoles();
+		const u = JSON.parse(localStorage.getItem('rag_user') || '{}');
+		const myDeptId = u.department_id;
+		const myTeamIds = (u.teams || []).map(function (t) { return t.team__id; });
+		
+		const isAdmin = roles.includes('super_admin') || roles.includes('kb_admin');
+		const isDeptManager = roles.includes('dept_manager');
+		const isTeamLeader = roles.includes('team_leader');
+		
+		let filteredNodes = allNodes;
+		let defaultNodeId = null;
+		
+		if (!isAdmin) {
+			if (isDeptManager && myDeptId) {
+				filteredNodes = allNodes.map(function(kbNode) {
+					const deptNode = kbNode.children ? kbNode.children.find(d => d.ref_id === myDeptId) : null;
+					if (deptNode) {
+						defaultNodeId = deptNode.id;
+						return { ...kbNode, children: [deptNode] };
+					}
+					return null;
+				}).filter(n => n);
+			} else if ((isTeamLeader || !isAdmin) && myTeamIds.length > 0) {
+				filteredNodes = allNodes.map(function(kbNode) {
+					if (!kbNode.children) return null;
+					const deptNode = kbNode.children.find(d => d.ref_id === myDeptId);
+					if (!deptNode || !deptNode.children) return null;
+					const teamNodes = deptNode.children.filter(t => myTeamIds.includes(t.ref_id));
+					if (teamNodes.length > 0) {
+						defaultNodeId = teamNodes[0].id;
+						return { 
+							...kbNode, 
+							children: [{ ...deptNode, children: teamNodes }] 
+						};
+					}
+					return null;
+				}).filter(n => n);
+			}
+		}
+		
 		sel.innerHTML = '<option value="">-- 请选择归属节点 --</option>';
-		function walk(nodes, prefix) {
+		function walk(nodes, prefix, depth) {
 			nodes.forEach(n => {
+				if (n.node_level === 1) {
+					if (n.children && n.children.length) walk(n.children, '', depth + 1);
+					return;
+				}
+				const indent = '&nbsp;'.repeat((depth - 1) * 4);
 				const p = prefix ? prefix + ' / ' + n.name : n.name;
 				const opt = document.createElement('option');
 				opt.value = n.id;
-				opt.textContent = n.name ? p : p;
+				opt.innerHTML = indent + (n.name ? p : p);
+				if (n.id === defaultNodeId) {
+					opt.selected = true;
+				}
 				sel.appendChild(opt);
-				if (n.children && n.children.length) walk(n.children, p);
+				if (n.children && n.children.length) walk(n.children, p, depth + 1);
 			});
 		}
-		walk(allNodes, '');
+		walk(filteredNodes, '', 1);
 	} catch (e) {
 		console.error('load nodes failed:', e);
 		sel.innerHTML = '<option value="">加载节点失败</option>';
@@ -394,28 +446,19 @@ function clearFileList() {
 	toast('已清空', '');
 }
 
-/* ============ 单文件上传（支持冲突重试） ============ */
-async function uploadSingleFile(info, nodeId, visibility, token, allowDownload, allowShare, forceUpload = false, action = '', depts = [], teams = []) {
+/* ============ 单文件上传（自动作为新版本） ============ */
+async function uploadSingleFile(info, nodeId, visibility, token, depts = [], teams = []) {
 	const bar = document.querySelector('#' + info.id + ' .file-item-progress-bar');
 
 	const formData = new FormData();
 	formData.append('file', info.file, info.name);
 	formData.append('node_id', nodeId);
-	formData.append('visibility', visibility);
-	formData.append('allow_download', allowDownload ? 'true' : 'false');
-	formData.append('allow_share', allowShare ? 'true' : 'false');
-	// 传递部门/团队列表
+	formData.append('visible_scope', visibility);
 	if (depts.length > 0) {
 		depts.forEach(function (id) { formData.append('visibility_depts', id); });
 	}
 	if (teams.length > 0) {
 		teams.forEach(function (id) { formData.append('visibility_teams', id); });
-	}
-	if (forceUpload) {
-		formData.append('force_upload', 'true');
-	}
-	if (action) {
-		formData.append('action', action);
 	}
 
 	const xhr = new XMLHttpRequest();
@@ -478,25 +521,28 @@ async function startUpload() {
 	if (!nodeId) { toast('请选择归属节点', 'error'); return; }
 
 	const visRadio = $('#visRadios .upload-radio.selected input');
-	const visValue = visRadio ? visRadio.value : 'private';
-	const visMap = { 'private': 1, 'org': 2, 'public': 3 };
-	const visibility = visMap[visValue] || 1;
-
-	const allowDownload = !!document.getElementById('chkAllowDownload')?.checked;
-	const allowShare = !!document.getElementById('chkAllowShare')?.checked;
-	
-	// 获取选中的部门/团队
-	const depts = [];
-	document.querySelectorAll('#uploadDeptPanel input:checked').forEach(function (cb) {
-		depts.push(parseInt(cb.value));
-	});
-	const teams = [];
-	document.querySelectorAll('#uploadTeamPanel input:checked').forEach(function (cb) {
-		teams.push(parseInt(cb.value));
-	});
+	const visValue = visRadio ? visRadio.value : 'org';
+	const visMap = { 'org': 'dept', 'public': 'public' };
+	const visibility = visMap[visValue] || 'dept';
 
 	const token = localStorage.getItem('rag_access');
 	if (!token) { toast('请先登录', 'error'); return; }
+
+	let depts = [];
+	let teams = [];
+	if (visValue === 'org') {
+		if (!uploadMultiSelect) {
+			await loadUploadDeptTeamOptions();
+		}
+		depts = [];
+		document.querySelectorAll('#uploadDeptPanel input:checked').forEach(function (cb) {
+			depts.push(parseInt(cb.value));
+		});
+		teams = [];
+		document.querySelectorAll('#uploadTeamPanel input:checked').forEach(function (cb) {
+			teams.push(parseInt(cb.value));
+		});
+	}
 
 	toast('正在准备上传...', '');
 
@@ -512,9 +558,6 @@ async function startUpload() {
 	isUploading = true;
 	setUploadBtnDisabled(true);
 	uploadingXhrs = [];
-
-	// 隐藏上传选项面板
-	hideUploadOptionsOnly();
 
 	const total = pendingFiles.length;
 	let completedCount = 0;
@@ -532,45 +575,7 @@ async function startUpload() {
 		if (statusEl) statusEl.innerHTML = '<span class="tag tag-info">上传中</span>';
 
 		try {
-			let responseData = await uploadSingleFile(info, nodeId, visibility, token, allowDownload, allowShare, false, '', depts, teams);
-
-			// -- 处理冲突响应：弹出确认对话框 --
-			while (responseData && responseData.conflict) {
-				const existing = responseData.existing;
-				if (responseData.conflict === 'duplicate') {
-					// 未删除的重复文件：二选项（继续/取消）
-					const msg = [
-						'已存在相同内容的文件：' + (existing.file_name || ''),
-						'上传者：' + (existing.owner_name || '未知'),
-						'上传时间：' + (existing.created_at || ''),
-						'状态：' + (existing.status || ''),
-						'',
-						'是否继续上传（将创建新记录）？'
-					].join('\n');
-
-					if (!confirm(msg)) {
-						if (statusEl) statusEl.innerHTML = '<span class="tag tag-default">已跳过</span>';
-						if (metaEl) metaEl.innerHTML = info.type + ' · ' + formatSize(info.size) + ' · 已取消（文件已存在）';
-						return 'skipped';
-					}
-
-					// 用户确认，使用 force_upload 重新上传
-					if (statusEl) statusEl.innerHTML = '<span class="tag tag-info">确认上传</span>';
-					responseData = await uploadSingleFile(info, nodeId, visibility, token, allowDownload, allowShare, true);
-				} else {
-					// 已删除的文件：三选项（恢复/新建/取消）
-					const choice = showDeletedFileDialog(existing);
-					if (choice === 'cancel') {
-						if (statusEl) statusEl.innerHTML = '<span class="tag tag-default">已跳过</span>';
-						if (metaEl) metaEl.innerHTML = info.type + ' · ' + formatSize(info.size) + ' · 已取消（文件已存在）';
-						return 'skipped';
-					}
-
-					// 用户选择恢复或新建
-					if (statusEl) statusEl.innerHTML = '<span class="tag tag-info">' + (choice === 'restore' ? '恢复中' : '新建中') + '</span>';
-					responseData = await uploadSingleFile(info, nodeId, visibility, token, allowDownload, allowShare, true, choice, depts, teams);
-				}
-			}
+			const responseData = await uploadSingleFile(info, nodeId, visibility, token, depts, teams);
 
 			if (bar) bar.style.width = '100%';
 
@@ -872,18 +877,17 @@ async function retryPendingDocs() {
 
 /* ============ 可见范围选择 ============ */
 function pickVis(elm) {
-	$$('#visRadios .upload-radio').forEach(r => r.classList.remove('selected'));
+	$$('#visRow .upload-radio-inline').forEach(r => r.classList.remove('selected'));
 	elm.classList.add('selected');
 	elm.querySelector('input').checked = true;
 	
-	// 显示/隐藏部门/团队选择
 	var visValue = elm.querySelector('input').value;
 	var orgSelect = document.getElementById('uploadOrgSelect');
 	if (visValue === 'org') {
-		orgSelect.classList.remove('hidden');
+		orgSelect.style.display = 'flex';
 		loadUploadDeptTeamOptions();
 	} else {
-		orgSelect.classList.add('hidden');
+		orgSelect.style.display = 'none';
 	}
 }
 
@@ -891,35 +895,54 @@ var uploadDeptList = [];
 var uploadTeamList = [];
 
 function loadUploadDeptTeamOptions() {
-	if (uploadDeptList.length > 0 && uploadTeamList.length > 0) {
-		if (!uploadMultiSelect) {
-			uploadMultiSelect = createDeptTeamMultiSelect({
-				prefix: 'upload',
-				deptList: uploadDeptList,
-				teamList: uploadTeamList
-			});
-		}
-		uploadMultiSelect.renderDeptList([]);
-		uploadMultiSelect.renderTeamList([], []);
-		return;
-	}
-	// 调用新 API 获取用户可选的部门/团队
-	api.getJson('/api/v1/knowledge/documents/allowed_visibility/').then(function (res) {
-		uploadDeptList = res.departments || [];
-		uploadTeamList = res.teams || [];
+	return new Promise((resolve) => {
+		api.getJson('/api/v1/knowledge/documents/allowed_visibility/').then(function (res) {
+			uploadDeptList = res.departments || [];
+			uploadTeamList = res.teams || [];
+			initDeptTeamSelect();
+			resolve();
+		}).catch(function (e) {
+			console.error('Failed to load allowed visibility:', e);
+			uploadDeptList = [];
+			uploadTeamList = [];
+			resolve();
+		});
+	});
+}
+
+function initDeptTeamSelect() {
+	const roles = getUserRoles();
+	const u = JSON.parse(localStorage.getItem('rag_user') || '{}');
+	const myDeptId = u.department_id;
+	const myTeamIds = (u.teams || []).map(function (t) { return t.team__id; });
+	
+	const deptTrigger = document.querySelector('#uploadDeptSelect .multi-select-trigger');
+	const teamTrigger = document.querySelector('#uploadTeamSelect .multi-select-trigger');
+	
+	if (!uploadMultiSelect) {
 		uploadMultiSelect = createDeptTeamMultiSelect({
 			prefix: 'upload',
 			deptList: uploadDeptList,
 			teamList: uploadTeamList
 		});
+	} else {
+		uploadMultiSelect.setDeptList(uploadDeptList);
+		uploadMultiSelect.setTeamList(uploadTeamList);
+	}
+	
+	if (myDeptId && myTeamIds.length > 0) {
+		uploadMultiSelect.renderDeptList([myDeptId]);
+		uploadMultiSelect.renderTeamList(myTeamIds, [myDeptId]);
+	} else if (myDeptId) {
+		uploadMultiSelect.renderDeptList([myDeptId]);
+		uploadMultiSelect.renderTeamList([], [myDeptId]);
+	} else {
 		uploadMultiSelect.renderDeptList([]);
 		uploadMultiSelect.renderTeamList([], []);
-	}).catch(function (e) {
-		console.error('Failed to load allowed visibility:', e);
-		// 降级为空列表
-		uploadDeptList = [];
-		uploadTeamList = [];
-	});
+	}
+	
+	deptTrigger.classList.remove('disabled');
+	teamTrigger.classList.remove('disabled');
 }
 
 // multi-select组件实例
@@ -936,7 +959,8 @@ function fileTypeByExt(name) {
 		go: 'Go', rs: 'Rust', c: 'C', cpp: 'C++', h: 'C/C++ Header',
 		yml: 'YAML', yaml: 'YAML', json: 'JSON', xml: 'XML',
 		toml: 'TOML', ini: 'INI', conf: '配置', cfg: '配置',
-		sh: 'Shell', bat: 'Batch', ps1: 'PowerShell'
+		sh: 'Shell', bat: 'Batch', ps1: 'PowerShell',
+		css: 'CSS',
 	};
 	return map[ext] || ext.toUpperCase();
 }
@@ -965,8 +989,8 @@ function fileTypeIcon(t) {
 }
 
 function visTag(v) {
-	const map = { 1: '仅本人', 2: '部门可见', 3: '团队可见', 4: '公开' };
-	const tagMap = { 1: 'default', 2: 'info', 3: 'primary', 4: 'success' };
+	const map = { 'team': '团队', 'dept': '部门', 'public': '公开' };
+	const tagMap = { 'team': 'default', 'dept': 'info', 'public': 'success' };
 	return `<span class="tag tag-${tagMap[v] || 'default'}">${map[v] || v}</span>`;
 }
 

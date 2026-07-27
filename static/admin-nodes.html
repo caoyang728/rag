@@ -47,77 +47,76 @@
 					</div>
 				</div>
 			</div>
+	</div>
 
-			<!-- ============ 文档列表区（默认隐藏，点击查看后展示） ============ -->
-			<div class="card doc-list-card hidden shrink-0" id="docListCard">
-				<div class="doc-list-toolbar">
-					<div class="doc-list-title">📄 文档列表
-						<span class="doc-list-count" id="docListCount"></span>
-					</div>
-					<div class="flex gap-8 items-center">
-						<button class="btn btn-sm" id="docListToggle" onclick="toggleDocList()">收起</button>
-					</div>
+	<!-- ============ 文档列表弹窗 ============ -->
+	<div class="modal" id="docListModal">
+		<div class="modal-content" style="max-width:1300px; width:80vw; max-height:85vh">
+			<div class="modal-header">
+				<h3>文档列表 <span class="text-sub text-sm" id="docListCount" style="font-weight:400"></span></h3>
+				<button class="modal-close" onclick="closeDocListModal()">&times;</button>
+			</div>
+			<div class="modal-body doc-list-modal-body">
+				<div class="doc-filter-bar">
+					<input class="input" id="docSearch" style="width:220px" placeholder="🔍 搜索文件名/标题" oninput="onDocSearchInput()">
+					<select class="select" id="docStatusFilter" style="width:130px">
+						<option value="">全部状态</option>
+						<option value="done">已完成</option>
+						<option value="pending">等待</option>
+						<option value="parsing">解析中</option>
+						<option value="desensitizing">脱敏中</option>
+						<option value="chunking">切片中</option>
+						<option value="embedding">向量化中</option>
+						<option value="embedding_failed">向量化失败</option>
+						<option value="failed">失败</option>
+					</select>
+					<select class="select" id="docVisFilter" style="width:130px">
+					<option value="">全部可见范围</option>
+					<option value="team">团队</option>
+					<option value="dept">部门</option>
+					<option value="public">公开</option>
+				</select>
+					<select class="select" id="docTypeFilter" style="width:120px">
+						<option value="">全部类型</option>
+						<option value="pdf">PDF</option>
+						<option value="docx">Word</option>
+						<option value="markdown">Markdown</option>
+						<option value="txt">TXT</option>
+						<option value="code">代码</option>
+						<option value="config">配置</option>
+					</select>
+					<button class="btn btn-sm btn-primary" onclick="loadDocList(1)">查询</button>
 				</div>
-				<div id="docListBody" class="hidden">
-					<div class="doc-filter-bar">
-						<input class="input" id="docSearch" style="width:220px" placeholder="🔍 搜索文件名/标题" oninput="onDocSearchInput()">
-						<select class="select" id="docStatusFilter" style="width:130px">
-							<option value="">全部状态</option>
-							<option value="done">已完成</option>
-							<option value="pending">等待</option>
-							<option value="parsing">解析中</option>
-							<option value="desensitizing">脱敏中</option>
-							<option value="chunking">切片中</option>
-							<option value="embedding">向量化中</option>
-							<option value="embedding_failed">向量化失败</option>
-							<option value="failed">失败</option>
-						</select>
-						<select class="select" id="docVisFilter" style="width:130px">
-							<option value="">全部可见范围</option>
-							<option value="1">个人</option>
-							<option value="2">部门/团队</option>
-							<option value="3">公开</option>
-						</select>
-						<select class="select" id="docTypeFilter" style="width:120px">
-							<option value="">全部类型</option>
-							<option value="pdf">PDF</option>
-							<option value="docx">Word</option>
-							<option value="markdown">Markdown</option>
-							<option value="txt">TXT</option>
-							<option value="code">代码</option>
-							<option value="config">配置</option>
-						</select>
-						<button class="btn btn-sm btn-primary" onclick="loadDocList(1)">查询</button>
-					</div>
-					<div class="table-container">
-						<table class="table">
+				<div class="table-container">
+					<table class="table doc-list-table">
 							<thead>
 								<tr>
-									<th>文件名</th>
-									<th>类型</th>
-									<th>上传人</th>
-									<th>可见范围</th>
-									<th>状态</th>
-									<th>上传时间</th>
-									<th style="width:240px">操作</th>
-								</tr>
-							</thead>
-							<tbody id="docListTbody"></tbody>
-						</table>
-					</div>
-					<div class="pagination" id="docPagination"></div>
+									<th style="max-width:200px">文件名</th>
+									<th style="max-width:60px">类型</th>
+									<th style="max-width:100px">上传人</th>
+									<th style="max-width:100px">归属团队</th>
+									<th style="max-width:60px">可见范围</th>
+									<th style="max-width:60px">状态</th>
+									<th style="max-width:60px;white-space:nowrap">上传时间</th>
+									<th>操作</th>
+							</tr>
+						</thead>
+						<tbody id="docListTbody"></tbody>
+					</table>
 				</div>
+				<div class="pagination" id="docPagination"></div>
 			</div>
 		</div>
 	</div>
 
 	<!-- ============ 文档预览弹窗（不可复制，支持分页） ============ -->
-	<div class="modal" id="docPreviewModal" style="max-width:860px">
+	<div class="modal" id="docPreviewModal">
+		<div class="modal-content" style="max-width:860px;max-height:85vh">
 		<div class="modal-header">
 			<div class="modal-title" id="docPreviewTitle">文档预览</div>
 			<button class="modal-close" onclick="closeModal('docPreviewModal')">&times;</button>
 		</div>
-		<div class="modal-body overflow-y-auto" style="max-height:60vh">
+		<div class="modal-body overflow-y-auto">
 			<div id="docPreviewContent" class="doc-preview-content select-none"></div>
 		</div>
 		<div class="modal-footer hidden" id="docPreviewFooter">
@@ -128,73 +127,96 @@
 				<button class="btn btn-sm" id="docPreviewNext" onclick="previewDocPage(currentPreviewDocId, currentPreviewPage + 1)">下一页 ›</button>
 			</div>
 		</div>
+		</div>
 	</div>
 
-	<!-- ============ 编辑可视范围弹窗 ============ -->
-	<div class="modal" id="docVisModal" style="max-width:900px">
+	<!-- ============ 编辑文档设置弹窗 ============ -->
+	<div class="modal" id="docVisModal">
+		<div class="modal-content" style="width:600px;max-height:85vh">
 		<div class="modal-header">
 			<div class="modal-title">编辑文档设置</div>
 			<button class="modal-close" onclick="closeModal('docVisModal')">&times;</button>
 		</div>
 		<div class="modal-body">
 			<input type="hidden" id="docVisId">
-			<div class="form-item mb-16">
-				<label class="form-label">可见范围</label>
+
+			<!-- 文档归属信息 -->
+			<div class="doc-ownership-card">
+				<div class="doc-ownership-header">
+					<span class="doc-ownership-icon">📄</span>
+					<span class="doc-ownership-name" id="docVisFileName">—</span>
+				</div>
+				<div class="doc-ownership-meta">
+					<div class="doc-ownership-row">
+						<span class="doc-ownership-label">归属</span>
+						<span class="doc-ownership-value" id="docVisOwnership">—</span>
+					</div>
+					<div class="doc-ownership-row">
+						<span class="doc-ownership-label">上传者</span>
+						<span class="doc-ownership-value" id="docVisUploader">—</span>
+					</div>
+					<div class="doc-ownership-row">
+						<span class="doc-ownership-label">当前可见</span>
+						<span class="doc-ownership-value" id="docVisCurrentLabel">—</span>
+					</div>
+				</div>
+			</div>
+
+			<!-- 调整可见范围 -->
+			<div class="form-section-title">调整可见范围</div>
+			<div class="mb-12">
 				<select class="select" id="docVisSelect" onchange="onDocVisChange()">
-					<option value="1">个人</option>
-					<option value="2">部门/团队</option>
-					<option value="3">公开</option>
 				</select>
 			</div>
-			<div class="hidden" id="docVisOrgRow">
-				<div class="multi-select-row">
-					<div class="multi-select" id="docVisDeptSelect">
-						<div class="multi-select-trigger" onclick="toggleMultiSelect('docVisDeptSelect')">
-							<span class="multi-select-label">请选择部门</span>
-							<span class="multi-select-count hidden" id="docVisDeptCount">0</span>
-							<span class="multi-select-arrow">▾</span>
-						</div>
-						<div class="multi-select-panel">
-							<div class="multi-select-header">
-								<input type="text" class="multi-select-search" placeholder="搜索部门..." oninput="docVisOnDeptSearch(this)">
-								<span class="multi-select-toggle-all" onclick="toggleMultiSelectAll('docVisDeptPanel')">全选</span>
-							</div>
-							<div class="multi-select-list" id="docVisDeptPanel"></div>
-						</div>
-					</div>
-					<div class="multi-select" id="docVisTeamSelect">
-						<div class="multi-select-trigger" onclick="toggleMultiSelect('docVisTeamSelect')">
-							<span class="multi-select-label">请先选择部门</span>
-							<span class="multi-select-count hidden" id="docVisTeamCount">0</span>
-							<span class="multi-select-arrow">▾</span>
-						</div>
-						<div class="multi-select-panel">
-							<div class="multi-select-header">
-								<input type="text" class="multi-select-search" placeholder="搜索团队..." oninput="docVisOnTeamSearch(this)">
-								<span class="multi-select-toggle-all" onclick="toggleMultiSelectAll('docVisTeamPanel')">全选</span>
-							</div>
-							<div class="multi-select-list" id="docVisTeamPanel"></div>
-						</div>
-					</div>
-				</div>
-				<div class="form-hint mt-8">选择部门后会自动选中该部门下的所有团队，可手动取消不需要的团队</div>
+
+			<!-- 扩大范围提示 -->
+			<div class="hidden" id="docVisUpgradeHint">
+				<div class="hint-warning">⚠️ 扩大可见范围需两位管理员先后审批</div>
 			</div>
-			<div class="form-item">
-				<div class="flex gap-24 items-center">
-					<label class="checkbox"><input type="checkbox" id="docAllowShare"> 允许分享</label>
-					<label class="checkbox"><input type="checkbox" id="docAllowDownload"> 允许下载</label>
+
+			<!-- 缩小范围：选择目标团队/部门 -->
+			<div class="hidden" id="docVisNarrowPanel">
+				<div class="multi-select-row">
+					<div class="multi-select hidden" id="docVisNarrowDeptSelect">
+						<div class="multi-select-trigger" onclick="toggleMultiSelect('docVisNarrowDeptSelect')">
+							<span class="multi-select-label">请选择部门</span>
+							<span class="multi-select-count hidden" id="docVisNarrowDeptCount">0</span>
+							<span class="multi-select-arrow">▾</span>
+						</div>
+						<div class="multi-select-panel">
+							<div class="multi-select-header">
+								<input type="text" class="multi-select-search" placeholder="搜索部门..." oninput="docVisNarrowOnDeptSearch(this)">
+								<span class="multi-select-toggle-all" onclick="toggleMultiSelectAll('docVisNarrowDeptPanel')">全选</span>
+							</div>
+							<div class="multi-select-list" id="docVisNarrowDeptPanel"></div>
+						</div>
+					</div>
+					<div class="multi-select" id="docVisNarrowTeamSelect">
+						<div class="multi-select-trigger" onclick="toggleMultiSelect('docVisNarrowTeamSelect')">
+							<span class="multi-select-label">请先选择部门</span>
+							<span class="multi-select-count hidden" id="docVisNarrowTeamCount">0</span>
+							<span class="multi-select-arrow">▾</span>
+						</div>
+						<div class="multi-select-panel">
+							<div class="multi-select-header">
+								<input type="text" class="multi-select-search" placeholder="搜索团队..." oninput="docVisNarrowOnTeamSearch(this)">
+								<span class="multi-select-toggle-all" onclick="toggleMultiSelectAll('docVisNarrowTeamPanel')">全选</span>
+							</div>
+							<div class="multi-select-list" id="docVisNarrowTeamPanel"></div>
+						</div>
+					</div>
 				</div>
-				<div class="form-hint">分享即授予访问权限；下载权限隐含读取权限</div>
+				<div class="form-hint mt-8" id="docVisNarrowHint"></div>
 			</div>
 		</div>
 		<div class="modal-footer">
 			<button class="btn-cancel" onclick="closeModal('docVisModal')">取消</button>
 			<button class="btn-save" onclick="saveDocVis()">保存</button>
 		</div>
+		</div>
 	</div>
-
-	<!-- ============ 分享弹窗 ============ -->
-	<div class="modal" id="docShareModal" style="max-width:480px">
+	<div class="modal" id="docShareModal">
+		<div class="modal-content" style="max-width:480px;max-height:85vh">
 		<div class="modal-header">
 			<div class="modal-title">分享文档</div>
 			<button class="modal-close" onclick="closeModal('docShareModal')">&times;</button>
@@ -223,10 +245,12 @@
 			<button class="btn-cancel" onclick="closeModal('docShareModal')">取消</button>
 			<button class="btn-save" onclick="submitShare()">分享</button>
 		</div>
+		</div>
 	</div>
 
 	<!-- ============ 申请权限弹窗 ============ -->
-	<div class="modal" id="docReqModal" style="max-width:480px">
+	<div class="modal" id="docReqModal">
+		<div class="modal-content" style="max-width:480px;max-height:85vh">
 		<div class="modal-header">
 			<div class="modal-title">申请文档权限</div>
 			<button class="modal-close" onclick="closeModal('docReqModal')">&times;</button>
@@ -250,10 +274,12 @@
 			<button class="btn-cancel" onclick="closeModal('docReqModal')">取消</button>
 			<button class="btn-save" onclick="submitRequest()">提交申请</button>
 		</div>
+		</div>
 	</div>
 
 	<!-- ============ 访问管理弹窗（查看/撤销授权 + 审批申请） ============ -->
-	<div class="modal" id="docAccessModal" style="max-width:760px">
+	<div class="modal" id="docAccessModal">
+		<div class="modal-content" style="width:1000px;height:80vh">
 		<div class="modal-header">
 			<div class="modal-title">访问管理</div>
 			<button class="modal-close" onclick="closeModal('docAccessModal')">&times;</button>
@@ -266,12 +292,12 @@
 				<table class="table">
 					<thead>
 						<tr>
-							<th>用户</th>
-							<th>权限</th>
-							<th>来源</th>
-							<th>到期</th>
-							<th>状态</th>
-							<th style="width:90px">操作</th>
+							<th style="max-width:100px">用户</th>
+							<th style="max-width:70px">权限</th>
+							<th style="max-width:70px">来源</th>
+							<th style="max-width:90px;white-space:nowrap">到期</th>
+							<th style="max-width:60px">状态</th>
+							<th style="max-width:80px">操作</th>
 						</tr>
 					</thead>
 					<tbody id="docGrantsBody"></tbody>
@@ -282,11 +308,11 @@
 				<table class="table">
 					<thead>
 						<tr>
-							<th>申请人</th>
-							<th>类型</th>
-							<th>理由</th>
-							<th>申请时间</th>
-							<th style="width:140px">操作</th>
+							<th style="max-width:100px">申请人</th>
+							<th style="max-width:70px">类型</th>
+							<th style="max-width:180px">理由</th>
+							<th style="max-width:90px;white-space:nowrap">申请时间</th>
+							<th style="max-width:80px">操作</th>
 						</tr>
 					</thead>
 					<tbody id="docReqsBody"></tbody>
@@ -294,10 +320,12 @@
 				</div>
 			</div>
 		</div>
+		</div>
 	</div>
 
 	<!-- 新增/编辑节点弹窗 -->
-	<div class="modal" id="nodeModal" style="max-width:560px">
+	<div class="modal" id="nodeModal">
+		<div class="modal-content" style="max-width:560px;max-height:85vh">
 		<div class="modal-header">
 			<div class="modal-title" id="nodeModalTitle">新增节点</div>
 			<button class="modal-close" onclick="closeModal('nodeModal')">&times;</button>
@@ -348,6 +376,7 @@
 			<button class="btn-cancel" onclick="closeModal('nodeModal')">取消</button>
 			<button class="btn-save" onclick="saveNode()">保存</button>
 		</div>
+		</div>
 	</div>
 
 	<div id="mask" class="mask"></div>
@@ -364,51 +393,53 @@
 			</div>
 			<div class="flex gap-8 nd-actions"></div>
 		</div>
-		<div class="grid-3 mb-24">
-			<div class="card nd-doc-card" style="padding:14px 16px;cursor:pointer" title="点击查看文档列表">
-				<div class="text-sub text-sm">文档总数</div>
-				<div class="flex items-center gap-8 mt-8">
-					<span class="text-2xl nd-doc-count"></span>
-					<span class="text-primary text-xs">📄 点击查看 →</span>
+		<div class="grid-3 mb-16">
+			<div class="stat-card nd-doc-card" title="点击查看文档列表">
+				<div class="stat-card-label">📄 文档总数</div>
+				<div class="flex items-center justify-between">
+					<span class="stat-card-value nd-doc-count"></span>
+					<span class="stat-card-link">点击查看 →</span>
 				</div>
 			</div>
-			<div class="card" style="padding:14px 16px">
-				<div class="text-sub text-sm">子节点数</div>
-				<div class="text-2xl mt-8 nd-children-count"></div>
+			<div class="stat-card">
+				<div class="stat-card-label">📂 子节点数</div>
+				<div class="stat-card-value nd-children-count"></div>
 			</div>
-			<div class="card" style="padding:14px 16px">
-				<div class="text-sub text-sm">节点类型</div>
-				<div class="text-2xl mt-8 nd-node-type-label"></div>
-			</div>
-		</div>
-		<div class="card">
-			<div class="card-title">基础信息</div>
-			<div class="grid-2" style="gap:14px 24px">
-				<div><div class="text-sub text-sm">节点名称</div><div class="fw-500 mt-4 nd-info-name"></div></div>
-				<div><div class="text-sub text-sm">根类型</div><div class="fw-500 mt-4 nd-info-root-type"></div></div>
-				<div><div class="text-sub text-sm">创建人</div><div class="fw-500 mt-4 nd-info-creator"></div></div>
-				<div><div class="text-sub text-sm">创建时间</div><div class="fw-500 mt-4 nd-info-created"></div></div>
-				<div><div class="text-sub text-sm">最后更新</div><div class="fw-500 mt-4 nd-info-updated"></div></div>
-				<div><div class="text-sub text-sm">上级节点</div><div class="fw-500 mt-4 nd-info-parent"></div></div>
-				<div><div class="text-sub text-sm">排序号</div><div class="fw-500 mt-4 nd-info-order"></div></div>
-				<div><div class="text-sub text-sm">深度</div><div class="fw-500 mt-4 nd-info-depth"></div></div>
+			<div class="stat-card">
+				<div class="stat-card-label">🏷️ 节点类型</div>
+				<div class="stat-card-value nd-node-type-label"></div>
 			</div>
 		</div>
-		<div class="card mt-16 nd-desc-card hidden">
-			<div class="card-title">描述</div>
-			<div class="text-sm nd-desc-text" style="line-height:1.6;white-space:pre-wrap"></div>
-		</div>
+		<!-- 信息/描述 -->
+		<div class="card nd-info-card">
+				<div class="card-title">基础信息</div>
+				<div class="grid-2" style="gap:14px 24px">
+					<div><div class="text-sub text-sm">节点名称</div><div class="fw-500 mt-4 nd-info-name"></div></div>
+					<div><div class="text-sub text-sm">根类型</div><div class="fw-500 mt-4 nd-info-root-type"></div></div>
+					<div><div class="text-sub text-sm">创建人</div><div class="fw-500 mt-4 nd-info-creator"></div></div>
+					<div><div class="text-sub text-sm">创建时间</div><div class="fw-500 mt-4 nd-info-created"></div></div>
+					<div><div class="text-sub text-sm">最后更新</div><div class="fw-500 mt-4 nd-info-updated"></div></div>
+					<div><div class="text-sub text-sm">上级节点</div><div class="fw-500 mt-4 nd-info-parent"></div></div>
+					<div><div class="text-sub text-sm">排序号</div><div class="fw-500 mt-4 nd-info-order"></div></div>
+					<div><div class="text-sub text-sm">深度</div><div class="fw-500 mt-4 nd-info-depth"></div></div>
+				</div>
+				<div class="nd-desc-section hidden" style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
+					<div class="text-sub text-sm" style="margin-bottom:8px">描述</div>
+					<div class="text-sm nd-desc-text" style="line-height:1.6;white-space:pre-wrap"></div>
+				</div>
+			</div>
 	</template>
 
 	<template id="tmpl-doc-row">
 		<tr>
-			<td><span class="dr-file" style="display:inline-flex;align-items:center;gap:6px"></span></td>
-			<td><span class="tag dr-type"></span></td>
-			<td class="text-sub dr-owner"></td>
-			<td class="dr-vis"></td>
-			<td class="dr-status"></td>
-			<td class="text-sub dr-date"></td>
-			<td class="dr-actions"></td>
+			<td style="max-width:200px"><span class="dr-file" style="display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span></td>
+			<td style="max-width:80px"><span class="tag dr-type"></span></td>
+			<td class="text-sub dr-owner" style="max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></td>
+			<td class="text-sub dr-team" style="max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></td>
+			<td class="dr-vis" style="max-width:100px"></td>
+			<td class="dr-status" style="max-width:90px"></td>
+			<td class="text-sub dr-date" style="max-width:90px;white-space:nowrap;cursor:default"></td>
+			<td class="dr-actions" style="white-space:nowrap"></td>
 		</tr>
 	</template>
 

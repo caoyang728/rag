@@ -142,8 +142,8 @@ class Document(models.Model):
     file_name = models.CharField(max_length=256)
     file_type = models.CharField(max_length=16, choices=FILE_TYPE_CHOICES)
     file_size = models.BigIntegerField(default=0)
-    file_hash = models.CharField(max_length=64, unique=True,
-                                  help_text='sha256 文件内容哈希，防重复上传')
+    file_hash = models.CharField(max_length=64,
+                                  help_text='sha256 文件内容哈希，用于版本识别')
     file_path = models.CharField(max_length=512, blank=True, default='',
                                  help_text='本地存储路径或 OSS URL')
     mime_type = models.CharField(max_length=64, blank=True, default='')
@@ -167,6 +167,8 @@ class Document(models.Model):
     error_message = models.TextField(blank=True, default='')
     chunk_count = models.IntegerField(default=0)
     version = models.IntegerField(default=1)
+    version_tag = models.CharField(max_length=64, default='', blank=True,
+                                    help_text='版本标签，如 v1.0、v2.1，用于区分同一文件的不同版本')
     tags = ArrayField(models.CharField(max_length=32), default=list, blank=True)
     extra = models.JSONField(default=dict, blank=True)
     is_deleted = models.BooleanField(default=False)
@@ -191,6 +193,14 @@ class Document(models.Model):
             models.Index(fields=['status'], name='idx_doc_status'),
             models.Index(fields=['visible_scope', 'root_type'], name='idx_doc_visroot'),
             models.Index(fields=['file_hash'], name='idx_doc_hash'),
+            models.Index(fields=['node', 'file_name', 'version_tag'], name='idx_doc_node_name_version'),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['node', 'file_name', 'version_tag'],
+                condition=models.Q(is_deleted=False),
+                name='unique_doc_node_name_version',
+            ),
         ]
 
     def __str__(self):

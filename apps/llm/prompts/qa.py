@@ -29,25 +29,127 @@ QA_USER_TEMPLATE = """{memory_block}
 """
 
 
+def _merge_chunks_by_group(chunks: list) -> list:
+    """按文档和段落组合并相邻切片，恢复完整段落"""
+    if not chunks:
+        return []
+    
+    grouped = {}
+    for ch in chunks:
+        doc_id = ch.get('document_id')
+        group_id = ch.get('extra', {}).get('paragraph_group', -1)
+        key = (doc_id, group_id)
+        if key not in grouped:
+            grouped[key] = {**ch, '_contents': [ch.get('content', '')]}
+        else:
+            grouped[key]['_contents'].append(ch.get('content', ''))
+    
+    merged = []
+    for key, ch in grouped.items():
+        contents = ch.pop('_contents')
+        if len(contents) == 1:
+            ch['content'] = contents[0]
+        else:
+            merged_content = contents[0]
+            for i in range(1, len(contents)):
+                prev = contents[i-1]
+                curr = contents[i]
+                overlap_len = min(50, len(prev), len(curr))
+                if prev[-overlap_len:] == curr[:overlap_len]:
+                    merged_content += curr[overlap_len:]
+                else:
+                    merged_content += '\n' + curr
+            ch['content'] = merged_content
+        merged.append(ch)
+    
+    return merged
+
+
+MAX_TABLE_CONTEXT_LENGTH = 2000
+MAX_TABLE_PREVIEW_ROWS = 10
+
+
+def _generate_table_summary(content: str, extra: dict) -> str:
+    """生成表格摘要，用于大表格的上下文保护"""
+    rows = content.strip().split('\n')
+    
+    header_row = rows[0] if rows else ''
+    column_names = [c.strip() for c in header_row.split('|') if c.strip()]
+    total_rows = len(rows) - 1
+    num_cols = len(column_names)
+    
+    summary_lines = []
+    summary_lines.append(f'表格摘要：共 {total_rows} 行 × {num_cols} 列')
+    
+    if column_names:
+        summary_lines.append(f'列名：{", ".join(column_names[:5])}' + ('...' if len(column_names) > 5 else ''))
+    
+    if extra.get('rows'):
+        summary_lines.append(f'数据行数：{extra["rows"]}')
+    if extra.get('cols'):
+        summary_lines.append(f'数据列数：{extra["cols"]}')
+    
+    if total_rows > 0:
+        preview_rows = rows[1:min(MAX_TABLE_PREVIEW_ROWS + 1, len(rows))]
+        summary_lines.append(f'\n前 {len(preview_rows)} 行数据：')
+        for row in preview_rows:
+            cells = [c.strip()[:20] for c in row.split('|') if c.strip()]
+            summary_lines.append(f'  {" | ".join(cells)}')
+    
+    if total_rows > MAX_TABLE_PREVIEW_ROWS:
+        summary_lines.append(f'\n（表格共 {total_rows} 行，仅展示前 {MAX_TABLE_PREVIEW_ROWS} 行，如需完整数据请查阅原文）')
+    
+    return '\n'.join(summary_lines)
+
+
 def build_context_block(chunks: list) -> str:
     """把检索命中的 chunks 拼成 Prompt 上下文
-    每个 chunk 结构：{'chunk_id','content','doc_title','section_path','page_number','score'}"""
+    每个 chunk 结构：{'chunk_id','content','doc_title','section_path','page_number','score','chunk_type'}
+    支持父子切片策略：按段落组合并相邻切片，恢复完整段落
+    支持表格和图片类型的chunk展示
+    表格上下文保护：超过阈值时自动降级为摘要模式"""
     if not chunks:
         return '（无相关知识片段）'
+    
+    merged_chunks = _merge_chunks_by_group(chunks)
+    
     lines = []
-    for i, ch in enumerate(chunks, 1):
+    for i, ch in enumerate(merged_chunks, 1):
         title = ch.get('doc_title', '未知文档')
         section = ch.get('section_path') or ''
         page = ch.get('page_number')
-        header = f'[{i}] 来源：《{title}》'
+        chunk_type = ch.get('chunk_type', 'text')
+        
+        type_label = ''
+        if chunk_type == 'table':
+            type_label = '【表格】'
+        elif chunk_type == 'image':
+            type_label = '【图片】'
+        
+        header = f'[{i}] {type_label}来源：《{title}》'
         if section:
             header += f' · {section}'
         if page:
             header += f' · P{page}'
+        
         content = ch.get('content', '').strip()
-        # 单片段截断，避免超预算
-        if len(content) > 1200:
-            content = content[:1200] + '...'
+        if chunk_type == 'table':
+            extra = ch.get('extra', {})
+            full_content = extra.get('full_content', '')
+            
+            if full_content and len(full_content) <= MAX_TABLE_CONTEXT_LENGTH:
+                content = full_content
+            elif full_content and len(full_content) > MAX_TABLE_CONTEXT_LENGTH:
+                content = _generate_table_summary(full_content, extra)
+            elif len(content) > MAX_TABLE_CONTEXT_LENGTH:
+                content = _generate_table_summary(content, extra)
+        elif chunk_type == 'image':
+            extra = ch.get('extra', {})
+            if extra.get('base64_data'):
+                content = f'图片数据已提取（{extra.get("width", 0)}×{extra.get("height", 0)}像素）'
+            else:
+                content = '图片数据未提取'
+        
         lines.append(f'{header}\n{content}')
     return '\n\n'.join(lines)
 

@@ -30,6 +30,8 @@ def build_user_context(user):
     if user is None or not getattr(user, 'is_authenticated', False):
         return None
     team_codes = set()
+    led_team_node_ids = set()
+    is_team_leader_role = False
     try:
         from apps.users.models import UserTeam, Team
         team_codes = set(
@@ -38,11 +40,33 @@ def build_user_context(user):
                 is_deleted=False,
             ).values_list('code', flat=True)
         )
+        # 团队组长：两种方式 — 1) Team.leader FK 指定  2) 拥有 team_leader 角色且属于某团队
+        led_team_ids = list(
+            Team.objects.filter(leader=user, is_deleted=False).values_list('id', flat=True)
+        )
+        if _has_role(user, 'team_leader'):
+            is_team_leader_role = True
+            # 该用户所属的所有团队均视为其管理的团队
+            user_team_ids = list(
+                UserTeam.objects.filter(user=user).values_list('team_id', flat=True)
+            )
+            for tid in user_team_ids:
+                if tid not in led_team_ids:
+                    led_team_ids.append(tid)
+        if led_team_ids:
+            from apps.knowledge.models import KnowledgeNode
+            led_team_node_ids = set(
+                KnowledgeNode.objects.filter(
+                    node_level=3, ref_id__in=led_team_ids, is_deleted=False,
+                ).values_list('id', flat=True)
+            )
     except Exception:
         pass
     return {
         'is_manager': (getattr(user, 'is_super_admin', False)
                        or _has_role(user, 'kb_admin')),
+        'is_team_leader': is_team_leader_role or len(led_team_node_ids) > 0,
+        'led_team_node_ids': led_team_node_ids,
         'user_dept_node_id': getattr(user, 'dept_node_id', None),
         'user_team_node_id': getattr(user, 'team_node_id', None),
         'user_team_codes': team_codes,
@@ -131,11 +155,22 @@ def resolve_doc_access(user, doc, ctx=None, grants_map=None):
     is_manager = (ctx['is_manager'] if ctx
                   else (getattr(user, 'is_super_admin', False) or _has_role(user, 'kb_admin')))
 
-    # 所有者 / 管理员始终有全部权限
-    if is_owner or is_manager:
+    # 团队组长：对归属于其团队子树内的文档拥有管理权
+    is_team_manager = False
+    if not is_owner and not is_manager and ctx:
+        is_team_manager = (
+            ctx.get('is_team_leader', False)
+            and doc.team_node_id is not None
+            and doc.team_node_id in ctx.get('led_team_node_ids', set())
+        )
+
+    effective_manager = is_manager or is_team_manager
+
+    # 所有者 / 管理员 / 团队组长对归属文档始终有全部权限
+    if is_owner or effective_manager:
         return {
             'is_owner': is_owner,
-            'is_manager': is_manager,
+            'is_manager': effective_manager,
             'can_read': True,
             'can_download': True,
             'can_share': True,

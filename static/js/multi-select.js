@@ -5,16 +5,12 @@
  * @param {string} id - multi-select容器的ID
  */
 function toggleMultiSelect(id) {
-	// 如果是团队选择且未选择部门，禁止展开
-	if (id.indexOf('TeamSelect') >= 0) {
-		var teamTrigger = document.getElementById(id).querySelector('.multi-select-trigger');
-		if (teamTrigger.classList.contains('disabled')) {
-			return;
-		}
+	var trigger = document.getElementById(id).querySelector('.multi-select-trigger');
+	if (trigger.classList.contains('disabled')) {
+		return;
 	}
 	
 	var panel = document.getElementById(id).querySelector('.multi-select-panel');
-	var trigger = document.getElementById(id).querySelector('.multi-select-trigger');
 	
 	// 关闭其他下拉框
 	document.querySelectorAll('.multi-select-panel.show').forEach(function (p) {
@@ -97,6 +93,14 @@ function createDeptTeamMultiSelect(options) {
 	var deptSearch = '';
 	var teamSearch = '';
 	
+	function setDeptList(newList) {
+		deptList = newList || [];
+	}
+	
+	function setTeamList(newList) {
+		teamList = newList || [];
+	}
+	
 	/**
 	 * 渲染部门列表
 	 * @param {Array} selectedIds - 已选中的部门ID列表
@@ -168,10 +172,7 @@ function createDeptTeamMultiSelect(options) {
 			panel.innerHTML = '<div style="padding:16px;text-align:center;color:var(--text-sub)">该部门下没有团队</div>';
 		} else {
 			panel.innerHTML = filtered.map(function (t) {
-				// 如果团队所属部门被选中，自动选中该团队
-				var deptId = parseInt(t.department_id || t.department);
-				var deptMatch = selectedDeptIds.indexOf(deptId) >= 0;
-				var checked = selectedIds.indexOf(parseInt(t.id)) >= 0 || deptMatch ? ' checked' : '';
+				var checked = selectedIds.indexOf(parseInt(t.id)) >= 0 ? ' checked' : '';
 				return '<div class="multi-select-option" onclick="window[\'' + prefix + 'OnOptionClick\'](this, event)">' +
 					'<input type="checkbox" value="' + t.id + '"' + checked + ' onchange="window[\'' + prefix + 'OnTeamChange\'](this)">' +
 					'<span class="multi-select-option-text">' + escapeHtml(t.name) + '</span>' +
@@ -196,19 +197,14 @@ function createDeptTeamMultiSelect(options) {
 		// 更新部门下拉框计数
 		updateDeptCount();
 		
-		// 计算应该自动选中的团队（选中部门下的所有团队）
-		var autoSelectedTeamIds = [];
-		if (selectedDeptIds.length > 0) {
-			teamList.forEach(function (t) {
-				var deptId = t.department_id || t.department;
-				if (selectedDeptIds.indexOf(deptId) >= 0) {
-					autoSelectedTeamIds.push(t.id);
-				}
-			});
-		}
+		// 获取当前已选中的团队ID（保持现有选择状态）
+		var selectedTeamIds = [];
+		document.querySelectorAll('#' + prefix + 'TeamPanel input:checked').forEach(function(cb) {
+			selectedTeamIds.push(parseInt(cb.value));
+		});
 		
 		// 重新渲染团队列表（仅展示选中部门下的团队）
-		renderTeamList(autoSelectedTeamIds, selectedDeptIds);
+		renderTeamList(selectedTeamIds, selectedDeptIds);
 		
 		// 更新团队下拉框的标签提示
 		var teamTrigger = document.querySelector('#' + prefix + 'TeamSelect .multi-select-trigger');
@@ -236,16 +232,21 @@ function createDeptTeamMultiSelect(options) {
 	 * 更新部门下拉框计数
 	 */
 	function updateDeptCount() {
-		var count = document.querySelectorAll('#' + prefix + 'DeptPanel input:checked').length;
-		var countEl = document.getElementById(prefix + 'DeptCount');
+		var checkedCbs = document.querySelectorAll('#' + prefix + 'DeptPanel input:checked');
 		var labelEl = document.querySelector('#' + prefix + 'DeptSelect .multi-select-label');
 		
-		if (count > 0) {
-			countEl.textContent = count;
-			countEl.style.display = '';
-			labelEl.textContent = '已选 ' + count + ' 个部门';
+		if (checkedCbs.length > 0) {
+			var names = Array.from(checkedCbs).map(function(cb) {
+				var option = cb.closest('.multi-select-option');
+				return option ? option.querySelector('.multi-select-option-text').textContent : '';
+			}).filter(function(n) { return n; });
+			
+			var displayText = names.join('，');
+			if (displayText.length > 30) {
+				displayText = displayText.substring(0, 27) + '...';
+			}
+			labelEl.textContent = displayText;
 		} else {
-			countEl.style.display = 'none';
 			labelEl.textContent = '请选择部门';
 		}
 	}
@@ -254,28 +255,28 @@ function createDeptTeamMultiSelect(options) {
 	 * 更新团队下拉框计数
 	 */
 	function updateTeamCount() {
-		var count = document.querySelectorAll('#' + prefix + 'TeamPanel input:checked').length;
-		var countEl = document.getElementById(prefix + 'TeamCount');
+		var checkedCbs = document.querySelectorAll('#' + prefix + 'TeamPanel input:checked');
 		var labelEl = document.querySelector('#' + prefix + 'TeamSelect .multi-select-label');
 		var teamTrigger = document.querySelector('#' + prefix + 'TeamSelect .multi-select-trigger');
 		
-		// 检查是否有选中的部门
 		var deptCount = document.querySelectorAll('#' + prefix + 'DeptPanel input:checked').length;
 		
 		if (deptCount === 0) {
-			// 未选择部门：禁用团队下拉框
-			countEl.style.display = 'none';
 			labelEl.textContent = '请先选择部门';
 			teamTrigger.classList.add('disabled');
-		} else if (count > 0) {
-			// 已选择团队
-			countEl.textContent = count;
-			countEl.style.display = '';
-			labelEl.textContent = '已选 ' + count + ' 个团队';
+		} else if (checkedCbs.length > 0) {
+			var names = Array.from(checkedCbs).map(function(cb) {
+				var option = cb.closest('.multi-select-option');
+				return option ? option.querySelector('.multi-select-option-text').textContent : '';
+			}).filter(function(n) { return n; });
+			
+			var displayText = names.join('，');
+			if (displayText.length > 30) {
+				displayText = displayText.substring(0, 27) + '...';
+			}
+			labelEl.textContent = displayText;
 			teamTrigger.classList.remove('disabled');
 		} else {
-			// 已选择部门但未选择团队
-			countEl.style.display = 'none';
 			labelEl.textContent = '请选择团队';
 			teamTrigger.classList.remove('disabled');
 		}
@@ -347,6 +348,8 @@ function createDeptTeamMultiSelect(options) {
 		renderDeptList: renderDeptList,
 		renderTeamList: renderTeamList,
 		updateDeptCount: updateDeptCount,
-		updateTeamCount: updateTeamCount
+		updateTeamCount: updateTeamCount,
+		setDeptList: setDeptList,
+		setTeamList: setTeamList
 	};
 }

@@ -35,7 +35,7 @@
 			</div>
 			<div class="upload-drop relative" id="dropZone">
 				<input type="file" id="fileInput" multiple class="upload-input"
-					accept=".pdf,.doc,.docx,.md,.txt,.py,.js,.ts,.java,.go,.rs,.yml,.yaml,.json,.xml,.conf,.cfg,.ini,.toml,.sh,.bat,.ps1">
+					accept=".pdf,.doc,.docx,.md,.txt,.py,.js,.ts,.java,.go,.rs,.yml,.yaml,.json,.xml,.conf,.cfg,.ini,.toml,.sh,.bat,.ps1,.css">
 				<div class="upload-drop-icon">📤</div>
 				<div class="upload-drop-title">拖拽文件到此处，或<span class="text-primary">点击选择上传</span></div>
 				<div class="upload-drop-desc">支持批量上传，单个文件最大 100 MB，建议单批次不超过 20 个文件</div>
@@ -45,6 +45,7 @@
 					<span class="tag tag-info">📝 Markdown</span>
 					<span class="tag tag-info">📃 TXT</span>
 					<span class="tag tag-info">💻 源代码</span>
+					<span class="tag tag-info">🎨 CSS</span>
 					<span class="tag tag-info">⚙️ YML</span>
 					<span class="tag tag-info">📊 JSON</span>
 				</div>
@@ -77,85 +78,48 @@
 						</div>
 						<div class="form-hint">上传后可在节点管理中调整归属</div>
 					</div>
-					<div>
-						<label class="form-label">文档权限设置</label>
-						<div class="grid-2 gap-16">
-							<label class="checkbox" style="align-items:flex-start">
-								<input type="checkbox" id="chkAllowShare">
-								<div>
-									<span>🔗 允许分享</span>
-									<div class="form-hint" style="margin-top:2px">所有者/管理员可将文档分享给指定用户</div>
-								</div>
-							</label>
-							<label class="checkbox" style="align-items:flex-start">
-								<input type="checkbox" id="chkAllowDownload">
-								<div>
-									<span>📥 允许下载</span>
-									<div class="form-hint" style="margin-top:2px">有读取权限的用户可下载原文件</div>
-								</div>
-							</label>
-						</div>
-					</div>
+					
 				</div>
 				<div class="mt-16">
-				<label class="form-label">可见范围 <span class="required">*</span></label>
-				<div class="upload-radio-group" id="visRadios">
-					<label class="upload-radio selected" onclick="pickVis(this)">
-						<input type="radio" name="vis" value="private" checked>
-						<div>
-							<div class="upload-radio-title">🔒 个人（Private）</div>
-							<div class="upload-radio-desc">仅上传者本人可检索，用于个人笔记、草稿</div>
-						</div>
-					</label>
-					<label class="upload-radio" onclick="pickVis(this)">
-						<input type="radio" name="vis" value="org">
-						<div>
-							<div class="upload-radio-title">🏢 部门/团队（Org）</div>
-							<div class="upload-radio-desc">指定部门和团队成员可检索，用于共享资料</div>
-						</div>
-					</label>
-					<label class="upload-radio" onclick="pickVis(this)">
-						<input type="radio" name="vis" value="public">
-						<div>
-							<div class="upload-radio-title">🌐 公开（Public）</div>
-							<div class="upload-radio-desc">全公司可检索，用于公开规范和白皮书</div>
-						</div>
-					</label>
-				</div>
-				<!-- 部门/团队选择（选择部门/团队时显示） -->
-				<div class="hidden" id="uploadOrgSelect">
-					<div class="multi-select-row">
-						<div class="multi-select" id="uploadDeptSelect">
-							<div class="multi-select-trigger" onclick="toggleMultiSelect('uploadDeptSelect')">
-								<span class="multi-select-label">请选择部门</span>
-								<span class="multi-select-count hidden" id="uploadDeptCount">0</span>
-								<span class="multi-select-arrow">▾</span>
-							</div>
-							<div class="multi-select-panel">
-								<div class="multi-select-header">
-									<input type="text" class="multi-select-search" placeholder="搜索部门..." oninput="uploadOnDeptSearch(this)">
-									<span class="multi-select-toggle-all" onclick="toggleMultiSelectAll('uploadDeptPanel')">全选</span>
+					<label class="form-label">可见范围 <span class="required">*</span></label>
+					<div class="flex items-center gap-16" id="visRow" style="min-height:36px">
+						<label class="upload-radio-inline" onclick="pickVis(this)">
+							<input type="radio" name="vis" value="public">
+							<span>🌐 全公司可见</span>
+						</label>
+						<label class="upload-radio-inline selected" onclick="pickVis(this)">
+							<input type="radio" name="vis" value="org" checked>
+							<span>🏢 部门/团队</span>
+						</label>
+						<div id="uploadOrgSelect" style="flex:1;display:flex;gap:12px;min-height:36px;align-items:center">
+							<div class="multi-select" id="uploadDeptSelect">
+								<div class="multi-select-trigger" onclick="toggleMultiSelect('uploadDeptSelect')">
+									<span class="multi-select-label">请选择部门</span>
+									<span class="multi-select-arrow">▾</span>
 								</div>
-								<div class="multi-select-list" id="uploadDeptPanel"></div>
-							</div>
-						</div>
-						<div class="multi-select" id="uploadTeamSelect">
-							<div class="multi-select-trigger" onclick="toggleMultiSelect('uploadTeamSelect')">
-								<span class="multi-select-label">请先选择部门</span>
-								<span class="multi-select-count hidden" id="uploadTeamCount">0</span>
-								<span class="multi-select-arrow">▾</span>
-							</div>
-							<div class="multi-select-panel">
-								<div class="multi-select-header">
-									<input type="text" class="multi-select-search" placeholder="搜索团队..." oninput="uploadOnTeamSearch(this)">
-									<span class="multi-select-toggle-all" onclick="toggleMultiSelectAll('uploadTeamPanel')">全选</span>
+								<div class="multi-select-panel">
+									<div class="multi-select-header">
+										<input type="text" class="multi-select-search" placeholder="搜索部门..." oninput="uploadOnDeptSearch(this)">
+										<span class="multi-select-toggle-all" onclick="toggleMultiSelectAll('uploadDeptPanel')">全选</span>
+									</div>
+									<div class="multi-select-list" id="uploadDeptPanel"></div>
 								</div>
-								<div class="multi-select-list" id="uploadTeamPanel"></div>
+							</div>
+							<div class="multi-select" id="uploadTeamSelect">
+								<div class="multi-select-trigger" onclick="toggleMultiSelect('uploadTeamSelect')">
+									<span class="multi-select-label">请先选择部门</span>
+									<span class="multi-select-arrow">▾</span>
+								</div>
+								<div class="multi-select-panel">
+									<div class="multi-select-header">
+										<input type="text" class="multi-select-search" placeholder="搜索团队..." oninput="uploadOnTeamSearch(this)">
+										<span class="multi-select-toggle-all" onclick="toggleMultiSelectAll('uploadTeamPanel')">全选</span>
+									</div>
+									<div class="multi-select-list" id="uploadTeamPanel"></div>
+								</div>
 							</div>
 						</div>
 					</div>
-					<div class="form-hint mt-8">选择部门后会自动选中该部门下的所有团队，可手动取消不需要的团队</div>
-				</div>
 				</div>
 			</div>
 
@@ -183,7 +147,7 @@
 								<th>可见范围</th>
 								<th>状态</th>
 								<th>上传时间</th>
-								<th style="width:120px">操作</th>
+								<th style="width:240px">操作</th>
 							</tr>
 						</thead>
 						<tbody id="uploadHistoryBody"></tbody>
@@ -210,7 +174,7 @@
 			<td>
 				<div class="table-actions">
 					<button class="btn-link btn-sm up-row-view">查看</button>
-					<button class="btn-link btn-sm up-row-reparse">重传</button>
+					<button class="btn-link btn-sm up-row-reparse">重新解析</button>
 					<button class="btn-link btn-sm text-danger up-row-delete">删除</button>
 				</div>
 			</td>

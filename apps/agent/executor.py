@@ -149,13 +149,33 @@ def ask(user, question: str, session: Session,
         except Exception:
             logger.exception('llm_call_log write failed')
 
-    # 6. 组装引用
-    citations = [
-        {'index': i + 1, 'chunk_id': c['chunk_id'],
-         'doc_title': c.get('doc_title', ''), 'section': c.get('section_path', ''),
-         'page': c.get('page_number')}
-        for i, c in enumerate(chunks)
-    ]
+    # 6. 组装引用（按文档合并）
+    doc_citations = {}
+    for i, c in enumerate(chunks):
+        doc_title = c.get('doc_title', '未知文档')
+        if doc_title not in doc_citations:
+            doc_citations[doc_title] = {
+                'index': len(doc_citations) + 1,
+                'doc_title': doc_title,
+                'sections': set(),
+                'pages': set(),
+                'chunk_ids': []
+            }
+        if c.get('section_path'):
+            doc_citations[doc_title]['sections'].add(c['section_path'])
+        if c.get('page_number'):
+            doc_citations[doc_title]['pages'].add(c['page_number'])
+        doc_citations[doc_title]['chunk_ids'].append(c['chunk_id'])
+    
+    citations = []
+    for key, val in doc_citations.items():
+        citations.append({
+            'index': val['index'],
+            'doc_title': val['doc_title'],
+            'section': ', '.join(list(val['sections'])[:3]) + ('...' if len(val['sections']) > 3 else ''),
+            'page': sorted(list(val['pages']))[:5],
+            'chunk_ids': val['chunk_ids']
+        })
 
     # 7. 落 QA 记录
     total_ms = int((time.time() - t0) * 1000)

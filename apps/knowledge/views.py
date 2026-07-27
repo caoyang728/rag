@@ -276,22 +276,8 @@ class AllowedVisibilityView(APIView):
             'teams': [],
         }
 
-        if role in ('super_admin', 'kb_admin'):
-            # 超管和知识库管理员：可以选择所有部门/团队
-            result['departments'] = list(Department.objects.filter(is_deleted=False).values('id', 'name'))
-            result['teams'] = list(Team.objects.filter(is_deleted=False).values('id', 'name', 'code', 'department_id'))
-        elif role == 'dept_manager':
-            # 部门经理：可以选择本部门及其下属部门的团队
-            result['departments'] = list(Department.objects.filter(is_deleted=False).values('id', 'name'))
-            result['teams'] = list(Team.objects.filter(is_deleted=False).values('id', 'name', 'code', 'department_id'))
-        elif role == 'team_leader':
-            # 团队组长：只能选择本部门的团队
-            result['departments'] = list(Department.objects.filter(id=user_dept_id, is_deleted=False).values('id', 'name'))
-            result['teams'] = list(Team.objects.filter(department_id=user_dept_id, is_deleted=False).values('id', 'name', 'code', 'department_id'))
-        else:
-            # 普通员工：只能选择本部门/本团队
-            result['departments'] = list(Department.objects.filter(id=user_dept_id, is_deleted=False).values('id', 'name'))
-            result['teams'] = list(Team.objects.filter(id__in=user_team_ids, is_deleted=False).values('id', 'name', 'code', 'department_id'))
+        result['departments'] = list(Department.objects.filter(is_deleted=False).values('id', 'name'))
+        result['teams'] = list(Team.objects.filter(is_deleted=False).values('id', 'name', 'code', 'department_id'))
 
         # 缓存1小时（3600秒）
         cache.set(cache_key, result, 3600)
@@ -638,7 +624,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def reparse(self, request, pk=None):
-        """重新解析（支持 embedding_failed 状态重试）"""
+        """重新解析文档：删除旧向量/切片/代码块/图片资源，基于原文件重新解析"""
         doc = self.get_object()
         self._require_write(doc)
         doc.status = "pending"
@@ -1197,91 +1183,30 @@ class DocumentUploadView(APIView):
             total += len(c)
         file_hash = h.hexdigest()
 
-        force_upload = request.data.get("force_upload") in ("true", "True", "1", True)
-        # action 参数：restore(恢复旧记录) / create_new(新建独立记录)
-        action = request.data.get("action")
+        version_tag = request.data.get("version_tag", "").strip()
 
-        # -- 未删除的相同文件 → 返回冲突信息 --
+        if not version_tag:
+            max_version = Document.objects.filter(
+                node=node, file_name=f.name[:256], is_deleted=False
+            ).aggregate(models.Max('version'))['version__max'] or 0
+            version_tag = f'v{max_version + 1}'
+            version = max_version + 1
+        else:
+            existing_with_tag = Document.objects.filter(
+                node=node, file_name=f.name[:256], version_tag=version_tag, is_deleted=False
+            ).first()
+            if existing_with_tag:
+                version = existing_with_tag.version
+            else:
+                max_version = Document.objects.filter(
+                    node=node, file_name=f.name[:256], is_deleted=False
+                ).aggregate(models.Max('version'))['version__max'] or 0
+                version = max_version + 1
+
         exist = Document.objects.filter(
-            file_hash=file_hash, is_deleted=False
-        ).select_related("owner").first()
-        if exist and not force_upload:
-            return Response({
-                "conflict": "duplicate",
-                "existing": {
-                    "id": exist.id,
-                    "title": exist.title,
-                    "file_name": exist.file_name,
-                    "owner_name": exist.owner.username if exist.owner else "",
-                    "created_at": exist.created_at.strftime("%Y-%m-%d %H:%M"),
-                    "status": exist.status,
-                },
-            }, status=200)
-
-        # -- 已删除的相同文件 → 返回冲突信息 --
-        deleted_exist = Document.objects.filter(
-            file_hash=file_hash, is_deleted=True
-        ).select_related("owner").first()
-        if deleted_exist and not force_upload:
-            return Response({
-                "conflict": "deleted",
-                "existing": {
-                    "id": deleted_exist.id,
-                    "title": deleted_exist.title,
-                    "file_name": deleted_exist.file_name,
-                    "owner_name": deleted_exist.owner.username if deleted_exist.owner else "",
-                    "created_at": deleted_exist.created_at.strftime("%Y-%m-%d %H:%M"),
-                },
-            }, status=200)
-
-        # -- force_upload + 已删除相同文件 + action=restore → 恢复 --
-        # 恢复时：保存文件到新节点目录，更新所有字段，记录恢复审计信息
-        if force_upload and deleted_exist and action == "restore":
-            # 保存文件到新节点目录
-            file_path = self._save_file(f, node)
-            if not file_path:
-                return Response({"detail": "文件存储失败"}, status=500)
-            
-            from django.utils import timezone
-            with transaction.atomic():
-                deleted_exist.is_deleted = False
-                deleted_exist.node = node
-                deleted_exist.owner = request.user
-                deleted_exist.owner_team_id = getattr(request.user, 'team_id', None)
-                deleted_exist.visible_scope = visible_scope
-                deleted_exist.allow_download = allow_download
-                deleted_exist.allow_share = allow_share
-                deleted_exist.status = "pending"
-                deleted_exist.error_message = ""
-                deleted_exist.file_path = file_path
-                deleted_exist.restored_at = timezone.now()
-                deleted_exist.restored_by = request.user
-                deleted_exist.save(update_fields=[
-                    "is_deleted", "node", "owner", "owner_team_id", "visible_scope",
-                    "allow_download", "allow_share",
-                    "status", "error_message", "file_path",
-                    "restored_at", "restored_by", "updated_at",
-                ])
-            logger.info('[Upload] restored deleted document: id=%d, node_id=%d, owner=%s, restored_by=%s, file_path=%s',
-                        deleted_exist.id, node.id, request.user.username, request.user.username, file_path)
-            try:
-                from apps.knowledge.tasks import parse_document
-                parse_document.delay(deleted_exist.id)
-            except Exception as e:
-                logger.warning("celery unreachable for restored doc %s: %s", deleted_exist.id, str(e)[:200])
-            return Response({
-                "document_id": deleted_exist.id,
-                "status": "pending",
-                "detail": "文件已恢复（sha256 匹配已删除记录）",
-                "dedup": True,
-                "restored": True,
-            }, status=201)
-
-        # -- 正常上传 / force_upload + 未删除相同文件（新建独立记录） --
-        same_name_exist = Document.objects.filter(
-            file_name=f.name[:256], node=node, is_deleted=False
+            node=node, file_name=f.name[:256], version_tag=version_tag, is_deleted=False
         ).first()
-        
+
         file_path = self._save_file(f, node)
         if not file_path:
             return Response({"detail": "文件存储失败"}, status=500)
@@ -1290,10 +1215,32 @@ class DocumentUploadView(APIView):
         file_type = _detect_file_type(f.name)
         
         with transaction.atomic():
-            if same_name_exist:
-                same_name_exist.is_deleted = True
-                same_name_exist.save(update_fields=["is_deleted", "updated_at"])
+            if exist:
+                exist.is_deleted = True
+                exist.save(update_fields=["is_deleted", "updated_at"])
             
+            kb_node_id = node_id
+            dept_node_id = None
+            team_node_id = None
+            category_node_id = node_id
+
+            if node.node_level >= 2:
+                ancestors = []
+                current = node
+                while current:
+                    ancestors.append(current)
+                    current = current.parent
+                ancestors.reverse()
+                for n in ancestors:
+                    if n.node_level == 1:
+                        kb_node_id = n.id
+                    elif n.node_level == 2:
+                        dept_node_id = n.id
+                    elif n.node_level == 3:
+                        team_node_id = n.id
+                    elif n.node_level >= 4:
+                        category_node_id = n.id
+
             doc = Document.objects.create(
                 node=node,
                 title=title[:256],
@@ -1305,12 +1252,17 @@ class DocumentUploadView(APIView):
                 mime_type=(f.content_type or "")[:64],
                 owner=request.user,
                 owner_team_id=getattr(request.user, 'team_id', None),
+                kb_node_id=kb_node_id,
+                dept_node_id=dept_node_id,
+                team_node_id=team_node_id,
+                category_node_id=category_node_id,
+                version_tag=version_tag,
                 visible_scope=visible_scope,
                 allow_download=allow_download,
                 allow_share=allow_share,
                 root_type=node.root_type,
                 status="pending",
-                version=same_name_exist.version + 1 if same_name_exist else 1,
+                version=version,
             )
 
         celery_ok = True

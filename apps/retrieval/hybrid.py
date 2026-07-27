@@ -123,18 +123,30 @@ def hybrid_search(query: str,
 
 
 def _enrich_chunks(chunks: List[Dict[str, Any]]) -> None:
-    """就地扩充 doc_title / section_path / page_number"""
+    """就地扩充 doc_title / section_path / page_number / extra / image_data"""
     if not chunks:
         return
-    from apps.knowledge.models import DocumentChunk, Document
+    from apps.knowledge.models import DocumentChunk, Document, ImageResource
     chunk_ids = [c['chunk_id'] for c in chunks]
     doc_ids = list({c['document_id'] for c in chunks})
 
     doc_titles = dict(Document.objects.filter(id__in=doc_ids).values_list('id', 'title'))
     chunk_meta = {
         c.id: c for c in DocumentChunk.objects.filter(id__in=chunk_ids)
-        .only('id', 'section_path', 'page_number', 'content')
+        .only('id', 'section_path', 'page_number', 'content', 'extra', 'image_id', 'chunk_type')
     }
+    
+    image_ids = [m.image_id for m in chunk_meta.values() if m.image_id]
+    image_data = {}
+    if image_ids:
+        for img in ImageResource.objects.filter(id__in=image_ids):
+            image_data[img.id] = {
+                'base64_data': img.base64_data,
+                'width': img.width,
+                'height': img.height,
+                'mime_type': img.mime_type,
+            }
+    
     for c in chunks:
         c['doc_title'] = doc_titles.get(c['document_id'], '未知文档')
         m = chunk_meta.get(c['chunk_id'])
@@ -142,3 +154,10 @@ def _enrich_chunks(chunks: List[Dict[str, Any]]) -> None:
             c['section_path'] = m.section_path
             c['page_number'] = m.page_number
             c['content'] = m.content  # 用完整内容替换 preview
+            c['extra'] = m.extra  # 传递段落组信息
+            c['chunk_type'] = m.chunk_type  # 传递类型信息
+            if m.image_id and m.image_id in image_data:
+                c['extra']['base64_data'] = image_data[m.image_id]['base64_data']
+                c['extra']['width'] = image_data[m.image_id]['width']
+                c['extra']['height'] = image_data[m.image_id]['height']
+                c['extra']['mime_type'] = image_data[m.image_id]['mime_type']

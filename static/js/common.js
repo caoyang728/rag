@@ -128,7 +128,7 @@ const api = {
 			throw new Error('No refresh token');
 		}
 
-		const response = await fetch('/api/v1/auth/refresh/', {
+		const response = await fetch('/api/v1/auth/token/refresh/', {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({ refresh })

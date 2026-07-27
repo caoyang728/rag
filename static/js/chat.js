@@ -254,13 +254,24 @@ function updateScopeBadge() {
 /* ---- 构建溯源来源 HTML ---- */
 function buildSourceHtml(citations) {
 	if (!citations || citations.length === 0) return '';
+	
 	return htmlFromTpl('tmpl-source-block', (frag) => {
-		frag.querySelector('.source-header').textContent = '📎 溯源来源 · ' + citations.length + ' 条引用';
+		frag.querySelector('.source-header').textContent = '📎 溯源来源 · ' + citations.length + ' 个文档';
 		const list = frag.querySelector('.source-list');
 		list.innerHTML = citations.map(c => {
 			return htmlFromTpl('tmpl-source-card', (cardFrag) => {
 				const titleEl = cardFrag.querySelector('.source-card-title');
-				titleEl.innerHTML = escapeHtml(c.doc_title || '文档') + ' <span class="source-score">' + (c.score || 80).toFixed(0) + '%</span>';
+				let info = '';
+				if (c.section) {
+					info += '<div class="source-card-section">章节: ' + escapeHtml(c.section) + '</div>';
+				}
+				if (c.page && Array.isArray(c.page)) {
+					info += '<div class="source-card-page">页码: P' + c.page.join(', P') + '</div>';
+				}
+				if (c.chunk_ids && c.chunk_ids.length > 0) {
+					info += '<div class="source-card-count">引用 ' + c.chunk_ids.length + ' 处</div>';
+				}
+				titleEl.innerHTML = escapeHtml(c.doc_title || '未知文档') + ' <span class="source-score">80%</span>' + info;
 			});
 		}).join('');
 	});
@@ -312,12 +323,14 @@ async function sendChat() {
 
 		const body = {
 			question: text,
-			session_id: currentSessionId || undefined,
 			root_types: rootTypes,
 			node_ids: [...selectedScopeIds].map(Number),
 			use_cache: true,
 			do_task_split: false
 		};
+		if (currentSessionId) {
+			body.session_id = currentSessionId;
+		}
 
 		const abortController = new AbortController();
 		const timeoutId = setTimeout(() => abortController.abort(), 60000);

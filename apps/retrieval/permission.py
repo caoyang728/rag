@@ -11,6 +11,22 @@ from typing import List, Tuple, Optional
 from django.db.models import Q
 
 
+def _get_user_dept_node_id(user) -> Optional[int]:
+    """获取用户部门对应的 KnowledgeNode ID"""
+    if not user.is_authenticated or not user.department:
+        return None
+    try:
+        from apps.knowledge.models import KnowledgeNode
+        node = KnowledgeNode.objects.filter(
+            node_level=2,
+            is_deleted=False,
+            ref_id=user.department.id
+        ).first()
+        return node.id if node else None
+    except Exception:
+        return None
+
+
 def build_permission_q(user, root_types: Optional[List[str]] = None,
                        node_path_prefix: Optional[str] = None,
                        node_ids: Optional[List[int]] = None) -> Q:
@@ -25,7 +41,7 @@ def build_permission_q(user, root_types: Optional[List[str]] = None,
         # 用户团队 node id 列表
         team_node_ids = _get_user_team_node_ids(user) if user.is_authenticated else []
         # 用户部门 node id
-        dept_node_id = getattr(user, 'dept_node_id', None) if user.is_authenticated else None
+        dept_node_id = _get_user_dept_node_id(user) if user.is_authenticated else None
         # 公开
         q = Q(visible_scope='public')
         if user.is_authenticated:
@@ -44,9 +60,23 @@ def build_permission_q(user, root_types: Optional[List[str]] = None,
     if node_path_prefix:
         q = q & Q(node_path__startswith=node_path_prefix)
 
-    # 节点 ID 过滤
+    # 节点 ID 过滤 - 支持节点路径前缀匹配
     if node_ids and node_ids:
-        q = q & Q(node_id__in=node_ids)
+        from apps.knowledge.models import KnowledgeNode
+        # 获取所有选中节点及其子孙节点的路径前缀
+        node_paths = []
+        for node_id in node_ids:
+            try:
+                node = KnowledgeNode.objects.get(id=node_id, is_deleted=False)
+                node_paths.append(node.path)
+            except KnowledgeNode.DoesNotExist:
+                continue
+        if node_paths:
+            # 构建 OR 查询：node_id 在选中节点中，或者 node_path 以选中节点的路径为前缀
+            path_q = Q()
+            for path in node_paths:
+                path_q = path_q | Q(node_path__startswith=path)
+            q = q & (Q(node_id__in=node_ids) | path_q)
 
     return q
 
@@ -63,8 +93,7 @@ def _get_user_team_node_ids(user) -> List[int]:
             KnowledgeNode.objects.filter(
                 node_level=3,
                 is_deleted=False,
-                root_type='team',
-                # 通过 parent 关联到 team 对应的 dept 节点范围来缩小
+                ref_id__in=team_ids,
             ).values_list('id', flat=True)
         )
     except Exception:
@@ -80,7 +109,7 @@ def build_permission_sql(user, root_types: Optional[List[str]] = None,
         params: list = []
     else:
         team_node_ids = _get_user_team_node_ids(user) if user.is_authenticated else []
-        dept_node_id = getattr(user, 'dept_node_id', None) if user.is_authenticated else None
+        dept_node_id = _get_user_dept_node_id(user) if user.is_authenticated else None
         conds = ["visible_scope = 'public'"]
         params = []
         if user.is_authenticated:

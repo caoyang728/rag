@@ -197,11 +197,13 @@
 .source-header{font-size:12px;color:var(--text-sub);margin-bottom:6px;font-weight:500}
 .source-list{display:flex;flex-direction:column;gap:6px}
 .source-card{
-  display:flex;align-items:center;justify-content:space-between;
-  padding:8px 12px;background:var(--bg);border-radius:var(--radius-sm);
+  padding:10px 12px;background:var(--bg);border-radius:var(--radius-sm);
   font-size:12px;border:1px solid var(--border);
 }
-.source-card-title{color:var(--text);font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.source-card-title{color:var(--text);font-weight:500;flex:1;display:flex;flex-direction:column;gap:4px}
+.source-card-title > span:first-child{font-weight:600}
+.source-card-section,.source-card-page{font-size:11px;color:var(--text-sub);font-weight:400}
+.source-card-count{font-size:10px;color:var(--text-muted);margin-top:2px}
 .source-score{color:var(--primary);font-weight:600;margin-left:8px;font-size:11px;flex-shrink:0}
 
 /* 反馈 */

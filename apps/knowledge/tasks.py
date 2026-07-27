@@ -12,15 +12,38 @@ import uuid
 import hashlib
 from typing import List
 
+def _sanitize_content(content: str) -> str:
+    """清理内容中的非法字符，特别是 PostgreSQL 不允许的 NUL 字节"""
+    if content is None:
+        return ''
+    if '\x00' in content:
+        before_len = len(content)
+        content = content.replace('\x00', '')
+        after_len = len(content)
+        logger.warning(f'[Sanitize] Removed {before_len - after_len} NUL bytes from content')
+    return content
+
+def _sanitize_dict(d):
+    """递归清理字典中的 NUL 字节"""
+    if isinstance(d, dict):
+        return {k: _sanitize_dict(v) for k, v in d.items()}
+    elif isinstance(d, list):
+        return [_sanitize_dict(item) for item in d]
+    elif isinstance(d, str):
+        return _sanitize_content(d)
+    else:
+        return d
+
 from celery import shared_task
 from django.conf import settings
+from django.db import models
 
-from apps.knowledge.models import Document, DocumentChunk, CodeChunk, KnowledgeNode
+from apps.knowledge.models import Document, DocumentChunk, CodeChunk, KnowledgeNode, ImageResource
 from apps.knowledge.parsers.base import get_parser
 from apps.knowledge.chunker import chunk_blocks
 from apps.knowledge.desensitizer import desensitize
 from apps.knowledge.storage import get_document_storage, generate_node_storage_path
-from apps.retrieval.vector_store import upsert_vector
+from apps.retrieval.vector_store import upsert_vector, delete_by_document
 from apps.llm.embedding import get_embedding_client
 from apps.users.models import User
 
@@ -107,45 +130,76 @@ def parse_document(document_id: int):
         print(f"  切片完成，共 {len(pieces)} 个 chunks")
         logger.info('[Parse] doc=%d chunked into %d pieces', doc.id, len(pieces))
 
-        # 清旧 chunks
-        print(f"  清理旧 chunks...")
-        old_count = DocumentChunk.objects.filter(document=doc).count()
+        # 清旧 chunks / 向量 / 代码块元数据 / 图片资源
+        print(f"  清理旧 chunks 和向量数据...")
+        old_chunk_count = DocumentChunk.objects.filter(document=doc).count()
+        # 先删向量（依赖 chunk_id）
+        delete_by_document(doc.id)
+        # 再删代码块元数据
+        CodeChunk.objects.filter(document=doc).delete()
+        # 删图片资源
+        ImageResource.objects.filter(document=doc).delete()
+        # 最后删 chunks
         DocumentChunk.objects.filter(document=doc).delete()
-        print(f"  已清理 {old_count} 个旧 chunks")
+        print(f"  已清理 {old_chunk_count} 个旧 chunks 及对应向量数据")
 
         # 创建新 chunks
         print(f"  创建新 chunks...")
         chunk_objs = []
         code_meta = []
+        image_count = 0
         for i, p in enumerate(pieces):
+            sanitized_content = _sanitize_content(p['content'])
+            sanitized_extra = _sanitize_dict(p.get('extra') or {})
+            chunk_type = p.get('type', 'text')
+            extra = sanitized_extra
+            
+            image_id = None
+            if chunk_type == 'image' and extra.get('base64_data'):
+                from apps.knowledge.models import ImageResource
+                img = ImageResource.objects.create(
+                    document=doc,
+                    storage_mode='base64',
+                    base64_data=extra['base64_data'],
+                    mime_type=extra.get('mime_type', 'image/png'),
+                    width=extra.get('width', 0),
+                    height=extra.get('height', 0),
+                    size_bytes=extra.get('size_bytes', 0),
+                )
+                image_id = img.id
+                extra.pop('base64_data', None)
+                image_count += 1
+            
             ch = DocumentChunk.objects.create(
                 document=doc,
                 chunk_index=i,
-                chunk_type=p.get('type', 'text'),
-                content=p['content'][:8000],
-                content_length=len(p['content']),
-                section_path=p.get('section_path', '')[:512],
+                chunk_type=chunk_type,
+                content=sanitized_content[:8000],
+                content_length=len(sanitized_content),
+                section_path=_sanitize_content(p.get('section_path', ''))[:512],
                 page_number=p.get('page_number'),
-                extra=p.get('extra') or {},
+                image_id=image_id,
+                extra=extra,
             )
             chunk_objs.append((ch, p))
-            extra = p.get('extra') or {}
             if extra.get('symbol_type'):
                 code_meta.append(CodeChunk(
                     document=doc, chunk=ch,
                     language=extra.get('language', 'python'),
                     symbol_type=extra['symbol_type'],
-                    symbol_name=extra.get('symbol_name', '')[:128],
-                    signature=extra.get('signature', '')[:500],
+                    symbol_name=_sanitize_content(extra.get('symbol_name', ''))[:128],
+                    signature=_sanitize_content(extra.get('signature', ''))[:500],
                     params=extra.get('params') or [],
-                    docstring=extra.get('docstring', ''),
+                    docstring=_sanitize_content(extra.get('docstring', '')),
                     start_line=extra.get('start_line', 0),
                     end_line=extra.get('end_line', 0),
-                    parent_symbol=extra.get('parent_symbol', '')[:128],
+                    parent_symbol=_sanitize_content(extra.get('parent_symbol', ''))[:128],
                 ))
         if code_meta:
             CodeChunk.objects.bulk_create(code_meta)
             print(f"  同时创建了 {len(code_meta)} 个代码块元数据")
+        if image_count > 0:
+            print(f"  同时创建了 {image_count} 个图片资源")
         print(f"  成功创建 {len(chunk_objs)} 个 chunks")
 
         # 4. embedding & vector upsert
@@ -328,7 +382,11 @@ def batch_import_single_file(temp_file_path, node_id, owner_id, visibility, owne
         
         logger.info(f'[BatchImport] 文件已保存: {filename} -> {file_path}')
         
-        # 6. 创建文档记录
+        max_version = Document.objects.filter(
+            node=node, file_name=filename, is_deleted=False
+        ).aggregate(models.Max('version'))['version__max'] or 0
+        version_tag = f'v{max_version + 1}'
+
         doc = Document.objects.create(
             node=node,
             title=filename,
@@ -340,9 +398,11 @@ def batch_import_single_file(temp_file_path, node_id, owner_id, visibility, owne
             mime_type=mime_type,
             owner=owner,
             owner_team_id=owner_team_id,
-            visibility=visibility,
+            visible_scope=visibility,
             root_type=node.root_type,
             status='pending',
+            version=max_version + 1,
+            version_tag=version_tag,
         )
         
         logger.info(f'[BatchImport] 文档记录已创建: {filename} (id={doc.id})')

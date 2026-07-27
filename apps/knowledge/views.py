@@ -116,9 +116,10 @@ def _validate_visibility_scope(user, visible_scope):
 
 
 ALLOWED_EXTENSIONS = {
-    ".pdf", ".doc", ".docx", ".md", ".markdown", ".txt",
-    ".py", ".java", ".go", ".js", ".ts", ".c", ".cpp", ".rs",
-    ".yaml", ".yml", ".json", ".toml", ".ini", ".conf",
+    ".pdf", ".doc", ".docx", ".md", ".markdown", ".txt", ".rst",
+    ".py", ".java", ".go", ".js", ".ts", ".jsx", ".tsx", ".c", ".cpp", ".h", ".rs",
+    ".yaml", ".yml", ".json", ".xml", ".toml", ".ini", ".conf", ".cfg",
+    ".sh", ".bat", ".ps1", ".css",
 }
 MAX_FILE_SIZE = int(getattr(settings, 'DOCUMENT_MAX_SIZE_MB', 100)) * 1024 * 1024
 
@@ -492,15 +493,29 @@ class KnowledgeNodeViewSet(viewsets.ModelViewSet):
 
 class DocumentViewSet(viewsets.ModelViewSet):
     """/api/v1/knowledge/documents/"""
-    queryset = Document.objects.filter(is_deleted=False).order_by("-created_at")
+    queryset = Document.objects.order_by("-created_at")
     serializer_class = DocumentSerializer
     permission_classes = [IsAuthenticated]
-    filterset_fields = ["node", "status", "file_type", "visible_scope", "root_type", "owner"]
-    search_fields = ["title", "file_name"]
+    filterset_fields = ["node", "status", "file_type", "visible_scope", "root_type", "owner", "is_deleted", "dept_node_id"]
+    search_fields = ["title", "file_name", "owner__username", "owner__real_name"]
 
     def get_queryset(self):
         qs = super().get_queryset().select_related("owner", "node")
         user = self.request.user
+        include_deleted = self.request.query_params.get("include_deleted") == "true"
+        
+        if not include_deleted:
+            qs = qs.filter(is_deleted=False)
+        
+        dept_id = self.request.query_params.get("dept_id")
+        if dept_id:
+            from apps.knowledge.models import KnowledgeNode
+            dept_node = KnowledgeNode.objects.filter(
+                ref_id=dept_id, node_level=2
+            ).first()
+            if dept_node:
+                qs = qs.filter(dept_node_id=dept_node.id)
+        
         if self.request.query_params.get("discover"):
             # 发现模式：返回全部文档用于浏览与申请权限，
             # 但绝密(secret_level=4)文档的条目名仅 owner 和管理员可见
@@ -532,6 +547,25 @@ class DocumentViewSet(viewsets.ModelViewSet):
             return self.get_paginated_response(serializer.data)
         serializer = self.get_serializer(queryset, many=True)
         return Response(serializer.data)
+
+    @action(detail=False, methods=["get"])
+    def available_depts(self, request):
+        """获取部门列表（用于筛选），使用Redis缓存"""
+        from django.core.cache import cache
+        from apps.users.models import Department
+        
+        cache_key = "available_depts_list"
+        cached_depts = cache.get(cache_key)
+        
+        if cached_depts is not None:
+            return Response(cached_depts)
+        
+        depts = Department.objects.filter(is_deleted=False).values('id', 'name')
+        dept_list = list(depts)
+        
+        cache.set(cache_key, dept_list, 3600)
+        
+        return Response(dept_list)
 
     def get_object(self):
         obj = super().get_object()
@@ -612,7 +646,8 @@ class DocumentViewSet(viewsets.ModelViewSet):
         doc = self.get_object()
         self._require_write(doc)
         doc.is_deleted = True
-        doc.save(update_fields=["is_deleted"])
+        doc.delete_time = timezone.now()
+        doc.save(update_fields=["is_deleted", "delete_time"])
         _log_operation(request, 'doc_delete', document=doc,
                        detail={'title': doc.title, 'file_name': doc.file_name})
         try:
@@ -621,6 +656,69 @@ class DocumentViewSet(viewsets.ModelViewSet):
         except Exception:
             logger.exception("delete vector failed")
         return Response(status=204)
+
+    @action(detail=True, methods=["post"])
+    def restore(self, request, pk=None):
+        """恢复已删除的文档"""
+        doc = self.get_object()
+        self._require_write(doc)
+        if not doc.is_deleted:
+            return Response({"detail": "文档未被删除"}, status=400)
+        
+        doc.is_deleted = False
+        doc.restored_at = timezone.now()
+        doc.restored_by = request.user
+        doc.save(update_fields=["is_deleted", "restored_at", "restored_by"])
+        _log_operation(request, 'doc_restore', document=doc,
+                       detail={'title': doc.title, 'file_name': doc.file_name})
+        return Response({"ok": True})
+
+    @action(detail=True, methods=["post"])
+    def hard_delete(self, request, pk=None):
+        """
+        物理删除已删除的文档（删除物理文件）
+        
+        限制条件：
+        - 文档必须已被逻辑删除（is_deleted=True）
+        - 删除时间超过30天（DEBUG模式下不受限制）
+        - 超过180天的已删除文档会被自动清理任务删除
+        
+        物理删除后无法恢复。
+        """
+        from django.conf import settings
+        from apps.knowledge.storage import get_document_storage
+        
+        doc = self.get_object()
+        self._require_write(doc)
+        
+        if not doc.is_deleted:
+            return Response({"detail": "文档未被逻辑删除，请先执行逻辑删除"}, status=400)
+        
+        if not doc.file_path:
+            return Response({"detail": "文档没有物理文件可删除"}, status=400)
+        
+        min_retention_days = 30
+        if not settings.DEBUG and doc.delete_time:
+            days_since_delete = (timezone.now() - doc.delete_time).days
+            if days_since_delete < min_retention_days:
+                remaining_days = min_retention_days - days_since_delete
+                return Response({
+                    "detail": f"文档删除不足 {min_retention_days} 天，还需等待 {remaining_days} 天才能物理删除",
+                    "remaining_days": remaining_days,
+                    "days_since_delete": days_since_delete
+                }, status=403)
+        
+        storage = get_document_storage()
+        try:
+            storage.delete(doc.file_path)
+            doc.file_path = ''
+            doc.save(update_fields=['file_path'])
+            _log_operation(request, 'doc_hard_delete', document=doc,
+                           detail={'title': doc.title, 'file_name': doc.file_name})
+            return Response({"ok": True})
+        except Exception as e:
+            logger.exception("Failed to hard delete file for doc=%d", doc.id)
+            return Response({"detail": f"物理删除失败: {str(e)[:200]}"}, status=500)
 
     @action(detail=True, methods=["post"])
     def reparse(self, request, pk=None):
@@ -1112,6 +1210,9 @@ class DocumentUploadView(APIView):
         except KnowledgeNode.DoesNotExist:
             return Response({"detail": "node 不存在"}, status=404)
 
+        if not self._check_node_upload_permission(request.user, node):
+            return Response({"detail": "无权限向该节点上传文档"}, status=403)
+
         ext = os.path.splitext(f.name)[1].lower()
         if ext not in ALLOWED_EXTENSIONS:
             return Response({"detail": f"不支持的文件类型: {ext}"}, status=400)
@@ -1130,20 +1231,29 @@ class DocumentUploadView(APIView):
                 '.md': ['text/markdown', 'text/plain'],
                 '.markdown': ['text/markdown', 'text/plain'],
                 '.txt': 'text/plain',
+                '.rst': 'text/x-rst',
                 '.py': 'text/x-python',
                 '.java': 'text/x-java-source',
                 '.go': 'text/x-go',
                 '.js': 'application/javascript',
                 '.ts': 'text/typescript',
+                '.jsx': 'application/javascript',
+                '.tsx': 'text/typescript',
                 '.c': 'text/x-c',
                 '.cpp': 'text/x-c++',
+                '.h': 'text/x-c',
                 '.rs': 'text/x-rust',
                 '.yaml': ['text/yaml', 'text/x-yaml'],
                 '.yml': ['text/yaml', 'text/x-yaml'],
                 '.json': 'application/json',
+                '.xml': 'application/xml',
                 '.toml': 'text/toml',
                 '.ini': 'text/x-ini',
                 '.conf': 'text/plain',
+                '.cfg': 'text/plain',
+                '.sh': 'text/x-shellscript',
+                '.bat': 'application/x-bat',
+                '.ps1': 'text/x-powershell',
                 '.css': 'text/css',
             }
             expected_mime = ext_mime_map.get(ext)
@@ -1155,8 +1265,8 @@ class DocumentUploadView(APIView):
                     if detected_mime != expected_mime:
                         return Response({"detail": f"文件类型不匹配：扩展名显示为 {ext}，但实际文件类型为 {detected_mime}"}, status=400)
         except Exception as e:
-            logger.warning(f"文件类型检测失败: {e}")
-            # 类型检测失败不阻止上传，但记录日志
+            logger.error(f"文件类型检测失败: {e}")
+            return Response({"detail": "文件类型检测失败，请上传合法文件"}, status=400)
 
         if f.size > MAX_FILE_SIZE:
             return Response({"detail": f"文件大小超过限制（最大 {MAX_FILE_SIZE//(1024*1024)} MB）"}, status=400)
@@ -1175,6 +1285,9 @@ class DocumentUploadView(APIView):
         )
         if not is_valid:
             return Response({"detail": error_msg}, status=403)
+
+        visibility_depts = request.data.getlist("visibility_depts", [])
+        visibility_teams = request.data.getlist("visibility_teams", [])
 
         h = hashlib.sha256()
         total = 0
@@ -1207,63 +1320,95 @@ class DocumentUploadView(APIView):
             node=node, file_name=f.name[:256], version_tag=version_tag, is_deleted=False
         ).first()
 
-        file_path = self._save_file(f, node)
-        if not file_path:
-            return Response({"detail": "文件存储失败"}, status=500)
-
         title = request.data.get("title") or f.name
         file_type = _detect_file_type(f.name)
         
-        with transaction.atomic():
-            if exist:
-                exist.is_deleted = True
-                exist.save(update_fields=["is_deleted", "updated_at"])
-            
-            kb_node_id = node_id
-            dept_node_id = None
-            team_node_id = None
-            category_node_id = node_id
+        file_path = None
+        doc = None
 
-            if node.node_level >= 2:
-                ancestors = []
-                current = node
-                while current:
-                    ancestors.append(current)
-                    current = current.parent
-                ancestors.reverse()
-                for n in ancestors:
-                    if n.node_level == 1:
-                        kb_node_id = n.id
-                    elif n.node_level == 2:
-                        dept_node_id = n.id
-                    elif n.node_level == 3:
-                        team_node_id = n.id
-                    elif n.node_level >= 4:
-                        category_node_id = n.id
+        try:
+            with transaction.atomic():
+                file_path = self._save_file(f, node)
+                if not file_path:
+                    raise Exception("文件存储失败")
 
-            doc = Document.objects.create(
-                node=node,
-                title=title[:256],
-                file_name=f.name[:256],
-                file_type=file_type,
-                file_size=total,
-                file_hash=file_hash,
-                file_path=file_path,
-                mime_type=(f.content_type or "")[:64],
-                owner=request.user,
-                owner_team_id=getattr(request.user, 'team_id', None),
-                kb_node_id=kb_node_id,
-                dept_node_id=dept_node_id,
-                team_node_id=team_node_id,
-                category_node_id=category_node_id,
-                version_tag=version_tag,
-                visible_scope=visible_scope,
-                allow_download=allow_download,
-                allow_share=allow_share,
-                root_type=node.root_type,
-                status="pending",
-                version=version,
-            )
+                if exist:
+                    exist.is_deleted = True
+                    exist.delete_time = timezone.now()
+                    exist.save(update_fields=["is_deleted", "delete_time", "updated_at"])
+                
+                kb_node_id = node_id
+                dept_node_id = None
+                team_node_id = None
+                category_node_id = node_id
+
+                if node.node_level >= 2:
+                    ancestors = []
+                    current = node
+                    while current:
+                        ancestors.append(current)
+                        current = current.parent
+                    ancestors.reverse()
+                    for n in ancestors:
+                        if n.node_level == 1:
+                            kb_node_id = n.id
+                        elif n.node_level == 2:
+                            dept_node_id = n.id
+                        elif n.node_level == 3:
+                            team_node_id = n.id
+                        elif n.node_level >= 4:
+                            category_node_id = n.id
+
+                doc = Document.objects.create(
+                    node=node,
+                    title=title[:256],
+                    file_name=f.name[:256],
+                    file_type=file_type,
+                    file_size=total,
+                    file_hash=file_hash,
+                    file_path=file_path,
+                    mime_type=(f.content_type or "")[:64],
+                    owner=request.user,
+                    owner_team_id=getattr(request.user, 'team_id', None),
+                    kb_node_id=kb_node_id,
+                    dept_node_id=dept_node_id,
+                    team_node_id=team_node_id,
+                    category_node_id=category_node_id,
+                    version_tag=version_tag,
+                    visible_scope=visible_scope,
+                    allow_download=allow_download,
+                    allow_share=allow_share,
+                    root_type=node.root_type,
+                    status="pending",
+                    version=version,
+                )
+
+                if visibility_teams:
+                    from apps.users.models import Team
+                    team_codes = list(Team.objects.filter(
+                        id__in=visibility_teams, is_deleted=False
+                    ).values_list('code', flat=True))
+                    for team_code in team_codes:
+                        DocCrossTeam.objects.get_or_create(
+                            doc_id=doc.id,
+                            team_code=team_code,
+                            defaults={"create_by": request.user.id},
+                        )
+                    doc.has_cross_team = True
+                    doc.save(update_fields=["has_cross_team"])
+
+                _log_operation(request, 'doc_upload', document=doc, node=node,
+                               detail={'file_name': f.name, 'file_size': total, 'file_hash': file_hash,
+                                       'visible_scope': visible_scope, 'version_tag': version_tag,
+                                       'visibility_teams': visibility_teams, 'visibility_depts': visibility_depts})
+        except Exception as e:
+            if file_path:
+                try:
+                    storage = get_document_storage()
+                    storage.delete(file_path)
+                except Exception:
+                    logger.exception("Failed to clean up orphan file: %s", file_path)
+            return Response({"detail": str(e)[:200]}, status=500)
 
         celery_ok = True
         celery_error = ""
@@ -1285,6 +1430,26 @@ class DocumentUploadView(APIView):
             "celery_error": celery_error,
             "version": doc.version,
         }, status=201)
+
+    def _check_node_upload_permission(self, user, node):
+        if getattr(user, 'is_super_admin', False) or getattr(user, 'is_kb_admin', False):
+            return True
+
+        role, dept_id, team_ids = _get_user_role(user)
+
+        if role == 'dept_manager' and dept_id:
+            if node.node_level == 2 and node.ref_id == dept_id:
+                return True
+            if node.parent and node.parent.node_level == 2 and node.parent.ref_id == dept_id:
+                return True
+
+        if role in ('team_leader', 'employee') and team_ids:
+            if node.node_level == 3 and node.ref_id in team_ids:
+                return True
+            if node.parent and node.parent.node_level == 3 and node.parent.ref_id in team_ids:
+                return True
+
+        return False
 
     def _save_file(self, f, node):
         from apps.knowledge.storage import get_document_storage, generate_node_storage_path

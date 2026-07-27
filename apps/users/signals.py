@@ -13,7 +13,7 @@ from .models import Department, Team
 
 
 def _invalidate_visibility_cache():
-    """删除所有allowed_visibility相关的缓存"""
+    """删除所有allowed_visibility相关的缓存和部门列表缓存"""
     try:
         # 使用Redis的scan命令查找所有匹配的key
         from django_redis import get_redis_connection
@@ -22,7 +22,8 @@ def _invalidate_visibility_cache():
         for key in conn.scan_iter('allowed_visibility_*'):
             conn.delete(key)
             deleted_count += 1
-        logger.debug(f"Invalidated {deleted_count} visibility cache keys")
+        conn.delete('available_depts_list')
+        logger.debug(f"Invalidated {deleted_count} visibility cache keys and available_depts_list")
     except ImportError:
         # django_redis 不可用（非Redis缓存）
         logger.debug("django_redis not available, skipping cache invalidation")
@@ -30,6 +31,7 @@ def _invalidate_visibility_cache():
         # 其他错误，尝试使用delete_pattern（仅Redis支持）
         try:
             cache.delete_pattern('allowed_visibility_*')
+            cache.delete('available_depts_list')
             logger.debug("Invalidated visibility cache via delete_pattern")
         except AttributeError:
             # LocMemCache不支持delete_pattern

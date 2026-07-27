@@ -62,7 +62,7 @@
 				<div id="deptLeaderSelected" class="text-sub text-sm" style="margin-top:4px"></div>
 			</div>
 			<div id="deptTeamsSection" class="hidden"
-			style="border-top:1px solid var(--border);padding-top:12px;margin-top:12px">
+				style="border-top:1px solid var(--border);padding-top:12px;margin-top:12px">
 				<div class="flex items-center justify-between mb-8">
 					<label class="form-label m-0">下属团队</label>
 					<button class="btn btn-primary btn-sm"
@@ -130,7 +130,8 @@
 	</template>
 
 	<template id="tmpl-dept-card">
-		<div class="dept-card" style="border:1px solid var(--border);border-radius:8px;padding:12px 16px;margin-bottom:8px">
+		<div class="dept-card"
+			style="border:1px solid var(--border);border-radius:8px;padding:12px 16px;margin-bottom:8px">
 			<div class="flex items-center justify-between">
 				<div>
 					<span style="font-weight:600;font-size:15px">__NAME__</span>
@@ -140,7 +141,8 @@
 				</div>
 				<div class="flex gap-6">
 					<button class="btn btn-sm btn-outline" onclick="openDeptModal(__ID__)">编辑</button>
-					<button class="btn btn-sm btn-outline" style="color:var(--danger)" onclick="deleteDept(__ID__,'__NAME_ESC__')">删除</button>
+					<button class="btn btn-sm btn-outline" style="color:var(--danger)"
+						onclick="deleteDept(__ID__,'__NAME_ESC__')">删除</button>
 				</div>
 			</div>
 			__TEAMS_HTML__
@@ -149,8 +151,8 @@
 
 	<template id="tmpl-user-search-result">
 		<div class="flex items-center gap-8" style="padding:8px 14px;font-size:13px;cursor:pointer"
-			onmousedown="__ONCLICK__"
-			onmouseover="this.style.background='var(--primary-light)'" onmouseout="this.style.background=''">
+			onmousedown="__ONCLICK__" onmouseover="this.style.background='var(--primary-light)'"
+			onmouseout="this.style.background=''">
 			<span style="font-weight:500">__NAME__</span>
 			<span class="text-sub text-sm">__EMAIL__</span>
 		</div>
@@ -159,8 +161,10 @@
 	<template id="tmpl-team-tag">
 		<span class="tag tag-closable" style="padding:4px 10px;font-size:13px">
 			__NAME____LEADER__
-			<button class="tag-close-btn" onclick="editTeam(__DEPT_ID__,__TEAM_ID__)" title="编辑" style="font-size:12px;margin:0 2px">&#9998;</button>
-			<button class="tag-close-btn" onclick="deleteTeam(__TEAM_ID__,'__NAME_ESC__')" title="删除" style="color:var(--danger)">&#215;</button>
+			<button class="tag-close-btn" onclick="editTeam(__DEPT_ID__,__TEAM_ID__)" title="编辑"
+				style="font-size:12px;margin:0 2px">&#9998;</button>
+			<button class="tag-close-btn" onclick="deleteTeam(__TEAM_ID__,'__NAME_ESC__')" title="删除"
+				style="color:var(--danger)">&#215;</button>
 		</span>
 	</template>
 

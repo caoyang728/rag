@@ -254,7 +254,7 @@ function updateScopeBadge() {
 /* ---- 构建溯源来源 HTML ---- */
 function buildSourceHtml(citations) {
 	if (!citations || citations.length === 0) return '';
-	
+
 	return htmlFromTpl('tmpl-source-block', (frag) => {
 		frag.querySelector('.source-header').textContent = '📎 溯源来源 · ' + citations.length + ' 个文档';
 		const list = frag.querySelector('.source-list');

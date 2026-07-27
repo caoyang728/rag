@@ -38,7 +38,8 @@
 
 	<!-- ===== Templates ===== -->
 	<template id="tmpl-audit-tab">
-		<div class="flex gap-8 mb-16 shrink-0 flex-wrap items-center" style="padding:12px;background:var(--primary-light);border-radius:var(--radius);border:1px solid var(--border)">
+		<div class="flex gap-8 mb-16 shrink-0 flex-wrap items-center"
+			style="padding:12px;background:var(--primary-light);border-radius:var(--radius);border:1px solid var(--border)">
 			<input class="input audit-filter-username" style="width:180px" placeholder="🔍 用户名">
 			<select class="select audit-filter-action" style="width:150px">
 				<option value="">全部操作类型</option>
@@ -61,7 +62,15 @@
 		<div class="card-scroll">
 			<table class="table" style="border:1px solid var(--border);border-radius:var(--radius)">
 				<thead>
-					<tr><th>时间</th><th>用户</th><th>操作类型</th><th>资源</th><th>IP 地址</th><th>结果</th><th>详情</th></tr>
+					<tr>
+						<th>时间</th>
+						<th>用户</th>
+						<th>操作类型</th>
+						<th>资源</th>
+						<th>IP 地址</th>
+						<th>结果</th>
+						<th>详情</th>
+					</tr>
 				</thead>
 				<tbody class="audit-tbody"></tbody>
 			</table>
@@ -76,7 +85,15 @@
 		</div>
 		<div class="card-scroll">
 			<table class="table" style="border:1px solid var(--border);border-radius:var(--radius)">
-				<thead><tr><th>IP / CIDR</th><th>说明</th><th>添加人</th><th>添加时间</th><th style="width:140px">操作</th></tr></thead>
+				<thead>
+					<tr>
+						<th>IP / CIDR</th>
+						<th>说明</th>
+						<th>添加人</th>
+						<th>添加时间</th>
+						<th style="width:140px">操作</th>
+					</tr>
+				</thead>
 				<tbody class="whitelist-tbody"></tbody>
 			</table>
 		</div>
@@ -89,7 +106,16 @@
 		</div>
 		<div class="card-scroll">
 			<table class="table" style="border:1px solid var(--border);border-radius:var(--radius)">
-				<thead><tr><th>IP 地址</th><th>封禁原因</th><th>操作人</th><th>封禁时间</th><th>解封时间</th><th style="width:120px">操作</th></tr></thead>
+				<thead>
+					<tr>
+						<th>IP 地址</th>
+						<th>封禁原因</th>
+						<th>操作人</th>
+						<th>封禁时间</th>
+						<th>解封时间</th>
+						<th style="width:120px">操作</th>
+					</tr>
+				</thead>
 				<tbody class="blacklist-tbody"></tbody>
 			</table>
 		</div>
@@ -109,7 +135,16 @@
 		</div>
 		<div class="card-scroll">
 			<table class="table" style="border:1px solid var(--border);border-radius:var(--radius)">
-				<thead><tr><th>时间</th><th>用户</th><th>IP 地址</th><th>User-Agent</th><th>结果</th><th>失败原因</th></tr></thead>
+				<thead>
+					<tr>
+						<th>时间</th>
+						<th>用户</th>
+						<th>IP 地址</th>
+						<th>User-Agent</th>
+						<th>结果</th>
+						<th>失败原因</th>
+					</tr>
+				</thead>
 				<tbody class="login-tbody"></tbody>
 			</table>
 		</div>
@@ -117,16 +152,23 @@
 
 	<template id="tmpl-audit-detail">
 		<div class="grid-2 audit-detail-grid" style="gap:8px 20px;font-size:13px">
-			<div class="text-sub">时间</div><div class="audit-detail-time"></div>
-			<div class="text-sub">用户</div><div class="audit-detail-user"></div>
-			<div class="text-sub">操作</div><div class="audit-detail-action"></div>
-			<div class="text-sub">资源</div><div class="audit-detail-resource"></div>
-			<div class="text-sub">IP 地址</div><div class="audit-detail-ip"></div>
-			<div class="text-sub">结果</div><div class="audit-detail-result"></div>
+			<div class="text-sub">时间</div>
+			<div class="audit-detail-time"></div>
+			<div class="text-sub">用户</div>
+			<div class="audit-detail-user"></div>
+			<div class="text-sub">操作</div>
+			<div class="audit-detail-action"></div>
+			<div class="text-sub">资源</div>
+			<div class="audit-detail-resource"></div>
+			<div class="text-sub">IP 地址</div>
+			<div class="audit-detail-ip"></div>
+			<div class="text-sub">结果</div>
+			<div class="audit-detail-result"></div>
 		</div>
 		<div class="mt-16">
 			<div class="text-sub text-sm mb-8">上下文 JSON</div>
-			<pre style="background:#0f172a;color:#e2e8f0;padding:12px 14px;border-radius:var(--radius);font-family:'Courier New',monospace;font-size:12px;line-height:1.6;overflow-x:auto" id="audit-json-block"></pre>
+			<pre style="background:#0f172a;color:#e2e8f0;padding:12px 14px;border-radius:var(--radius);font-family:'Courier New',monospace;font-size:12px;line-height:1.6;overflow-x:auto"
+				id="audit-json-block"></pre>
 		</div>
 	</template>
 

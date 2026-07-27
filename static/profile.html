@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
+
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -7,28 +8,29 @@
   <link rel="stylesheet" href="/static/css/common.css">
   <link rel="stylesheet" href="/static/css/profile.css">
 </head>
+
 <body>
   <div id="topnav-container"></div>
 
   <div class="layout">
     <div id="sidebar-container"></div>
     <div class="main main-flex">
-    <div class="page-header">
-      <div class="flex items-baseline gap-10">
+      <div class="page-header">
+        <div class="flex items-baseline gap-10">
           <div class="page-title">个人中心</div>
           <div class="page-subtitle">管理你的资料、AI 记忆、订阅偏好与安全设置</div>
+        </div>
       </div>
-    </div>
-    <div class="profile-layout">
-      <aside class="profile-menu">
-        <div class="profile-menu-item active" onclick="setProfileMenu('basic')">👤 基本信息</div>
-        <div class="profile-menu-item" onclick="setProfileMenu('memory')">🧠 我的记忆</div>
-        <div class="profile-menu-item" onclick="setProfileMenu('permissions')">🔑 我的权限</div>
-        <div class="profile-menu-item" onclick="setProfileMenu('email')">📧 邮件订阅</div>
-        <div class="profile-menu-item" onclick="setProfileMenu('pwd')">🔐 修改密码</div>
-      </aside>
-      <div class="profile-content" id="profileContent"></div>
-    </div>
+      <div class="profile-layout">
+        <aside class="profile-menu">
+          <div class="profile-menu-item active" onclick="setProfileMenu('basic')">👤 基本信息</div>
+          <div class="profile-menu-item" onclick="setProfileMenu('memory')">🧠 我的记忆</div>
+          <div class="profile-menu-item" onclick="setProfileMenu('permissions')">🔑 我的权限</div>
+          <div class="profile-menu-item" onclick="setProfileMenu('email')">📧 邮件订阅</div>
+          <div class="profile-menu-item" onclick="setProfileMenu('pwd')">🔐 修改密码</div>
+        </aside>
+        <div class="profile-content" id="profileContent"></div>
+      </div>
     </div>
   </div>
 
@@ -79,7 +81,8 @@
   <!-- ===== 个人中心模板 ===== -->
   <template id="tmpl-profile-basic">
     <div class="card-title">基本信息</div>
-    <div class="flex gap-24 items-center mb-24" style="padding:16px;background:var(--primary-light);border-radius:var(--radius-lg)">
+    <div class="flex gap-24 items-center mb-24"
+      style="padding:16px;background:var(--primary-light);border-radius:var(--radius-lg)">
       <div class="avatar avatar-lg" id="pf-avatar" style="background:linear-gradient(135deg,#2563eb,#1e40af)"></div>
       <div class="flex-1">
         <div class="text-xl" id="pf-name"></div>
@@ -125,7 +128,8 @@
       <div class="card-title" style="margin:0">🧠 我的记忆（用户永久层）</div>
       <button class="btn btn-danger btn-sm" onclick="clearAllMemory()">🗑 清空记忆</button>
     </div>
-    <div style="padding:12px 14px;background:#fef9c3;border-left:3px solid var(--warning);border-radius:var(--radius);margin-bottom:20px;font-size:13px;line-height:1.6">
+    <div
+      style="padding:12px 14px;background:#fef9c3;border-left:3px solid var(--warning);border-radius:var(--radius);margin-bottom:20px;font-size:13px;line-height:1.6">
       💡 <b>四层记忆机制</b>：短时（Redis）→ 会话（PG）→ <b>用户永久（此处）</b> → 全局系统。个人记忆会影响 AI 对你的回答偏好，仅你本人可见。
     </div>
     <div class="form-item">
@@ -148,7 +152,9 @@
     </div>
     <div class="form-item">
       <label class="form-label">已提炼的偏好（系统自动生成）</label>
-      <div style="background:var(--hover);padding:12px 14px;border-radius:var(--radius);font-size:13px;line-height:1.7;color:var(--text-sub)" id="profileTextDisplay"></div>
+      <div
+        style="background:var(--hover);padding:12px 14px;border-radius:var(--radius);font-size:13px;line-height:1.7;color:var(--text-sub)"
+        id="profileTextDisplay"></div>
       <div class="form-hint">系统每 24 小时基于你的行为异步提炼一次</div>
     </div>
     <div class="mt-16">
@@ -161,7 +167,8 @@
       <div class="card-title" style="margin:0">🔑 我的权限</div>
       <button class="btn btn-primary btn-sm" onclick="openPermissionApplyModal()">＋ 申请权限</button>
     </div>
-    <div style="padding:12px 14px;background:var(--primary-light);border-radius:var(--radius);margin-bottom:16px;font-size:13px;line-height:1.7">
+    <div
+      style="padding:12px 14px;background:var(--primary-light);border-radius:var(--radius);margin-bottom:16px;font-size:13px;line-height:1.7">
       💡 <b>权限说明</b><br>
       • 当前你拥有的权限由所分配的角色决定（RBAC）<br>
       • 如需更高或额外权限，请提交申请并选择对应的审批人<br>
@@ -183,7 +190,9 @@
 
   <template id="tmpl-profile-subscription">
     <div class="card-title">📧 邮件订阅偏好</div>
-    <div style="padding:12px 14px;background:var(--primary-light);border-radius:var(--radius);margin-bottom:20px;font-size:13px;line-height:1.6" id="sub-email-hint">
+    <div
+      style="padding:12px 14px;background:var(--primary-light);border-radius:var(--radius);margin-bottom:20px;font-size:13px;line-height:1.6"
+      id="sub-email-hint">
     </div>
     <div style="display:flex;flex-direction:column;gap:14px" id="sub-checkboxes">
     </div>
@@ -201,15 +210,21 @@
       </div>
       <div class="form-item">
         <label class="form-label">新密码</label>
-        <input class="input" type="password" id="newPwd" placeholder="至少 8 位，包含大小写字母和数字" oninput="updatePwdStrength(this.value)">
-        <div class="password-strength" id="pwdStrength"><div class="bar"></div><div class="bar"></div><div class="bar"></div></div>
+        <input class="input" type="password" id="newPwd" placeholder="至少 8 位，包含大小写字母和数字"
+          oninput="updatePwdStrength(this.value)">
+        <div class="password-strength" id="pwdStrength">
+          <div class="bar"></div>
+          <div class="bar"></div>
+          <div class="bar"></div>
+        </div>
         <div class="password-hint" id="pwdHint">密码强度：待输入</div>
       </div>
       <div class="form-item">
         <label class="form-label">确认新密码</label>
         <input class="input" type="password" id="confirmPwd" placeholder="再次输入新密码">
       </div>
-      <div style="padding:12px;background:var(--hover);border-radius:var(--radius);font-size:12px;line-height:1.7;color:var(--text-sub)">
+      <div
+        style="padding:12px;background:var(--hover);border-radius:var(--radius);font-size:12px;line-height:1.7;color:var(--text-sub)">
         <b>密码安全要求：</b><br>
         • 至少 8 位，最多 32 位<br>
         • 必须包含大写字母、小写字母和数字<br>
@@ -243,4 +258,5 @@
     </div>
   </template>
 </body>
+
 </html>

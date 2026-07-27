@@ -26,9 +26,9 @@
 				<div class="flex items-center justify-between mb-8 shrink-0 flex-wrap gap-8">
 					<div class="flex gap-8 items-center flex-wrap">
 						<form class="hidden">
-						<input type="text" autocomplete="username" readonly>
-						<input type="password" autocomplete="current-password" readonly>
-					</form>
+							<input type="text" autocomplete="username" readonly>
+							<input type="password" autocomplete="current-password" readonly>
+						</form>
 						<input id="searchInput" name="search_query_noname" class="input" placeholder="搜索用户"
 							style="width:180px" autocomplete="off" autocapitalize="off" autocorrect="off"
 							spellcheck="false" oninput="onSearchInput()">
@@ -49,8 +49,7 @@
 						<button class="btn btn-primary btn-sm" onclick="searchUsers()">搜索</button>
 					</div>
 					<div class="flex gap-8">
-						<button class="btn btn-sm" onclick="batchExport()"
-							style="background:var(--bg)">批量导出</button>
+						<button class="btn btn-sm" onclick="batchExport()" style="background:var(--bg)">批量导出</button>
 						<button class="btn btn-sm" onclick="exportAll()" style="background:var(--bg)">导出全部</button>
 						<button class="btn btn-primary btn-sm" onclick="openUserModal()">＋ 新建用户</button>
 					</div>
@@ -58,27 +57,27 @@
 
 				<!-- 用户表格 -->
 				<div class="card-scroll">
-				<table class="table">
-					<thead>
-						<tr>
-							<th style="width:40px"><input type="checkbox" id="checkAll" onchange="toggleCheckAll()">
-							</th>
-							<th>用户名</th>
-							<th>姓名</th>
-							<th>邮箱</th>
-							<th>部门</th>
-							<th>团队</th>
-							<th>角色</th>
-							<th>状态</th>
-							<th style="width:180px">操作</th>
-						</tr>
-					</thead>
-					<tbody id="userTable">
-						<tr>
-							<td colspan="9" class="text-sub text-sm text-center" style="padding:30px">加载中...</td>
-						</tr>
-					</tbody>
-				</table>
+					<table class="table">
+						<thead>
+							<tr>
+								<th style="width:40px"><input type="checkbox" id="checkAll" onchange="toggleCheckAll()">
+								</th>
+								<th>用户名</th>
+								<th>姓名</th>
+								<th>邮箱</th>
+								<th>部门</th>
+								<th>团队</th>
+								<th>角色</th>
+								<th>状态</th>
+								<th style="width:180px">操作</th>
+							</tr>
+						</thead>
+						<tbody id="userTable">
+							<tr>
+								<td colspan="9" class="text-sub text-sm text-center" style="padding:30px">加载中...</td>
+							</tr>
+						</tbody>
+					</table>
 				</div>
 
 				<!-- 分页 -->
@@ -179,7 +178,8 @@
 	</template>
 
 	<template id="tmpl-pagination-btn">
-		<button class="btn btn-sm {{active}} page-btn" onclick="goPage({{page}})" style="min-width:36px">{{page}}</button>
+		<button class="btn btn-sm {{active}} page-btn" onclick="goPage({{page}})"
+			style="min-width:36px">{{page}}</button>
 	</template>
 
 	<template id="tmpl-pagination-ellipsis">

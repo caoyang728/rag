@@ -636,7 +636,7 @@ function renderDocList(docs) {
 /* ---- 渲染操作按钮（按权限） ---- */
 function isPreviewable(fileType) {
 	// 文本类文件可预览，二进制/PDF/Word 不可
-	return ['markdown','txt','code','config'].indexOf(fileType) !== -1;
+	return ['markdown', 'txt', 'code', 'config'].indexOf(fileType) !== -1;
 }
 
 function renderDocActions(d) {
@@ -739,17 +739,17 @@ function previewDocPage(id, page) {
 			contentEl.innerHTML = '<div class="doc-preview-disabled"><div class="doc-preview-disabled-icon">📭</div>文档无内容</div>';
 			return;
 		}
-		
+
 		// 更新分页状态
 		currentPreviewPage = data.current_page || 1;
 		currentPreviewTotalPages = data.total_pages || 1;
 		currentPreviewTotalChars = data.total_chars || 0;
-		
+
 		titleEl.textContent = '文档预览：' + escapeHtml(data.file_name || '') + '（不可复制）';
-		
+
 		// 使用 <pre> 保留原始格式，禁止复制
 		contentEl.innerHTML = '<pre class="doc-preview-content" style="white-space:pre-wrap;word-break:break-word;font-family:inherit">' + escapeHtml(data.content) + '</pre>';
-		
+
 		// 显示分页栏（当有多个页面时）
 		if (currentPreviewTotalPages > 1) {
 			footerEl.classList.remove('hidden');
@@ -889,11 +889,11 @@ function loadDocGrants(id) {
 			tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text-sub)">暂无授权记录</td></tr>';
 			return;
 		}
-		
+
 		var actionMap = { read: '读取', download: '下载', share: '分享', edit: '编辑', export: '导出' };
 		var sourceMap = { direct: '直接', share: '分享', request: '申请' };
 		tbody.innerHTML = '';
-		
+
 		// 显示部门授权
 		if (data.dept_grants && data.dept_grants.length > 0) {
 			var deptTpl = document.getElementById('tmpl-auth-dept-row');
@@ -903,7 +903,7 @@ function loadDocGrants(id) {
 				tbody.appendChild(clone);
 			});
 		}
-		
+
 		// 显示团队授权
 		if (data.team_grants && data.team_grants.length > 0) {
 			var teamTpl = document.getElementById('tmpl-auth-team-row');
@@ -913,7 +913,7 @@ function loadDocGrants(id) {
 				tbody.appendChild(clone);
 			});
 		}
-		
+
 		// 显示直接授权的用户
 		if (data.direct_grants && data.direct_grants.length > 0) {
 			var directTpl = document.getElementById('tmpl-auth-direct-row');
@@ -932,7 +932,7 @@ function loadDocGrants(id) {
 				tbody.appendChild(clone);
 			});
 		}
-		
+
 		if (tbody.children.length === 0) {
 			tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text-sub)">暂无授权记录</td></tr>';
 		}

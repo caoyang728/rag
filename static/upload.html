@@ -29,7 +29,8 @@
 							<span id="celeryIcon">⏳</span>
 							<span id="celeryText">检查文档解析服务状态...</span>
 						</span>
-						<button class="btn btn-sm btn-warning hidden" id="retryPendingBtn" onclick="retryPendingDocs()">🔄 重试待处理文档</button>
+						<button class="btn btn-sm btn-warning hidden" id="retryPendingBtn"
+							onclick="retryPendingDocs()">🔄 重试待处理文档</button>
 					</div>
 				</div>
 			</div>
@@ -74,11 +75,12 @@
 							<select class="select" id="nodeSelect" style="flex:1;min-width:180px">
 								<option value="">-- 请选择归属节点 --</option>
 							</select>
-							<label class="checkbox"><input type="checkbox" id="chkAutoDesensitize" checked><span>自动脱敏（手机号 / 身份证 / 密钥 / IP）</span></label>
+							<label class="checkbox"><input type="checkbox" id="chkAutoDesensitize"
+									checked><span>自动脱敏（手机号 / 身份证 / 密钥 / IP）</span></label>
 						</div>
 						<div class="form-hint">上传后可在节点管理中调整归属</div>
 					</div>
-					
+
 				</div>
 				<div class="mt-16">
 					<label class="form-label">可见范围 <span class="required">*</span></label>
@@ -91,7 +93,8 @@
 							<input type="radio" name="vis" value="org" checked>
 							<span>🏢 部门/团队</span>
 						</label>
-						<div id="uploadOrgSelect" style="flex:1;display:flex;gap:12px;min-height:36px;align-items:center">
+						<div id="uploadOrgSelect"
+							style="flex:1;display:flex;gap:12px;min-height:36px;align-items:center">
 							<div class="multi-select" id="uploadDeptSelect">
 								<div class="multi-select-trigger" onclick="toggleMultiSelect('uploadDeptSelect')">
 									<span class="multi-select-label">请选择部门</span>
@@ -99,8 +102,10 @@
 								</div>
 								<div class="multi-select-panel">
 									<div class="multi-select-header">
-										<input type="text" class="multi-select-search" placeholder="搜索部门..." oninput="uploadOnDeptSearch(this)">
-										<span class="multi-select-toggle-all" onclick="toggleMultiSelectAll('uploadDeptPanel')">全选</span>
+										<input type="text" class="multi-select-search" placeholder="搜索部门..."
+											oninput="uploadOnDeptSearch(this)">
+										<span class="multi-select-toggle-all"
+											onclick="toggleMultiSelectAll('uploadDeptPanel')">全选</span>
 									</div>
 									<div class="multi-select-list" id="uploadDeptPanel"></div>
 								</div>
@@ -112,8 +117,10 @@
 								</div>
 								<div class="multi-select-panel">
 									<div class="multi-select-header">
-										<input type="text" class="multi-select-search" placeholder="搜索团队..." oninput="uploadOnTeamSearch(this)">
-										<span class="multi-select-toggle-all" onclick="toggleMultiSelectAll('uploadTeamPanel')">全选</span>
+										<input type="text" class="multi-select-search" placeholder="搜索团队..."
+											oninput="uploadOnTeamSearch(this)">
+										<span class="multi-select-toggle-all"
+											onclick="toggleMultiSelectAll('uploadTeamPanel')">全选</span>
 									</div>
 									<div class="multi-select-list" id="uploadTeamPanel"></div>
 								</div>
@@ -164,7 +171,8 @@
 	<!-- ====== 模板 ====== -->
 	<template id="tmpl-upload-row">
 		<tr>
-			<td><span class="flex items-center gap-6"><span class="up-row-icon"></span> <span class="up-row-name"></span></span></td>
+			<td><span class="flex items-center gap-6"><span class="up-row-icon"></span> <span
+						class="up-row-name"></span></span></td>
 			<td><span class="tag up-row-type"></span></td>
 			<td class="text-sub up-row-node"></td>
 			<td class="up-row-owner"></td>
@@ -195,30 +203,40 @@
 				<div class="file-item-name up-fi-name"></div>
 				<div class="file-item-meta up-fi-meta"></div>
 			</div>
-			<div class="file-item-progress"><div class="file-item-progress-bar"></div></div>
+			<div class="file-item-progress">
+				<div class="file-item-progress-bar"></div>
+			</div>
 			<div class="file-item-status"><span class="tag">等待中</span></div>
 			<button class="btn-link btn-sm text-danger up-fi-remove">✕</button>
 		</div>
 	</template>
 
 	<template id="tmpl-upload-progress">
-		<div class="global-progress" style="margin-top:12px;padding:12px;background:var(--primary-light);border-radius:var(--radius)">
+		<div class="global-progress"
+			style="margin-top:12px;padding:12px;background:var(--primary-light);border-radius:var(--radius)">
 			<div class="flex justify-between items-center" style="margin-bottom:8px">
 				<span style="font-size:13px;color:var(--text-primary)">整体上传进度</span>
 				<button class="btn-link btn-sm text-danger up-prog-cancel">取消上传</button>
 			</div>
-			<div class="up-prog-bar-bg" style="width:100%;height:6px;background:var(--border);border-radius:3px;overflow:hidden">
-				<div class="up-prog-bar-fill" style="height:100%;background:var(--primary);transition:width 0.3s ease;width:0%"></div>
+			<div class="up-prog-bar-bg"
+				style="width:100%;height:6px;background:var(--border);border-radius:3px;overflow:hidden">
+				<div class="up-prog-bar-fill"
+					style="height:100%;background:var(--primary);transition:width 0.3s ease;width:0%"></div>
 			</div>
-			<div class="up-prog-text" style="text-align:right;font-size:11.5px;color:var(--text-sub);margin-top:4px">0/0</div>
+			<div class="up-prog-text" style="text-align:right;font-size:11.5px;color:var(--text-sub);margin-top:4px">0/0
+			</div>
 		</div>
 	</template>
 
 	<template id="tmpl-conflict-dialog">
-		<div class="conflict-overlay" style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:10000;display:flex;align-items:center;justify-content:center">
-			<div class="conflict-dialog" style="background:white;border-radius:12px;padding:24px;width:420px;max-width:90vw;box-shadow:0 10px 40px rgba(0,0,0,0.2);font-family:system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+		<div class="conflict-overlay"
+			style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:10000;display:flex;align-items:center;justify-content:center">
+			<div class="conflict-dialog"
+				style="background:white;border-radius:12px;padding:24px;width:420px;max-width:90vw;box-shadow:0 10px 40px rgba(0,0,0,0.2);font-family:system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
 				<div class="flex items-center gap-12" style="margin-bottom:16px">
-					<div style="width:40px;height:40px;border-radius:50%;background:#ff980015;display:flex;align-items:center;justify-content:center;font-size:20px">⚠️</div>
+					<div
+						style="width:40px;height:40px;border-radius:50%;background:#ff980015;display:flex;align-items:center;justify-content:center;font-size:20px">
+						⚠️</div>
 					<div>
 						<div style="font-size:16px;font-weight:600;color:#333">文件已存在且已被删除</div>
 						<div style="font-size:13px;color:#999">检测到相同内容的文件之前已被删除</div>
@@ -239,9 +257,12 @@
 					</div>
 				</div>
 				<div class="flex gap-12">
-					<button class="con-btn-cancel" style="flex:1;padding:10px;border:1px solid #ddd;border-radius:8px;background:white;color:#666;cursor:pointer;font-size:14px;transition:all 0.2s">取消</button>
-					<button class="con-btn-new" style="flex:1;padding:10px;border:1px solid #2196f3;border-radius:8px;background:white;color:#2196f3;cursor:pointer;font-size:14px;transition:all 0.2s">新建记录</button>
-					<button class="con-btn-restore" style="flex:1;padding:10px;border:none;border-radius:8px;background:#2196f3;color:white;cursor:pointer;font-size:14px;transition:all 0.2s">恢复</button>
+					<button class="con-btn-cancel"
+						style="flex:1;padding:10px;border:1px solid #ddd;border-radius:8px;background:white;color:#666;cursor:pointer;font-size:14px;transition:all 0.2s">取消</button>
+					<button class="con-btn-new"
+						style="flex:1;padding:10px;border:1px solid #2196f3;border-radius:8px;background:white;color:#2196f3;cursor:pointer;font-size:14px;transition:all 0.2s">新建记录</button>
+					<button class="con-btn-restore"
+						style="flex:1;padding:10px;border:none;border-radius:8px;background:#2196f3;color:white;cursor:pointer;font-size:14px;transition:all 0.2s">恢复</button>
 				</div>
 			</div>
 		</div>

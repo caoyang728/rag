@@ -207,17 +207,17 @@ async function initNodeSelect() {
 		const u = JSON.parse(localStorage.getItem('rag_user') || '{}');
 		const myDeptId = u.department_id;
 		const myTeamIds = (u.teams || []).map(function (t) { return t.team__id; });
-		
+
 		const isAdmin = roles.includes('super_admin') || roles.includes('kb_admin');
 		const isDeptManager = roles.includes('dept_manager');
 		const isTeamLeader = roles.includes('team_leader');
-		
+
 		let filteredNodes = allNodes;
 		let defaultNodeId = null;
-		
+
 		if (!isAdmin) {
 			if (isDeptManager && myDeptId) {
-				filteredNodes = allNodes.map(function(kbNode) {
+				filteredNodes = allNodes.map(function (kbNode) {
 					const deptNode = kbNode.children ? kbNode.children.find(d => d.ref_id === myDeptId) : null;
 					if (deptNode) {
 						defaultNodeId = deptNode.id;
@@ -226,23 +226,23 @@ async function initNodeSelect() {
 					return null;
 				}).filter(n => n);
 			} else if ((isTeamLeader || !isAdmin) && myTeamIds.length > 0) {
-				filteredNodes = allNodes.map(function(kbNode) {
+				filteredNodes = allNodes.map(function (kbNode) {
 					if (!kbNode.children) return null;
 					const deptNode = kbNode.children.find(d => d.ref_id === myDeptId);
 					if (!deptNode || !deptNode.children) return null;
 					const teamNodes = deptNode.children.filter(t => myTeamIds.includes(t.ref_id));
 					if (teamNodes.length > 0) {
 						defaultNodeId = teamNodes[0].id;
-						return { 
-							...kbNode, 
-							children: [{ ...deptNode, children: teamNodes }] 
+						return {
+							...kbNode,
+							children: [{ ...deptNode, children: teamNodes }]
 						};
 					}
 					return null;
 				}).filter(n => n);
 			}
 		}
-		
+
 		sel.innerHTML = '<option value="">-- 请选择归属节点 --</option>';
 		function walk(nodes, prefix, depth) {
 			nodes.forEach(n => {
@@ -811,7 +811,7 @@ function hasProcessingDocuments(docs) {
  */
 function scheduleUploadHistoryRefresh(docs) {
 	clearHistoryRefresh();
-	
+
 	// 如果传入了文档列表，立即检查是否需要刷新
 	if (docs && docs.length > 0) {
 		if (hasProcessingDocuments(docs)) {
@@ -819,7 +819,7 @@ function scheduleUploadHistoryRefresh(docs) {
 		}
 		return;
 	}
-	
+
 	// 没有传入文档列表，从currentDocs获取并启动持续检查
 	startHistoryRefreshLoop();
 }
@@ -880,7 +880,7 @@ function pickVis(elm) {
 	$$('#visRow .upload-radio-inline').forEach(r => r.classList.remove('selected'));
 	elm.classList.add('selected');
 	elm.querySelector('input').checked = true;
-	
+
 	var visValue = elm.querySelector('input').value;
 	var orgSelect = document.getElementById('uploadOrgSelect');
 	if (visValue === 'org') {
@@ -915,10 +915,10 @@ function initDeptTeamSelect() {
 	const u = JSON.parse(localStorage.getItem('rag_user') || '{}');
 	const myDeptId = u.department_id;
 	const myTeamIds = (u.teams || []).map(function (t) { return t.team__id; });
-	
+
 	const deptTrigger = document.querySelector('#uploadDeptSelect .multi-select-trigger');
 	const teamTrigger = document.querySelector('#uploadTeamSelect .multi-select-trigger');
-	
+
 	if (!uploadMultiSelect) {
 		uploadMultiSelect = createDeptTeamMultiSelect({
 			prefix: 'upload',
@@ -929,7 +929,7 @@ function initDeptTeamSelect() {
 		uploadMultiSelect.setDeptList(uploadDeptList);
 		uploadMultiSelect.setTeamList(uploadTeamList);
 	}
-	
+
 	if (myDeptId && myTeamIds.length > 0) {
 		uploadMultiSelect.renderDeptList([myDeptId]);
 		uploadMultiSelect.renderTeamList(myTeamIds, [myDeptId]);
@@ -940,7 +940,7 @@ function initDeptTeamSelect() {
 		uploadMultiSelect.renderDeptList([]);
 		uploadMultiSelect.renderTeamList([], []);
 	}
-	
+
 	deptTrigger.classList.remove('disabled');
 	teamTrigger.classList.remove('disabled');
 }

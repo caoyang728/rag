@@ -43,7 +43,7 @@ document.addEventListener('DOMContentLoaded', () => {
 	}
 	loadDepts();
 	// 点击外部关闭搜索下拉
-	document.addEventListener('click', function(e) {
+	document.addEventListener('click', function (e) {
 		const deptResults = document.getElementById('deptLeaderResults');
 		const deptSearch = document.getElementById('deptLeaderSearch');
 		const teamResults = document.getElementById('teamLeaderResults');

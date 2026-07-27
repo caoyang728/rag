@@ -691,20 +691,20 @@ function renderSidebar(active) {
       <div class="sidebar-group">
         <div class="sidebar-group-title">${g.group}</div>
         ${g.items.map(it => {
-          if (it.page) {
-            return `
+		if (it.page) {
+			return `
               <a class="sidebar-item ${it.key === active ? 'active' : ''}" href="${PAGE_MAP[it.page]}">
                 <span class="sidebar-item-icon">${it.icon}</span>
                 <span>${it.name}</span>
               </a>`;
-          }
-          return `
+		}
+		return `
               <div class="sidebar-item sidebar-item-placeholder" style="cursor:not-allowed;opacity:0.5" title="功能预留，即将上线">
                 <span class="sidebar-item-icon">${it.icon}</span>
                 <span>${it.name}</span>
                 <span style="margin-left:auto;font-size:10px;color:var(--text-sub);padding:2px 8px;border:1px solid #e5e7eb;border-radius:10px">即将上线</span>
               </div>`;
-        }).join('')}
+	}).join('')}
       </div>
     `).join('')}
   </aside>`;

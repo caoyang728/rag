@@ -85,15 +85,15 @@ async function renderAuditTab(tab) {
 
 			// Set filter values
 			frag.querySelector('.audit-filter-username').value = auditFilter.username || '';
-			frag.querySelector('.audit-filter-username').onchange = function() { auditFilter.username = this.value; };
+			frag.querySelector('.audit-filter-username').onchange = function () { auditFilter.username = this.value; };
 			frag.querySelector('.audit-filter-action').value = auditFilter.action || '';
-			frag.querySelector('.audit-filter-action').onchange = function() { auditFilter.action = this.value; };
+			frag.querySelector('.audit-filter-action').onchange = function () { auditFilter.action = this.value; };
 			frag.querySelector('.audit-filter-ip').value = auditFilter.ip || '';
-			frag.querySelector('.audit-filter-ip').onchange = function() { auditFilter.ip = this.value; };
+			frag.querySelector('.audit-filter-ip').onchange = function () { auditFilter.ip = this.value; };
 			frag.querySelector('.audit-filter-start').value = auditFilter.startDate || '';
-			frag.querySelector('.audit-filter-start').onchange = function() { auditFilter.startDate = this.value; };
+			frag.querySelector('.audit-filter-start').onchange = function () { auditFilter.startDate = this.value; };
 			frag.querySelector('.audit-filter-end').value = auditFilter.endDate || '';
-			frag.querySelector('.audit-filter-end').onchange = function() { auditFilter.endDate = this.value; };
+			frag.querySelector('.audit-filter-end').onchange = function () { auditFilter.endDate = this.value; };
 			frag.querySelector('.audit-btn-query').onclick = loadAuditLogs;
 			frag.querySelector('.audit-btn-reset').onclick = resetAuditFilter;
 
@@ -214,7 +214,7 @@ async function renderAuditTab(tab) {
 
 			// Set filter select value
 			frag.querySelector('.login-filter-result').value = window._loginResultFilter || '';
-			frag.querySelector('.login-filter-result').onchange = function() { filterLoginAttempts(this.value); };
+			frag.querySelector('.login-filter-result').onchange = function () { filterLoginAttempts(this.value); };
 
 			// Generate table rows
 			const tbody = frag.querySelector('.login-tbody');

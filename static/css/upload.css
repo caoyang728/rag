@@ -1,71 +1,210 @@
 /* ============ 上传页 ============ */
-.upload-drop{
-  border:2px dashed var(--border-strong);border-radius:var(--radius-lg);
-  padding:40px 20px;text-align:center;background:var(--white);
-  transition:all 0.2s;cursor:pointer;
-}
-.upload-drop:hover,.upload-drop.dragover{border-color:var(--primary);background:var(--primary-light)}
-.upload-drop-icon{font-size:48px;margin-bottom:12px;color:var(--primary)}
-.upload-drop-title{font-size:16px;font-weight:500;margin-bottom:6px}
-.upload-drop-desc{color:var(--text-sub);font-size:13px}
-.upload-types{display:flex;justify-content:center;gap:8px;margin-top:14px;flex-wrap:wrap}
-
-.upload-options{background:var(--white);border:1px solid var(--border);border-radius:var(--radius-lg);padding:20px;margin-top:16px}
-.upload-radio-group{display:flex;gap:12px;flex-wrap:wrap;margin-top:6px}
-.upload-radio{
-  flex:1;min-width:200px;
-  padding:12px 14px;
-  border:1.5px solid var(--border);border-radius:var(--radius);
-  cursor:pointer;transition:all 0.15s;
-  display:flex;align-items:flex-start;gap:10px;
-}
-.upload-radio:hover{border-color:var(--primary)}
-.upload-radio.selected{border-color:var(--primary);background:var(--primary-light)}
-.upload-radio input{margin-top:3px;accent-color:var(--primary)}
-.upload-radio-title{font-weight:500;font-size:13px;display:flex;align-items:center;gap:4px}
-.upload-radio-desc{font-size:11.5px;color:var(--text-sub);margin-top:3px}
-
-.upload-radio-inline{
-  padding:8px 14px;
-  border:1.5px solid var(--border);border-radius:var(--radius);
-  cursor:pointer;transition:all 0.15s;
-  display:inline-flex;align-items:center;gap:6px;
-  font-size:13px;
-  min-height:36px;
-  box-sizing:border-box;
-}
-.upload-radio-inline:hover{border-color:var(--primary)}
-.upload-radio-inline.selected{border-color:var(--primary);background:var(--primary-light);color:var(--primary)}
-.upload-radio-inline input{display:none}
-
-#visRow{
-  min-height:36px;
-  align-items:center;
+.upload-drop {
+	border: 2px dashed var(--border-strong);
+	border-radius: var(--radius-lg);
+	padding: 40px 20px;
+	text-align: center;
+	background: var(--white);
+	transition: all 0.2s;
+	cursor: pointer;
 }
 
-#uploadOrgSelect{
-  min-height:36px;
-  align-items:center;
+.upload-drop:hover,
+.upload-drop.dragover {
+	border-color: var(--primary);
+	background: var(--primary-light)
 }
 
-.file-list{margin-top:16px}
-.file-item{
-  display:flex;align-items:center;gap:12px;
-  padding:12px 14px;background:var(--white);
-  border:1px solid var(--border);border-radius:var(--radius);
-  margin-bottom:8px;
+.upload-drop-icon {
+	font-size: 48px;
+	margin-bottom: 12px;
+	color: var(--primary)
 }
-.file-item-icon{
-  width:40px;height:40px;border-radius:var(--radius);
-  display:flex;align-items:center;justify-content:center;
-  font-size:20px;flex-shrink:0;
-  background:var(--primary-light);color:var(--primary);
-}
-.file-item-info{flex:1;min-width:0}
-.file-item-name{font-size:13px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.file-item-meta{font-size:11.5px;color:var(--text-sub);margin-top:2px}
-.file-item-progress{width:120px;height:4px;background:var(--border);border-radius:2px;overflow:hidden}
-.file-item-progress-bar{height:100%;background:var(--primary);transition:width 0.3s ease;width:0%}
-.file-item-status{min-width:80px;text-align:right}
 
-.upload-input{position:absolute;inset:0;opacity:0;cursor:pointer;z-index:5}
+.upload-drop-title {
+	font-size: 16px;
+	font-weight: 500;
+	margin-bottom: 6px
+}
+
+.upload-drop-desc {
+	color: var(--text-sub);
+	font-size: 13px
+}
+
+.upload-types {
+	display: flex;
+	justify-content: center;
+	gap: 8px;
+	margin-top: 14px;
+	flex-wrap: wrap
+}
+
+.upload-options {
+	background: var(--white);
+	border: 1px solid var(--border);
+	border-radius: var(--radius-lg);
+	padding: 20px;
+	margin-top: 16px
+}
+
+.upload-radio-group {
+	display: flex;
+	gap: 12px;
+	flex-wrap: wrap;
+	margin-top: 6px
+}
+
+.upload-radio {
+	flex: 1;
+	min-width: 200px;
+	padding: 12px 14px;
+	border: 1.5px solid var(--border);
+	border-radius: var(--radius);
+	cursor: pointer;
+	transition: all 0.15s;
+	display: flex;
+	align-items: flex-start;
+	gap: 10px;
+}
+
+.upload-radio:hover {
+	border-color: var(--primary)
+}
+
+.upload-radio.selected {
+	border-color: var(--primary);
+	background: var(--primary-light)
+}
+
+.upload-radio input {
+	margin-top: 3px;
+	accent-color: var(--primary)
+}
+
+.upload-radio-title {
+	font-weight: 500;
+	font-size: 13px;
+	display: flex;
+	align-items: center;
+	gap: 4px
+}
+
+.upload-radio-desc {
+	font-size: 11.5px;
+	color: var(--text-sub);
+	margin-top: 3px
+}
+
+.upload-radio-inline {
+	padding: 8px 14px;
+	border: 1.5px solid var(--border);
+	border-radius: var(--radius);
+	cursor: pointer;
+	transition: all 0.15s;
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 13px;
+	min-height: 36px;
+	box-sizing: border-box;
+}
+
+.upload-radio-inline:hover {
+	border-color: var(--primary)
+}
+
+.upload-radio-inline.selected {
+	border-color: var(--primary);
+	background: var(--primary-light);
+	color: var(--primary)
+}
+
+.upload-radio-inline input {
+	display: none
+}
+
+#visRow {
+	min-height: 36px;
+	align-items: center;
+}
+
+#uploadOrgSelect {
+	min-height: 36px;
+	align-items: center;
+}
+
+.file-list {
+	margin-top: 16px
+}
+
+.file-item {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	padding: 12px 14px;
+	background: var(--white);
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	margin-bottom: 8px;
+}
+
+.file-item-icon {
+	width: 40px;
+	height: 40px;
+	border-radius: var(--radius);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 20px;
+	flex-shrink: 0;
+	background: var(--primary-light);
+	color: var(--primary);
+}
+
+.file-item-info {
+	flex: 1;
+	min-width: 0
+}
+
+.file-item-name {
+	font-size: 13px;
+	font-weight: 500;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis
+}
+
+.file-item-meta {
+	font-size: 11.5px;
+	color: var(--text-sub);
+	margin-top: 2px
+}
+
+.file-item-progress {
+	width: 120px;
+	height: 4px;
+	background: var(--border);
+	border-radius: 2px;
+	overflow: hidden
+}
+
+.file-item-progress-bar {
+	height: 100%;
+	background: var(--primary);
+	transition: width 0.3s ease;
+	width: 0%
+}
+
+.file-item-status {
+	min-width: 80px;
+	text-align: right
+}
+
+.upload-input {
+	position: absolute;
+	inset: 0;
+	opacity: 0;
+	cursor: pointer;
+	z-index: 5
+}

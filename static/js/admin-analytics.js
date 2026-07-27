@@ -32,10 +32,10 @@ async function loadOverview() {
 		kpiValues[2].innerHTML = (data.avg_latency_ms / 1000).toFixed(2) + '<span class="text-sm text-sub">s</span>';
 		kpiValues[3].textContent = data.active_users;
 	} catch (e) {
-    kpiValues.forEach(el => { if (el) el.textContent = '--'; });
-    toast('加载概览数据失败', 'error');
-    console.error('load overview failed:', e);
-  }
+		kpiValues.forEach(el => { if (el) el.textContent = '--'; });
+		toast('加载概览数据失败', 'error');
+		console.error('load overview failed:', e);
+	}
 }
 
 /* ---- 趋势图 ---- */
@@ -64,26 +64,26 @@ async function loadTrend() {
 }
 
 function renderTrendChart(trend) {
-  if (!trend || trend.length === 0) {
-    return '<div style="text-align:center;padding:40px;color:var(--text-sub)">暂无数据</div>';
-  }
-  if (trend.length === 1) {
-    return '<div style="text-align:center;padding:40px;color:var(--text-sub)">仅 1 天数据，暂无法绘制趋势图</div>';
-  }
+	if (!trend || trend.length === 0) {
+		return '<div style="text-align:center;padding:40px;color:var(--text-sub)">暂无数据</div>';
+	}
+	if (trend.length === 1) {
+		return '<div style="text-align:center;padding:40px;color:var(--text-sub)">仅 1 天数据，暂无法绘制趋势图</div>';
+	}
 
-  const w = 900, h = 260, pad = 40;
-  const days = trend.map(t => t.date.slice(5));
-  const sat = trend.map(t => t.accuracy * 100);
-  const rt = trend.map(t => t.avg_latency_ms / 1000);
+	const w = 900, h = 260, pad = 40;
+	const days = trend.map(t => t.date.slice(5));
+	const sat = trend.map(t => t.accuracy * 100);
+	const rt = trend.map(t => t.avg_latency_ms / 1000);
 
-  const xStep = (w - 2 * pad) / (days.length - 1);
-  const yMin = 70, yMax = 100;
-  let y2Min = Math.min(...rt) - 0.5;
-  let y2Max = Math.max(...rt) + 0.5;
-  if (Math.abs(y2Max - y2Min) < 0.01) {
-    y2Min -= 0.5;
-    y2Max += 0.5;
-  }
+	const xStep = (w - 2 * pad) / (days.length - 1);
+	const yMin = 70, yMax = 100;
+	let y2Min = Math.min(...rt) - 0.5;
+	let y2Max = Math.max(...rt) + 0.5;
+	if (Math.abs(y2Max - y2Min) < 0.01) {
+		y2Min -= 0.5;
+		y2Max += 0.5;
+	}
 
 	const yPos = (v, mi, ma) => h - pad - ((v - mi) / (ma - mi)) * (h - 2 * pad);
 	const p1 = showAccuracy ? sat.map((v, i) => `${pad + i * xStep},${yPos(v, yMin, yMax)}`).join(' ') : '';
@@ -173,11 +173,11 @@ async function loadRootTypes() {
 		}
 		updateRootTypeSelect();
 	} catch (e) {
-    toast('加载节点树失败', 'error');
-    console.error('load nodes failed:', e);
-    nodesCache = [];
-    updateRootTypeSelect();
-  }
+		toast('加载节点树失败', 'error');
+		console.error('load nodes failed:', e);
+		nodesCache = [];
+		updateRootTypeSelect();
+	}
 }
 
 function updateRootTypeSelect() {

@@ -5,7 +5,6 @@ Agent Executor - 问答主流程编排
 - 拒答机制：无相关片段时降级为 general_reasoning 或 "无相关资料"
 """
 import hashlib
-import json
 from loguru import logger
 import time
 from decimal import Decimal
@@ -21,6 +20,7 @@ from apps.llm.factory import get_llm
 from apps.llm.prompts import build_qa_messages
 from apps.system.models import LlmCallLog
 from apps.llm.embedding import EmbeddingException
+from apps.knowledge.access import filter_accessible_doc_ids
 
 
 
@@ -32,8 +32,9 @@ def _hash(q: str) -> str:
     return hashlib.sha256(_normalize(q).encode('utf-8')).hexdigest()
 
 
-def _visibility_scope(user) -> str:
-    if not user or not user.is_authenticated:
+def _cache_scope(user) -> str:
+    """返回缓存作用域，用于区分匿名用户/超级管理员/普通用户的缓存"""
+    if not user or not getattr(user, 'is_authenticated', False):
         return 'anonymous'
     if getattr(user, 'is_super_admin', False):
         return 'super'
@@ -109,6 +110,20 @@ def ask(user, question: str, session: Session,
             'stats': {'total_ms': int((time.time() - t0) * 1000), 'error': str(e)},
         }
 
+    # 3.5 二次权限验证：过滤用户无权访问的文档片段
+    if chunks and user and getattr(user, 'is_authenticated', False):
+        doc_ids = list({c['document_id'] for c in chunks})
+        accessible_ids = filter_accessible_doc_ids(user, doc_ids)
+        
+        filtered_chunks = []
+        for chunk in chunks:
+            if chunk['document_id'] in accessible_ids:
+                filtered_chunks.append(chunk)
+        
+        if filtered_chunks != chunks:
+            logger.info('[Executor] permission filter removed %d chunks', len(chunks) - len(filtered_chunks))
+            chunks = filtered_chunks
+
     # 4. 记忆加载
     mm = MemoryManager()
     ctx = mm.load_context(user, session, question, root_type=root_type)
@@ -137,7 +152,7 @@ def ask(user, question: str, session: Session,
         try:
             LlmCallLog.objects.create(
                 provider=llm_stats['llm_provider'], model=llm_stats['llm_model'],
-                scene='qa', user=user if user.is_authenticated else None,
+                scene='qa', user=user if user and getattr(user, 'is_authenticated', False) else None,
                 prompt_tokens=llm_stats['tokens_prompt'],
                 completion_tokens=llm_stats['tokens_completion'],
                 total_tokens=llm_stats['tokens_prompt'] + llm_stats['tokens_completion'],
@@ -220,23 +235,44 @@ def ask(user, question: str, session: Session,
 
 
 def _try_cache(question: str, root_type: str, user) -> dict:
-    scope = 'private' if user and user.is_authenticated else 'public'
+    scope = _cache_scope(user)
     qh = _hash(question)
     now = timezone.now()
+    scopes = [scope]
+    if user and getattr(user, 'is_authenticated', False):
+        scopes.append('super')
     obj = HotQaCache.objects.filter(
         question_hash=qh, root_type=root_type,
-        visibility_scope__in=[scope, 'public'],
+        visibility_scope__in=scopes,
     ).first()
     if not obj:
         return None
     if obj.expires_at and obj.expires_at < now:
         return None
+
+    # 验证用户是否仍有权限访问缓存中的文档
+    if user and getattr(user, 'is_authenticated', False) and obj.citations:
+        doc_ids = []
+        for cite in obj.citations:
+            chunk_ids = cite.get('chunk_ids', [])
+            if chunk_ids:
+                from apps.knowledge.models import DocumentChunk
+                chunk = DocumentChunk.objects.filter(id=chunk_ids[0]).first()
+                if chunk and chunk.document_id not in doc_ids:
+                    doc_ids.append(chunk.document_id)
+
+        if doc_ids:
+            accessible_ids = filter_accessible_doc_ids(user, doc_ids)
+            if set(doc_ids) - set(accessible_ids):
+                logger.info('[Cache] permission revoked for cached QA, skipping')
+                return None
+
     HotQaCache.objects.filter(id=obj.id).update(hit_count=F('hit_count') + 1, last_hit_at=timezone.now())
     return {'answer': obj.answer, 'citations': obj.citations}
 
 
 def _update_cache(question: str, root_type: str, user, answer: str, citations: list):
-    scope = _visibility_scope(user)
+    scope = _cache_scope(user)
     qh = _hash(question)
     try:
         HotQaCache.objects.update_or_create(
@@ -258,7 +294,7 @@ def _persist_qa(*, user, session, question, answer, citations,
                 is_task_split=False):
     qa = QaRecord.objects.create(
         session=session,
-        user=user if user.is_authenticated else None,
+        user=user if user and getattr(user, 'is_authenticated', False) else None,
         turn_index=turn_index,
         question=question[:5000],
         answer=answer[:20000],

@@ -167,6 +167,13 @@ permissions:
     action: config
     scope: all
 
+  # 审计日志权限
+  - code: audit:read:all
+    name: 审计日志全局只读
+    module: audit
+    action: read
+    scope: all
+
 # ------------------------------
 # 角色-权限映射
 # ------------------------------
@@ -178,6 +185,7 @@ role_permissions:
     - knowledge:download:all
     - user:manage_users:all
     - system:config:all
+    - audit:read:all
 
   dept_manager:
     - knowledge:read:all

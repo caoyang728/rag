@@ -64,7 +64,7 @@ def build_user_context(user):
         pass
     return {
         'is_manager': (getattr(user, 'is_super_admin', False)
-                       or _has_role(user, 'kb_admin')),
+                       or getattr(user, 'is_kb_admin', False)),
         'is_team_leader': is_team_leader_role or len(led_team_node_ids) > 0,
         'led_team_node_ids': led_team_node_ids,
         'user_dept_node_id': getattr(user, 'dept_node_id', None),
@@ -77,7 +77,7 @@ def _has_role(user, role_code):
     """检查用户是否拥有指定角色"""
     try:
         from apps.users.models import UserRole
-        return UserRole.objects.filter(user=user, role__code=role_code).exists()
+        return UserRole.objects.filter(user=user, role__code=role_code, is_active=True).exists()
     except Exception:
         return False
 
@@ -153,7 +153,7 @@ def resolve_doc_access(user, doc, ctx=None, grants_map=None):
 
     is_owner = doc.owner_id == user.id
     is_manager = (ctx['is_manager'] if ctx
-                  else (getattr(user, 'is_super_admin', False) or _has_role(user, 'kb_admin')))
+                  else (getattr(user, 'is_super_admin', False) or getattr(user, 'is_kb_admin', False)))
 
     # 团队组长：对归属于其团队子树内的文档拥有管理权
     is_team_manager = False

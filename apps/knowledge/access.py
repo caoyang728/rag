@@ -23,57 +23,153 @@ from django.db import models
 from django.utils import timezone
 
 from apps.users.models import DocDenyUser, DocAllowUser, DocCrossTeam
+from loguru import logger
+
+
+def get_user_team_ids(user) -> list:
+    """获取用户所有团队的 ID 列表"""
+    try:
+        from apps.users.models import UserTeam
+        return list(UserTeam.objects.filter(user=user).values_list('team_id', flat=True))
+    except Exception:
+        return []
+
+
+def get_user_team_node_ids(user) -> list:
+    """获取用户所有团队的 KnowledgeNode ID（node_level=3）"""
+    try:
+        from apps.knowledge.models import KnowledgeNode
+        team_ids = get_user_team_ids(user)
+        if not team_ids:
+            return []
+        return list(
+            KnowledgeNode.objects.filter(
+                node_level=3,
+                is_deleted=False,
+                ref_id__in=team_ids,
+            ).values_list('id', flat=True)
+        )
+    except Exception:
+        return []
+
+
+def get_user_team_codes(user) -> set:
+    """获取用户所有团队的 code 集合"""
+    try:
+        from apps.users.models import Team
+        team_ids = get_user_team_ids(user)
+        if not team_ids:
+            return set()
+        return set(
+            Team.objects.filter(
+                id__in=team_ids,
+                is_deleted=False,
+            ).values_list('code', flat=True)
+        )
+    except Exception:
+        return set()
+
+
+def get_user_team_info(user) -> tuple:
+    """获取用户所有团队的 (team_ids, node_ids, team_codes)，一次性获取全部信息"""
+    try:
+        from apps.users.models import UserTeam, Team
+        from apps.knowledge.models import KnowledgeNode
+        team_ids = list(UserTeam.objects.filter(user=user).values_list('team_id', flat=True))
+        if not team_ids:
+            return [], [], set()
+        node_ids = list(
+            KnowledgeNode.objects.filter(
+                node_level=3,
+                is_deleted=False,
+                ref_id__in=team_ids,
+            ).values_list('id', flat=True)
+        )
+        team_codes = set(
+            Team.objects.filter(
+                id__in=team_ids,
+                is_deleted=False,
+            ).values_list('code', flat=True)
+        )
+        return team_ids, node_ids, team_codes
+    except Exception:
+        return [], [], set()
+
+
+def get_user_dept_node_id(user):
+    """获取用户部门对应的 KnowledgeNode ID（node_level=2）"""
+    if not getattr(user, 'is_authenticated', False) or not getattr(user, 'department', None):
+        return None
+    try:
+        from apps.knowledge.models import KnowledgeNode
+        node = KnowledgeNode.objects.filter(
+            node_level=2,
+            is_deleted=False,
+            ref_id=user.department.id,
+        ).first()
+        return node.id if node else None
+    except Exception:
+        return None
+
+
+
+
+
+def get_user_denied_doc_ids(user) -> list:
+    """获取用户被 DocDenyUser 拉黑的文档 ID 列表"""
+    try:
+        from apps.users.models import DocDenyUser
+        return list(DocDenyUser.objects.filter(uid=user.id).values_list('doc_id', flat=True))
+    except Exception:
+        return []
 
 
 def build_user_context(user):
     """预计算用户的团队/部门/管理员身份，供批量权限判定复用，避免 N+1"""
     if user is None or not getattr(user, 'is_authenticated', False):
         return None
-    team_codes = set()
     led_team_node_ids = set()
-    is_team_leader_role = False
+    user_team_ids = []
+    user_team_node_ids = []
+    user_team_codes = set()
     try:
-        from apps.users.models import UserTeam, Team
-        team_codes = set(
-            Team.objects.filter(
-                id__in=UserTeam.objects.filter(user=user).values_list('team_id', flat=True),
-                is_deleted=False,
-            ).values_list('code', flat=True)
-        )
+        user_dept_node_id = get_user_dept_node_id(user)
+        user_team_ids, user_team_node_ids, user_team_codes = get_user_team_info(user)
         # 团队组长：两种方式 — 1) Team.leader FK 指定  2) 拥有 team_leader 角色且属于某团队
+        from apps.users.models import Team
+        from apps.knowledge.models import KnowledgeNode
         led_team_ids = list(
             Team.objects.filter(leader=user, is_deleted=False).values_list('id', flat=True)
         )
-        if _has_role(user, 'team_leader'):
-            is_team_leader_role = True
-            # 该用户所属的所有团队均视为其管理的团队
-            user_team_ids = list(
-                UserTeam.objects.filter(user=user).values_list('team_id', flat=True)
-            )
+        if has_role(user, 'team_leader'):
             for tid in user_team_ids:
                 if tid not in led_team_ids:
                     led_team_ids.append(tid)
         if led_team_ids:
-            from apps.knowledge.models import KnowledgeNode
             led_team_node_ids = set(
                 KnowledgeNode.objects.filter(
                     node_level=3, ref_id__in=led_team_ids, is_deleted=False,
                 ).values_list('id', flat=True)
             )
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning('[build_user_context] failed to load user context: %s', e)
+        user_dept_node_id = None
+        user_team_ids = []
+        user_team_node_ids = []
+        user_team_codes = set()
     return {
         'is_manager': (getattr(user, 'is_super_admin', False)
                        or getattr(user, 'is_kb_admin', False)),
-        'is_team_leader': is_team_leader_role or len(led_team_node_ids) > 0,
+        'is_team_leader': bool(led_team_node_ids),
         'led_team_node_ids': led_team_node_ids,
-        'user_dept_node_id': getattr(user, 'dept_node_id', None),
-        'user_team_node_id': getattr(user, 'team_node_id', None),
-        'user_team_codes': team_codes,
+        'user_dept_node_id': user_dept_node_id,
+        'user_team_ids': user_team_ids,
+        'user_team_node_ids': user_team_node_ids,
+        'user_team_codes': user_team_codes,
     }
 
 
-def _has_role(user, role_code):
+def has_role(user, role_code):
     """检查用户是否拥有指定角色"""
     try:
         from apps.users.models import UserRole
@@ -91,14 +187,15 @@ def _visibility_allows_read(doc, ctx):
         return (ctx.get('user_dept_node_id') is not None
                 and ctx['user_dept_node_id'] == doc.dept_node_id)
     if scope == 'team':
-        return (ctx.get('user_team_node_id') is not None
-                and ctx['user_team_node_id'] == doc.team_node_id)
+        return (doc.team_node_id is not None
+                and doc.team_node_id in ctx.get('user_team_node_ids', []))
     return False
 
 
-def _has_active_grant(user, doc, grants_map=None):
+def _has_active_grant(user, doc, grants_map=None, user_team_codes=None):
     """是否存在有效的文档级授权（DocAllowUser / DocCrossTeam）
-    优化：先检查 doc.has_allow_user / doc.has_cross_team 标志，为 False 时跳过表查询"""
+    优化：先检查 doc.has_allow_user / doc.has_cross_team 标志，为 False 时跳过表查询
+    user_team_codes: 可选，传入已计算的团队 code 集合，避免重复查询"""
     if grants_map is not None:
         allow_docs = grants_map.get('allow_docs', set())
         cross_docs = grants_map.get('cross_team_docs', set())
@@ -116,13 +213,8 @@ def _has_active_grant(user, doc, grants_map=None):
 
     # DocCrossTeam：先检查 has_cross_team 标志
     if doc.has_cross_team:
-        from apps.users.models import UserTeam, Team
-        user_team_codes = set(
-            Team.objects.filter(
-                id__in=UserTeam.objects.filter(user=user).values_list('team_id', flat=True),
-                is_deleted=False,
-            ).values_list('code', flat=True)
-        )
+        if user_team_codes is None:
+            user_team_codes = get_user_team_codes(user)
         if user_team_codes:
             return DocCrossTeam.objects.filter(
                 doc_id=doc.id, team_code__in=user_team_codes,
@@ -213,12 +305,32 @@ def resolve_doc_access(user, doc, ctx=None, grants_map=None):
     }
 
 
-def build_grants_map(user, doc_ids):
+def filter_accessible_doc_ids(user, doc_ids):
+    """过滤用户有权限访问的文档 ID 列表"""
+    if not user or not getattr(user, 'is_authenticated', False) or not doc_ids:
+        return []
+    from apps.knowledge.models import Document
+    user_ctx = build_user_context(user)
+    user_team_codes = user_ctx.get('user_team_codes', set()) if user_ctx else get_user_team_codes(user)
+    grants_map = build_grants_map(user, doc_ids, user_team_codes=user_team_codes)
+    docs = {d.id: d for d in Document.objects.filter(id__in=doc_ids)}
+    accessible = []
+    for doc_id in doc_ids:
+        doc = docs.get(doc_id)
+        if doc:
+            access = resolve_doc_access(user, doc, ctx=user_ctx, grants_map=grants_map)
+            if access.get('can_read', False):
+                accessible.append(doc_id)
+    return accessible
+
+
+def build_grants_map(user, doc_ids, user_team_codes=None):
     """批量查询用户对一组文档的有效授权，返回 {
         'allow_docs': set(doc_ids),
         'cross_team_docs': set(doc_ids),
         'deny_docs': set(doc_ids),
-    }"""
+    }
+    user_team_codes: 可选，传入已计算的团队 code 集合，避免重复查询"""
     if not user or not getattr(user, 'is_authenticated', False) or not doc_ids:
         return {}
 
@@ -239,13 +351,8 @@ def build_grants_map(user, doc_ids):
     result['allow_docs'] = set(allow_rows)
 
     # DocCrossTeam：user 所属 team_code 匹配，未过期
-    from apps.users.models import UserTeam, Team
-    user_team_codes = set(
-        Team.objects.filter(
-            id__in=UserTeam.objects.filter(user=user).values_list('team_id', flat=True),
-            is_deleted=False,
-        ).values_list('code', flat=True)
-    )
+    if user_team_codes is None:
+        user_team_codes = get_user_team_codes(user)
     if user_team_codes:
         cross_rows = DocCrossTeam.objects.filter(
             doc_id__in=doc_ids,

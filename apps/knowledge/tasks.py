@@ -59,8 +59,7 @@ def _notify_admin_on_embedding_failure(doc: Document, error_msg: str):
     :param doc: 失败的文档对象
     :param error_msg: 错误信息
     """
-    logger.error('[Embedding Notify] embedding失败，文档ID=%d, 文件名=%s, 错误=%s',
-                 doc.id, doc.file_name, error_msg)
+    logger.error(f'[Embedding Notify] embedding失败，文档ID={doc.id}, 文件名={doc.file_name}, 错误={error_msg}')
     
     # TODO: 预留邮件发送接口
     # 可在此处调用邮件发送服务，通知管理员及时排查问题
@@ -108,7 +107,7 @@ def parse_document(document_id: int):
         print(f"  使用解析器: {parser.__class__.__name__}")
         blocks = parser.parse(local_path)
         print(f"  解析完成，共 {len(blocks)} 个 blocks")
-        logger.info('[Parse] doc=%d parsed %d blocks', doc.id, len(blocks))
+        logger.info(f'[Parse] doc={doc.id} parsed {len(blocks)} blocks')
 
         # 2. desensitizing
         print(f"[步骤2/5] 开始脱敏处理...")
@@ -129,7 +128,7 @@ def parse_document(document_id: int):
         doc.save(update_fields=['status'])
         pieces = chunk_blocks(blocks)
         print(f"  切片完成，共 {len(pieces)} 个 chunks")
-        logger.info('[Parse] doc=%d chunked into %d pieces', doc.id, len(pieces))
+        logger.info(f'[Parse] doc={doc.id} chunked into {len(pieces)} pieces')
 
         # 清旧 chunks / 向量 / 代码块元数据 / 图片资源
         print(f"  清理旧 chunks 和向量数据...")
@@ -157,7 +156,6 @@ def parse_document(document_id: int):
             
             image_id = None
             if chunk_type == 'image' and extra.get('base64_data'):
-                from apps.knowledge.models import ImageResource
                 img = ImageResource.objects.create(
                     document=doc,
                     storage_mode='base64',
@@ -217,7 +215,7 @@ def parse_document(document_id: int):
         except Exception as e:
             # embedding失败，暂停向量化，标记文档状态
             print(f"  embedding失败: {str(e)}")
-            logger.error('[Parse] doc=%d embedding failed: %s', doc.id, str(e))
+            logger.error(f'[Parse] doc={doc.id} embedding failed: {str(e)}')
             
             # 预留邮件通知接口
             _notify_admin_on_embedding_failure(doc, str(e))
@@ -268,7 +266,7 @@ def parse_document(document_id: int):
         print(f"========== 文档 [{doc.id}] 解析失败 ==========")
         print(f"  错误: {str(e)}")
         print(f"==============================================")
-        logger.exception('parse_document fail doc=%d', document_id)
+        logger.exception(f'parse_document fail doc={document_id}')
         doc.status = 'failed'
         doc.error_message = str(e)[:1000]
         doc.save(update_fields=['status', 'error_message'])
@@ -309,13 +307,13 @@ def cleanup_deleted_docs(retention_days: int = 180):
             doc.file_path = ''
             doc.save(update_fields=['file_path'])
             cleaned_count += 1
-            logger.info('[Cleanup] Deleted file for doc=%d, file=%s', doc.id, doc.file_name)
+            logger.info(f'[Cleanup] Deleted file for doc={doc.id}, file={doc.file_name}')
         except Exception as e:
             failed_count += 1
             failed_paths.append(f'{doc.id}:{doc.file_path}')
-            logger.exception('[Cleanup] Failed to delete file for doc=%d', doc.id)
+            logger.exception(f'[Cleanup] Failed to delete file for doc={doc.id}')
     
-    logger.info('[Cleanup] Completed: cleaned=%d, failed=%d', cleaned_count, failed_count)
+    logger.info(f'[Cleanup] Completed: cleaned={cleaned_count}, failed={failed_count}')
     return {
         'ok': True,
         'cleaned': cleaned_count,

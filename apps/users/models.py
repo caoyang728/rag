@@ -141,7 +141,7 @@ class User(AbstractBaseUser):
                 old = User.objects.get(pk=self.pk)
                 # 超级管理员不能被禁用（使用多种方式判断，确保万无一失）
                 is_sa = UserRole.objects.filter(
-                    user=old, role__code='super_admin'
+                    user=old, role__code='super_admin', is_active=True
                 ).exists()
                 if is_sa:
                     if self.status == 'disabled' and old.status != 'disabled':
@@ -161,7 +161,7 @@ class User(AbstractBaseUser):
         if not v and self.pk:
             # 超级管理员不能被禁用（使用多种方式判断，确保万无一失）
             is_sa = UserRole.objects.filter(
-                user=self, role__code='super_admin'
+                user=self, role__code='super_admin', is_active=True
             ).exists()
             if is_sa:
                 raise ValueError("超级管理员不能被禁用")
@@ -169,30 +169,25 @@ class User(AbstractBaseUser):
 
     @property
     def is_staff(self):
-        return UserRole.objects.filter(
-            user=self, role__code='super_admin'
-        ).exists()
+        """Django内置方法, 覆盖"""
+        return self.is_super_admin
 
     @property
     def is_super_admin(self):
         """判断是否为超级管理员（使用自定义角色体系）"""
         return UserRole.objects.filter(
-            user=self, role__code='super_admin'
+            user=self, role__code='super_admin', is_active=True
         ).exists()
 
     @property
     def is_kb_admin(self):
-        """判断是否为知识库管理员（文档管理权限等同于超管）"""
-        return UserRole.objects.filter(
-            user=self, role__code__in=['super_admin', 'kb_admin']
-        ).exists()
+        """判断是否有知识库管理权限（RBAC：knowledge:manage:all）"""
+        return self.is_super_admin or has_permission(self, 'knowledge:manage:all')
 
     @property
     def is_user_admin(self):
-        """判断是否为用户管理员（用户管理权限）"""
-        return UserRole.objects.filter(
-            user=self, role__code__in=['super_admin', 'user_admin']
-        ).exists()
+        """判断是否有用户管理权限（RBAC：user:manage_users:all）"""
+        return self.is_super_admin or has_permission(self, 'user:manage_users:all')
 
     def has_perm(self, perm, obj=None):
         return self.is_super_admin or has_permission(self, perm)
@@ -258,6 +253,10 @@ class RolePermission(models.Model):
     granted_at = models.DateTimeField(auto_now_add=True)
     granted_by = models.ForeignKey(User, on_delete=models.SET_NULL,
                                    null=True, blank=True, related_name='+')
+    is_active = models.BooleanField(default=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    revoked_by = models.ForeignKey(User, on_delete=models.SET_NULL,
+                                   null=True, blank=True, related_name='+')
 
     class Meta:
         db_table = 'user_role_permission_rel'
@@ -272,6 +271,10 @@ class UserRole(models.Model):
     granted_by = models.ForeignKey(User, on_delete=models.SET_NULL,
                                    null=True, blank=True, related_name='+')
     expires_at = models.DateTimeField(null=True, blank=True)
+    is_active = models.BooleanField(default=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    revoked_by = models.ForeignKey(User, on_delete=models.SET_NULL,
+                                   null=True, blank=True, related_name='+')
 
     class Meta:
         db_table = 'user_account_role_rel'
@@ -422,8 +425,9 @@ def has_permission(user: User, perm_code: str) -> bool:
     if user is None or not user.is_authenticated:
         return False
     return RolePermission.objects.filter(
-        role__in=UserRole.objects.filter(user=user).values('role_id'),
+        role__in=UserRole.objects.filter(user=user, is_active=True).values('role_id'),
         permission__code=perm_code,
+        is_active=True,
     ).exists()
 
 
@@ -434,7 +438,7 @@ def has_perm_for_scope(user: User, action: str, scope: str = 'all', module: str 
     if user is None or not user.is_authenticated:
         return False
 
-    if UserRole.objects.filter(user=user, role__code='super_admin').exists():
+    if UserRole.objects.filter(user=user, role__code='super_admin', is_active=True).exists():
         return True
 
     code = f'{module}:{action}:{scope}'
@@ -442,12 +446,13 @@ def has_perm_for_scope(user: User, action: str, scope: str = 'all', module: str 
 
 
 def check_upload_permission(user):
-    """检查用户是否有上传权限（readonly 和 compliance_reviewer 除外）"""
+    """检查用户是否有上传权限（RBAC：knowledge:upload:* 任一 scope）
+    super_admin 自动放行；readonly/compliance_reviewer 等无 upload 权限的角色被拒绝"""
     if user is None or not user.is_authenticated:
         return False
-    if UserRole.objects.filter(user=user, role__code='readonly').exists():
-        return False
-    return True
+    return (has_perm_for_scope(user, 'upload', 'all')
+            or has_perm_for_scope(user, 'upload', 'department')
+            or has_perm_for_scope(user, 'upload', 'team'))
 
 
 def get_user_permission_map(user: User) -> dict:

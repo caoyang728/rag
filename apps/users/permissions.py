@@ -1,19 +1,15 @@
 """
-DRF 权限类 - 基于 has_permission + scope 检查
+DRF 权限类 - 基于 RBAC（has_permission + scope 检查）
 
-角色体系 (6 种):
-  super_admin          - 超级管理员，全部配置权限、绕过双审直接发布、可物理销毁文档
-  dept_manager         - 部门负责人，管辖本部门全部团队、审批扩大可见范围申请
-  team_leader          - 团队组长，本团队文档一审、管理文档、调整可见范围、直接收回对外权限
-  compliance_reviewer  - 文档审核员，专职合规风控、敏感内容二审校验、无日常检索问答权限
-  employee             - 普通员工，检索已审核文档、上传发起双审工单、发起权限申请
-  readonly             - 只读员工，检索已发布文档、发起read权限申请、禁止上传
+权限判定统一走 RBAC 链路：
+  User → UserRole → RolePermission → Permission(code={module}:{action}:{scope})
+super_admin 作为设计规定的快路径，在所有权限类中直接放行。
 
 权限范围 (3 级): all / department / team
 权限动作: read / upload / manage / download / manage_users / config
 """
 from rest_framework.permissions import BasePermission
-from apps.users.models import has_permission, has_perm_for_scope, UserRole
+from apps.users.models import has_permission, has_perm_for_scope
 
 
 class RequirePerm(BasePermission):
@@ -21,12 +17,13 @@ class RequirePerm(BasePermission):
     perm_code: str = ''
 
     def has_permission(self, request, view):
-        if not request.user or not request.user.is_authenticated:
+        u = request.user
+        if not u or not u.is_authenticated:
             return False
-        if UserRole.objects.filter(user=request.user, role__code='super_admin').exists():
+        if u.is_super_admin:
             return True
         code = getattr(view, 'required_perm', None) or self.perm_code
-        return has_permission(request.user, code) if code else True
+        return has_permission(u, code) if code else True
 
 
 def perm_class(code: str):
@@ -35,23 +32,25 @@ def perm_class(code: str):
 
 
 class IsSuperAdmin(BasePermission):
-    """仅超级管理员"""
+    """仅超级管理员（哈希链校验等系统级操作）"""
     def has_permission(self, request, view):
         u = request.user
         if not u or not u.is_authenticated:
             return False
-        return UserRole.objects.filter(user=u, role__code='super_admin').exists()
+        return u.is_super_admin
 
 
 class CanManageUsers(BasePermission):
-    """可以管理用户：super_admin / user_admin / kb_admin / kb_ops / dept_manager / team_leader"""
+    """可以管理用户（RBAC：user:manage_users:* 任一 scope）"""
     def has_permission(self, request, view):
         u = request.user
         if not u or not u.is_authenticated:
             return False
-        return UserRole.objects.filter(user=u, role__code__in=[
-            'super_admin', 'user_admin', 'kb_admin', 'kb_ops', 'dept_manager', 'team_leader'
-        ]).exists()
+        if u.is_super_admin:
+            return True
+        return (has_permission(u, 'user:manage_users:all')
+                or has_permission(u, 'user:manage_users:department')
+                or has_permission(u, 'user:manage_users:team'))
 
 
 class CanReadAudit(BasePermission):
@@ -78,9 +77,9 @@ class RequireKnowledgePerm(BasePermission):
 
 
 class IsAdminOrOps(BasePermission):
-    """节点 CRUD：超级管理员或知识库管理员可操作"""
+    """节点 CRUD（RBAC：knowledge:manage:all）"""
     def has_permission(self, request, view):
         u = request.user
         if not u or not u.is_authenticated:
             return False
-        return UserRole.objects.filter(user=u, role__code__in=['super_admin', 'kb_admin']).exists()
+        return u.is_super_admin or has_permission(u, 'knowledge:manage:all')

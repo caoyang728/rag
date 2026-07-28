@@ -1,4 +1,5 @@
 """users serializers - 与 apps.users.models 严格对齐"""
+import re
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from apps.users.models import Department, Team, Role, Permission, UserRole, UserTeam, get_user_permission_map
@@ -81,9 +82,26 @@ class TeamWriteSerializer(serializers.ModelSerializer):
 
 
 class RoleSerializer(serializers.ModelSerializer):
+    permission_ids = serializers.SerializerMethodField()
+
     class Meta:
         model = Role
-        fields = ["id", "code", "name", "description", "is_builtin", "created_at"]
+        fields = ["id", "code", "name", "description", "is_builtin", "created_at", "permission_ids"]
+        read_only_fields = ["is_builtin", "created_at"]
+
+    def validate_code(self, value):
+        if not re.match(r'^[a-z][a-z0-9_]*$', value):
+            raise serializers.ValidationError("角色编码只能包含小写字母、数字和下划线，且以字母开头")
+        if len(value) > 32:
+            raise serializers.ValidationError("角色编码长度不能超过32个字符")
+        return value
+
+    def get_permission_ids(self, obj):
+        if hasattr(obj, '_permission_ids_list'):
+            return obj._permission_ids_list
+        if hasattr(obj, '_prefetched_objects_cache') and 'role_permissions' in obj._prefetched_objects_cache:
+            return [rp.permission_id for rp in obj.role_permissions.all()]
+        return list(obj.role_permissions.values_list('permission_id', flat=True))
 
 
 class PermissionSerializer(serializers.ModelSerializer):

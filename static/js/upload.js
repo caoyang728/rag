@@ -434,6 +434,9 @@ function initDropZone() {
 /* ============ 文件过滤 ============ */
 const ALLOWED_EXTS = new Set([
 	'pdf', 'doc', 'docx', 'md', 'markdown', 'txt', 'rst',
+	'csv', 'xlsx', 'xls',
+	'ppt', 'pptx',
+	'wps', 'et', 'dps',
 	'py', 'js', 'ts', 'jsx', 'tsx', 'java', 'go', 'rs', 'c', 'cpp', 'h',
 	'yml', 'yaml', 'json', 'xml', 'toml', 'ini', 'conf', 'cfg',
 	'sh', 'bat', 'ps1', 'css'
@@ -1029,8 +1032,10 @@ var uploadMultiSelect = null;
 function fileTypeByExt(name) {
 	const ext = name.split('.').pop().toLowerCase();
 	const map = {
-		pdf: 'PDF', doc: 'Word', docx: 'Word',
+		pdf: 'PDF', doc: 'Word', docx: 'Word', wps: 'WPS文字',
 		md: 'Markdown', txt: 'TXT', rst: 'TXT',
+		csv: 'CSV', xlsx: 'Excel', xls: 'Excel', et: 'WPS表格',
+		ppt: 'PPT', pptx: 'PPT', dps: 'WPS演示',
 		py: 'Python', js: 'JavaScript', ts: 'TypeScript',
 		jsx: 'React JSX', tsx: 'React TSX', java: 'Java',
 		go: 'Go', rs: 'Rust', c: 'C', cpp: 'C++', h: 'C/C++ Header',
@@ -1045,9 +1050,11 @@ function fileTypeByExt(name) {
 function fileIconByExt(name) {
 	const ext = name.split('.').pop().toLowerCase();
 	if (ext === 'pdf') return '📕';
-	if (['doc', 'docx'].includes(ext)) return '📄';
+	if (['doc', 'docx', 'wps'].includes(ext)) return '📄';
 	if (ext === 'md') return '📝';
 	if (ext === 'txt' || ext === 'rst') return '📃';
+	if (['csv', 'xlsx', 'xls', 'et'].includes(ext)) return '📊';
+	if (['ppt', 'pptx', 'dps'].includes(ext)) return '📽️';
 	if (['yml', 'yaml'].includes(ext)) return '⚙️';
 	if (ext === 'json') return '📊';
 	if (['py', 'js', 'ts', 'jsx', 'tsx', 'java', 'go', 'rs', 'c', 'cpp', 'h', 'sh', 'bat', 'ps1'].includes(ext)) return '💻';

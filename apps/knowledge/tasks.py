@@ -396,8 +396,10 @@ def batch_import_single_file(temp_file_path, node_id, owner_id, visibility, owne
         ext_map = {
             '.txt': 'txt', '.md': 'md', '.markdown': 'md',
             '.docx': 'docx', '.doc': 'docx', '.pdf': 'pdf',
+            '.wps': 'docx',  # WPS 文字
             '.json': 'json', '.xml': 'xml', '.csv': 'csv',
-            '.xlsx': 'xlsx', '.xls': 'xlsx',
+            '.xlsx': 'xlsx', '.xls': 'xlsx', '.et': 'xlsx',  # WPS 表格
+            '.ppt': 'ppt', '.pptx': 'pptx', '.dps': 'pptx',  # WPS 演示
         }
         ext = os.path.splitext(filename)[1].lower()
         file_type = ext_map.get(ext, 'other')
@@ -406,11 +408,16 @@ def batch_import_single_file(temp_file_path, node_id, owner_id, visibility, owne
             '.txt': 'text/plain', '.md': 'text/markdown',
             '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
             '.doc': 'application/msword',
+            '.wps': 'application/msword',
             '.pdf': 'application/pdf',
             '.json': 'application/json', '.xml': 'application/xml',
             '.csv': 'text/csv',
             '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
             '.xls': 'application/vnd.ms-excel',
+            '.et': 'application/vnd.ms-excel',
+            '.ppt': 'application/vnd.ms-powerpoint',
+            '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+            '.dps': 'application/vnd.ms-powerpoint',
         }
         mime_type = mime_map.get(ext, 'application/octet-stream')
         

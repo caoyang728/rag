@@ -6,10 +6,8 @@ import json
 from loguru import logger
 from typing import List, Dict
 
-from django.core.cache import cache
 from django.conf import settings
 from django_redis import get_redis_connection
-
 
 
 class ShortTermMemory:
@@ -18,19 +16,25 @@ class ShortTermMemory:
     def __init__(self):
         self.ttl = settings.SHORT_TERM_TTL
         self.max_turns = settings.SHORT_TERM_MAX_TURNS
+        self._client = None
 
     def _key(self, session_id: int) -> str:
         return f'short_term:sess:{session_id}'
 
-    def _client(self):
+    def _get_client(self):
+        """缓存 Redis 连接，失败时记录告警"""
+        if self._client is not None:
+            return self._client
         try:
-            return get_redis_connection('default')
-        except Exception:
+            self._client = get_redis_connection('default')
+            return self._client
+        except Exception as e:
+            logger.error('[ShortTerm] Redis connection failed: %s', e)
             return None
 
     def get_turns(self, session_id: int) -> List[Dict]:
         """获取所有轮次（最近的在尾部）"""
-        r = self._client()
+        r = self._get_client()
         if not r:
             return []
         try:
@@ -41,21 +45,24 @@ class ShortTermMemory:
             return []
 
     def append_turn(self, session_id: int, question: str, answer: str):
-        r = self._client()
+        """使用 pipeline 合并 rpush + ltrim + expire"""
+        r = self._get_client()
         if not r:
             return
         try:
             key = self._key(session_id)
-            r.rpush(key, json.dumps({'question': question, 'answer': answer}, ensure_ascii=False))
-            r.ltrim(key, -self.max_turns, -1)
-            r.expire(key, self.ttl)
+            pipe = r.pipeline()
+            pipe.rpush(key, json.dumps({'question': question, 'answer': answer}, ensure_ascii=False))
+            pipe.ltrim(key, -self.max_turns, -1)
+            pipe.expire(key, self.ttl)
+            pipe.execute()
         except Exception as e:
             logger.warning('[ShortTerm] append failed: %s', e)
 
     def clear(self, session_id: int):
-        r = self._client()
+        r = self._get_client()
         if r:
             try:
                 r.delete(self._key(session_id))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning('[ShortTerm] clear failed: %s', e)

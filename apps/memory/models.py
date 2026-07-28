@@ -74,6 +74,7 @@ class UserMemory(models.Model):
     session_refined_count = models.IntegerField(default=0,
                                                  help_text='被提炼过多少次会话')
     updated_at = models.DateTimeField(auto_now=True)
+    # TODO: 后续可扩展结构化用户特征字段，如 language、timezone、position、work_years、output_preference、expertise_level
 
     class Meta:
         db_table = 'memory_user_memory'

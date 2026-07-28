@@ -33,3 +33,22 @@ USER_REFINE_USER_TEMPLATE = """历史会话摘要（最近 {count} 个）：
 
 请更新用户画像。
 """
+
+USER_REFINE_INCREMENTAL_SYSTEM = """你是「用户画像师」。基于用户上一日的新对话，增量更新用户长期画像。
+要求：
+1. 已有画像仅作参考，重点分析新对话中的变化
+2. domain_tags：用户擅长/关心的领域（≤ 8 个），新增领域优先
+3. frequent_topics：用户高频提问主题（≤ 10 个），新增主题优先
+4. preferences：偏好 JSON，如 {"tone":"专业","length":"详细"}，变化部分优先
+5. profile_text：一段可以直接拼进 System Prompt 的自然语言画像描述（80 字内）
+只输出 JSON。
+"""
+
+USER_REFINE_INCREMENTAL_USER_TEMPLATE = """【已有用户画像（仅作参考）】
+{existing_profile}
+
+【上一日新增对话】
+{new_conversations}
+
+请基于新对话增量更新用户画像。已有画像仅作参考，重点关注新对话中体现的用户偏好变化、新领域和新话题。
+"""

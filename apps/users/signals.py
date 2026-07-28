@@ -114,3 +114,51 @@ def on_team_node_sync(sender, instance, **kwargs):
         sync_team_node(instance)
     except Exception as e:
         logger.error(f'[Signal] 团队节点同步失败: {e}')
+
+
+@receiver(post_save, sender=__import__('apps.users.models').users.models.User)
+def on_user_create_init_memory(sender, instance, created, **kwargs):
+    """用户创建时初始化 UserMemory，从 User 表读取基础信息"""
+    if kwargs.get('raw', False):
+        return
+    if not created:
+        return
+    try:
+        from apps.memory.models import UserMemory
+        um, created = UserMemory.objects.get_or_create(user=instance)
+        if created:
+            parts = []
+            if instance.real_name:
+                parts.append(f"姓名：{instance.real_name}")
+            if instance.department:
+                parts.append(f"部门：{instance.department.name}")
+            if instance.team:
+                parts.append(f"团队：{instance.team.name}")
+            if parts:
+                um.profile_text = "；".join(parts)
+                um.save()
+            logger.info(f'[Signal] 初始化 UserMemory: user_id={instance.id}')
+    except Exception as e:
+        logger.error(f'[Signal] UserMemory 初始化失败: {e}')
+
+
+@receiver(post_delete, sender=__import__('apps.users.models').users.models.User)
+def on_user_delete_clean_memory(sender, instance, **kwargs):
+    """用户删除时清理相关记忆数据"""
+    try:
+        from apps.memory.models import UserMemory, SessionMemory, Session
+        from apps.memory.short_term import ShortTermMemory
+
+        UserMemory.objects.filter(user=instance).delete()
+
+        sessions = Session.objects.filter(user=instance)
+        for sess in sessions:
+            try:
+                SessionMemory.objects.filter(session=sess).delete()
+                ShortTermMemory().clear(sess.id)
+            except Exception as e:
+                logger.error(f'[Signal] 清理会话记忆失败: session_id={sess.id}, error={e}')
+
+        logger.info(f'[Signal] 清理用户记忆: user_id={instance.id}')
+    except Exception as e:
+        logger.error(f'[Signal] 用户记忆清理失败: {e}')

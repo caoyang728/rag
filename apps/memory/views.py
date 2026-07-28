@@ -91,6 +91,6 @@ class UserMemoryView(APIView):
             else:
                 return Response({"detail": "preferences 必须是对象"}, status=400)
         if "output_preference" in request.data:
-            um.preferences = {**(um.preferences or {}), "output_preference": str(request.data["output_preference"])[:1024]}
+            um.preferences = {**(um.preferences or {}), "output_preference": str(request.data["output_preference"])[:512]}
         um.save()
         return Response({"ok": True})

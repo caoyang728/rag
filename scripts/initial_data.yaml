@@ -224,6 +224,28 @@ role_permissions:
     - system:config:all
 
 # ------------------------------
+# 全局记忆（公司规则）
+# ------------------------------
+global_memories:
+  - key: company_rules
+    content: "公司内部信息安全规范：禁止泄露公司机密数据、客户信息、财务数据等敏感信息。所有回答必须严格遵守公司保密制度。"
+    scope_root_types: ["all"]
+    priority: 100
+    is_enabled: true
+
+  - key: response_guidelines
+    content: "回答规范：使用中文回答，保持专业、简洁、准确；避免使用过于口语化的表达；对于不确定的内容，明确说明'根据现有资料暂无法回答'。"
+    scope_root_types: ["all"]
+    priority: 90
+    is_enabled: true
+
+  - key: knowledge_base_rules
+    content: "知识库使用规则：回答必须基于知识库中的资料；如无相关资料，禁止编造答案；引用来源必须在回答末尾标注。"
+    scope_root_types: ["company_doc"]
+    priority: 80
+    is_enabled: true
+
+# ------------------------------
 # 初始部门 & 团队（2 层扁平：部门 → 团队）
 # ------------------------------
 departments:

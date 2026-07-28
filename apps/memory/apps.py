@@ -5,3 +5,6 @@ class MemoryConfig(AppConfig):
     default_auto_field = 'django.db.models.BigAutoField'
     name = 'apps.memory'
     label = 'memory'
+
+    def ready(self):
+        import apps.memory.signals

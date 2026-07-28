@@ -387,6 +387,43 @@ def create_users(config, dry_run=False):
     return created
 
 
+def create_global_memories(config, dry_run=False):
+    logger.info('\n=== 创建全局记忆 ===')
+    from apps.memory.models import GlobalMemory
+    gm_config = config.get('global_memories', [])
+    created = 0
+    skipped = 0
+
+    for gm_data in gm_config:
+        key = gm_data['key']
+        content = gm_data['content']
+        scope_root_types = gm_data.get('scope_root_types', [])
+        priority = gm_data.get('priority', 0)
+        is_enabled = gm_data.get('is_enabled', True)
+
+        try:
+            if GlobalMemory.objects.filter(key=key).exists():
+                logger.info(f'  ⏭️  全局记忆 "{key}" 已存在，跳过')
+                skipped += 1
+            else:
+                if not dry_run:
+                    GlobalMemory.objects.create(
+                        key=key,
+                        content=content,
+                        scope_root_types=scope_root_types,
+                        priority=priority,
+                        is_enabled=is_enabled
+                    )
+                logger.info(f'  ✅ 创建全局记忆: {key}')
+                created += 1
+        except Exception as e:
+            logger.info(f'  ❌ 创建全局记忆 "{key}" 失败: {e}')
+            traceback.print_exc()
+
+    logger.info(f'  总计: 创建 {created} 个，跳过 {skipped} 个')
+    return created
+
+
 def main():
     parser = argparse.ArgumentParser(description='系统初始化脚本')
     parser.add_argument('--config', default='scripts/initial_data.yaml', help='配置文件路径')
@@ -447,6 +484,7 @@ def main():
     create_departments(config, args.dry_run)
     create_teams(config, args.dry_run)
     create_users(config, args.dry_run)
+    create_global_memories(config, args.dry_run)
 
     logger.info('\n' + '=' * 60)
     if args.dry_run:

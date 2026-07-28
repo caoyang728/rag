@@ -130,10 +130,11 @@ function renderScopeList(flat) {
 	const el = $('#scopeList');
 	if (!el) return;
 	el.innerHTML = flat.map(n => {
-		const cls = n.depth === 1 ? 'child' : (n.depth >= 2 ? 'grandchild' : '');
+		const indent = 20 + n.depth * 20;
 		return htmlFromTpl('tmpl-scope-node', (frag) => {
 			const label = frag.querySelector('label');
-			label.className = 'scope-item ' + cls;
+			label.className = 'scope-item';
+			label.style.paddingLeft = indent + 'px';
 			const cb = frag.querySelector('input');
 			cb.value = n.id;
 			cb.setAttribute('onchange', "onScopeChange(this, '" + n.id + "')");
@@ -637,8 +638,8 @@ async function initSessionList(skipLoadMessages = false) {
 						titleEl.textContent = s.title;
 						itemFrag.querySelector('.session-preview').textContent = s.preview || '';
 						itemFrag.querySelector('.session-time').textContent = formatSessionTime(s.last_active_at || s.created_at);
-						itemFrag.querySelector('.btn-edit').setAttribute('onclick', 'event.stopPropagation();editSessionTitle(' + s.id + ')');
-						itemFrag.querySelector('.btn-del').setAttribute('onclick', 'event.stopPropagation();delSession(this,' + s.id + ')');
+						itemFrag.querySelector('.icon-edit').setAttribute('onclick', 'event.stopPropagation();editSessionTitle(' + s.id + ')');
+						itemFrag.querySelector('.icon-del').setAttribute('onclick', 'event.stopPropagation();delSession(this,' + s.id + ')');
 					});
 				}).join('');
 			});
@@ -744,7 +745,7 @@ async function switchSession(id, elm) {
 			msgs.innerHTML = renderMessagesFromRecords(records);
 			scrollChatBottom();
 		}
-		toast('已切换会话', '');
+		toast('已切换会话', 'success');
 	} catch (e) {
 		console.error('load records failed:', e);
 		toast('加载会话记录失败', 'error');

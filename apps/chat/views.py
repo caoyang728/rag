@@ -29,9 +29,17 @@ class SessionViewSet(viewsets.ModelViewSet):
         first_question_subq = QaRecord.objects.filter(session=OuterRef('pk')) \
             .order_by('turn_index') \
             .values('question')[:1]
-        return Session.objects.filter(user=self.request.user, is_deleted=False) \
-            .annotate(_first_question=Subquery(first_question_subq)) \
-            .order_by("-last_active_at")
+        qs = Session.objects.filter(user=self.request.user, is_deleted=False) \
+            .annotate(_first_question=Subquery(first_question_subq))
+
+        search = self.request.query_params.get('search', '').strip()
+        if search:
+            qs = qs.filter(
+                Q(title__icontains=search) |
+                Q(_first_question__icontains=search)
+            )
+
+        return qs.order_by("-last_active_at")
 
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)

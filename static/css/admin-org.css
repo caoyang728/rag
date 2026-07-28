@@ -1,0 +1,116 @@
+/* ============ 组织架构管理页专属样式 ============ */
+
+.font-medium {
+	font-weight: 500
+}
+
+/* --- 团队管理弹窗 --- */
+.team-card {
+	background: var(--bg);
+	border-radius: var(--radius);
+	padding: 12px 14px;
+	margin-bottom: 8px;
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	transition: background 0.15s ease;
+	cursor: default;
+}
+
+.team-card:hover {
+	background: var(--primary-light);
+}
+
+.team-card-info {
+	display: flex;
+	align-items: center;
+	gap: 16px;
+}
+
+.team-card-name {
+	font-weight: 500;
+	font-size: 14px;
+}
+
+.team-card-leader {
+	font-size: 13px;
+	color: var(--text-sub);
+}
+
+.team-card-actions {
+	display: flex;
+	gap: 6px;
+	opacity: 0;
+	transition: opacity 0.15s ease;
+}
+
+.team-card:hover .team-card-actions {
+	opacity: 1;
+}
+
+.team-card-editing .team-card-actions {
+	opacity: 1;
+}
+
+.team-manage-editing .team-card:not(.team-card-editing):hover .team-card-actions {
+	opacity: 0;
+}
+
+.team-form {
+	margin-top: 8px;
+	padding-bottom: 8px;
+}
+
+.team-card-editing {
+	background: #dbeafe;
+	border: 1px solid var(--primary);
+}
+
+.team-card-editing .team-card-name {
+	font-weight: 600;
+	color: var(--primary);
+}
+
+.team-form-editing {
+	background: #dbeafe;
+	border: 1px solid var(--primary);
+	border-radius: var(--radius-lg);
+	padding: 16px;
+}
+
+/* --- 部门卡片 --- */
+.dept-card {
+	border: 1px solid var(--border);
+	border-radius: var(--radius-lg);
+	padding: 12px 16px;
+	margin-bottom: 8px;
+	transition: border-color 0.15s ease;
+}
+
+.dept-card:hover {
+	border-color: var(--border-strong);
+}
+
+.dept-card-name {
+	font-weight: 600;
+	font-size: 15px;
+}
+
+.dept-card-meta {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	flex-wrap: wrap;
+}
+
+.dept-card-actions {
+	display: flex;
+	gap: 6px;
+}
+
+.dept-card-teams {
+	margin-top: 8px;
+	display: flex;
+	gap: 6px;
+	flex-wrap: wrap;
+}

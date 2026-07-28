@@ -85,6 +85,7 @@ urlpatterns = [
     path("admin-analytics/", _serve_frontend("admin-analytics"), name="admin-analytics"),
     path("admin-audit/", _serve_frontend("admin-audit"), name="admin-audit"),
     path("admin-rbac/", _serve_frontend("admin-rbac"), name="admin-rbac"),
+    path("admin-org/", _serve_frontend("admin-org"), name="admin-org"),
     path("admin/", admin.site.urls),
     path("api/v1/", include(api_v1)),
     path("healthz", healthz),

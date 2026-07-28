@@ -72,7 +72,7 @@ def _get_user_role(user):
     except Exception:
         user_roles = []
 
-    if 'kb_admin' in user_roles:
+    if getattr(user, 'is_kb_admin', False):
         return 'kb_admin', None, []
 
     if 'dept_manager' in user_roles:
@@ -325,9 +325,9 @@ class KnowledgeNodeViewSet(viewsets.ModelViewSet):
         raise PermissionDenied("您只能操作自己团队范围内的分类节点")
 
     def _is_admin_user(self, user):
-        """用户是否为管理员（super_admin / kb_admin）"""
+        """用户是否为管理员（RBAC：knowledge:manage:all）"""
         try:
-            return user.user_roles.filter(role__code__in=['super_admin', 'kb_admin']).exists()
+            return bool(user.is_kb_admin)
         except Exception:
             return False
 

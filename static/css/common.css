@@ -214,6 +214,17 @@ ol {
 	background: var(--hover)
 }
 
+.btn-outline {
+	background: var(--white);
+	color: var(--text);
+	border-color: var(--border)
+}
+
+.btn-outline:hover {
+	background: var(--hover);
+	border-color: var(--border-strong)
+}
+
 .btn-link {
 	background: transparent;
 	border: none;
@@ -1268,6 +1279,7 @@ ol {
 
 .dropdown-menu {
 	position: absolute;
+	left: 0;
 	right: 0;
 	top: calc(100% + 4px);
 	min-width: 180px;
@@ -1278,6 +1290,8 @@ ol {
 	padding: 6px;
 	z-index: 200;
 	display: none;
+	max-height: 200px;
+	overflow-y: auto;
 }
 
 .dropdown-menu.show {

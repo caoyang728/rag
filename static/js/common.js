@@ -394,6 +394,7 @@ const PAGE_MAP = {
 	'admin-analytics': '/admin-analytics/',
 	'admin-audit': '/admin-audit/',
 	'admin-rbac': '/admin-rbac/',
+	'admin-org': '/admin-org/',
 	'profile': '/profile/',
 	'login': '/login/',
 	'reset-password': '/reset-password/'
@@ -666,9 +667,12 @@ function renderSidebar(active) {
 			{ icon: '🛡️', name: '审计与安全', page: 'admin-audit', key: 'admin-audit' },
 		);
 	}
-	// RBAC 权限配置：仅超级管理员和kb_admin可见
+	// 组织架构 & RBAC 权限配置：仅超级管理员和kb_admin可见
 	if (isAdminOrOps()) {
-		adminItems.push({ icon: '&#9881;&#65039;', name: 'RBAC 权限配置', page: 'admin-rbac', key: 'admin-rbac' });
+		adminItems.push(
+			{ icon: '🏢', name: '组织架构', page: 'admin-org', key: 'admin-org' },
+			{ icon: '&#9881;&#65039;', name: 'RBAC 权限配置', page: 'admin-rbac', key: 'admin-rbac' },
+		);
 	}
 	const items = [
 		{

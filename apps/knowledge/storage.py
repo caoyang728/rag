@@ -37,7 +37,7 @@ def generate_node_storage_path(node) -> str:
         current = current.parent
     
     result = '/'.join(path_parts) + '/'
-    logger.info('[Storage] node path generated: %s -> %s', ' > '.join(original_names), result)
+    logger.info(f'[Storage] node path generated: {" > ".join(original_names)} -> {result}')
     return result
 
 
@@ -106,14 +106,13 @@ class LocalStorage(DocumentStorage):
         else:
             save_dir = base_dir
             logger.warning('[Storage] LocalStorage.save called without node_path! file will be saved to root directory')
-        logger.info('[Storage] LocalStorage.save: base_dir=%s, node_path=%s, save_dir=%s, filename=%s',
-                    base_dir, node_path, save_dir, filename)
+        logger.info(f'[Storage] LocalStorage.save: base_dir={base_dir}, node_path={node_path}, save_dir={save_dir}, filename={filename}')
         os.makedirs(save_dir, exist_ok=True)
         fpath = os.path.join(save_dir, filename)
         with open(fpath, 'wb') as w:
             for chunk in file_obj.chunks():
                 w.write(chunk)
-        logger.info('[Storage] LocalStorage.save: file saved to %s', fpath)
+        logger.info(f'[Storage] LocalStorage.save: file saved to {fpath}')
         return fpath
 
     def delete(self, filepath):

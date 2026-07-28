@@ -114,6 +114,7 @@ async function loadUploadHistory(page = 1) {
 		tbody.innerHTML = '';
 		docs.forEach(function (h) {
 			const row = document.importNode(rowTpl, true).querySelector('tr');
+			row.setAttribute('data-doc-id', h.id);
 			row.querySelector('.up-row-icon').textContent = fileTypeIcon(h.file_type);
 			row.querySelector('.up-row-name').textContent = h.file_name;
 			row.querySelector('.up-row-type').textContent = fileTypeByExt(h.file_name);
@@ -244,10 +245,34 @@ async function viewDocument(docId) {
 
 async function reparseDocument(docId) {
 	try {
+		// 乐观更新：立即将本地状态更新为 pending，避免用户看到标签仍然是失败
+		const docIdx = currentDocs.findIndex(d => d.id === docId);
+		if (docIdx !== -1) {
+			currentDocs[docIdx].status = 'pending';
+			currentDocs[docIdx].error_message = '';
+			// 同步更新 DOM 中的状态标签
+			const row = document.querySelector(`#uploadHistoryBody tr[data-doc-id="${docId}"]`);
+			if (row) {
+				const statusEl = row.querySelector('.up-row-status');
+				if (statusEl) statusEl.innerHTML = statusTag('pending');
+			}
+		}
+		// 立即重启轮询（确保不被 hasProcessingDocuments 判断停止）
+		startUploadPolling();
+
 		await api.postJson(`/api/v1/knowledge/documents/${docId}/reparse/`, {});
 		toast('已触发重新解析', 'success');
-		loadUploadHistory();
+		// 最终用服务端数据覆盖一次，保证一致性
+		loadUploadHistory(uploadHistoryCurrentPage);
 	} catch (e) {
+		// 失败时回滚乐观更新
+		if (docIdx !== -1) {
+			const row = document.querySelector(`#uploadHistoryBody tr[data-doc-id="${docId}"]`);
+			if (row) {
+				const statusEl = row.querySelector('.up-row-status');
+				if (statusEl) statusEl.innerHTML = statusTag(currentDocs[docIdx].status || 'failed');
+			}
+		}
 		toast(e.message || '操作失败', 'error');
 	}
 }
@@ -900,7 +925,25 @@ async function retryPendingDocs() {
 			if (data.failed && data.failed.length > 0) {
 				toast(`有 ${data.failed.length} 个文档触发失败`, 'error');
 			}
-			loadUploadHistory();
+			// 乐观更新：将所有 pending/parsing/... 之外的 failed/embedding_failed 文档改为 pending
+			const toTrigger = (data.failed && data.failed.length)
+				? data.retriggered
+				: data.retriggered;
+			if (toTrigger > 0) {
+				currentDocs.forEach(d => {
+					if (d.status === 'failed' || d.status === 'embedding_failed') {
+						d.status = 'pending';
+						d.error_message = '';
+						const row = document.querySelector(`#uploadHistoryBody tr[data-doc-id="${d.id}"]`);
+						if (row) {
+							const statusEl = row.querySelector('.up-row-status');
+							if (statusEl) statusEl.innerHTML = statusTag('pending');
+						}
+					}
+				});
+				startUploadPolling();
+			}
+			loadUploadHistory(uploadHistoryCurrentPage);
 		} else {
 			toast(data.detail || '操作失败', 'error');
 		}

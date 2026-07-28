@@ -717,7 +717,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
                            detail={'title': doc.title, 'file_name': doc.file_name})
             return Response({"ok": True})
         except Exception as e:
-            logger.exception("Failed to hard delete file for doc=%d", doc.id)
+            logger.exception(f"Failed to hard delete file for doc={doc.id}")
             return Response({"detail": f"物理删除失败: {str(e)[:200]}"}, status=500)
 
     @action(detail=True, methods=["post"])
@@ -873,8 +873,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
             reason=(request.data.get("reason") or "")[:1000],
             status="pending",
         )
-        logger.info("[AccessRequest] doc=%s applicant=%s action=%s",
-                    doc.id, request.user.username, action)
+        logger.info(f"[AccessRequest] doc={doc.id} applicant={request.user.username} action={action}")
         return Response({
             "id": app.id,
             "doc_id": doc.id,
@@ -1101,8 +1100,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
             app.first_reviewed_at = timezone.now()
             app.reviewer_comment = comment
             app.save(update_fields=["first_reviewed_by", "first_reviewed_at", "reviewer_comment"])
-            logger.info("[AccessRequest] first-approved id=%s by=%s (pending second review)",
-                        app.id, reviewer.username)
+            logger.info(f"[AccessRequest] first-approved id={app.id} by={reviewer.username} (pending second review)")
             return Response({
                 "id": app.id,
                 "status": "pending",
@@ -1146,8 +1144,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
             _log_operation(request, 'doc_grant', document=doc,
                            detail={'application_id': app.id, 'applicant': app.applicant.username,
                                    'action': app.action, 'type': 'allow_user'})
-        logger.info("[AccessRequest] approved id=%s applicant=%s target=%s:%s",
-                    app.id, app.applicant.username, app.target_type, app.target_id)
+        logger.info(f"[AccessRequest] approved id={app.id} applicant={app.applicant.username} target={app.target_type}:{app.target_id}")
         return Response({
             "id": app.id,
             "status": app.status,
@@ -1407,7 +1404,7 @@ class DocumentUploadView(APIView):
                     storage = get_document_storage()
                     storage.delete(file_path)
                 except Exception:
-                    logger.exception("Failed to clean up orphan file: %s", file_path)
+                    logger.exception(f"Failed to clean up orphan file: {file_path}")
             return Response({"detail": str(e)[:200]}, status=500)
 
         celery_ok = True
@@ -1418,7 +1415,7 @@ class DocumentUploadView(APIView):
         except Exception as e:
             celery_ok = False
             celery_error = str(e)[:200]
-            logger.warning("celery unreachable, doc %s will need manual reparse: %s", doc.id, celery_error)
+            logger.warning(f"celery unreachable, doc {doc.id} will need manual reparse: {celery_error}")
 
         return Response({
             "document_id": doc.id,
@@ -1464,10 +1461,9 @@ class DocumentUploadView(APIView):
         fname = f"{uuid_lib.uuid4().hex}_{safe_name}"
         # 生成节点存储路径
         node_path = generate_node_storage_path(node)
-        logger.info('[Upload] saving file to node_path=%s, filename=%s, node_id=%d, node_name=%s',
-                    node_path, fname, node.id, node.name)
+        logger.info(f'[Upload] saving file to node_path={node_path}, filename={fname}, node_id={node.id}, node_name={node.name}')
         file_path = storage.save(fname, f, node_path)
-        logger.info('[Upload] file saved to: %s', file_path)
+        logger.info(f'[Upload] file saved to: {file_path}')
         return file_path
 
 
@@ -1477,9 +1473,7 @@ class DocumentChunksView(APIView):
 
     def get(self, request, doc_id):
         # 调试日志：确认用户认证状态
-        logger.info('[Chunks] request user: %s, is_authenticated: %s, is_super_admin: %s',
-                    request.user, request.user.is_authenticated, 
-                    getattr(request.user, 'is_super_admin', False))
+        logger.info(f'[Chunks] request user: {request.user}, is_authenticated: {request.user.is_authenticated}, is_super_admin: {getattr(request.user, "is_super_admin", False)}')
         
         try:
             doc = Document.objects.get(id=doc_id, is_deleted=False)
@@ -1487,7 +1481,7 @@ class DocumentChunksView(APIView):
             return Response({"detail": "文档不存在"}, status=404)
         
         if not resolve_doc_access(request.user, doc)["can_read"]:
-            logger.warning('[Chunks] user %s has no permission for doc %d', request.user, doc_id)
+            logger.warning(f'[Chunks] user {request.user} has no permission for doc {doc_id}')
             return Response({"detail": "无权限查看此文档"}, status=403)
 
         chunks = DocumentChunk.objects.filter(document_id=doc_id).order_by("chunk_index")[:500]
@@ -1524,7 +1518,7 @@ class CeleryStatusView(APIView):
             conn.close()
             diagnostics['broker_connected'] = True
         except Exception as e:
-            logger.warning("celery broker connection failed: %s", e)
+            logger.warning(f"celery broker connection failed: {e}")
             return Response({
                 "celery_ok": False,
                 "detail": "消息队列（Redis）连接失败",
@@ -1540,7 +1534,7 @@ class CeleryStatusView(APIView):
                     "worker_count": worker_count,
                 })
         except Exception as e:
-            logger.warning("celery control.ping failed: %s", e)
+            logger.warning(f"celery control.ping failed: {e}")
 
         try:
             r = redis.Redis.from_url(broker_url)
@@ -1562,7 +1556,7 @@ class CeleryStatusView(APIView):
                         "worker_count": 1,
                     })
         except Exception as e:
-            logger.warning("celery redis check failed: %s", e)
+            logger.warning(f"celery redis check failed: {e}")
 
         return Response({
             "celery_ok": False,

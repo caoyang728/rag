@@ -152,7 +152,7 @@ def build_user_context(user):
                 ).values_list('id', flat=True)
             )
     except Exception as e:
-        logger.warning('[build_user_context] failed to load user context: %s', e)
+        logger.warning(f'[build_user_context] failed to load user context: {e}')
         user_dept_node_id = None
         user_team_ids = []
         user_team_node_ids = []

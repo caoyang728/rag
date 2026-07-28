@@ -116,18 +116,33 @@ def _validate_visibility_scope(user, visible_scope):
 
 
 ALLOWED_EXTENSIONS = {
+    # 文档类
     ".pdf", ".doc", ".docx", ".md", ".markdown", ".txt", ".rst",
+    # 电子表格
+    ".csv", ".xlsx", ".xls",
+    # 演示文稿
+    ".ppt", ".pptx",
+    # 代码类
     ".py", ".java", ".go", ".js", ".ts", ".jsx", ".tsx", ".c", ".cpp", ".h", ".rs",
+    # 配置类
     ".yaml", ".yml", ".json", ".xml", ".toml", ".ini", ".conf", ".cfg",
+    # 脚本/样式
     ".sh", ".bat", ".ps1", ".css",
+    # WPS Office 格式（新版WPS默认使用标准格式，这些是兼容旧版扩展名）
+    ".wps", ".et", ".dps",
 }
 MAX_FILE_SIZE = int(getattr(settings, 'DOCUMENT_MAX_SIZE_MB', 100)) * 1024 * 1024
 
 FILE_TYPE_MAP = {
     ".pdf": "pdf",
     ".doc": "docx", ".docx": "docx",
+    ".wps": "docx",  # WPS 文字，尝试用 docx 解析
     ".md": "markdown", ".markdown": "markdown",
     ".txt": "txt",
+    ".csv": "spreadsheet", ".xlsx": "spreadsheet", ".xls": "spreadsheet",
+    ".et": "spreadsheet",  # WPS 表格，尝试用 spreadsheet 解析
+    ".ppt": "presentation", ".pptx": "presentation",
+    ".dps": "presentation",  # WPS 演示，尝试用 presentation 解析
     ".py": "code", ".java": "code", ".go": "code", ".js": "code",
     ".ts": "code", ".c": "code", ".cpp": "code", ".rs": "code",
     ".yaml": "config", ".yml": "config", ".json": "config",
@@ -192,11 +207,94 @@ def _extract_text_content(content: bytes, file_type: str, filename: str) -> str:
             except UnicodeDecodeError:
                 return content.decode("latin-1", errors="ignore")
 
+    # 电子表格（CSV/XLSX/XLS/ET）
+    if file_type == "spreadsheet" or ext in (".csv", ".xlsx", ".xls", ".et"):
+        return _extract_spreadsheet_preview(content, ext)
+
+    # 演示文稿（PPTX/PPT/DPS）
+    if file_type == "presentation" or ext in (".ppt", ".pptx", ".dps"):
+        return _extract_presentation_preview(content, ext)
+
     # 未知类型：尝试文本解码或显示二进制提示
     try:
         return content.decode("utf-8")
     except UnicodeDecodeError:
         return f"[{filename}] 无法预览此类型文件，建议下载查看"
+
+
+def _extract_spreadsheet_preview(content: bytes, ext: str) -> str:
+    """提取电子表格预览文本"""
+    import io
+
+    # CSV: 直接解码为文本
+    if ext == '.csv':
+        for encoding in ('utf-8', 'gbk', 'gb2312', 'latin-1'):
+            try:
+                return content.decode(encoding)
+            except UnicodeDecodeError:
+                continue
+        return "CSV 文件解码失败"
+
+    # XLSX/ET: 使用 openpyxl 读取
+    if ext in ('.xlsx', '.et'):
+        try:
+            from openpyxl import load_workbook
+            wb = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+            parts = []
+            for ws in wb.worksheets:
+                parts.append(f"=== Sheet: {ws.title} ===")
+                for row in ws.iter_rows(values_only=True):
+                    cells = [str(c) if c is not None else '' for c in row]
+                    if any(c.strip() for c in cells):
+                        parts.append(' | '.join(cells))
+            wb.close()
+            return '\n'.join(parts) if parts else "电子表格无数据"
+        except ImportError:
+            return "需要安装 openpyxl 才能预览 Excel 内容"
+        except Exception as e:
+            logger.error(f"Spreadsheet preview failed: {e}")
+            return f"电子表格解析失败: {str(e)}"
+
+    # XLS: 旧版格式不支持预览
+    if ext == '.xls':
+        return "[.xls 旧版格式不支持预览，请下载查看或转换为 .xlsx 格式]"
+
+    return "不支持的电子表格格式"
+
+
+def _extract_presentation_preview(content: bytes, ext: str) -> str:
+    """提取演示文稿预览文本"""
+    import io
+
+    # PPTX/DPS: 使用 python-pptx 读取
+    if ext in ('.pptx', '.dps'):
+        try:
+            from pptx import Presentation
+            prs = Presentation(io.BytesIO(content))
+            parts = []
+            for slide_num, slide in enumerate(prs.slides, start=1):
+                texts = []
+                for shape in slide.shapes:
+                    if shape.has_text_frame:
+                        for para in shape.text_frame.paragraphs:
+                            text = para.text.strip()
+                            if text:
+                                texts.append(text)
+                if texts:
+                    parts.append(f"=== 幻灯片 {slide_num} ===")
+                    parts.append('\n'.join(texts))
+            return '\n'.join(parts) if parts else "演示文稿无文本内容"
+        except ImportError:
+            return "需要安装 python-pptx 才能预览 PPT 内容"
+        except Exception as e:
+            logger.error(f"Presentation preview failed: {e}")
+            return f"演示文稿解析失败: {str(e)}"
+
+    # PPT: 旧版格式不支持预览
+    if ext == '.ppt':
+        return "[.ppt 旧版格式不支持预览，请下载查看或转换为 .pptx 格式]"
+
+    return "不支持的演示文稿格式"
 
 
 def _build_tree(qs):
@@ -1221,6 +1319,8 @@ class DocumentUploadView(APIView):
             f.seek(0)  # 重置文件指针
             detected_mime = magic.from_buffer(file_content, mime=True)
             # 根据扩展名验证MIME类型
+            # 注意：纯文本类文件（代码/配置等）在不同系统的libmagic版本下，
+            # 可能被检测为 text/plain 而非特定类型，因此增加 text/plain 作为备选
             ext_mime_map = {
                 '.pdf': 'application/pdf',
                 '.doc': 'application/msword',
@@ -1228,30 +1328,42 @@ class DocumentUploadView(APIView):
                 '.md': ['text/markdown', 'text/plain'],
                 '.markdown': ['text/markdown', 'text/plain'],
                 '.txt': 'text/plain',
-                '.rst': 'text/x-rst',
-                '.py': 'text/x-python',
-                '.java': 'text/x-java-source',
-                '.go': 'text/x-go',
-                '.js': 'application/javascript',
-                '.ts': 'text/typescript',
-                '.jsx': 'application/javascript',
-                '.tsx': 'text/typescript',
-                '.c': 'text/x-c',
-                '.cpp': 'text/x-c++',
-                '.h': 'text/x-c',
-                '.rs': 'text/x-rust',
-                '.yaml': ['text/yaml', 'text/x-yaml'],
-                '.yml': ['text/yaml', 'text/x-yaml'],
-                '.json': 'application/json',
-                '.xml': 'application/xml',
-                '.toml': 'text/toml',
-                '.ini': 'text/x-ini',
+                '.rst': ['text/x-rst', 'text/plain'],
+                # 电子表格
+                '.csv': ['text/csv', 'application/csv', 'text/plain'],
+                '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                '.xls': 'application/vnd.ms-excel',
+                # 演示文稿
+                '.ppt': 'application/vnd.ms-powerpoint',
+                '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+                # WPS Office 格式（MIME 类型与对应 MS 格式一致）
+                '.wps': ['application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
+                '.et': ['application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'],
+                '.dps': ['application/vnd.ms-powerpoint', 'application/vnd.openxmlformats-officedocument.presentationml.presentation'],
+                # 代码类
+                '.py': ['text/x-python', 'text/plain'],
+                '.java': ['text/x-java-source', 'text/plain'],
+                '.go': ['text/x-go', 'text/plain'],
+                '.js': ['application/javascript', 'text/javascript', 'text/plain'],
+                '.ts': ['text/typescript', 'application/typescript', 'text/plain'],
+                '.jsx': ['application/javascript', 'text/javascript', 'text/plain'],
+                '.tsx': ['text/typescript', 'application/typescript', 'text/plain'],
+                '.c': ['text/x-c', 'text/plain'],
+                '.cpp': ['text/x-c++', 'text/plain'],
+                '.h': ['text/x-c', 'text/x-c++', 'text/plain'],
+                '.rs': ['text/x-rust', 'text/plain'],
+                '.yaml': ['text/yaml', 'text/x-yaml', 'text/plain'],
+                '.yml': ['text/yaml', 'text/x-yaml', 'text/plain'],
+                '.json': ['application/json', 'text/plain'],
+                '.xml': ['application/xml', 'text/xml', 'text/plain'],
+                '.toml': ['text/toml', 'text/plain'],
+                '.ini': ['text/x-ini', 'text/plain'],
                 '.conf': 'text/plain',
                 '.cfg': 'text/plain',
-                '.sh': 'text/x-shellscript',
-                '.bat': 'application/x-bat',
-                '.ps1': 'text/x-powershell',
-                '.css': 'text/css',
+                '.sh': ['text/x-shellscript', 'text/plain'],
+                '.bat': ['application/x-bat', 'text/plain'],
+                '.ps1': ['text/x-powershell', 'text/plain'],
+                '.css': ['text/css', 'text/plain'],
             }
             expected_mime = ext_mime_map.get(ext)
             if expected_mime:

@@ -217,7 +217,8 @@ def import_documents(args):
     
     # 收集所有文件
     supported_extensions = ('.txt', '.md', '.markdown', '.docx', '.doc', '.pdf',
-                           '.json', '.xml', '.csv', '.xlsx', '.xls')
+                           '.json', '.xml', '.csv', '.xlsx', '.xls',
+                           '.ppt', '.pptx', '.wps', '.et', '.dps')
     files_to_import = []
     
     for root, dirs, files in os.walk(upload_dir):

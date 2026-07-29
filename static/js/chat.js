@@ -27,6 +27,8 @@ let selectedScopeIds = new Set();  // 统一存储字符串 ID，避免与 API �
 let scopeFlatList = [];  // 缓存扁平化节点，避免重复遍历
 let currentSessionId = null;
 let isSending = false;
+let currentAbortController = null;  // 当前流式请求的 AbortController，供 stopChat 中断
+let userAborted = false;  // 标记是否用户主动终止（区分超时中断）
 let heartbeatTimer = null;
 let isOnline = true;
 
@@ -262,17 +264,25 @@ function buildSourceHtml(citations) {
 		list.innerHTML = citations.map(c => {
 			return htmlFromTpl('tmpl-source-card', (cardFrag) => {
 				const titleEl = cardFrag.querySelector('.source-card-title');
-				let info = '';
+				titleEl.innerHTML = escapeHtml(c.doc_title || '未知文档') + ' <span class="source-score">80%</span>';
+
+				// 元信息（章节/页码/引用数）放到底部 meta 行，inline 排列节省纵向空间
+				let meta = '';
 				if (c.section) {
-					info += '<div class="source-card-section">章节: ' + escapeHtml(c.section) + '</div>';
+					meta += '<span class="source-card-section">章节: ' + escapeHtml(c.section) + '</span>';
 				}
 				if (c.page && Array.isArray(c.page)) {
-					info += '<div class="source-card-page">页码: P' + c.page.join(', P') + '</div>';
+					meta += '<span class="source-card-page">页码: P' + c.page.join(', P') + '</span>';
 				}
 				if (c.chunk_ids && c.chunk_ids.length > 0) {
-					info += '<div class="source-card-count">引用 ' + c.chunk_ids.length + ' 处</div>';
+					meta += '<span class="source-card-count">引用 ' + c.chunk_ids.length + ' 处</span>';
 				}
-				titleEl.innerHTML = escapeHtml(c.doc_title || '未知文档') + ' <span class="source-score">80%</span>' + info;
+				if (meta) {
+					const metaEl = document.createElement('div');
+					metaEl.className = 'source-card-meta';
+					metaEl.innerHTML = meta;
+					cardFrag.querySelector('.source-card').appendChild(metaEl);
+				}
 			});
 		}).join('');
 	});
@@ -281,6 +291,29 @@ function buildSourceHtml(citations) {
 /* ---- 发送消息 ---- */
 function handleChatKey(e) {
 	if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
+}
+
+/* 切换发送按钮状态：idle=发送，stopping=终止 */
+function setSendButtonState(state) {
+	const btn = $('#chatSendBtn');
+	if (!btn) return;
+	if (state === 'stopping') {
+		btn.textContent = '⏹ 终止';
+		btn.classList.add('stopping');
+		btn.setAttribute('onclick', 'stopChat()');
+	} else {
+		btn.textContent = '发送 ↵';
+		btn.classList.remove('stopping');
+		btn.setAttribute('onclick', 'sendChat()');
+	}
+}
+
+/* 用户主动终止流式生成 */
+function stopChat() {
+	if (currentAbortController) {
+		userAborted = true;
+		currentAbortController.abort();
+	}
 }
 
 async function sendChat() {
@@ -314,81 +347,199 @@ async function sendChat() {
 	msgs.appendChild(aMsg);
 	scrollChatBottom();
 
+	// 流式状态
+	let answerText = '';
+	let ttfbMs = 0;
+	let totalMs = 0;
+	let messageId = null;
+	let citations = [];
+	let answerContentEl = null;   // .msg-ai-content 容器
+	let answerTextEl = null;      // .ai-answer-text 文本节点
+	let renderPending = false;    // rAF 节流标志，避免高频 delta 卡顿
+
+	// 用 rAF 节流 markdown 重渲染：delta 高频到达时只在每帧合并渲染一次
+	const flushRender = () => {
+		renderPending = false;
+		if (answerTextEl) {
+			answerTextEl.innerHTML = formatAnswer(answerText);
+			scrollChatBottom();
+		}
+	};
+	const scheduleRender = () => {
+		if (!renderPending) {
+			renderPending = true;
+			requestAnimationFrame(flushRender);
+		}
+	};
+
+	// 动态获取根类型（如果没有选中节点，由后端动态返回默认根类型）
+	const rootTypes = [];
+
+	const body = {
+		question: text,
+		root_types: rootTypes,
+		node_ids: [...selectedScopeIds].map(Number),
+		use_cache: true,
+		do_task_split: false
+	};
+	if (currentSessionId) {
+		body.session_id = currentSessionId;
+	}
+
+	// 声明在 try 外部，确保 catch/finally 可访问（否则块级作用域导致 ReferenceError）
+	const abortController = new AbortController();
+	currentAbortController = abortController;
+	// 发送中按钮切换为"终止"
+	setSendButtonState('stopping');
+	// 流式可能持续较久，放宽到 120s（超时自动中断）
+	const timeoutId = setTimeout(() => abortController.abort(), 120000);
+
 	try {
-		// 动态获取根类型（如果没有选中节点）
-		let rootTypes = [];
-		if (selectedScopeIds.size === 0) {
-			// 默认使用第一个根类型（由后端动态返回）
-			rootTypes = [];
-		}
-
-		const body = {
-			question: text,
-			root_types: rootTypes,
-			node_ids: [...selectedScopeIds].map(Number),
-			use_cache: true,
-			do_task_split: false
-		};
-		if (currentSessionId) {
-			body.session_id = currentSessionId;
-		}
-
-		const abortController = new AbortController();
-		const timeoutId = setTimeout(() => abortController.abort(), 60000);
-
-		const data = await api.postJson('/api/v1/chat/ask/', body, { signal: abortController.signal });
-		clearTimeout(timeoutId);
-
-		if (data.session_id) {
-			currentSessionId = data.session_id;
-			localStorage.setItem('rag_current_session', currentSessionId);
-			const chatTitle = $('#chatTitle');
-			if (chatTitle && !chatTitle.dataset.hasTitle) {
-				const title = text.slice(0, 30) + (text.length > 30 ? '...' : '');
-				chatTitle.textContent = title;
-				chatTitle.classList.remove('hidden');
-				chatTitle.dataset.hasTitle = 'true';
-				updateSessionTitle(data.session_id, title);
+		await api.stream('/api/v1/chat/ask_stream/', body, (chunk) => {
+			if (!chunk) return;
+			// 兼容 streamer.py 外层兜底异常（无 type，仅 error/finish 字段）
+			if (!chunk.type && chunk.error) {
+				const target = answerContentEl || aMsg.querySelector('.msg-ai-content');
+				if (target) {
+					target.innerHTML = '<div style="color:var(--danger)">生成失败：' + escapeHtml(chunk.error) + '</div>';
+				}
+				return;
 			}
-		}
+			if (!chunk.type) return;
+			switch (chunk.type) {
+				case 'start': {
+					// 切换"思考中"占位 → 回答骨架
+					if (chunk.session_id) {
+						currentSessionId = chunk.session_id;
+						localStorage.setItem('rag_current_session', currentSessionId);
+						const chatTitle = $('#chatTitle');
+						if (chatTitle && !chatTitle.dataset.hasTitle) {
+							const title = text.slice(0, 30) + (text.length > 30 ? '...' : '');
+							chatTitle.textContent = title;
+							chatTitle.classList.remove('hidden');
+							chatTitle.dataset.hasTitle = 'true';
+							updateSessionTitle(chunk.session_id, title);
+						}
+					}
+					citations = chunk.citations || [];
 
-		const citations = data.citations || [];
-		const sourceHtml = buildSourceHtml(citations);
+					answerContentEl = aMsg.querySelector('.msg-ai-content');
+					answerContentEl.innerHTML = '';
+					const answerFrag = tpl('tmpl-ai-answer').content.cloneNode(true);
+					answerTextEl = answerFrag.querySelector('.ai-answer-text');
+					const sourceArea = answerFrag.querySelector('.ai-source-area');
+					const sourceHtml = buildSourceHtml(citations);
+					if (sourceHtml) sourceArea.innerHTML = sourceHtml;
+					// message_id 此时未知，先用 0 占位，done 时回填
+					answerFrag.querySelector('.feedback-good').setAttribute('onclick', "submitFeedback('" + mid + "', 0, 1)");
+					answerFrag.querySelector('.feedback-bad').setAttribute('onclick', "submitFeedback('" + mid + "', 0, -1)");
+					answerFrag.querySelector('.feedback-detail-btn').setAttribute('onclick', "toggleFeedbackDetail(this,'" + mid + "',0)");
+					answerFrag.querySelector('.feedback-latency').textContent = '生成中...';
+					answerFrag.querySelector('.feedback-detail').id = 'fbd-' + mid;
+					answerContentEl.appendChild(answerFrag);
+					scrollChatBottom();
+					break;
+				}
+				case 'first_token': {
+					ttfbMs = chunk.ttfb_ms || 0;
+					if (answerContentEl) {
+						const latencyEl = answerContentEl.querySelector('.feedback-latency');
+						if (latencyEl) {
+							latencyEl.textContent = '首字 ' + (ttfbMs / 1000).toFixed(2) + 's · 生成中...';
+						}
+					}
+					break;
+				}
+				case 'delta': {
+					answerText += chunk.delta || '';
+					scheduleRender();
+					break;
+				}
+				case 'done': {
+					messageId = chunk.message_id;
+					totalMs = chunk.stats?.total_ms || 0;
+					ttfbMs = chunk.stats?.ttfb_ms || ttfbMs;
+					citations = chunk.citations || citations;
 
-		const answerContent = aMsg.querySelector('.msg-ai-content');
-		answerContent.innerHTML = '';
-		const answerFrag = tpl('tmpl-ai-answer').content.cloneNode(true);
-		answerFrag.querySelector('.ai-answer-text').innerHTML = formatAnswer(data.answer || '');
-		if (sourceHtml) {
-			answerFrag.querySelector('.ai-source-area').innerHTML = sourceHtml;
-		}
-		answerFrag.querySelector('.feedback-good').setAttribute('onclick', "submitFeedback('" + mid + "', " + data.message_id + ", 1)");
-		answerFrag.querySelector('.feedback-bad').setAttribute('onclick', "submitFeedback('" + mid + "', " + data.message_id + ", -1)");
-		answerFrag.querySelector('.feedback-detail-btn').setAttribute('onclick', "toggleFeedbackDetail(this,'" + mid + "'," + data.message_id + ")");
-		answerFrag.querySelector('.feedback-latency').textContent = '生成耗时 ' + ((data.stats?.total_ms || 0) / 1000).toFixed(2) + 's';
-		answerFrag.querySelector('.feedback-detail').id = 'fbd-' + mid;
-		answerContent.appendChild(answerFrag);
-		scrollChatBottom();
-		initSessionList(true);
-		isSending = false;
+					// 最终再渲染一次（确保完整 markdown）
+					if (answerTextEl) {
+						answerTextEl.innerHTML = formatAnswer(answerText);
+					}
+					if (answerContentEl) {
+						// 刷新溯源区
+						const sourceArea = answerContentEl.querySelector('.ai-source-area');
+						if (sourceArea) {
+							const sourceHtml = buildSourceHtml(citations);
+							sourceArea.innerHTML = sourceHtml || '';
+						}
+						// 回填真实 message_id 到反馈按钮
+						answerContentEl.querySelector('.feedback-good').setAttribute('onclick', "submitFeedback('" + mid + "', " + messageId + ", 1)");
+						answerContentEl.querySelector('.feedback-bad').setAttribute('onclick', "submitFeedback('" + mid + "', " + messageId + ", -1)");
+						answerContentEl.querySelector('.feedback-detail-btn').setAttribute('onclick', "toggleFeedbackDetail(this,'" + mid + "'," + messageId + ")");
+						// 展示首字 + 总计耗时
+						const latencyEl = answerContentEl.querySelector('.feedback-latency');
+						if (latencyEl) {
+							const ttfb = (ttfbMs / 1000).toFixed(2);
+							const total = (totalMs / 1000).toFixed(2);
+							latencyEl.textContent = '首字 ' + ttfb + 's · 总计 ' + total + 's';
+						}
+					}
+					scrollChatBottom();
+					initSessionList(true);
+					break;
+				}
+				case 'error': {
+					const detail = chunk.detail || '未知错误';
+					const target = answerContentEl || aMsg.querySelector('.msg-ai-content');
+					if (target) {
+						target.innerHTML = '<div style="color:var(--danger)">生成失败：' + escapeHtml(detail) + '</div>';
+					}
+					break;
+				}
+			}
+		}, { signal: abortController.signal });
 	} catch (e) {
-		console.error('send chat failed:', e);
-		const isTimeout = e.name === 'AbortError';
-		const btn = document.createElement('button');
-		btn.className = 'btn btn-sm btn-primary';
-		btn.textContent = '🔄 重试发送';
-		btn.dataset.retryText = text;
-		btn.addEventListener('click', retrySendChat);
-		const container = document.createElement('div');
-		container.innerHTML = htmlFromTpl('tmpl-error-message', (frag) => {
-			frag.querySelector('.error-text').textContent = isTimeout ? '请求超时，请稍后重试' : '发送失败：' + e.message;
-			frag.querySelector('.error-hint').textContent = isTimeout ? '服务器响应时间过长，请检查网络或缩短提问内容' : '请检查网络连接或重试';
-		});
-		container.appendChild(btn);
-		aMsg.querySelector('.msg-ai-content').innerHTML = '';
-		aMsg.querySelector('.msg-ai-content').appendChild(container);
-		scrollChatBottom();
+		// 区分：用户主动终止 vs 网络/超时异常
+		if (userAborted) {
+			// 用户主动终止：保留已生成的部分回答，标注"已终止"
+			if (answerText && answerTextEl) {
+				answerTextEl.innerHTML = formatAnswer(answerText);
+			}
+			if (answerContentEl) {
+				const latencyEl = answerContentEl.querySelector('.feedback-latency');
+				if (latencyEl) {
+					latencyEl.textContent = '已终止' + (ttfbMs > 0 ? ' · 首字 ' + (ttfbMs / 1000).toFixed(2) + 's' : '');
+				}
+			} else {
+				// start 事件未到达就已终止：显示简短提示
+				aMsg.querySelector('.msg-ai-content').innerHTML = '<div style="color:var(--text-sub)">已终止</div>';
+			}
+			scrollChatBottom();
+		} else {
+			console.error('stream chat failed:', e);
+			const isTimeout = e.name === 'AbortError';
+			const btn = document.createElement('button');
+			btn.className = 'btn btn-sm btn-primary';
+			btn.textContent = '🔄 重试发送';
+			btn.dataset.retryText = text;
+			btn.addEventListener('click', retrySendChat);
+			const container = document.createElement('div');
+			container.innerHTML = htmlFromTpl('tmpl-error-message', (frag) => {
+				frag.querySelector('.error-text').textContent = isTimeout ? '请求超时，请稍后重试' : '发送失败：' + e.message;
+				frag.querySelector('.error-hint').textContent = isTimeout ? '服务器响应时间过长，请检查网络或缩短提问内容' : '请检查网络连接或重试';
+			});
+			container.appendChild(btn);
+			aMsg.querySelector('.msg-ai-content').innerHTML = '';
+			aMsg.querySelector('.msg-ai-content').appendChild(container);
+			scrollChatBottom();
+		}
+	} finally {
+		// 保底重置：无论流式成功、异常还是中断，都必须释放发送锁，否则后续无法发送
+		clearTimeout(timeoutId);
+		currentAbortController = null;
+		userAborted = false;
 		isSending = false;
+		setSendButtonState('idle');
 	}
 }
 
@@ -494,10 +645,23 @@ function renderAIMessageHTML(answer, citations, messageId, stats) {
 		frag.querySelector('.feedback-good').setAttribute('onclick', "submitFeedback('m" + messageId + "', " + messageId + ", 1)");
 		frag.querySelector('.feedback-bad').setAttribute('onclick', "submitFeedback('m" + messageId + "', " + messageId + ", -1)");
 		frag.querySelector('.feedback-detail-btn').setAttribute('onclick', "toggleFeedbackDetail(this,'m" + messageId + "'," + messageId + ")");
-		const latency = stats?.total_ms || stats?.latency_total_ms || 0;
-		frag.querySelector('.feedback-latency').textContent = '耗时 ' + (latency / 1000).toFixed(2) + 's';
+		frag.querySelector('.feedback-latency').textContent = formatLatencyText(stats);
 		frag.querySelector('.feedback-detail').id = 'fbd-m' + messageId;
 	});
+}
+
+/* 格式化耗时展示：有首字耗时则显示"首字 X · 总计 Y"，否则仅显示总计 */
+function formatLatencyText(stats) {
+	if (!stats) return '';
+	const total = stats.total_ms || stats.latency_total_ms || 0;
+	const ttfb = stats.ttfb_ms || stats.latency_ttfb_ms || 0;
+	if (ttfb > 0) {
+		return '首字 ' + (ttfb / 1000).toFixed(2) + 's · 总计 ' + (total / 1000).toFixed(2) + 's';
+	}
+	if (total > 0) {
+		return '总计 ' + (total / 1000).toFixed(2) + 's';
+	}
+	return '';
 }
 
 /* ---- 反馈 ---- */
@@ -760,7 +924,10 @@ function renderMessagesFromRecords(records) {
 	const wrap = frag.querySelector('.msg-wrap');
 	wrap.innerHTML = records.map(r => {
 		return renderUserMessageHTML(r.question, formatSessionTime(r.created_at)) +
-			renderAIMessageHTML(r.answer, r.citations, r.id, { latency_total_ms: r.latency_total_ms });
+			renderAIMessageHTML(r.answer, r.citations, r.id, {
+				latency_total_ms: r.latency_total_ms,
+				latency_ttfb_ms: r.latency_ttfb_ms
+			});
 	}).join('');
 	const wrapper = document.createElement('div');
 	wrapper.appendChild(frag);

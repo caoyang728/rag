@@ -370,6 +370,15 @@
 	background: var(--primary-hover)
 }
 
+/* 终止按钮状态：发送中点击可中断流式 */
+.chat-send-btn.stopping {
+	background: var(--danger, #ef4444);
+}
+
+.chat-send-btn.stopping:hover {
+	background: var(--danger-hover, #dc2626);
+}
+
 /* 消息样式 */
 .msg-wrap {
 	display: flex;
@@ -504,31 +513,40 @@
 	font-weight: 500
 }
 
+/* 网格布局：卡片自动填充行，节省纵向空间 */
 .source-list {
-	display: flex;
-	flex-direction: column;
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
 	gap: 6px
 }
 
 .source-card {
-	padding: 10px 12px;
+	padding: 8px 10px;
 	background: var(--bg);
 	border-radius: var(--radius-sm);
 	font-size: 12px;
 	border: 1px solid var(--border);
+	min-width: 0
 }
 
+/* 标题行：文档名 + 相关度，单行 */
 .source-card-title {
 	color: var(--text);
 	font-weight: 500;
-	flex: 1;
 	display: flex;
-	flex-direction: column;
-	gap: 4px
+	align-items: center;
+	gap: 6px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap
 }
 
-.source-card-title>span:first-child {
-	font-weight: 600
+/* 元信息行：章节/页码/引用数 inline 排列，自动换行 */
+.source-card-meta {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 2px 8px;
+	margin-top: 4px
 }
 
 .source-card-section,
@@ -540,14 +558,13 @@
 
 .source-card-count {
 	font-size: 10px;
-	color: var(--text-muted);
-	margin-top: 2px
+	color: var(--text-muted)
 }
 
 .source-score {
 	color: var(--primary);
 	font-weight: 600;
-	margin-left: 8px;
+	margin-left: auto;
 	font-size: 11px;
 	flex-shrink: 0
 }

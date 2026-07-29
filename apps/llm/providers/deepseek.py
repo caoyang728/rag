@@ -70,32 +70,44 @@ class DeepSeekProvider(BaseLLMProvider):
             }
 
     def stream(self, messages, temperature=0.3, max_tokens=2048, **kwargs) -> Iterator[Dict[str, Any]]:
+        """流式生成，yield {'delta', 'finish'} 帧
+
+        使用 with 上下文管理器管理 Stream 生命周期：当调用方中断迭代（如客户端断开
+        触发 GeneratorExit）时，with 会自动关闭底层 HTTP 连接，避免连接泄漏。
+        """
         t0 = time.time()
         try:
-            resp = self.client.chat.completions.create(
+            # WARNING: 必须用 with 管理 Stream 对象。
+            # 当 ask_stream 生成器被 close()（客户端断开）时，GeneratorExit 会中断
+            # for 循环，with 的 __exit__ 会调用 resp.close() 释放 HTTP 连接。
+            with self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 stream=True,
-            )
-            full = []
-            for chunk in resp:
-                if not chunk.choices:
-                    continue
-                delta = chunk.choices[0].delta.content or ''
-                if delta:
-                    full.append(delta)
-                    yield {'delta': delta, 'finish': False}
-            latency_ms = int((time.time() - t0) * 1000)
-            yield {
-                'delta': '',
-                'finish': True,
-                'content': ''.join(full),
-                'latency_ms': latency_ms,
-                'model': self.model,
-                'provider': self.name,
-            }
+            ) as resp:
+                full = []
+                for chunk in resp:
+                    if not chunk.choices:
+                        continue
+                    delta = chunk.choices[0].delta.content or ''
+                    if delta:
+                        full.append(delta)
+                        yield {'delta': delta, 'finish': False}
+                latency_ms = int((time.time() - t0) * 1000)
+                yield {
+                    'delta': '',
+                    'finish': True,
+                    'content': ''.join(full),
+                    'latency_ms': latency_ms,
+                    'model': self.model,
+                    'provider': self.name,
+                }
+        except GeneratorExit:
+            # 客户端断开：with 已自动关闭 resp，无需额外处理
+            logger.info('[DeepSeek] stream interrupted by client disconnect')
+            raise
         except Exception as e:
             logger.exception('[DeepSeek] stream error')
             yield {'delta': f'[流式失败: {e}]', 'finish': True, 'error': str(e)}

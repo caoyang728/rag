@@ -9,6 +9,7 @@ router.register("sessions", views.SessionViewSet, basename="session")
 
 urlpatterns = [
     path("ask/", views.ChatAskView.as_view()),
+    path("ask_stream/", views.ChatAskStreamView.as_view()),
     path("feedback/", views.FeedbackView.as_view()),
     path("records/", views.QaRecordListView.as_view()),
     path("", include(router.urls)),

@@ -333,27 +333,37 @@ const api = {
 		const reader = response.body.getReader();
 		const decoder = new TextDecoder('utf-8');
 		let buffer = '';
+		let streamDone = false;
 
-		while (true) {
-			const { done, value } = await reader.read();
-			if (done) break;
+		// WARNING: 收到 [DONE] 标记后必须主动结束读取。
+		// 某些服务器（如 Django dev server）在 StreamingHttpResponse 迭代完后
+		// 不一定及时关闭连接，导致 reader.read() 永不返回 done=true，
+		// 调用方 await api.stream(...) 会一直挂起（isSending 卡死）。
+		try {
+			while (!streamDone) {
+				const { done, value } = await reader.read();
+				if (done) break;
 
-			buffer += decoder.decode(value, { stream: true });
-			const lines = buffer.split('\n');
-			buffer = lines.pop() || '';
+				buffer += decoder.decode(value, { stream: true });
+				const lines = buffer.split('\n');
+				buffer = lines.pop() || '';
 
-			for (const line of lines) {
-				if (line.trim().startsWith('data: ')) {
-					const jsonStr = line.slice(6);
-					if (jsonStr.trim() === '[DONE]') continue;
-					try {
-						const chunk = JSON.parse(jsonStr);
-						onChunk(chunk);
-					} catch (e) {
-						console.warn('Failed to parse SSE chunk:', e);
+				for (const line of lines) {
+					if (line.trim().startsWith('data: ')) {
+						const jsonStr = line.slice(6);
+						if (jsonStr.trim() === '[DONE]') { streamDone = true; break; }
+						try {
+							const chunk = JSON.parse(jsonStr);
+							onChunk(chunk);
+						} catch (e) {
+							console.warn('Failed to parse SSE chunk:', e);
+						}
 					}
 				}
 			}
+		} finally {
+			// 主动释放 reader，避免连接悬挂
+			try { reader.cancel(); } catch (e) { /* ignore */ }
 		}
 	},
 

@@ -150,6 +150,19 @@
 	margin: 12px 0 20px
 }
 
+.auth-back {
+	display: block;
+	text-align: center;
+	margin-top: 16px;
+	color: var(--text-sub);
+	font-size: 13px;
+	text-decoration: none
+}
+
+.auth-back:hover {
+	color: var(--primary)
+}
+
 .auth-divider {
 	display: flex;
 	align-items: center;

@@ -284,6 +284,22 @@ SHORT_TERM_MAX_TURNS = int(os.getenv('SHORT_TERM_MAX_TURNS', '6'))
 MAX_LOGIN_FAIL = int(os.getenv('MAX_LOGIN_FAIL', '5'))
 BAN_DURATION_MIN = int(os.getenv('BAN_DURATION_MIN', '15'))
 
+# --- 邮件服务（SMTP）---
+# 用于密码重置、系统通知等场景；未配置 EMAIL_HOST 时不发送邮件
+EMAIL_ENABLED = os.getenv('EMAIL_ENABLED', '0') == '1'
+EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend' if EMAIL_ENABLED else 'django.core.mail.backends.console.EmailBackend'
+EMAIL_HOST = os.getenv('EMAIL_HOST', '')
+EMAIL_PORT = int(os.getenv('EMAIL_PORT', '465'))
+EMAIL_USE_SSL = os.getenv('EMAIL_USE_SSL', '1') == '1'
+EMAIL_USE_TLS = os.getenv('EMAIL_USE_TLS', '0') == '1'
+EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', '')
+EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '')
+EMAIL_FROM = os.getenv('EMAIL_FROM', EMAIL_HOST_USER)
+# 密码重置链接有效期（秒），默认 5 分钟
+PASSWORD_RESET_TIMEOUT = int(os.getenv('PASSWORD_RESET_TIMEOUT', '300'))
+# 前端基础地址（用于拼接重置密码页面链接）
+FRONTEND_BASE_URL = os.getenv('FRONTEND_BASE_URL', 'http://localhost:8080')
+
 # --- 日志 ---
 class InterceptHandler(logging.Handler):
     def emit(self, record):

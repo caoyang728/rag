@@ -441,6 +441,18 @@ ol {
 	letter-spacing: 0.02em
 }
 
+/* 分页按钮：统一尺寸（多页面共用） */
+.page-btn {
+	min-width: 32px;
+	height: 28px;
+	padding: 4px 8px;
+}
+
+.page-btn:disabled {
+	opacity: 0.4;
+	cursor: not-allowed;
+}
+
 .table tbody tr:nth-child(even) {
 	background: #fafbfc
 }

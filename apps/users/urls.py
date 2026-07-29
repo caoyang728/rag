@@ -17,6 +17,8 @@ urlpatterns = [
     path("logout/", views.LogoutView.as_view()),
     path("profile/", views.ProfileView.as_view()),
     path("reset-password/", views.ResetPasswordView.as_view()),
+    path("password-reset/request/", views.PasswordResetRequestView.as_view()),
+    path("password-reset/confirm/", views.PasswordResetConfirmView.as_view()),
     path("token/refresh/", TokenRefreshView.as_view()),
     # 个人权限查看 / 权限申请
     path("permissions/me/", views.MyPermissionsView.as_view()),

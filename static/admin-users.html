@@ -7,6 +7,7 @@
 	<title>用户与角色 · 知库 Agent</title>
 	<link rel="stylesheet" href="/static/css/common.css">
 	<link rel="stylesheet" href="/static/css/multi-select.css">
+	<link rel="stylesheet" href="/static/css/admin-users.css">
 </head>
 
 <body>
@@ -35,7 +36,7 @@
 						<select id="filterDept" class="select" style="width:130px" onchange="onFilterDeptChange()">
 							<option value="">全部部门</option>
 						</select>
-						<select id="filterTeam" class="select" style="width:130px" onchange="searchUsers()">
+						<select id="filterTeam" class="select" style="width:130px" onchange="searchUsers()" disabled>
 							<option value="">全部团队</option>
 						</select>
 						<select id="filterRole" class="select" style="width:110px" onchange="searchUsers()">
@@ -49,9 +50,12 @@
 						<button class="btn btn-primary btn-sm" onclick="searchUsers()">搜索</button>
 					</div>
 					<div class="flex gap-8">
+						<button class="btn btn-sm" onclick="downloadImportTemplate()" style="background:var(--bg)">下载模板</button>
+						<button class="btn btn-sm" onclick="batchImport()" style="background:var(--bg)">批量导入</button>
 						<button class="btn btn-sm" onclick="batchExport()" style="background:var(--bg)">批量导出</button>
 						<button class="btn btn-sm" onclick="exportAll()" style="background:var(--bg)">导出全部</button>
 						<button class="btn btn-primary btn-sm" onclick="openUserModal()">＋ 新建用户</button>
+						<input type="file" id="importFileInput" accept=".csv" style="display:none" onchange="handleImportFile(event)">
 					</div>
 				</div>
 
@@ -62,9 +66,9 @@
 							<tr>
 								<th style="width:40px"><input type="checkbox" id="checkAll" onchange="toggleCheckAll()">
 								</th>
-								<th>用户名</th>
-								<th>姓名</th>
-								<th>邮箱</th>
+								<th class="th-sortable" onclick="onSortChange('username')">用户名 <span id="sort-username" class="sort-indicator"></span></th>
+								<th class="th-sortable" onclick="onSortChange('real_name')">姓名 <span id="sort-real_name" class="sort-indicator"></span></th>
+								<th class="th-sortable" onclick="onSortChange('email')">邮箱 <span id="sort-email" class="sort-indicator"></span></th>
 								<th>部门</th>
 								<th>团队</th>
 								<th>角色</th>
@@ -81,9 +85,14 @@
 				</div>
 
 				<!-- 分页 -->
-				<div class="flex items-center justify-between mt-16 shrink-0">
-					<div class="text-sub text-sm" id="paginationInfo"></div>
-					<div class="flex gap-4" id="paginationBtns"></div>
+				<div class="flex items-center justify-center mt-16 shrink-0 gap-10">
+					<span class="text-sub text-sm" id="paginationInfo"></span>
+					<select id="pageSizeSelect" class="select page-size-select" onchange="onPageSizeChange()">
+						<option value="20">20 条</option>
+						<option value="50">50 条</option>
+						<option value="100">100 条</option>
+					</select>
+					<div class="flex items-center gap-4" id="paginationBtns"></div>
 				</div>
 			</div>
 		</div>
@@ -175,15 +184,6 @@
 				</div>
 			</td>
 		</tr>
-	</template>
-
-	<template id="tmpl-pagination-btn">
-		<button class="btn btn-sm {{active}} page-btn" onclick="goPage({{page}})"
-			style="min-width:36px">{{page}}</button>
-	</template>
-
-	<template id="tmpl-pagination-ellipsis">
-		<span class="text-sub" style="padding:0 4px">...</span>
 	</template>
 
 	<div id="mask" class="mask"></div>

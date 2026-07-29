@@ -241,10 +241,123 @@ class ResetPasswordView(APIView):
         return Response({"ok": True})
 
 
+class PasswordResetRequestView(APIView):
+    """密码重置请求：接收邮箱 + 图形验证码，验证通过后生成 6 位验证码发送至邮箱。
+    验证码存入 Redis（5 分钟过期），用户在前端输入验证码 + 新密码完成重置。
+    安全考虑：无论邮箱是否存在，都返回相同的成功信息，避免被用于探测注册邮箱。
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        import random
+        from django.conf import settings
+        from django.core.mail import send_mail
+        from apps.security.views import verify_captcha, _get_redis
+
+        email = (request.data.get("email") or "").strip().lower()
+        captcha_id = request.data.get("captcha_id", "")
+        captcha_code = request.data.get("captcha_code", "")
+
+        if not email:
+            return Response({"detail": "请输入邮箱"}, status=400)
+        # 校验图形验证码，防止接口被刷
+        if not verify_captcha(captcha_id, captcha_code):
+            return Response({"detail": "图形验证码错误或已过期"}, status=400)
+
+        user = User.objects.filter(email__iexact=email, is_deleted=False).first()
+        if user:
+            # 生成 6 位数字验证码
+            code = f"{random.randint(0, 999999):06d}"
+            r = _get_redis()
+            redis_key = f"pwd_reset:{email}"
+            # 防刷：1 分钟内不可重复请求
+            if r and r.exists(redis_key):
+                ttl = r.ttl(redis_key)
+                if ttl and ttl > 240:  # 距上次发送不到 1 分钟（300 - 240 = 60s）
+                    return Response({"detail": "请求过于频繁，请 1 分钟后再试"}, status=429)
+            # 存入 Redis，5 分钟过期
+            if r:
+                r.setex(redis_key, 300, code)
+            # 发送验证码邮件
+            try:
+                send_mail(
+                    subject="知库 Agent - 密码重置验证码",
+                    message=f"您正在重置知库 Agent 账号密码。\n\n验证码：{code}\n\n该验证码 5 分钟内有效，如非本人操作，请忽略此邮件。",
+                    from_email=settings.EMAIL_FROM,
+                    recipient_list=[email],
+                    fail_silently=False,
+                )
+                logger.info(f"PasswordResetRequest - code sent to {email}, user={user.username}")
+            except Exception as e:
+                logger.error(f"PasswordResetRequest - failed to send email to {email}: {e}")
+                return Response({"detail": "验证码发送失败，请联系管理员"}, status=500)
+        else:
+            logger.warning(f"PasswordResetRequest - email not found: {email}")
+        # 安全考虑：不暴露邮箱是否存在
+        return Response({"ok": True, "message": "验证码已发送至该邮箱"})
+
+
+class PasswordResetConfirmView(APIView):
+    """密码重置确认：验证邮箱 + 6 位验证码，通过后设置新密码。
+    验证码从 Redis 读取，验证后立即删除（一次性使用）。
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        from apps.security.views import _get_redis
+
+        email = (request.data.get("email") or "").strip().lower()
+        code = request.data.get("code", "")
+        new_password = request.data.get("new_password", "")
+
+        # 参数校验
+        if not email:
+            return Response({"detail": "请输入邮箱"}, status=400)
+        if not code:
+            return Response({"detail": "请输入验证码"}, status=400)
+        if len(new_password) < 8:
+            return Response({"detail": "新密码至少 8 位"}, status=400)
+        if len(new_password) > 32:
+            return Response({"detail": "新密码最多 32 位"}, status=400)
+        if not re.search(r'[A-Z]', new_password):
+            return Response({"detail": "新密码必须包含大写字母"}, status=400)
+        if not re.search(r'[a-z]', new_password):
+            return Response({"detail": "新密码必须包含小写字母"}, status=400)
+        if not re.search(r'\d', new_password):
+            return Response({"detail": "新密码必须包含数字"}, status=400)
+
+        # 从 Redis 读取验证码
+        r = _get_redis()
+        if not r:
+            return Response({"detail": "服务暂时不可用，请稍后重试"}, status=500)
+        redis_key = f"pwd_reset:{email}"
+        stored_code = r.get(redis_key)
+        if not stored_code:
+            return Response({"detail": "验证码已过期，请重新获取"}, status=400)
+        # _get_redis 使用 decode_responses=True，返回的是 str
+        if stored_code != code:
+            return Response({"detail": "验证码错误"}, status=400)
+        # 验证通过，立即删除验证码（一次性使用）
+        r.delete(redis_key)
+
+        # 查找用户并重置密码
+        user = User.objects.filter(email__iexact=email, is_deleted=False).first()
+        if not user:
+            return Response({"detail": "账号不存在"}, status=400)
+        user.set_password(new_password)
+        user.password_changed_at = timezone.now()
+        user.save()
+        logger.info(f"PasswordResetConfirm - password reset for user={user.username}")
+        return Response({"ok": True, "message": "密码已重置，请使用新密码登录"})
+
+
 class UserViewSet(viewsets.ModelViewSet):
     queryset = User.objects.filter(is_deleted=False).order_by("-created_at")
     serializer_class = UserSerializer
     permission_classes = [IsAuthenticated, CanManageUsers]
+    # 允许排序的字段（DRF OrderingFilter 自动识别 ordering 查询参数）
+    ordering_fields = ['username', 'email', 'real_name', 'created_at', 'last_login_at']
+    ordering = '-created_at'
 
     # ---------- 权限辅助 ----------
     def _get_user_roles(self, user):
@@ -407,7 +520,7 @@ class UserViewSet(viewsets.ModelViewSet):
                 ).first()
                 if existing:
                     team_name = Team.objects.filter(id=tid).values_list('name', flat=True).first() or f'团队#{tid}'
-                    return f"团队\"{team_name}\"已有团队组长：{existing.user.real_name or existing.user.username}"
+                    return f"团队“{team_name}”已有团队组长：{existing.user.real_name or existing.user.username}"
         return None
 
     # ---------- 查询（限定范围）----------
@@ -760,6 +873,216 @@ class UserViewSet(viewsets.ModelViewSet):
             users = self.filter_queryset(self.get_queryset())
         return _export_users_csv(users, filename="users_export.csv")
 
+    # ---- 批量导入 ----
+    @action(detail=False, methods=["post"])
+    def batch_import(self, request):
+        """POST /api/v1/auth/users/batch_import/
+        上传 CSV 文件批量导入员工，返回带「结果」和「原因」两列的 CSV 供下载。
+        CSV 列：用户名, 姓名, 邮箱, 部门, 团队, 角色, 状态
+        """
+        u = request.user
+        # 权限校验：与 create 一致，仅管理角色可导入
+        is_super = u.is_super_admin
+        can_manage_all = has_permission(u, 'user:manage_users:all')
+        is_dept = not is_super and not can_manage_all and has_permission(u, 'user:manage_users:department')
+        is_team = not is_super and not can_manage_all and not is_dept and has_permission(u, 'user:manage_users:team')
+        if not is_super and not can_manage_all and not is_dept and not is_team:
+            return Response({"detail": "无用户管理权限"}, status=403)
+
+        csv_file = request.FILES.get("file")
+        if not csv_file:
+            return Response({"detail": "请上传 CSV 文件"}, status=400)
+        if not csv_file.name.lower().endswith(".csv"):
+            return Response({"detail": "仅支持 .csv 文件"}, status=400)
+
+        # 读取文件内容并处理 BOM（Excel 中文 CSV 通常带 UTF-8 BOM）
+        raw = csv_file.read().decode("utf-8-sig")
+        reader = csv.reader(io.StringIO(raw))
+        rows = list(reader)
+        if not rows:
+            return Response({"detail": "CSV 文件为空"}, status=400)
+
+        # 解析表头，建立列名→索引映射，兼容列顺序变化
+        header = [h.strip() for h in rows[0]]
+        col_map = {}
+        for idx, name in enumerate(header):
+            col_map[name] = idx
+
+        # 校验必填列
+        required_cols = ["用户名", "姓名"]
+        missing = [c for c in required_cols if c not in col_map]
+        if missing:
+            return Response({"detail": f"CSV 缺少必要列：{','.join(missing)}"}, status=400)
+
+        # 预加载部门、团队、角色映射（按名称查找，减少 N+1 查询）
+        dept_map = {d.name: d for d in Department.objects.filter(is_deleted=False)}
+        team_map = {(t.name, t.department_id): t for t in Team.objects.filter(is_deleted=False)}
+        role_map = {r.name: r for r in Role.objects.all()}
+
+        # 非超管可分配的角色ID集合（与 _filter_downward_roles / _filter_role_ids 一致）
+        if is_super or can_manage_all:
+            allowed_role_ids = set(Role.objects.values_list('id', flat=True))
+        elif is_dept:
+            allowed_role_ids = set(Role.objects.filter(code__in=['team_leader', 'employee', 'readonly']).values_list('id', flat=True))
+        else:  # is_team
+            allowed_role_ids = set(Role.objects.filter(code__in=['employee', 'readonly']).values_list('id', flat=True))
+
+        # 组长锁定部门/团队，与 create 逻辑一致
+        my_team_ids = list(UserTeam.objects.filter(user=u).values_list('team_id', flat=True)) if is_team else []
+
+        # 输出 CSV：原列 + 结果 + 原因
+        out_buf = io.StringIO()
+        out_buf.write('\ufeff')  # BOM for Excel
+        writer = csv.writer(out_buf)
+        writer.writerow(header + ["结果", "原因"])
+
+        success_count = 0
+        fail_count = 0
+        for line_no, row in enumerate(rows[1:], start=2):
+            def get_col(name):
+                idx = col_map.get(name)
+                if idx is None or idx >= len(row):
+                    return ""
+                return (row[idx] or "").strip()
+
+            username = get_col("用户名")
+            real_name = get_col("姓名")
+            email = get_col("邮箱")
+            dept_name = get_col("部门")
+            team_name = get_col("团队")
+            role_name = get_col("角色")
+            status_str = get_col("状态")
+
+            result = "失败"
+            reason = ""
+
+            # 行级校验
+            if not username:
+                reason = "用户名不能为空"
+            elif not real_name:
+                reason = "姓名不能为空"
+            elif not email:
+                reason = "邮箱不能为空"
+            elif User.objects.filter(username=username, is_deleted=False).exists():
+                reason = f"用户名「{username}」已存在"
+            elif User.objects.filter(email=email, is_deleted=False).exists():
+                reason = f"邮箱「{email}」已被使用"
+            else:
+                # 解析部门
+                dept_id = None
+                department = None
+                if dept_name:
+                    department = dept_map.get(dept_name)
+                    if not department:
+                        reason = f"部门「{dept_name}」不存在"
+                    else:
+                        dept_id = department.id
+
+                # 非超管权限范围校验
+                if not reason:
+                    if is_team and dept_id and dept_id != u.department_id:
+                        reason = "组长只能导入本部门员工"
+                    elif is_dept and dept_id and dept_id != u.department_id:
+                        reason = "部门经理只能导入本部门员工"
+
+                # 解析团队
+                team_id = None
+                if not reason and team_name and dept_id:
+                    team = team_map.get((team_name, dept_id))
+                    if not team:
+                        reason = f"团队「{team_name}」在部门「{dept_name}」下不存在"
+                    else:
+                        team_id = team.id
+                        # 组长只能导入本团队
+                        if is_team and team_id not in my_team_ids:
+                            reason = "组长只能导入本团队员工"
+
+                # 解析角色
+                role_id = None
+                if not reason and role_name:
+                    role = role_map.get(role_name)
+                    if not role:
+                        reason = f"角色「{role_name}」不存在"
+                    else:
+                        role_id = role.id
+                        # 非超管不能分配高级角色
+                        if role_id not in allowed_role_ids:
+                            reason = f"无权分配角色「{role_name}」"
+
+                # 解析状态
+                status_val = "active"
+                if status_str:
+                    if status_str in ("启用", "active"):
+                        status_val = "active"
+                    elif status_str in ("禁用", "disabled"):
+                        status_val = "disabled"
+                    else:
+                        reason = f"状态「{status_str}」无效，应为 启用/禁用"
+
+                # 校验部门经理/团队leader唯一性
+                if not reason:
+                    role_ids_list = [role_id] if role_id else []
+                    conflict = self._validate_role_uniqueness(None, role_ids_list, dept_id, [team_id] if team_id else [])
+                    if conflict:
+                        reason = conflict
+
+                # 创建用户
+                if not reason:
+                    try:
+                        with transaction.atomic():
+                            # 生成默认密码：与 create 一致
+                            pwd = username[:1].upper() + username[1:].lower() + "@1234"
+                            user = User.objects.create(
+                                username=username,
+                                email=email,
+                                real_name=real_name,
+                                department_id=dept_id,
+                                status=status_val,
+                            )
+                            user.set_password(pwd)
+                            user.save()
+                            if role_id:
+                                UserRole.objects.create(user=user, role_id=role_id)
+                            if team_id:
+                                UserTeam.objects.create(user=user, team_id=team_id)
+                            # 同步 Team.leader_id / Department.leader_id
+                            if role_id:
+                                self._sync_role_leader(user, {role_id})
+                        result = "成功"
+                        success_count += 1
+                    except Exception as e:
+                        reason = f"创建失败：{str(e)[:200]}"
+
+            if result == "失败":
+                fail_count += 1
+            writer.writerow(row + [result, reason])
+
+        # 返回带结果的 CSV 文件
+        resp = HttpResponse(out_buf.getvalue(), content_type="text/csv; charset=utf-8")
+        resp["Content-Disposition"] = f'attachment; filename="users_import_result.csv"'
+        # 通过自定义 header 返回统计信息，前端可读取展示 toast
+        resp["X-Import-Success"] = str(success_count)
+        resp["X-Import-Fail"] = str(fail_count)
+        logger.info(f"User.batch_import - user: {u.username}, success: {success_count}, fail: {fail_count}")
+        return resp
+
+    # ---- 下载导入模板 ----
+    @action(detail=False, methods=["get"])
+    def import_template(self, request):
+        """GET /api/v1/auth/users/import_template/
+        下载 CSV 导入模板，含表头和示例行。
+        """
+        buf = io.StringIO()
+        buf.write('\ufeff')
+        writer = csv.writer(buf)
+        writer.writerow(["用户名", "姓名", "邮箱", "部门", "团队", "角色", "状态"])
+        writer.writerow(["zhangsan", "张三", "zhangsan@example.com", "研发部", "后端组", "普通员工", "启用"])
+        writer.writerow(["lisi", "李四", "lisi@example.com", "研发部", "前端组", "只读员工", "启用"])
+        writer.writerow(["wangwu", "王五", "王五@example.com", "", "", "文档管理员", "禁用"])
+        resp = HttpResponse(buf.getvalue(), content_type="text/csv; charset=utf-8")
+        resp["Content-Disposition"] = f'attachment; filename="users_import_template.csv"'
+        return resp
+
     # ---- 角色、部门下拉选项 ----
     @action(detail=False, methods=["get"])
     def form_options(self, request):
@@ -866,7 +1189,7 @@ class DepartmentViewSet(viewsets.ModelViewSet):
         data["code"] = _ensure_unique_code(data["code"], Department)
 
         if Department.objects.filter(name=name, is_deleted=False).exists():
-            return Response({"detail": f"部门\"{name}\"已存在"}, status=400)
+            return Response({"detail": f"部门“{name}”已存在"}, status=400)
 
         deleted_dept = Department.objects.filter(name=name, is_deleted=True).first()
         if deleted_dept:
@@ -879,7 +1202,7 @@ class DepartmentViewSet(viewsets.ModelViewSet):
             try:
                 deleted_dept.save()
             except IntegrityError:
-                return Response({"detail": f"部门\"{name}\"已存在"}, status=400)
+                return Response({"detail": f"部门“{name}”已存在"}, status=400)
             if leader_id is not None:
                 self._set_leader(deleted_dept, leader_id)
             logger.info(f"Department.create - restored deleted department: {deleted_dept.name}")
@@ -890,7 +1213,7 @@ class DepartmentViewSet(viewsets.ModelViewSet):
         try:
             dept = ser.save()
         except IntegrityError:
-            return Response({"detail": f"部门\"{name}\"已存在"}, status=400)
+            return Response({"detail": f"部门“{name}”已存在"}, status=400)
         if leader_id is not None:
             self._set_leader(dept, leader_id)
         return Response(DepartmentSerializer(dept).data, status=201)
@@ -1163,7 +1486,7 @@ class TeamViewSet(viewsets.ModelViewSet):
         data["department_id"] = dept_id
 
         if Team.objects.filter(name=name, department_id=dept_id, is_deleted=False).exists():
-            return Response({"detail": f"部门\"{dept.name}\"下已存在团队\"{name}\""}, status=400)
+            return Response({"detail": f"部门“{dept.name}”下已存在团队“{name}”"}, status=400)
 
         if not data.get("code", "").strip():
             logger.info(f"Team.create - auto generating code, department_id: {dept_id}")
@@ -1184,7 +1507,7 @@ class TeamViewSet(viewsets.ModelViewSet):
             try:
                 deleted_team.save()
             except IntegrityError:
-                return Response({"detail": f"部门\"{dept.name}\"下已存在团队\"{name}\""}, status=400)
+                return Response({"detail": f"部门“{dept.name}”下已存在团队“{name}”"}, status=400)
             if leader_id is not None:
                 self._set_leader(deleted_team, leader_id)
             logger.info(f"Team.create - restored deleted team: {deleted_team.name}, department_id: {dept_id}")
@@ -1203,7 +1526,7 @@ class TeamViewSet(viewsets.ModelViewSet):
             logger.info(f"Team.create - success, team id: {team.id}, department_id: {team.department_id}")
             return Response(TeamSerializer(team).data, status=201)
         except IntegrityError:
-            return Response({"detail": f"部门\"{dept.name}\"下已存在团队\"{name}\""}, status=400)
+            return Response({"detail": f"部门“{dept.name}”下已存在团队“{name}”"}, status=400)
         except Exception as e:
             logger.error(f"Team.create - failed, exception: {str(e)}")
             raise

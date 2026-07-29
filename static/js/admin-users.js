@@ -3,6 +3,8 @@ let currentPage = 1, totalPages = 1, totalCount = 0, pageSize = 20;
 let filterOptions = {};
 let _loadSeq = 0;       // loadUsers 请求序列号，防止竞态
 let _filterLoadSeq = 0; // loadFilterOptions 请求序列号，防止竞态
+let sortField = '';      // 当前排序字段（空表示默认 -created_at）
+let sortOrder = '';      // '' | 'asc' | 'desc'
 
 const $id = id => document.getElementById(id);
 
@@ -61,12 +63,21 @@ async function loadFilterOptions(force = false) {
 		const uDept = $id('userDept');
 		uDept.innerHTML = '<option value="">— 无 —</option>' +
 			(filterOptions.departments || []).map(d => `<option value="${d.id}">${escapeHtml(d.name)}</option>`).join('');
+		// 初始化时未选择部门，团队筛选应禁用
+		$id('filterTeam').disabled = true;
 		populateRoleSelect(null);
 		populateTeamSelect(0, null);
 	} catch (e) { console.error('加载筛选项失败:', e); }
 }
 
 function searchUsers() {
+	currentPage = 1;
+	loadUsers();
+}
+
+/** 切换每页条数 */
+function onPageSizeChange() {
+	pageSize = parseInt($id('pageSizeSelect').value) || 20;
 	currentPage = 1;
 	loadUsers();
 }
@@ -79,10 +90,17 @@ function onSearchInput() {
 
 function onFilterDeptChange() {
 	const deptId = parseInt($id('filterDept').value) || 0;
+	const teamSel = $id('filterTeam');
+	if (!deptId) {
+		// 未选择部门时禁用团队下拉
+		teamSel.disabled = true;
+		searchUsers();
+		return;
+	}
+	teamSel.disabled = false;
 	const teams = filterOptions.teams || [];
-	const filtered = deptId ? teams.filter(t => t.department_id === deptId) : teams;
-	const sel = $id('filterTeam');
-	sel.innerHTML = '<option value="">全部团队</option>' +
+	const filtered = teams.filter(t => t.department_id === deptId);
+	teamSel.innerHTML = '<option value="">全部团队</option>' +
 		filtered.map(t => `<option value="${t.id}">${escapeHtml(t.name)}</option>`).join('');
 	searchUsers();
 }
@@ -100,6 +118,10 @@ async function loadUsers() {
 	if (fr) params.set('role_id', fr);
 	const fs = $id('filterStatus').value;
 	if (fs) params.set('status', fs);
+	// 排序参数：DRF OrderingFilter 接受 ordering=field（升序）或 ordering=-field（降序）
+	if (sortField) {
+		params.set('ordering', (sortOrder === 'desc' ? '-' : '') + sortField);
+	}
 	try {
 		const data = await api.getJson(`/api/v1/auth/users/?${params}`);
 		if (seq !== _loadSeq) return;  // 过时请求，忽略
@@ -108,10 +130,37 @@ async function loadUsers() {
 		if (currentPage > totalPages) currentPage = 1;
 		renderTable(data.results || []);
 		renderPagination();
+		renderSortIndicators();
 	} catch (e) {
 		if (seq !== _loadSeq) return;
 		$id('userTable').innerHTML = '<tr><td colspan="9" class="text-sub" style="text-align:center;padding:28px">加载失败</td></tr>';
 		console.error(e);
+	}
+}
+
+/** 点击表头切换排序：同字段切换方向，不同字段切换为该字段升序 */
+function onSortChange(field) {
+	if (sortField === field) {
+		// 同字段：asc → desc → 取消
+		if (sortOrder === 'asc') sortOrder = 'desc';
+		else if (sortOrder === 'desc') { sortField = ''; sortOrder = ''; }
+		else sortOrder = 'asc';
+	} else {
+		sortField = field;
+		sortOrder = 'asc';
+	}
+	currentPage = 1;
+	loadUsers();
+}
+
+/** 渲染表头排序指示器（↑/↓） */
+function renderSortIndicators() {
+	document.querySelectorAll('.sort-indicator').forEach(el => {
+		el.textContent = '';
+	});
+	if (sortField) {
+		const indicator = $id('sort-' + sortField);
+		if (indicator) indicator.textContent = sortOrder === 'asc' ? '↑' : '↓';
 	}
 }
 
@@ -145,39 +194,31 @@ function renderTable(users) {
 
 function renderPagination() {
 	$id('paginationInfo').textContent = `共 ${totalCount} 条，第 ${currentPage}/${totalPages} 页`;
-	let btns = '';
-	const maxVisible = 7;
-	if (totalPages <= maxVisible) {
-		for (let i = 1; i <= totalPages; i++) {
-			btns += fillTemplate('tmpl-pagination-btn', {
-				page: i,
-				active: i === currentPage ? 'btn-primary' : '',
-			});
-		}
+	const btns = [];
+	// 首页：第 1 页时禁用
+	btns.push(`<button class="btn btn-sm page-btn" onclick="goPage(1)" ${currentPage <= 1 ? 'disabled' : ''}>«</button>`);
+	// 上一页：第 1 页时禁用
+	btns.push(`<button class="btn btn-sm page-btn" onclick="goPage(${currentPage - 1})" ${currentPage <= 1 ? 'disabled' : ''}>‹</button>`);
+	// 页码：最多显示 5 个，当前页尽量居中
+	if (totalPages <= 5) {
+		for (let i = 1; i <= totalPages; i++) btns.push(renderPageBtn(i));
 	} else {
-		if (currentPage <= 3) {
-			for (let i = 1; i <= 4; i++) {
-				btns += fillTemplate('tmpl-pagination-btn', { page: i, active: i === currentPage ? 'btn-primary' : '' });
-			}
-			btns += $id('tmpl-pagination-ellipsis').innerHTML;
-			btns += fillTemplate('tmpl-pagination-btn', { page: totalPages, active: '' });
-		} else if (currentPage >= totalPages - 2) {
-			btns += fillTemplate('tmpl-pagination-btn', { page: 1, active: '' });
-			btns += $id('tmpl-pagination-ellipsis').innerHTML;
-			for (let i = totalPages - 3; i <= totalPages; i++) {
-				btns += fillTemplate('tmpl-pagination-btn', { page: i, active: i === currentPage ? 'btn-primary' : '' });
-			}
-		} else {
-			btns += fillTemplate('tmpl-pagination-btn', { page: 1, active: '' });
-			btns += $id('tmpl-pagination-ellipsis').innerHTML;
-			for (let i = currentPage - 1; i <= currentPage + 1; i++) {
-				btns += fillTemplate('tmpl-pagination-btn', { page: i, active: i === currentPage ? 'btn-primary' : '' });
-			}
-			btns += $id('tmpl-pagination-ellipsis').innerHTML;
-			btns += fillTemplate('tmpl-pagination-btn', { page: totalPages, active: '' });
-		}
+		let start = Math.max(1, currentPage - 2);
+		const end = Math.min(totalPages, start + 4);
+		if (end - start < 4) start = Math.max(1, end - 4);
+		for (let i = start; i <= end; i++) btns.push(renderPageBtn(i));
 	}
-	$id('paginationBtns').innerHTML = btns;
+	// 下一页：末页时禁用
+	btns.push(`<button class="btn btn-sm page-btn" onclick="goPage(${currentPage + 1})" ${currentPage >= totalPages ? 'disabled' : ''}>›</button>`);
+	// 末页：末页时禁用
+	btns.push(`<button class="btn btn-sm page-btn" onclick="goPage(${totalPages})" ${currentPage >= totalPages ? 'disabled' : ''}>»</button>`);
+	$id('paginationBtns').innerHTML = btns.join('');
+}
+
+/** 渲染单个页码按钮 */
+function renderPageBtn(page) {
+	const active = page === currentPage ? 'btn-primary' : '';
+	return `<button class="btn btn-sm ${active} page-btn" onclick="goPage(${page})">${page}</button>`;
 }
 
 function goPage(p) {
@@ -206,6 +247,63 @@ async function exportAll() {
 		downloadBlob(blob, 'users_export.csv');
 		toast('导出成功', 'success');
 	} catch (e) { toast('导出失败: ' + escapeHtml(e.message), 'error'); }
+}
+
+/** 触发隐藏的 file input，选择 CSV 文件 */
+function batchImport() {
+	$id('importFileInput').click();
+}
+
+/** 处理 CSV 文件上传：发送到后端批量导入接口，下载带结果列的 CSV */
+async function handleImportFile(event) {
+	const file = event.target.files[0];
+	if (!file) return;
+	// 重置 input value，允许再次选择同一文件
+	event.target.value = '';
+	if (!file.name.toLowerCase().endsWith('.csv')) {
+		toast('请选择 .csv 文件', 'warning');
+		return;
+	}
+	const formData = new FormData();
+	formData.append('file', file);
+	try {
+		// FormData 上传不能通过 api 对象（会强制设 Content-Type: application/json）
+		// 直接用 fetch + 手动携带 token，让浏览器自动设置 multipart/form-data; boundary=...
+		const token = api.getToken();
+		const resp = await fetch('/api/v1/auth/users/batch_import/', {
+			method: 'POST',
+			headers: token ? { 'Authorization': `Bearer ${token}` } : {},
+			body: formData
+		});
+		if (resp.status === 401) {
+			api.logout();
+			return;
+		}
+		if (!resp.ok) {
+			let detail = '导入失败';
+			try { const data = await resp.json(); detail = data.detail || detail; } catch (e) { }
+			toast('导入失败: ' + escapeHtml(detail), 'error');
+			return;
+		}
+		const blob = await resp.blob();
+		// 后端通过自定义 header 返回成功/失败计数
+		const successCount = resp.headers.get('X-Import-Success') || '0';
+		const failCount = resp.headers.get('X-Import-Fail') || '0';
+		downloadBlob(blob, 'users_import_result.csv');
+		toast(`导入完成：成功 ${successCount} 条，失败 ${failCount} 条`, failCount > 0 ? 'warning' : 'success');
+		loadUsers();
+	} catch (e) {
+		toast('导入失败: ' + escapeHtml(e.message), 'error');
+	}
+}
+
+/** 下载 CSV 导入模板（含表头和示例行） */
+async function downloadImportTemplate() {
+	try {
+		const blob = await api.get('/api/v1/auth/users/import_template/').then(r => r.blob());
+		downloadBlob(blob, 'users_import_template.csv');
+		toast('模板已下载', 'success');
+	} catch (e) { toast('下载模板失败: ' + escapeHtml(e.message), 'error'); }
 }
 
 function downloadBlob(blob, filename) {
@@ -317,10 +415,12 @@ function openUserModal(id) {
 				$id('userDept').value = deptId;
 				$id('userStatus').value = u.status || 'active';
 				const roleId = (u.roles && u.roles.length > 0) ? u.roles[0].role__id : null;
-				$id('userRoleSelect').value = roleId || '';
-				onRoleChange();
 				const selectedTeamId = (u.teams && u.teams.length > 0) ? u.teams[0].team__id : null;
+				$id('userRoleSelect').value = roleId || '';
+				// 先填充团队下拉（会默认启用），再调用 onRoleChange 由 updateTeamDisabledState 覆盖禁用状态
+				// 顺序不能反过来，否则 populateTeamSelect 的 disabled=false 会覆盖 dept_manager 的禁用
 				populateTeamSelect(deptId, selectedTeamId);
+				onRoleChange();
 				// 防止越权：组长锁定部门和团队，部门经理锁定部门
 				const teamSel = $id('userDeptTeam');
 				const deptSel = $id('userDept');
@@ -377,17 +477,21 @@ function renderRolePermSummary() {
 }
 
 function updateTeamDisabledState() {
+	// 团队下拉的禁用条件：1) 角色为部门经理（不需要团队）；2) 未选择部门
 	const roleId = parseInt($id('userRoleSelect').value) || 0;
 	const roles = filterOptions.roles || [];
 	const r = roles.find(r => r.id === roleId);
-	const isDisabled = r && r.code === 'dept_manager';
-	$id('userDeptTeam').disabled = isDisabled;
+	const isDeptManager = r && r.code === 'dept_manager';
+	const deptId = parseInt($id('userDept').value) || 0;
+	$id('userDeptTeam').disabled = isDeptManager || !deptId;
 }
 
 // ====================== 部门变更 ======================
 function onDeptChange() {
 	const deptId = parseInt($id('userDept').value) || 0;
 	populateTeamSelect(deptId, null);
+	// 部门变更后需要重新评估团队禁用状态
+	updateTeamDisabledState();
 }
 
 // ====================== 团队下拉（弹窗内） ======================
@@ -396,9 +500,13 @@ function populateTeamSelect(deptId, selectedTeamId) {
 	const filtered = deptId ? teams.filter(t => t.department_id === deptId) : [];
 	const sel = $id('userDeptTeam');
 	if (!deptId) {
+		// 未选部门时清空并禁用，避免用户误选
 		sel.innerHTML = '<option value="">请先选择部门</option>';
+		sel.disabled = true;
 		return;
 	}
+	// 选中部门时默认启用团队下拉；dept_manager 角色等场景由 updateTeamDisabledState 二次覆盖
+	sel.disabled = false;
 	if (filtered.length === 0) {
 		sel.innerHTML = '<option value="">该部门暂无团队</option>';
 		return;

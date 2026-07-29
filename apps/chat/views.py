@@ -137,6 +137,77 @@ class ChatAskView(APIView):
         return Response(response_data)
 
 
+class ChatAskStreamView(APIView):
+    """
+    POST /api/v1/chat/ask_stream/  （SSE 流式问答）
+    Body: {session_id?, question, mode?, root_types?[], node_ids?[], use_cache?, do_task_split?}
+
+    响应内容类型：text/event-stream
+    事件序列：start → first_token → delta* → done  （或 error）
+    - start:       {type, session_id, citations, is_hit_cache}
+    - first_token: {type, ttfb_ms}                      # 首字返回耗时（ms）
+    - delta:       {type, delta}                        # 增量文本
+    - done:        {type, message_id, session_id, citations, stats}
+    - error:       {type, detail}
+
+    与 ChatAskView 的区别：LLM 生成阶段走 Provider.stream，answer 增量下发；
+    首字耗时 ttfb_ms 覆盖从请求入口到首个 delta 的全链路（缓存/检索/记忆/LLM TTFT）。
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        question = (request.data.get("question") or "").strip()
+        if not question:
+            return Response({"detail": "question 必填"}, status=400)
+
+        session_id = request.data.get("session_id")
+        root_types = request.data.get("root_types")
+        node_ids = request.data.get("node_ids")
+        use_cache = bool(request.data.get("use_cache", True))
+        do_task_split = bool(request.data.get("do_task_split", False))
+
+        # 动态获取默认根类型
+        if not root_types or not root_types[0]:
+            default_root = KnowledgeNode.objects.filter(
+                node_type='root', is_deleted=False
+            ).first()
+            root_types = [default_root.root_type] if default_root else ['company_doc']
+
+        # 会话解析/创建（同步完成，确保 session_id 在流开始前可用）
+        if session_id:
+            try:
+                session = Session.objects.get(id=session_id, user=request.user, is_deleted=False)
+            except Session.DoesNotExist:
+                return Response({"detail": "session 不存在"}, status=404)
+        else:
+            session = Session.objects.create(
+                user=request.user,
+                title=question[:32],
+                root_type=root_types[0],
+            )
+
+        # 调用流式 executor
+        from apps.agent.executor import ask_stream as executor_ask_stream
+        from apps.agent.streamer import stream_response
+
+        # 会话轮次 +1：流式响应无法在"响应完成"后执行更新，故在此预先 +1。
+        # 注意：不刷新 session 对象，executor 内仍以原 turn_count 计算 turn_index（=原值+1），
+        # 与 DB 自增后的 turn_count 保持一致。错误路径也会落 QaRecord，故无需回滚。
+        Session.objects.filter(id=session.id).update(turn_count=F('turn_count') + 1)
+
+        gen = executor_ask_stream(
+            user=request.user,
+            question=question,
+            session=session,
+            root_types=root_types,
+            node_ids=node_ids,
+            use_cache=use_cache,
+            do_task_split=do_task_split,
+            do_rerank=True,
+        )
+        return stream_response(gen)
+
+
 class FeedbackView(APIView):
     """POST /api/v1/chat/feedback/  {qa_record_id, rating, tags?, comment?}"""
     permission_classes = [IsAuthenticated]

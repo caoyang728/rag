@@ -234,6 +234,345 @@ def ask(user, question: str, session: Session,
     }
 
 
+def ask_stream(user, question: str, session: Session,
+               root_types: list = None,
+               node_ids: list = None,
+               use_cache: bool = True,
+               do_task_split: bool = False,
+               do_rerank: bool = True):
+    """流式问答主流程，yield SSE 事件 dict
+
+    与 ``ask`` 相同的全链路（热点缓存 → 任务拆分 → 混合检索 → 记忆 → LLM 流式生成 → 落库 → 缓存），
+    但 LLM 生成阶段改走 Provider.stream，增量输出 answer。
+
+    事件协议（前端按 type 分发）::
+        {'type': 'start',       'session_id', 'citations', 'is_hit_cache'}
+        {'type': 'first_token', 'ttfb_ms'}                # 首字返回耗时（请求起点→首个 delta）
+        {'type': 'delta',       'delta'}                  # 增量文本
+        {'type': 'done',        'message_id', 'session_id', 'citations', 'stats'}
+        {'type': 'error',       'detail'}
+
+    首字耗时 ttfb_ms：从函数入口 t0 到首个 delta yield 的毫秒数，覆盖缓存命中、检索、
+    记忆加载、LLM TTFT 全链路，便于前端展示"首字返回时间"。
+    """
+    from apps.agent.task_splitter import maybe_split, execute_split
+
+    t0 = time.time()
+    root_type = root_types[0] if root_types else 'company_doc'
+    turn_index = (session.turn_count or 0) + 1
+
+    # 1. 热点缓存命中：一次性输出完整答案，ttfb 即缓存命中耗时
+    if use_cache:
+        cached = _try_cache(question, root_type, user)
+        if cached:
+            ttfb_ms = int((time.time() - t0) * 1000)
+            yield {
+                'type': 'start',
+                'session_id': session.id,
+                'citations': cached.get('citations', []),
+                'is_hit_cache': True,
+            }
+            yield {'type': 'first_token', 'ttfb_ms': ttfb_ms}
+            yield {'type': 'delta', 'delta': cached['answer']}
+
+            qa = _persist_qa(
+                user=user, session=session, question=question, answer=cached['answer'],
+                citations=cached.get('citations', []),
+                retrieval_hits=[], retrieval_scores=[],
+                stats={'latency_total_ms': int((time.time() - t0) * 1000),
+                       'latency_ttfb_ms': ttfb_ms},
+                llm_stats={}, root_type=root_type, turn_index=turn_index,
+                answer_type='rag', is_hit_cache=True,
+            )
+            MemoryManager().append_turn(session, question, cached['answer'])
+
+            yield {
+                'type': 'done',
+                'message_id': qa.id,
+                'session_id': session.id,
+                'citations': cached.get('citations', []),
+                'stats': {
+                    'total_ms': int((time.time() - t0) * 1000),
+                    'ttfb_ms': ttfb_ms,
+                    'is_hit_cache': True,
+                },
+            }
+            return
+
+    # 2. 任务拆分：流式模式下不支持真流式（execute_split 内部走同步 ask），
+    #    这里降级为一次性输出最终合并答案，仍保留 start/first_token/delta/done 协议
+    if do_task_split:
+        split = maybe_split(question)
+        if split.get('need_split'):
+            yield {
+                'type': 'start',
+                'session_id': session.id,
+                'citations': [],
+                'is_hit_cache': False,
+            }
+            try:
+                result = execute_split(user, session, question, split, root_types=root_types)
+            except Exception as e:
+                logger.exception('[ask_stream] task_split execute error')
+                yield {'type': 'error', 'detail': f'任务拆分执行失败: {e}'}
+                return
+            ttfb_ms = int((time.time() - t0) * 1000)
+            yield {'type': 'first_token', 'ttfb_ms': ttfb_ms}
+            yield {'type': 'delta', 'delta': result.get('answer', '')}
+            yield {
+                'type': 'done',
+                'message_id': result.get('qa_id'),
+                'session_id': session.id,
+                'citations': result.get('citations', []),
+                'stats': {
+                    'total_ms': int((time.time() - t0) * 1000),
+                    'ttfb_ms': ttfb_ms,
+                    'is_task_split': True,
+                },
+            }
+            return
+
+    # 3. 混合检索
+    try:
+        retrieval = hybrid_search(question, user, root_types=root_types, node_ids=node_ids, do_rerank=do_rerank)
+        chunks = retrieval['chunks']
+        r_stats = retrieval['stats']
+    except EmbeddingException as e:
+        logger.error('[ask_stream] embedding failed during search: %s', e)
+        answer = '当前向量服务暂时不可用，请稍后重试。'
+        ttfb_ms = int((time.time() - t0) * 1000)
+        yield {
+            'type': 'start',
+            'session_id': session.id,
+            'citations': [],
+            'is_hit_cache': False,
+        }
+        yield {'type': 'first_token', 'ttfb_ms': ttfb_ms}
+        yield {'type': 'delta', 'delta': answer}
+        qa = _persist_qa(
+            user=user, session=session, question=question, answer=answer,
+            citations=[],
+            retrieval_hits=[], retrieval_scores=[],
+            stats={'latency_total_ms': int((time.time() - t0) * 1000),
+                   'latency_ttfb_ms': ttfb_ms},
+            llm_stats={}, root_type=root_type, turn_index=turn_index,
+            answer_type='refused', is_hit_cache=False,
+        )
+        yield {
+            'type': 'done',
+            'message_id': qa.id,
+            'session_id': session.id,
+            'citations': [],
+            'stats': {
+                'total_ms': int((time.time() - t0) * 1000),
+                'ttfb_ms': ttfb_ms,
+                'error': str(e),
+            },
+        }
+        return
+    except Exception as e:
+        logger.exception('[ask_stream] retrieval error')
+        yield {'type': 'error', 'detail': f'检索失败: {e}'}
+        return
+
+    # 3.5 二次权限验证：过滤用户无权访问的文档片段
+    if chunks and user and getattr(user, 'is_authenticated', False):
+        doc_ids = list({c['document_id'] for c in chunks})
+        accessible_ids = filter_accessible_doc_ids(user, doc_ids)
+        filtered_chunks = [c for c in chunks if c['document_id'] in accessible_ids]
+        if filtered_chunks != chunks:
+            logger.info('[ask_stream] permission filter removed %d chunks', len(chunks) - len(filtered_chunks))
+            chunks = filtered_chunks
+
+    # 4. 记忆加载
+    mm = MemoryManager()
+    ctx = mm.load_context(user, session, question, root_type=root_type)
+
+    # 5. 预先组装引用（按文档合并），在 start 事件中带出，前端可先渲染溯源区
+    doc_citations = {}
+    for c in chunks:
+        doc_title = c.get('doc_title', '未知文档')
+        if doc_title not in doc_citations:
+            doc_citations[doc_title] = {
+                'index': len(doc_citations) + 1,
+                'doc_title': doc_title,
+                'sections': set(),
+                'pages': set(),
+                'chunk_ids': []
+            }
+        if c.get('section_path'):
+            doc_citations[doc_title]['sections'].add(c['section_path'])
+        if c.get('page_number'):
+            doc_citations[doc_title]['pages'].add(c['page_number'])
+        doc_citations[doc_title]['chunk_ids'].append(c['chunk_id'])
+    citations = []
+    for key, val in doc_citations.items():
+        citations.append({
+            'index': val['index'],
+            'doc_title': val['doc_title'],
+            'section': ', '.join(list(val['sections'])[:3]) + ('...' if len(val['sections']) > 3 else ''),
+            'page': sorted(list(val['pages']))[:5],
+            'chunk_ids': val['chunk_ids']
+        })
+
+    # 6. 发送 start 事件（citations 提前下发）
+    yield {
+        'type': 'start',
+        'session_id': session.id,
+        'citations': citations,
+        'is_hit_cache': False,
+    }
+
+    # 7. LLM 流式生成（或拒答降级）
+    llm_stats = {}
+    if not chunks:
+        # 无相关片段：直接吐拒答文案
+        answer = '当前选择的知识库范围内未找到相关资料。请尝试选择其他知识库节点，或调整搜索关键词。'
+        answer_type = 'refused'
+        ttfb_ms = int((time.time() - t0) * 1000)
+        yield {'type': 'first_token', 'ttfb_ms': ttfb_ms}
+        yield {'type': 'delta', 'delta': answer}
+    else:
+        messages = build_qa_messages(question, chunks, memory_block=ctx['memory_block'])
+        llm = get_llm()
+        full_answer = []
+        ttfb_ms = None
+        llm_error = None
+        t_llm = time.time()
+        try:
+            for chunk in llm.stream(messages, temperature=0.3, max_tokens=2048):
+                # finish 帧：Provider 会在最后发一帧 finish=True，可能带 error
+                if chunk.get('finish'):
+                    if chunk.get('error'):
+                        llm_error = chunk['error']
+                    break
+                delta = chunk.get('delta', '')
+                if delta:
+                    # 首个 delta 触发 first_token 事件（仅一次）
+                    if ttfb_ms is None:
+                        ttfb_ms = int((time.time() - t0) * 1000)
+                        yield {'type': 'first_token', 'ttfb_ms': ttfb_ms}
+                    full_answer.append(delta)
+                    yield {'type': 'delta', 'delta': delta}
+        except GeneratorExit:
+            # 客户端主动终止流式：保存已生成的部分回答到 QaRecord（不能 yield，连接已断）
+            logger.info('[ask_stream] client aborted, saving partial answer (%d chars)', len(full_answer))
+            answer = ''.join(full_answer)
+            try:
+                _persist_qa(
+                    user=user, session=session, question=question,
+                    answer=answer or '[已终止]',
+                    citations=citations,
+                    retrieval_hits=[c['chunk_id'] for c in chunks],
+                    retrieval_scores=[
+                        {'chunk_id': c['chunk_id'], 'rrf': c.get('rrf_score', 0),
+                         'rerank': c.get('rerank_score', 0)} for c in chunks
+                    ],
+                    stats={
+                        'latency_retrieval_ms': r_stats.get('vector_ms', 0)
+                                                 + r_stats.get('bm25_ms', 0)
+                                                 + r_stats.get('rrf_ms', 0),
+                        'latency_rerank_ms': r_stats.get('rerank_ms', 0),
+                        'latency_total_ms': int((time.time() - t0) * 1000),
+                        'latency_ttfb_ms': ttfb_ms or 0,
+                    },
+                    llm_stats={
+                        'latency_llm_ms': int((time.time() - t_llm) * 1000),
+                        'llm_provider': getattr(llm, 'name', 'deepseek'),
+                        'llm_model': getattr(llm, 'model', 'deepseek-chat'),
+                    },
+                    root_type=root_type, turn_index=turn_index,
+                    answer_type='rag' if answer else 'refused',
+                )
+            except Exception:
+                logger.exception('[ask_stream] failed to persist partial answer on abort')
+            raise  # GeneratorExit 必须 re-raise
+        except Exception as e:
+            logger.exception('[ask_stream] llm stream error')
+            llm_error = str(e)
+            # 异常时补一个 first_token，保证前端协议完整性
+            if ttfb_ms is None:
+                ttfb_ms = int((time.time() - t0) * 1000)
+                yield {'type': 'first_token', 'ttfb_ms': ttfb_ms}
+            yield {'type': 'delta', 'delta': f'\n\n[流式中断: {e}]'}
+
+        # 极端情况：LLM 未产出任何 delta（如首帧即 finish/error），补 first_token 协议
+        if ttfb_ms is None:
+            ttfb_ms = int((time.time() - t0) * 1000)
+            yield {'type': 'first_token', 'ttfb_ms': ttfb_ms}
+
+        answer = ''.join(full_answer)
+        if not answer:
+            answer = '[未生成内容]'
+            answer_type = 'refused'
+        else:
+            answer_type = 'rag'
+
+        # 流式无 token usage（DeepSeek stream 不返回 usage），仅记录耗时
+        llm_stats = {
+            'latency_llm_ms': int((time.time() - t_llm) * 1000),
+            'tokens_prompt': 0,
+            'tokens_completion': 0,
+            'cost': 0,
+            'llm_provider': getattr(llm, 'name', 'deepseek'),
+            'llm_model': getattr(llm, 'model', 'deepseek-chat'),
+            'error': llm_error,
+        }
+        try:
+            LlmCallLog.objects.create(
+                provider=llm_stats['llm_provider'], model=llm_stats['llm_model'],
+                scene='qa', user=user if user and getattr(user, 'is_authenticated', False) else None,
+                prompt_tokens=0, completion_tokens=0, total_tokens=0,
+                cost=Decimal('0'),
+                latency_ms=llm_stats['latency_llm_ms'],
+                status='error' if llm_error else 'success',
+                error_message=(llm_error or '')[:1000],
+            )
+        except Exception:
+            logger.exception('llm_call_log write failed')
+
+    # 8. 落 QaRecord
+    total_ms = int((time.time() - t0) * 1000)
+    qa = _persist_qa(
+        user=user, session=session, question=question, answer=answer,
+        citations=citations,
+        retrieval_hits=[c['chunk_id'] for c in chunks],
+        retrieval_scores=[
+            {'chunk_id': c['chunk_id'], 'rrf': c.get('rrf_score', 0),
+             'rerank': c.get('rerank_score', 0)} for c in chunks
+        ],
+        stats={
+            'latency_retrieval_ms': r_stats.get('vector_ms', 0) + r_stats.get('bm25_ms', 0)
+                                     + r_stats.get('rrf_ms', 0),
+            'latency_rerank_ms': r_stats.get('rerank_ms', 0),
+            'latency_total_ms': total_ms,
+            'latency_ttfb_ms': ttfb_ms,
+        },
+        llm_stats=llm_stats,
+        root_type=root_type, turn_index=turn_index,
+        answer_type=answer_type,
+    )
+
+    # 9. 记录短时记忆 + 更新热点缓存
+    mm.append_turn(session, question, answer)
+    if answer_type == 'rag':
+        _update_cache(question, root_type, user, answer, citations)
+
+    # 10. 发送 done 事件
+    yield {
+        'type': 'done',
+        'message_id': qa.id,
+        'session_id': session.id,
+        'citations': citations,
+        'stats': {
+            'total_ms': total_ms,
+            'ttfb_ms': ttfb_ms,
+            'retrieval': r_stats,
+            'llm': llm_stats,
+        },
+    }
+
+
 def _try_cache(question: str, root_type: str, user) -> dict:
     scope = _cache_scope(user)
     qh = _hash(question)
@@ -307,6 +646,7 @@ def _persist_qa(*, user, session, question, answer, citations,
         latency_rerank_ms=stats.get('latency_rerank_ms', 0),
         latency_llm_ms=llm_stats.get('latency_llm_ms', 0),
         latency_total_ms=stats.get('latency_total_ms', 0),
+        latency_ttfb_ms=stats.get('latency_ttfb_ms', 0),
         tokens_prompt=llm_stats.get('tokens_prompt', 0),
         tokens_completion=llm_stats.get('tokens_completion', 0),
         cost_estimate=Decimal(str(llm_stats.get('cost', 0))),

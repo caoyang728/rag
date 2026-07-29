@@ -28,6 +28,7 @@ class QaRecordSerializer(serializers.ModelSerializer):
             "id", "uuid", "session_id", "turn_index", "question", "answer",
             "answer_type", "citations", "retrieval_hits",
             "latency_retrieval_ms", "latency_rerank_ms", "latency_llm_ms", "latency_total_ms",
+            "latency_ttfb_ms",
             "tokens_prompt", "tokens_completion", "cost_estimate",
             "llm_provider", "llm_model", "is_hit_cache", "is_task_split",
             "created_at",

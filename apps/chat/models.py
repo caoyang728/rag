@@ -62,6 +62,7 @@ class QaRecord(models.Model):
     latency_rerank_ms = models.IntegerField(default=0)
     latency_llm_ms = models.IntegerField(default=0)
     latency_total_ms = models.IntegerField(default=0)
+    latency_ttfb_ms = models.IntegerField(default=0, help_text='首字返回耗时（请求起点→首个 delta，ms）')
     tokens_prompt = models.IntegerField(default=0)
     tokens_completion = models.IntegerField(default=0)
     cost_estimate = models.DecimalField(max_digits=10, decimal_places=6, default=0)

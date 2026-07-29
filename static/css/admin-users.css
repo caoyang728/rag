@@ -1,0 +1,27 @@
+/* admin-users 页面专用样式 */
+
+/* 可排序表头 */
+.th-sortable {
+	cursor: pointer;
+	user-select: none;
+	white-space: nowrap;
+}
+
+.th-sortable:hover {
+	color: var(--primary);
+}
+
+.sort-indicator {
+	font-size: 11px;
+	margin-left: 2px;
+	color: var(--primary);
+}
+
+/* 分页大小选择框：与 btn-sm 等高 */
+.page-size-select {
+	width: 68px;
+	padding: 4px 8px;
+	font-size: 12px;
+	height: 28px;
+	line-height: 1;
+}

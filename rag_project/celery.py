@@ -64,6 +64,26 @@ app.conf.beat_schedule = {
         'task': 'apps.analytics.tasks.cleanup_old_data',
         'schedule': crontab(hour=3, minute=30),
     },
+    # 每日 04:00 批量评估文档质量
+    'doc-quality-daily': {
+        'task': 'apps.analytics.tasks.batch_evaluate_document_quality',
+        'schedule': crontab(hour=4, minute=0),
+    },
+    # 每日 04:30 生成知识库覆盖率报告
+    'coverage-report-daily': {
+        'task': 'apps.analytics.tasks.generate_coverage_report_daily',
+        'schedule': crontab(hour=4, minute=30),
+    },
+    # 每 2 小时执行多维度回答质量评估（与忠实度错开）
+    'multi-dim-evaluation': {
+        'task': 'apps.analytics.tasks.run_multi_dimension_evaluation',
+        'schedule': crontab(hour='*/2', minute=30),
+    },
+    # 每周一 05:00 执行离线检索评估（黄金测试集回归测试）
+    'periodic-retrieval-eval': {
+        'task': 'apps.analytics.tasks.periodic_retrieval_evaluation',
+        'schedule': crontab(hour=5, minute=0, day_of_week=1),
+    },
 }
 
 

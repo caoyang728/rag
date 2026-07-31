@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>RAG 质量评估 · 知库 Agent</title>
+	<link rel="stylesheet" href="/static/css/common.css">
+	<link rel="stylesheet" href="/static/css/admin-eval.css">
+</head>
+
+<body>
+	<div id="topnav-container"></div>
+
+	<div class="layout">
+		<div id="sidebar-container"></div>
+		<div class="main main-flex">
+
+			<!-- 顶部固定区 -->
+			<div class="eval-header">
+				<div class="page-header">
+					<div class="flex items-baseline gap-10">
+						<div class="page-title">RAG 质量评估中心</div>
+						<div class="page-subtitle">全链路质量监控 · 数据入库→检索→回答→反馈闭环</div>
+					</div>
+				</div>
+				<div class="tabs" id="evalTabs">
+					<div class="tab-item active" data-tab="golden" onclick="switchEvalTab('golden')">📋 黄金测试集</div>
+					<div class="tab-item" data-tab="retrieval" onclick="switchEvalTab('retrieval')">🔍 检索质量</div>
+					<div class="tab-item" data-tab="answer" onclick="switchEvalTab('answer')">💬 回答质量</div>
+					<div class="tab-item" data-tab="doc" onclick="switchEvalTab('doc')">📄 文档质量</div>
+					<div class="tab-item" data-tab="coverage" onclick="switchEvalTab('coverage')">📊 覆盖率</div>
+					<div class="tab-item" data-tab="feedback" onclick="switchEvalTab('feedback')">🔄 反馈闭环</div>
+				</div>
+			</div>
+
+			<!-- 下方滚动区 -->
+			<div class="eval-scroll">
+
+				<!-- ===== Tab: 黄金测试集 ===== -->
+				<div class="tab-panel active" data-panel="golden">
+					<div class="panel">
+						<div class="panel-header">
+							<div class="flex gap-4">
+								<button class="btn btn-primary" onclick="showCreateDatasetDialog()">➕ 创建测试集</button>
+								<button class="btn" onclick="showImportDialog()">📥 批量导入</button>
+							</div>
+							<div class="text-sub" id="datasetSummary"></div>
+						</div>
+						<div class="panel-body">
+							<table class="table" id="datasetTable">
+								<thead>
+									<tr>
+										<th>ID</th><th>名称</th><th>类型</th><th>问题数</th>
+										<th>版本</th><th>状态</th><th>更新时间</th><th>操作</th>
+									</tr>
+								</thead>
+								<tbody id="datasetTableBody">
+									<tr><td colspan="8" class="text-center text-sub">加载中...</td></tr>
+								</tbody>
+							</table>
+						</div>
+					</div>
+				</div>
+
+				<!-- ===== Tab: 检索质量 ===== -->
+				<div class="tab-panel" data-panel="retrieval">
+					<div class="eval-toolbar mb-8">
+						<div class="panel-header">
+							<div class="flex gap-4">
+								<select class="select" id="retrievalDatasetSel" onchange="loadRetrievalReports()">
+									<option value="">选择测试集</option>
+								</select>
+								<button class="btn btn-primary" onclick="runRetrievalEval()">🚀 执行检索评估</button>
+							</div>
+						</div>
+					</div>
+
+					<div class="kpi-grid mb-16" id="retrievalKpi" style="display:none">
+						<div class="kpi-card"><div class="kpi-label">Recall@5</div><div class="kpi-value" id="rAt5">--</div></div>
+						<div class="kpi-card"><div class="kpi-label">Recall@10</div><div class="kpi-value" id="rAt10">--</div></div>
+						<div class="kpi-card"><div class="kpi-label">Recall@20</div><div class="kpi-value" id="rAt20">--</div></div>
+						<div class="kpi-card"><div class="kpi-label">MRR</div><div class="kpi-value" id="rMrr">--</div></div>
+						<div class="kpi-card"><div class="kpi-label">NDCG@10</div><div class="kpi-value" id="rNdcg">--</div></div>
+						<div class="kpi-card"><div class="kpi-label">问题命中率</div><div class="kpi-value" id="rHitRate">--</div></div>
+					</div>
+
+					<div class="panel mb-16">
+						<div class="panel-header"><div class="panel-title">各阶段增益分析</div></div>
+						<div class="panel-body">
+							<svg id="gainChart" width="100%" height="200" viewBox="0 0 500 200"></svg>
+							<div class="text-sm text-sub mt-8">向量 vs BM25 vs 混合(RRF) vs Rerank 各阶段 Recall@10 对比</div>
+						</div>
+					</div>
+
+					<div class="panel">
+						<div class="panel-header"><div class="panel-title">历史评估报告</div></div>
+						<div class="panel-body">
+							<table class="table" id="retrievalReportTable">
+								<thead>
+									<tr>
+										<th>ID</th><th>测试集</th><th>R@5</th><th>R@10</th>
+										<th>R@20</th><th>MRR</th><th>NDCG@10</th><th>时间</th>
+									</tr>
+								</thead>
+								<tbody id="retrievalReportBody">
+									<tr><td colspan="8" class="text-center text-sub">暂无数据</td></tr>
+								</tbody>
+							</table>
+						</div>
+					</div>
+				</div>
+
+				<!-- ===== Tab: 回答质量 ===== -->
+				<div class="tab-panel" data-panel="answer">
+					<div class="eval-toolbar mb-8">
+						<div class="panel-header">
+							<div class="flex gap-4">
+								<select class="select" id="answerDatasetSel" onchange="loadAnswerScores()">
+									<option value="">全部</option>
+								</select>
+								<button class="btn btn-primary" onclick="runAnswerEval()">🚀 执行回答评估</button>
+								<button class="btn" onclick="loadAnswerScores()">🔄 刷新</button>
+							</div>
+						</div>
+					</div>
+
+					<div class="kpi-grid mb-16" id="answerKpi">
+						<div class="kpi-card"><div class="kpi-label">忠实度</div><div class="kpi-value" id="dimFaithfulness">--</div></div>
+						<div class="kpi-card"><div class="kpi-label">相关性</div><div class="kpi-value" id="dimRelevance">--</div></div>
+						<div class="kpi-card"><div class="kpi-label">完整性</div><div class="kpi-value" id="dimCompleteness">--</div></div>
+						<div class="kpi-card"><div class="kpi-label">正确性</div><div class="kpi-value" id="dimCorrectness">--</div></div>
+						<div class="kpi-card"><div class="kpi-label">无害性</div><div class="kpi-value" id="dimHarmlessness">--</div></div>
+						<div class="kpi-card"><div class="kpi-label">上下文召回率</div><div class="kpi-value" id="dimContextRecall">--</div></div>
+					</div>
+
+					<div class="panel mb-16">
+						<div class="panel-header"><div class="panel-title">多维度评估详情</div></div>
+						<div class="panel-body">
+							<table class="table" id="multiDimTable">
+								<thead>
+									<tr>
+										<th>ID</th><th>QA记录</th><th>维度</th><th>得分</th>
+										<th>理由</th><th>模型</th><th>成本</th><th>时间</th>
+									</tr>
+								</thead>
+								<tbody id="multiDimBody">
+									<tr><td colspan="8" class="text-center text-sub">加载中...</td></tr>
+								</tbody>
+							</table>
+						</div>
+					</div>
+
+					<div class="panel">
+						<div class="panel-header"><div class="panel-title">手动触发评估</div></div>
+						<div class="panel-body flex gap-12 items-center">
+							<input type="number" id="manualQaId" placeholder="QA 记录 ID" class="input" style="width:200px">
+							<button class="btn btn-primary" onclick="runManualEval()">评估指定 QA</button>
+							<span class="text-sm text-sub">评估该条 QA 记录的全部 6 个维度</span>
+						</div>
+					</div>
+				</div>
+
+				<!-- ===== Tab: 文档质量 ===== -->
+				<div class="tab-panel" data-panel="doc">
+					<div class="eval-toolbar mb-8">
+						<div class="panel-header">
+							<div class="flex gap-4">
+								<select class="select" id="docRootType" onchange="loadDocQuality()">
+									<option value="">全部类型</option>
+									<option value="knowledge_base">知识库</option>
+									<option value="company_doc">公司文档</option>
+									<option value="dept_doc">部门文档</option>
+									<option value="team_doc">团队文档</option>
+								</select>
+								<button class="btn btn-primary" onclick="runBatchDocEval()">🔍 批量评估最近文档</button>
+							</div>
+							<div class="text-sub" id="docSummary"></div>
+						</div>
+					</div>
+
+					<div class="kpi-grid mb-16">
+						<div class="kpi-card"><div class="kpi-label">文档总数</div><div class="kpi-value" id="docTotal">--</div></div>
+						<div class="kpi-card"><div class="kpi-label">平均质量分</div><div class="kpi-value" id="docAvgScore">--</div></div>
+						<div class="kpi-card kpi-highlight"><div class="kpi-label">优秀 (≥85)</div><div class="kpi-value" id="docExcellent">--</div></div>
+						<div class="kpi-card kpi-good"><div class="kpi-label">良好 (≥70)</div><div class="kpi-value" id="docGood">--</div></div>
+						<div class="kpi-card kpi-fair"><div class="kpi-label">及格 (≥50)</div><div class="kpi-value" id="docFair">--</div></div>
+						<div class="kpi-card kpi-poor"><div class="kpi-label">待改进 (<50)</div><div class="kpi-value" id="docPoor">--</div></div>
+					</div>
+
+					<div class="panel mb-16">
+						<div class="panel-header"><div class="panel-title">文档质量分布</div></div>
+						<div class="panel-body">
+							<svg id="docDistChart" width="100%" height="160" viewBox="0 0 400 160"></svg>
+						</div>
+					</div>
+
+					<div class="panel mb-16">
+						<div class="panel-header"><div class="panel-title">常见质量问题</div></div>
+						<div class="panel-body" id="commonIssues">
+							<div class="text-sub">暂无数据</div>
+						</div>
+					</div>
+
+					<div class="panel">
+						<div class="panel-header"><div class="panel-title">文档质量报告</div></div>
+						<div class="panel-body">
+							<table class="table" id="docQualityTable">
+								<thead>
+									<tr>
+										<th>ID</th><th>文档</th><th>质量分</th><th>解析状态</th>
+										<th>提取率</th><th>切片数</th><th>平均大小</th>
+										<th>向量化率</th><th>问题</th><th>评估时间</th>
+									</tr>
+								</thead>
+								<tbody id="docQualityBody">
+									<tr><td colspan="10" class="text-center text-sub">加载中...</td></tr>
+								</tbody>
+							</table>
+						</div>
+					</div>
+				</div>
+
+				<!-- ===== Tab: 覆盖率 ===== -->
+				<div class="tab-panel" data-panel="coverage">
+					<div class="eval-toolbar mb-8">
+						<div class="panel-header">
+							<div class="flex gap-4">
+								<select class="select" id="coverageDays">
+									<option value="7">最近7天</option>
+									<option value="30">最近30天</option>
+								</select>
+								<button class="btn btn-primary" onclick="loadCoverage()">🔄 刷新</button>
+								<button class="btn" onclick="generateCoverage()">📊 生成报告</button>
+							</div>
+						</div>
+					</div>
+
+					<div class="kpi-grid mb-16">
+						<div class="kpi-card"><div class="kpi-label">热门问题覆盖率</div><div class="kpi-value" id="covRate">--<span class="text-sm text-sub">%</span></div></div>
+						<div class="kpi-card"><div class="kpi-label">热门查询总数</div><div class="kpi-value" id="covTotal">--</div></div>
+						<div class="kpi-card"><div class="kpi-label">已覆盖查询</div><div class="kpi-value" id="covCovered">--</div></div>
+						<div class="kpi-card"><div class="kpi-label">未覆盖查询</div><div class="kpi-value kpi-red" id="covUncovered">--</div></div>
+						<div class="kpi-card"><div class="kpi-label">知识空白数</div><div class="kpi-value kpi-red" id="gapCount">--</div></div>
+						<div class="kpi-card"><div class="kpi-label">重复切片率</div><div class="kpi-value" id="dupRate">--<span class="text-sm text-sub">%</span></div></div>
+					</div>
+
+					<div class="panel mb-16">
+						<div class="panel-header"><div class="panel-title">知识空白查询</div></div>
+						<div class="panel-body" id="gapList">
+							<div class="text-sub">加载中...</div>
+						</div>
+					</div>
+
+					<div class="panel mb-16">
+						<div class="panel-header"><div class="panel-title">部门/团队知识覆盖</div></div>
+						<div class="panel-body" id="domainCoverage">
+							<div class="text-sub">加载中...</div>
+						</div>
+					</div>
+
+					<div class="panel">
+						<div class="panel-header">
+							<div class="panel-title">历史报告</div>
+							<button class="btn btn-sm" onclick="loadCoverageReports()">🔄 刷新</button>
+						</div>
+						<div class="panel-body">
+							<table class="table" id="coverageReportTable">
+								<thead>
+									<tr>
+										<th>ID</th><th>报告日期</th><th>覆盖率</th><th>查询数</th>
+										<th>知识空白</th><th>重复率</th><th>生成时间</th><th>操作</th>
+									</tr>
+								</thead>
+								<tbody id="coverageReportBody">
+									<tr><td colspan="8" class="text-center text-sub">点击"刷新"加载历史报告</td></tr>
+								</tbody>
+							</table>
+						</div>
+					</div>
+				</div>
+
+				<!-- ===== Tab: 反馈闭环 ===== -->
+				<div class="tab-panel" data-panel="feedback">
+					<div class="eval-toolbar mb-8">
+						<div class="panel-header">
+							<div class="flex gap-4">
+								<button class="btn btn-primary" onclick="runFeedbackLoop()">🔍 执行反馈闭环分析</button>
+							</div>
+						</div>
+					</div>
+
+					<div class="kpi-grid mb-16">
+						<div class="kpi-card"><div class="kpi-label">差评总数</div><div class="kpi-value" id="fbTotal">--</div></div>
+						<div class="kpi-card"><div class="kpi-label">已关联闭环</div><div class="kpi-value" id="fbLinked">--</div></div>
+						<div class="kpi-card"><div class="kpi-label">关联率</div><div class="kpi-value" id="fbLinkRate">--<span class="text-sm text-sub">%</span></div></div>
+					</div>
+
+					<div class="panel">
+						<div class="panel-header"><div class="panel-title">待处理的反馈闭环</div></div>
+						<div class="panel-body">
+							<table class="table" id="feedbackTable">
+								<thead>
+									<tr>
+										<th>反馈ID</th><th>问题</th><th>评分</th><th>标签</th>
+										<th>关联Chunk</th><th>建议处理</th><th>操作</th>
+									</tr>
+								</thead>
+								<tbody id="feedbackBody">
+									<tr><td colspan="7" class="text-center text-sub">点击上方按钮执行分析</td></tr>
+								</tbody>
+							</table>
+						</div>
+					</div>
+				</div>
+
+			</div><!-- /.eval-scroll -->
+		</div>
+	</div>
+
+	<!-- Dialog: 创建测试集 -->
+	<div class="dialog-mask" id="createDialog" style="display:none">
+		<div class="dialog">
+			<div class="dialog-title">创建黄金测试集</div>
+			<div class="dialog-body">
+				<div class="form-item"><label>测试集名称</label><input id="dsName" class="input" placeholder="如: HR领域2026Q3"></div>
+				<div class="form-item"><label>知识库类型</label>
+					<select id="dsRootType" class="select">
+						<option value="knowledge_base">知识库</option>
+						<option value="company_doc">公司文档</option>
+						<option value="dept_doc">部门文档</option>
+						<option value="team_doc">团队文档</option>
+					</select>
+				</div>
+				<div class="form-item"><label>版本</label><input id="dsVersion" class="input" value="v1"></div>
+				<div class="form-item"><label>描述</label><textarea id="dsDesc" class="textarea" rows="3" placeholder="测试集用途说明"></textarea></div>
+			</div>
+			<div class="dialog-footer">
+				<button class="btn" onclick="closeDialog('createDialog')">取消</button>
+				<button class="btn btn-primary" onclick="createDataset()">创建</button>
+			</div>
+		</div>
+	</div>
+
+	<!-- Dialog: 导入问题 -->
+	<div class="dialog-mask" id="importDialog" style="display:none">
+		<div class="dialog dialog-lg">
+			<div class="dialog-title">批量导入测试问题</div>
+			<div class="dialog-body">
+				<div class="form-item"><label>选择测试集</label>
+					<select id="importDatasetSel" class="select"></select>
+				</div>
+				<div class="form-item"><label>JSON 数据</label>
+					<textarea id="importJson" class="textarea" rows="10" placeholder='[{"question":"问题","relevant_doc_ids":[1,2],"reference_answer":"答案"}]'></textarea>
+				</div>
+				<div class="text-sm text-sub mt-8">格式说明：question(问题), relevant_doc_ids(相关文档ID数组), reference_answer(参考答案), key_points(关键点数组)</div>
+			</div>
+			<div class="dialog-footer">
+				<button class="btn" onclick="closeDialog('importDialog')">取消</button>
+				<button class="btn btn-primary" onclick="importQuestions()">导入</button>
+			</div>
+		</div>
+	</div>
+
+	<script src="/static/js/common.js"></script>
+	<script src="/static/js/admin-eval.js"></script>
+</body>
+
+</html>

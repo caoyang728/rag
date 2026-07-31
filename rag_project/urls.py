@@ -83,6 +83,7 @@ urlpatterns = [
     path("admin-users/", _serve_frontend("admin-users"), name="admin-users"),
     path("admin-nodes/", _serve_frontend("admin-nodes"), name="admin-nodes"),
     path("admin-analytics/", _serve_frontend("admin-analytics"), name="admin-analytics"),
+    path("admin-eval/", _serve_frontend("admin-eval"), name="admin-eval"),
     path("admin-audit/", _serve_frontend("admin-audit"), name="admin-audit"),
     path("admin-rbac/", _serve_frontend("admin-rbac"), name="admin-rbac"),
     path("admin-org/", _serve_frontend("admin-org"), name="admin-org"),

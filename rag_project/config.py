@@ -213,3 +213,59 @@ class LogConfig:
         )
 
         logger.info('[LogConfig] 日志系统初始化完成')
+
+
+class AnalyticsConfig:
+    """Analytics 配置 - 监控指标 & 忠实度评估 & 队列监控
+
+    - 所有参数均通过 .env 控制，无需改代码即可调整
+    - 忠实度评估的开关/批量/日限/成本限分离，灵活控制成本和覆盖度
+    - 队列监控可独立开关，生产环境故障时可临时关闭以减压
+    - Redis DB 选择：Celery broker=DB1, result_backend=DB2, Analytics=DB3（避免冲突）
+    """
+
+    @staticmethod
+    def redis_db() -> int:
+        """Analytics 专用 Redis DB（默认 3，与 Celery broker/result backend 隔离）"""
+        return int(os.getenv('ANALYTICS_REDIS_DB', '3'))
+
+    @staticmethod
+    def _parse_bool(env_key: str, default: str = 'true') -> bool:
+        """统一布尔环境变量解析（支持 1/0, true/false, yes/no 等格式）
+
+        - Docker/Compose 环境变量常以字符串传递，需兼容多种格式
+        - 接受值：'1','0','true','false','yes','no','on','off'（大小写不敏感）
+        - 默认值 'true' 对应 Python 布尔 True
+        """
+        val = os.getenv(env_key, default).lower().strip()
+        return val in ('1', 'true', 'yes', 'on')
+
+    @staticmethod
+    def faithfulness_enabled() -> bool:
+        """是否启用忠实度评估总开关"""
+        return AnalyticsConfig._parse_bool('FAITHFULNESS_ENABLED', 'true')
+
+    @staticmethod
+    def faithfulness_batch_size() -> int:
+        """每次评估的最大记录数（默认 50，越大消耗越多 Token）"""
+        return int(os.getenv('FAITHFULNESS_BATCH_SIZE', '50'))
+
+    @staticmethod
+    def faithfulness_daily_limit() -> int:
+        """每日评估总量上限（默认 500，防止成本失控）"""
+        return int(os.getenv('FAITHFULNESS_DAILY_LIMIT', '500'))
+
+    @staticmethod
+    def faithfulness_model() -> str:
+        """忠实度评估所用模型（默认 deepseek-chat，可改为更便宜的模型）"""
+        return os.getenv('FAITHFULNESS_MODEL', 'deepseek-chat')
+
+    @staticmethod
+    def faithfulness_cost_limit() -> float:
+        """每日评估成本上限（元，默认 1.0）"""
+        return float(os.getenv('FAITHFULNESS_COST_LIMIT', '1.0'))
+
+    @staticmethod
+    def queue_monitor_enabled() -> bool:
+        """是否启用队列深度监控（生产故障时可临时关闭）"""
+        return AnalyticsConfig._parse_bool('QUEUE_MONITOR_ENABLED', 'true')

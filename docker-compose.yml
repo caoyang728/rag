@@ -75,7 +75,7 @@ services:
       TZ: Asia/Shanghai
     volumes:
       - .:/app
-    command: ["celery", "-A", "rag_project", "worker", "-l", "info", "-Q", "default,parse,memory,email", "--concurrency=1"]
+    command: ["celery", "-A", "rag_project", "worker", "-l", "info", "-Q", "default,parse,memory,email,analytics", "--concurrency=1"]
     networks:
       - data_network
 

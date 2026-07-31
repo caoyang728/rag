@@ -227,6 +227,7 @@ CELERY_TASK_QUEUES = {
     'parse': {},     # 文档解析
     'memory': {},    # 记忆提炼
     'email': {},     # 邮件推送
+    'analytics': {}, # 系统监控 & 忠实度评估（低优先级任务）
 }
 
 # --- LLM ---

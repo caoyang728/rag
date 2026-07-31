@@ -757,6 +757,10 @@ ol {
 	border-bottom: 2px solid transparent;
 	transition: all 0.15s;
 	margin-bottom: -1px;
+	white-space: nowrap;   /* 防止 Tab 文字在窄容器中被强制换行 */
+	display: inline-flex;  /* 图标与文字横向对齐，避免图文错位 */
+	align-items: center;
+	gap: 4px;
 }
 
 .tab-item:hover {

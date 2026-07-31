@@ -83,3 +83,21 @@ class IsAdminOrOps(BasePermission):
         if not u or not u.is_authenticated:
             return False
         return u.is_super_admin or has_permission(u, 'knowledge:manage:all')
+
+
+class CanViewAnalytics(BasePermission):
+    """Analytics 数据查看权限（管理员 + 部门负责人 + 团队负责人）
+
+    - 系统级指标（P50/P95、队列深度、忠实度报告）仅对管理员开放
+    - 组织使用报表可对部门/团队负责人开放
+    - 通过 required_perm 属性区分：analytics:system:read / analytics:org:read
+    - super_admin 始终放行
+    """
+    def has_permission(self, request, view):
+        u = request.user
+        if not u or not u.is_authenticated:
+            return False
+        if u.is_super_admin:
+            return True
+        perm_code = getattr(view, 'required_perm', 'analytics:org:read')
+        return has_permission(u, perm_code)

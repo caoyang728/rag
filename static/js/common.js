@@ -402,6 +402,7 @@ const PAGE_MAP = {
 	'admin-users': '/admin-users/',
 	'admin-nodes': '/admin-nodes/',
 	'admin-analytics': '/admin-analytics/',
+	'admin-eval': '/admin-eval/',
 	'admin-audit': '/admin-audit/',
 	'admin-rbac': '/admin-rbac/',
 	'admin-org': '/admin-org/',
@@ -674,6 +675,7 @@ function renderSidebar(active) {
 	if (isManagerRole) {
 		adminItems.push(
 			{ icon: '📊', name: '反馈与报表', page: 'admin-analytics', key: 'admin-analytics' },
+			{ icon: '🎯', name: '质量评估', page: 'admin-eval', key: 'admin-eval' },
 			{ icon: '🛡️', name: '审计与安全', page: 'admin-audit', key: 'admin-audit' },
 		);
 	}

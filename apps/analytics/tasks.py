@@ -1,5 +1,5 @@
 """
-Analytics Celery Tasks - 系统指标 & 组织报表 & 队列监控 & 忠实度评估
+Analytics Celery Tasks - 系统指标 & 组织报表 & 队列监控 & 忠实度评估 & RAG 质量评估
 
 定时任务列表：
 1. aggregate_daily_report: 每日 01:10 聚合准确率日报（已存在，补齐实现）
@@ -8,6 +8,10 @@ Analytics Celery Tasks - 系统指标 & 组织报表 & 队列监控 & 忠实度�
 4. update_queue_depth_snapshot: 每 5 分钟更新队列深度快照（PG 历史 + Redis 实时）
 5. flush_realtime_metrics_task: 每 5 分钟刷新实时指标时间戳
 6. run_faithfulness_evaluation: 每小时批量评估回答忠实度
+7. batch_evaluate_document_quality: 每日 03:00 批量评估文档质量
+8. generate_coverage_report_daily: 每日 03:30 生成知识库覆盖率报告
+9. run_multi_dimension_evaluation: 每 2 小时批量执行多维度回答质量评估
+10. periodic_retrieval_evaluation: 每周一次执行离线检索评估（黄金测试集）
 
 - 使用 @shared_task 装饰器，支持独立 Worker 部署
 - 队列命名：analytics（专用队列，避免与业务任务混跑）
@@ -499,3 +503,161 @@ def cleanup_old_data():
         'quality_reports_deleted': deleted_aqr,
         'org_usage_reports_deleted': deleted_our,
     }
+
+
+# ============================================================================
+# 8. 文档质量批量评估（每日 03:00）
+# ============================================================================
+
+@shared_task(name='analytics.batch_evaluate_document_quality', queue='analytics')
+def batch_evaluate_document_quality(days: int = 7):
+    """每日批量评估最近 N 天入库文档的解析/切分/向量化质量
+
+    触发时机：文档解析完成后 + 每日批量
+    目的：发现解析质量问题（如文本提取不全、切片过碎、向量化失败），
+    便于运营及时干预。
+    """
+    from apps.analytics.doc_quality import batch_evaluate_document_quality as _batch_eval
+    try:
+        summary = _batch_eval(days=days)
+        logger.info(f'[DocQuality] Batch evaluation completed: {summary}')
+        return {'ok': True, 'summary': summary}
+    except Exception:
+        logger.exception('[DocQuality] Batch evaluation failed')
+        return {'ok': False, 'error': 'batch_eval_failed'}
+
+
+# ============================================================================
+# 9. 知识库覆盖率报告生成（每日 03:30）
+# ============================================================================
+
+@shared_task(name='analytics.generate_coverage_report_daily', queue='analytics')
+def generate_coverage_report_daily(days: int = 7):
+    """每日生成知识库覆盖率报告
+
+    分析热门问题覆盖率、知识空白、重复切片、领域覆盖情况、反馈闭环。
+    是知识库运营的核心参考数据。
+    """
+    from apps.analytics.coverage import generate_coverage_report
+    try:
+        report = generate_coverage_report(days=days)
+        logger.info(
+            f'[Coverage] Daily report: date={report.report_date}, '
+            f'coverage={report.hot_query_coverage_rate:.1%}, '
+            f'gaps={report.gap_count}'
+        )
+        return {
+            'ok': True,
+            'report_id': report.id,
+            'coverage_rate': report.hot_query_coverage_rate,
+            'gap_count': report.gap_count,
+        }
+    except Exception:
+        logger.exception('[Coverage] Report generation failed')
+        return {'ok': False, 'error': 'coverage_report_failed'}
+
+
+# ============================================================================
+# 10. 多维度回答质量批量评估（每 2 小时）
+# ============================================================================
+
+@shared_task(name='analytics.run_multi_dimension_evaluation', queue='analytics')
+def run_multi_dimension_evaluation(batch_size: int = 20):
+    """每 2 小时批量执行多维度回答质量评估
+
+    选取最近未评估的 QA 记录，执行 6 维度评估：
+    Faithfulness / Relevance / Completeness / Correctness / Harmlessness / ContextRecall
+
+    有成本控制，单日上限通过 .env 配置。
+    """
+    from apps.analytics.models import QaRecord, MultiDimensionScore
+    from apps.analytics.evaluation_engine import evaluate_all_dimensions, build_context_from_qa_record
+    from rag_project.config import AnalyticsConfig
+
+    # 成本检查
+    if not AnalyticsConfig.faithfulness_enabled():
+        return {'ok': True, 'skipped': True, 'reason': 'disabled'}
+
+    # 获取待评估的 QA 记录（最近 24 小时内未评估过的）
+    since = timezone.now() - timedelta(hours=24)
+    evaluated_qa_ids = MultiDimensionScore.objects.filter(
+        created_at__gte=since
+    ).values_list('qa_record_id', flat=True)
+
+    pending_qa = QaRecord.objects.filter(
+        created_at__gte=since,
+        is_success=True,
+        answer_type='answer',
+    ).exclude(id__in=evaluated_qa_ids).order_by('-created_at')[:batch_size]
+
+    if not pending_qa.exists():
+        return {'ok': True, 'evaluated': 0}
+
+    count = 0
+    for qa in pending_qa:
+        try:
+            context = build_context_from_qa_record(qa)
+            if not context:
+                continue
+
+            evaluate_all_dimensions(
+                question=qa.question,
+                answer=qa.answer,
+                context=context,
+                dimensions=['faithfulness', 'relevance', 'completeness', 'harmlessness'],
+                qa_record_id=qa.id,
+            )
+            count += 1
+        except Exception:
+            logger.warning(f'[MultiDimEval] Failed for QA {qa.id}')
+            continue
+
+    logger.info(f'[MultiDimEval] Evaluated {count} QA records')
+    return {'ok': True, 'evaluated': count}
+
+
+# ============================================================================
+# 11. 周期性离线检索评估（每周）
+# ============================================================================
+
+@shared_task(name='analytics.periodic_retrieval_evaluation', queue='analytics')
+def periodic_retrieval_evaluation():
+    """每周对所有活跃黄金测试集执行离线检索评估
+
+    用于回归测试：检索参数变更后自动评估质量变化。
+    如果测试集为空则跳过。
+    """
+    from apps.analytics.models import GoldenDataset
+    from apps.analytics.offline_eval import run_retrieval_evaluation
+    from apps.users.models import User
+
+    datasets = GoldenDataset.objects.filter(
+        status='active',
+        question_count__gt=0,
+    )
+    if not datasets.exists():
+        logger.info('[PeriodicEval] No active golden datasets, skipping')
+        return {'ok': True, 'skipped': True}
+
+    # 使用系统用户执行评估
+    sys_user = User.objects.filter(username='system').first()
+    if not sys_user:
+        sys_user = User.objects.filter(is_superuser=True).first()
+    if not sys_user:
+        return {'ok': False, 'error': 'no_user_for_eval'}
+
+    results = []
+    for ds in datasets:
+        try:
+            report = run_retrieval_evaluation(dataset_id=ds.id, user=sys_user)
+            results.append({
+                'dataset': ds.name,
+                'recall_at_10': report.recall_at_10,
+                'mrr': report.mrr,
+            })
+        except Exception:
+            logger.warning(f'[PeriodicEval] Failed for dataset {ds.id}')
+            continue
+
+    logger.info(f'[PeriodicEval] Evaluated {len(results)} datasets: {results}')
+    return {'ok': True, 'evaluated_datasets': len(results), 'results': results}

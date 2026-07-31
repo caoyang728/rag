@@ -23,6 +23,37 @@ from apps.llm.embedding import EmbeddingException
 from apps.knowledge.access import filter_accessible_doc_ids
 
 
+def _detect_error_type(llm_stats: dict) -> str:
+    """根据 LLM 返回的 error 信息推断错误类型
+
+    将 LLM 原始 error 字符串映射到结构化的 error_type，
+    便于统计 timeout_rate、rate_limit_rate 等细分指标。
+    使用关键词匹配规则，覆盖常见错误场景。
+
+    Args:
+        llm_stats: LLM 调用统计 dict，可能包含 error 字段
+
+    Returns:
+        error_type 字符串，空字符串表示无错误
+    """
+    error_msg = (llm_stats.get('error') or '').lower()
+    if not error_msg:
+        return ''
+    if 'timeout' in error_msg or 'timed out' in error_msg:
+        return 'timeout'
+    if 'rate limit' in error_msg or '429' in error_msg or 'too many requests' in error_msg:
+        return 'rate_limit'
+    if 'connection' in error_msg or 'network' in error_msg or 'reset' in error_msg:
+        return 'network'
+    if 'content' in error_msg and ('filter' in error_msg or 'policy' in error_msg):
+        return 'content_filter'
+    if 'embedding' in error_msg:
+        return 'embedding_error'
+    if 'server' in error_msg or '500' in error_msg or '502' in error_msg or '503' in error_msg:
+        return 'server_error'
+    return 'unknown'
+
+
 
 def _normalize(q: str) -> str:
     return ''.join(q.strip().lower().split())
@@ -99,6 +130,9 @@ def ask(user, question: str, session: Session,
             stats={'latency_total_ms': int((time.time() - t0) * 1000)},
             llm_stats=llm_stats, root_type=root_type, turn_index=turn_index,
             answer_type=answer_type, is_hit_cache=False,
+            # Embedding 异常标记为链路中断，但 answer_type='refused'
+            # （正常的拒答类型），is_success=False 便于统计 embedding_error_rate
+            error_type='embedding_error', is_success=False,
         )
         
         return {
@@ -194,6 +228,9 @@ def ask(user, question: str, session: Session,
 
     # 7. 落 QA 记录
     total_ms = int((time.time() - t0) * 1000)
+    # 通过 _detect_error_type() 从 llm_stats.error 推断错误类型，
+    # is_success=False 表示链路中断（LLM 错误），区别于 answer_type='refused'（正常拒答）
+    detected_error_type = _detect_error_type(llm_stats)
     qa = _persist_qa(
         user=user, session=session, question=question, answer=answer,
         citations=citations,
@@ -211,6 +248,8 @@ def ask(user, question: str, session: Session,
         llm_stats=llm_stats,
         root_type=root_type, turn_index=turn_index,
         answer_type=answer_type,
+        error_type=detected_error_type,
+        is_success=not bool(llm_stats.get('error')),
     )
 
     # 8. 记录短时记忆
@@ -357,6 +396,8 @@ def ask_stream(user, question: str, session: Session,
                    'latency_ttfb_ms': ttfb_ms},
             llm_stats={}, root_type=root_type, turn_index=turn_index,
             answer_type='refused', is_hit_cache=False,
+            # Embedding 异常标记为链路中断
+            error_type='embedding_error', is_success=False,
         )
         yield {
             'type': 'done',
@@ -483,6 +524,9 @@ def ask_stream(user, question: str, session: Session,
                     },
                     root_type=root_type, turn_index=turn_index,
                     answer_type='rag' if answer else 'refused',
+                    # 客户端主动终止视为成功（部分回答有效），
+                    # is_success=True 防止被计入失败率统计
+                    is_success=True,
                 )
             except Exception:
                 logger.exception('[ask_stream] failed to persist partial answer on abort')
@@ -533,6 +577,9 @@ def ask_stream(user, question: str, session: Session,
 
     # 8. 落 QaRecord
     total_ms = int((time.time() - t0) * 1000)
+    # 通过 _detect_error_type() 从 llm_stats.error 推断错误类型，
+    # 流式模式下 llm_stats.error 记录流式中断异常
+    detected_error_type_stream = _detect_error_type(llm_stats)
     qa = _persist_qa(
         user=user, session=session, question=question, answer=answer,
         citations=citations,
@@ -551,6 +598,8 @@ def ask_stream(user, question: str, session: Session,
         llm_stats=llm_stats,
         root_type=root_type, turn_index=turn_index,
         answer_type=answer_type,
+        error_type=detected_error_type_stream,
+        is_success=not bool(llm_stats.get('error')),
     )
 
     # 9. 记录短时记忆 + 更新热点缓存
@@ -630,7 +679,30 @@ def _update_cache(question: str, root_type: str, user, answer: str, citations: l
 def _persist_qa(*, user, session, question, answer, citations,
                 retrieval_hits, retrieval_scores, stats, llm_stats,
                 root_type, turn_index, answer_type='rag', is_hit_cache=False,
-                is_task_split=False):
+                is_task_split=False, error_type='', is_success=True):
+    """持久化问答记录 + 实时指标上报
+    - error_type / is_success / tokens_per_second 字段填充
+      error_type 分类记录 LLM/Embedding 错误原因，便于统计细分指标
+      is_success=False 表示链路中断（LLM 错误、Embedding 失败等），
+      区别于 answer_type='refused'（正常的"无相关资料"拒答）
+      tokens_per_second 在保存时计算，避免 Dashboard 端重复计算
+    - QaRecord 创建后立即调用 increment_realtime_metrics()，
+      保证 Redis 实时指标与 PG 数据的一致性
+    - 即使实时指标上报失败也不影响 QaRecord 保存（try/except 包裹）
+    """
+    # --- 计算 Token 生成速率（仅非缓存 + 成功的请求）---
+    # 说明：
+    # - 缓存命中：tokens_completion 是之前缓存的内容，重新计算无意义
+    # - 失败场景 (is_success=False)：LLM 可能输出 0 或不完整 token，统计速率会失真
+    # - llm_latency_sec 设 max(0.1) 防止除零（极快的 LLM 响应 <100ms）
+    tokens_per_second = 0.0
+    if not is_hit_cache and is_success:
+        latency_ms = max(llm_stats.get('latency_llm_ms', 0) or 0, 0)
+        completion_tokens = llm_stats.get('tokens_completion', 0) or 0
+        llm_latency_sec = max(latency_ms / 1000.0, 0.1)
+        if completion_tokens > 0:
+            tokens_per_second = completion_tokens / llm_latency_sec
+
     qa = QaRecord.objects.create(
         session=session,
         user=user if user and getattr(user, 'is_authenticated', False) else None,
@@ -654,5 +726,18 @@ def _persist_qa(*, user, session, question, answer, citations,
         llm_model=llm_stats.get('llm_model', 'deepseek-chat'),
         is_hit_cache=is_hit_cache,
         is_task_split=is_task_split,
+        error_type=error_type,
+        is_success=is_success,
+        tokens_per_second=round(tokens_per_second, 2),
+        # 保留原有 error_message 写入逻辑（如有需要可后续关联 error_type）
+        error_message=llm_stats.get('error', ''),
     )
+
+    # --- 实时指标上报（Redis 原子 INCR，失败不影响主流程）---
+    try:
+        from apps.analytics.realtime import increment_realtime_metrics
+        increment_realtime_metrics(qa)
+    except Exception:
+        logger.exception('[Executor] Failed to report realtime metrics (non-critical)')
+
     return qa

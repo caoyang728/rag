@@ -1,1 +1,481 @@
-/* 反馈与准确率报表 — 主要使用通用 kpi/chart 样式 */
+/* ============ 反馈与准确率报表专用样式 ============ */
+
+/* --- 固定头部 + 内容滚动布局（flex 方案，比 sticky 更可靠） ---
+ * .analytics-main 覆盖 .main 的 overflow/padding，改为 flex 列容器
+ * .analytics-sticky-top 固定不滚动（flex-shrink: 0）
+ * .analytics-content 占满剩余高度，内部 overflow-y: auto 独立滚动
+ */
+.analytics-main {
+	overflow: hidden;
+	display: flex;
+	flex-direction: column;
+	padding: 0;
+}
+
+.analytics-sticky-top {
+	flex-shrink: 0;
+	background: var(--bg);
+	padding: 14px 18px 10px;
+	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+	z-index: 20;
+}
+
+.analytics-content {
+	flex: 1;
+	overflow: hidden;
+	padding: 0 18px 14px;
+	display: flex;
+	flex-direction: column;
+}
+
+/* --- Tab Panel 显示/隐藏 + flex 列布局 ---
+ * active 面板撑满 analytics-content 高度，内部用 panel-header/body/footer 分层
+ */
+.tab-panel {
+	display: none;
+	animation: tabFadeIn 0.18s ease;
+}
+
+.tab-panel.active {
+	display: flex;
+	flex-direction: column;
+	flex: 1;
+	min-height: 0;  /* flex 子项滚动必须设 min-height:0 */
+	overflow: hidden;
+}
+
+/* 面板内三段式布局：header 固定顶部 / body 占满滚动 / footer 固定底部 */
+.panel-header {
+	flex-shrink: 0;
+	padding: 10px 14px;
+	background: var(--white);
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+}
+
+.panel-body {
+	flex: 1;
+	overflow-y: auto;
+	min-height: 0;  /* flex 子项滚动必须设 min-height:0 */
+	display: flex;
+	flex-direction: column;
+}
+
+/* panel-body 内最后一个主要元素撑满剩余高度，避免底部空白 */
+.panel-body > .chart-wrap:last-child,
+.panel-body > .card:last-child,
+.panel-body > .grid-2:last-child {
+	flex: 1;
+	min-height: 0;
+}
+
+/* chart-wrap 内部用 flex 列布局，让 chart-container 自适应高度而非固定 280px */
+.panel-body .chart-wrap {
+	display: flex;
+	flex-direction: column;
+}
+
+.panel-body .chart-container {
+	flex: 1;
+	min-height: 0;
+	height: auto;  /* 覆盖 common.css 的 height:280px，防止溢出 */
+}
+
+/* QA 记录等表格表头固定：滚动时 thead 粘在 panel-body 顶部 */
+.panel-body > table thead th,
+.panel-body > .card > table thead th {
+	position: sticky;
+	top: 0;
+	z-index: 1;
+	background: #f9fafb;
+}
+
+/* 减小 card-title 下方间距（common.css 默认 margin-bottom:16px → 10px） */
+.card-title {
+	margin-bottom: 10px !important;
+}
+
+/* 忠实度评估：两个 block 之间用紧凑间距，不要双重 padding */
+#qualityBody .kpi-grid + .card {
+	margin-top: 10px;
+}
+
+/* 日报 chart-wrap 头部：标题左 / 天数选择器右 */
+.daily-chart-header {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	margin-bottom: 6px;
+	flex-shrink: 0;
+}
+
+/* 统一的指标圆点样式：用 font-size 控制大小，color 控制颜色，background 继承 color */
+.metric-dot {
+	display: inline-block;
+	width: 1em;
+	height: 1em;
+	border-radius: 50%;
+	margin-right: 4px;
+	vertical-align: middle;
+	background: currentColor;  /* 关键：用 currentColor 让背景色继承 color 属性 */
+}
+
+/* 自定义日期范围弹窗：加宽 + 横向双列布局 */
+#modal-date-range {
+	width: 480px;
+}
+
+#modal-date-range .modal-body {
+	display: flex;
+	gap: 20px;
+	padding: 24px 28px;
+}
+
+#modal-date-range .form-item {
+	flex: 1;
+}
+
+#modal-date-range .form-label {
+	display: block;
+	margin-bottom: 8px;
+	font-size: 14px;
+	font-weight: 600;
+	color: var(--text-main);
+}
+
+#modal-date-range .input {
+	width: 100%;
+	height: 40px;
+	padding: 0 12px;
+	font-size: 14px;
+}
+
+#modal-date-range .modal-footer {
+	padding: 16px 28px;
+}
+
+/* 图例放图表下方 */
+.chart-wrap > .chart-legend {
+	margin-top: 8px;
+	justify-content: center;
+}
+
+.panel-footer {
+	flex-shrink: 0;
+}
+
+@keyframes tabFadeIn {
+	from { opacity: 0; transform: translateY(4px); }
+	to { opacity: 1; transform: translateY(0); }
+}
+
+/* --- Tab 栏：横向滚动（小屏），纵向不出现滚动条 --- */
+#analyticsTabs {
+	border-radius: var(--radius-lg);
+	box-shadow: var(--shadow-sm);
+	padding: 0 8px;
+	overflow-x: auto;
+	overflow-y: hidden;
+	white-space: nowrap;
+	-webkit-overflow-scrolling: touch;
+	background: var(--white);
+}
+
+#analyticsTabs .tab-item {
+	flex-shrink: 0;
+	padding: 12px 16px;
+	font-size: 13px;
+	white-space: nowrap;   /* 防止文字在窄容器中换行 */
+	display: inline-flex;  /* 图标与文字横向对齐 */
+	align-items: center;
+	gap: 4px;
+}
+
+/* --- 筛选行内元素垂直居中 --- */
+.page-actions .select,
+.page-actions .input,
+.card .select,
+.card .input {
+	vertical-align: middle;
+}
+
+/* --- KPI 卡片网格最小列宽调优（analytics 页更紧凑） --- */
+.tab-panel .kpi-grid {
+	grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+	gap: 12px;
+}
+
+.tab-panel .kpi-card {
+	padding: 16px;
+}
+
+.tab-panel .kpi-value {
+	font-size: 24px;
+}
+
+/* --- 系统指标页卡片内表格的响应式容器：横向可滚动 --- */
+#systemMetricsBody .card .table,
+#orgUsageBody .card .table,
+#qualityBody .card .table {
+	min-width: 100%;
+}
+
+#systemMetricsBody .table td,
+#systemMetricsBody .table th,
+#orgUsageBody .table td,
+#orgUsageBody .table th {
+	white-space: nowrap;
+}
+
+/* --- 队列深度 SVG 画布最小高度 --- */
+#queueDepthHistory .chart-svg {
+	min-height: 240px;
+}
+
+/* --- QA 记录行 hover 高亮更明显 --- */
+#qaRecordsBody .table tbody tr:hover {
+	background: #eff6ff !important;
+}
+
+/* --- 实时监控数据新鲜度标签 --- */
+#realtimeBody .tag {
+	margin-left: 8px;
+}
+
+/* --- 延迟直方图百分比条 hover 效果 --- */
+#systemMetricsBody [class*="__anim"]:hover {
+	filter: brightness(0.9);
+}
+
+/* --- 日报详情表格环比列最小宽度 --- */
+#dailyBody .table th:last-child,
+#dailyBody .table td:last-child {
+	min-width: 200px;
+}
+
+/* --- 辅助：tools tab 与 overview tab 中的差评卡片避免重复样式冲突 --- */
+.feedback-item + .feedback-item {
+	margin-top: 0;
+}
+
+/* --- 宽度工具类：用于 select / input 配合 ---
+ */
+.select-sm { width: 140px; }
+.select-md { width: 160px; }
+.select-lg { width: 180px; }
+/* 日报趋势天数选择器：紧凑型 select（小高度 + 小字号） */
+.select-xs { width: 80px; height: 28px; padding: 2px 6px; font-size: 12px; }
+.input-date { width: 160px; }
+
+/* --- 时间范围按钮组容器：白底 + 边框 + 内边距 2px，让内部 btn-ghost 看起来像分段控件 --- */
+.time-range-group {
+	background: var(--white);
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	padding: 2px;
+}
+
+/* --- 卡片 / Grid 工具类 ---
+ * .card-shrink 用于在 flex 容器中固定不被压缩的卡片
+ * .grid-cols-* 提供常用列比，避免在 HTML/JS 里写 grid-template-columns
+ */
+.card-shrink { flex-shrink: 0; }
+.grid-cols-5-4 { grid-template-columns: 5fr 4fr; }
+.grid-cols-1-1 { grid-template-columns: 1fr 1fr; }
+.grid-cols-3 { grid-template-columns: repeat(3, 1fr); }
+
+/* --- 表格相关 ---
+ * .table-bordered 给 table 加边框圆角（默认 table 无外框）
+ * .th-action 操作列固定宽度
+ * .td-question 单行省略，限制最大宽度，配合 title 属性显示完整内容
+ * .td-reason 评估说明列：限制宽度 + 小字灰色
+ * .tr-clickable 整行可点击：鼠标变手型
+ */
+.table-bordered { border: 1px solid var(--border); border-radius: var(--radius); }
+.th-action { width: 100px; }
+.td-question {
+	max-width: 320px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.td-reason { max-width: 280px; font-size: 12px; color: var(--text-sub); }
+.tr-clickable { cursor: pointer; }
+
+/* --- 反馈列表 / 卡片 ---
+ * .feedback-list 限定最大高度并内部滚动，避免页面过长
+ * .feedback-item 差评反馈卡片：浅红底 + 左侧红色边条
+ * .fb-comment 反馈内容块：白底嵌入卡片内
+ */
+.feedback-list { max-height: 520px; }
+
+.feedback-item {
+	padding: 12px;
+	background: #fef2f2;
+	border-left: 3px solid var(--danger);
+	border-radius: var(--radius);
+	font-size: 13px;
+}
+
+.feedback-item .fb-comment {
+	padding: 6px 8px;
+	background: var(--white);
+	border-radius: var(--radius-sm);
+	color: var(--text);
+}
+
+/* --- Modal QA 详情 ---
+ * .modal-qa-detail 比 common 默认弹窗更宽，便于展示问答对
+ * .modal-body-scroll 限制 body 高度并独立滚动，避免内容过长撑满屏幕
+ */
+.modal-qa-detail { width: 720px; }
+.modal-body-scroll { max-height: 60vh; overflow-y: auto; }
+
+/* --- 错误 / 空态占位 ---
+ * 多处 catch 分支会用占位 HTML 提示加载失败，统一抽成 class
+ * .error-block-lg 用于 chart 容器内大块错误（40px padding）
+ * .error-block 用于表格 tbody 内的错误（20px padding，居中）
+ * .card-error 用于 panel-body 内的错误卡片（带 card 边框感）
+ * .card-empty 数据为空时的占位卡片（大 padding + 居中）
+ * .empty-emoji 空态大 emoji（48px 字号 + 下方间距）
+ * .text-loading 加载中提示（20px padding）
+ */
+/* 公共：居中 + 红色错误文字；padding 大小不同区分使用场景 */
+.error-block-lg,
+.error-block { text-align: center; color: var(--danger); }
+.error-block-lg { padding: 40px; }
+.error-block { padding: 20px; }
+.card-error { padding: 20px; color: var(--danger); }
+.card-empty { padding: 40px; text-align: center; }
+.empty-emoji { font-size: 48px; margin-bottom: 16px; }
+.text-loading { padding: 20px; }
+
+/* --- 大数字 / KPI 动态色值显示 ---
+ * .metric-value-lg Token 统计大数字（24px 粗体）
+ * .metric-value-cost 费用数字（红色强调）
+ * .kpi-value-dynamic 用于 KPI 卡片：字号 22px，颜色由 --kpi-color 控制（默认深灰）
+ *   用法：<div class="kpi-value kpi-value-dynamic" style="--kpi-color:#059669">
+ *   注意：用 .kpi-value.kpi-value-dynamic 提升优先级，覆盖 .tab-panel .kpi-value 的 24px
+ */
+/* 公共：大数字样式；.metric-value-cost 额外红色强调费用 */
+.metric-value-lg,
+.metric-value-cost { font-size: 24px; font-weight: 600; }
+.metric-value-cost { color: #dc2626; }
+.kpi-value.kpi-value-dynamic { font-size: 22px; color: var(--kpi-color, #1f2937); }
+
+/* --- 卡片小内边距（用于紧凑型横向 card，如实时监控顶部的数据日期行） --- */
+.card-pad-sm { padding: 12px 20px; }
+
+/* --- 文本行高工具类（用于说明性文字，让多行更易读） --- */
+.text-lh-18 { line-height: 1.8; }
+
+/* --- 直方图行布局 ---
+ * 延迟分布 / 错误分布的每行结构：[标签 | 进度条 | 数值]
+ * .hist-row 行容器（flex + 居中 + gap）
+ * .hist-label 普通标签（右对齐 + 灰色小字，120px）
+ * .hist-label-err 错误标签（红色小字，160px，留给较长的错误名）
+ * .hist-value 右侧数值（右对齐 + 深灰小字，80px）
+ * .hist-track 普通进度条轨道（灰底 + 圆角 + 限宽）
+ * .hist-track-err 错误进度条轨道（粉红底，与普通区分）
+ * .hist-bar 进度条填充（高度 100%，宽度由 JS 动画设置）
+ * .hist-bar-err 错误填充（固定红色，宽度由 JS 设置）
+ */
+.hist-row { margin: 6px 0; display: flex; align-items: center; gap: 8px; }
+.hist-label { width: 120px; text-align: right; color: var(--text-sub); font-size: 12px; }
+.hist-label-err { width: 160px; text-align: right; color: #dc2626; font-size: 12px; }
+.hist-value { width: 80px; text-align: right; font-size: 12px; color: #374151; }
+/* 进度条轨道公共样式，仅 background 不同 */
+.hist-track,
+.hist-track-err { flex: 1; height: 20px; border-radius: 4px; overflow: hidden; max-width: 480px; }
+.hist-track { background: #f3f4f6; }
+.hist-track-err { background: #fef2f2; }
+.hist-bar,
+.hist-bar-err { height: 100%; }
+/* .hist-bar 初始宽度 0，由 JS 动画递增到目标百分比 */
+.hist-bar { width: 0; }
+.hist-bar-err { background: #dc2626; }
+
+/* --- 图表侧栏 / 行布局 ---
+ * 趋势图左侧的勾选框列：垂直排列 + 居中 + 不被压缩
+ * .chart-sidebar 概览趋势图侧栏（min-width 110px）
+ * .daily-sidebar 仅覆盖 min-width（需配合 .chart-sidebar 一起使用）
+ * .chart-row 图表主行容器（侧栏 + 图表横向排列）
+ * .chart-container-flex chart-container 的 flex 变体：占满剩余宽度（高度由 JS 动态设置）
+ */
+.chart-sidebar {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	flex-shrink: 0;
+	padding: 10px 4px 10px 6px;
+	min-width: 110px;
+	justify-content: center;
+}
+
+/* 日报侧栏：仅覆盖 min-width，HTML 需写 class="chart-sidebar daily-sidebar" */
+.daily-sidebar {
+	min-width: 120px;
+}
+
+.chart-row { display: flex; gap: 4px; align-items: center; }
+.chart-container-flex { flex: 1; min-width: 0; }
+
+/* --- 圆点颜色修饰类 ---
+ * 配合 .metric-dot（圆点基础类，background 用 currentColor）
+ * font-size 统一 1.28em（比父级大 28%），color 控制圆点颜色
+ * 用于趋势图勾选框前的色块标识
+ */
+.dot-blue, .dot-yellow, .dot-red, .dot-green, .dot-purple { font-size: 1.28em; }
+.dot-blue { color: #2563eb; }
+.dot-yellow { color: #a16207; }
+.dot-red { color: #ef4444; }
+.dot-green { color: #059669; }
+.dot-purple { color: #7c3aed; }
+
+/* --- QA 详情弹窗内的问答展示块 ---
+ * 公共样式：圆角 + 内边距 + 行高；仅 background 不同区分问题和回答
+ */
+.qa-detail-question,
+.qa-detail-answer {
+	border-radius: var(--radius);
+	padding: 12px 14px;
+	line-height: 1.6;
+}
+.qa-detail-question { background: #f9fafb; }
+.qa-detail-answer { background: #eff6ff; }
+
+/* --- 分页省略号按钮：去掉边框与背景，看起来像纯文本 --- */
+.page-btn-ellipsis { border: none; background: transparent; }
+
+/* --- 动态色值单元格 ---
+ * 队列大小、忠实度分数、环比差值等会根据数值动态切换颜色
+ * 这里提供语义化 class，JS 根据阈值选择对应 class
+ */
+/* 公共：加粗显示；颜色区分正常/危险 */
+.cell-danger,
+.cell-success { font-weight: 600; }
+.cell-danger { color: #dc2626; }
+.cell-success { color: #059669; }
+.score-good { color: #059669; }
+.score-mid { color: #f59e0b; }
+.score-bad { color: #dc2626; }
+.diff-up { color: #059669; }
+.diff-down { color: #dc2626; }
+
+/* --- SVG 画布自适应（队列深度历史图）：保持宽度 100% + 高度自适应 --- */
+.chart-svg-fluid { min-width: 100%; height: auto; }
+
+/* --- kpi-grid 上使用 .grid-cols-3 时需提升优先级，覆盖 .tab-panel .kpi-grid 的 auto-fit --- */
+.kpi-grid.grid-cols-3 { grid-template-columns: repeat(3, 1fr); }
+
+/* --- 小屏响应式：把所有降列的选择器放到一个合并后的 @media，
+   位置放在 .kpi-grid.grid-cols-3 之后，确保按 CSS 级联覆盖成功 --- */
+@media (max-width: 900px) {
+	.grid-2,
+	.grid-3,
+	.grid-cols-5-4,
+	.grid-cols-1-1,
+	.kpi-grid.grid-cols-3 {
+		grid-template-columns: 1fr;
+	}
+}

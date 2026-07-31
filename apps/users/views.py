@@ -711,8 +711,7 @@ class UserViewSet(viewsets.ModelViewSet):
                 UserRole.objects.filter(
                     user=user,
                     is_active=True,
-                    role_id__not_in=role_ids
-                ).update(
+                ).exclude(role_id__in=role_ids).update(
                     is_active=False,
                     revoked_at=timezone.now(),
                     revoked_by=request.user
@@ -808,8 +807,7 @@ class UserViewSet(viewsets.ModelViewSet):
             UserRole.objects.filter(
                 user=u,
                 is_active=True,
-                role_id__not_in=role_ids
-            ).update(
+            ).exclude(role_id__in=role_ids).update(
                 is_active=False,
                 revoked_at=timezone.now(),
                 revoked_by=request.user
@@ -1394,8 +1392,7 @@ class RoleViewSet(viewsets.ModelViewSet):
             RolePermission.objects.filter(
                 role=role,
                 is_active=True,
-                permission_id__not_in=valid_ids
-            ).update(
+            ).exclude(permission_id__in=valid_ids).update(
                 is_active=False,
                 revoked_at=timezone.now(),
                 revoked_by=request.user

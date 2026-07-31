@@ -74,6 +74,32 @@ class QaRecord(models.Model):
     is_task_split = models.BooleanField(default=False, help_text='是否触发复杂任务拆分')
     error_message = models.TextField(blank=True, default='')
 
+    # --- 错误类型分类（结构化统计 LLM/Embedding 失败原因）---
+    # 缓存命中时 error_type 为空字符串；LLM 调用失败时分类记录，
+    # 用于统计 timeout_rate、rate_limit_rate、embedding_error_rate 等细分指标
+    ERROR_TYPE_CHOICES = [
+        ('timeout', 'timeout'),
+        ('rate_limit', 'rate_limit'),
+        ('network', 'network'),
+        ('content_filter', 'content_filter'),
+        ('server_error', 'server_error'),
+        ('embedding_error', 'embedding_error'),
+        ('unknown', 'unknown'),
+    ]
+    error_type = models.CharField(max_length=32, choices=ERROR_TYPE_CHOICES,
+                                  default='', blank=True,
+                                  help_text='错误类型：timeout/rate_limit/network/content_filter/server_error/embedding_error')
+    # is_success=False 表示对话链路中断（含 LLM 错误、Embedding 失败等），
+    # 区别于 answer_type='refused'（正常的"无相关资料"拒答）
+    is_success = models.BooleanField(default=True,
+                                      help_text='对话是否成功完成（False=链路中断）')
+
+    # --- Token 生成速率 ---
+    # 保存时计算 completion_tokens / (latency_llm_ms / 1000)，
+    # 避免 Dashboard 端重复计算；缓存命中时为 0
+    tokens_per_second = models.FloatField(default=0.0,
+                                           help_text='生成速率: completion_tokens / llm_duration_sec')
+
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -84,6 +110,9 @@ class QaRecord(models.Model):
             models.Index(fields=['root_type'], name='idx_qa_root'),
             models.Index(fields=['answer_type'], name='idx_qa_ans_type'),
             models.Index(fields=['-created_at'], name='idx_qa_created'),
+            # 加速失败率和错误分类统计
+            models.Index(fields=['is_success', '-created_at'], name='idx_qa_success_time'),
+            models.Index(fields=['error_type', '-created_at'], name='idx_qa_errtype_time'),
         ]
 
     def __str__(self):

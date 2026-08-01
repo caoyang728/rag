@@ -29,7 +29,13 @@
 			<div class="chat-header">
 				<div class="chat-title-input hidden" id="chatTitle"></div>
 				<div class="flex gap-8 items-center">
-					<span class="tag tag-info">💡 已启用 4 层记忆</span>
+					<!-- 问答模式切换：auto=LLM自主决定是否调用工具（默认）/ rag=传统RAG / agent=强制Agent -->
+					<div class="mode-switcher" id="modeSwitcher" role="tablist" aria-label="问答模式">
+						<button class="mode-btn active" data-mode="auto" onclick="setChatMode('auto')" title="LLM 自主决定是否调用工具（推荐）">⚡ Auto</button>
+						<button class="mode-btn" data-mode="rag" onclick="setChatMode('rag')" title="传统 RAG：预检索 + LLM 生成">📚 RAG</button>
+						<button class="mode-btn" data-mode="agent" onclick="setChatMode('agent')" title="强制 Agent 模式：必定走 ReAct 工具循环">🤖 Agent</button>
+					</div>
+					<span class="tag tag-info">💡 4 层记忆</span>
 					<button class="btn btn-sm" onclick="newSession()">+ 新建会话</button>
 				</div>
 			</div>
@@ -116,6 +122,7 @@
 
 	<!-- 5. AI 回答完整内容区 -->
 	<template id="tmpl-ai-answer">
+		<div class="ai-thinking-area" id="thinkingArea"></div>
 		<div class="ai-answer-text"></div>
 		<div class="ai-source-area"></div>
 		<div class="feedback-bar">
@@ -126,6 +133,33 @@
 			<span class="feedback-latency" style="font-size:11px;color:var(--text-sub)"></span>
 		</div>
 		<div class="feedback-detail"></div>
+	</template>
+
+	<!-- 5b. 思考过程区（Agent 模式可折叠，含工具调用链） -->
+	<template id="tmpl-thinking-area">
+		<div class="thinking-area">
+			<div class="thinking-header" onclick="toggleThinkingArea(this)">
+				<span class="thinking-icon">🤔</span>
+				<span class="thinking-title">思考过程</span>
+				<span class="thinking-summary"></span>
+				<span class="thinking-toggle">▾</span>
+			</div>
+			<div class="thinking-body"></div>
+		</div>
+	</template>
+
+	<!-- 5c. 单次工具调用卡片（tool_call → tool_result 配对） -->
+	<template id="tmpl-tool-call">
+		<div class="tool-call" data-call-id="">
+			<div class="tool-call-header">
+				<span class="tool-call-icon">🔧</span>
+				<span class="tool-call-name"></span>
+				<span class="tool-call-status">执行中...</span>
+				<span class="tool-call-latency"></span>
+			</div>
+			<div class="tool-call-args"></div>
+			<div class="tool-call-result"></div>
+		</div>
 	</template>
 
 	<!-- 6. 用户消息气泡 -->
@@ -146,6 +180,7 @@
 		<div class="msg msg-ai">
 			<div class="msg-ai-avatar">AI</div>
 			<div class="msg-ai-content">
+				<div class="ai-thinking-area"></div>
 				<div class="ai-answer-text"></div>
 				<div class="ai-source-area"></div>
 				<div class="feedback-bar">

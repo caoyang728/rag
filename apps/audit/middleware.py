@@ -31,13 +31,16 @@ _ACTION_MAP = [
     (re.compile(r'/api/v1/users/(\d+)/toggle_status/?$'), 'toggle_user_status', 'user', 'user'),
     (re.compile(r'/api/v1/users/(\d+)/assign_roles/?$'), 'assign_roles', 'user', 'user'),
     (re.compile(r'/api/v1/users/batch_delete/?$'), 'batch_delete_user', 'user', 'user'),
-    (re.compile(r'/api/v1/chat/ask/?$'), 'chat_ask', 'chat', 'chat'),
+    # 同步 chat/ask 接口已下线，ask_stream 是 SSE 流式，不在审计规则里（流式请求难以审计 request body）
     (re.compile(r'/api/v1/feedback/?$'), 'feedback', 'chat', 'feedback'),
     (re.compile(r'/api/v1/export/?$'), 'export', 'export', 'export'),
     (re.compile(r'/api/v1/security/ip-whitelist/?$'), 'manage_whitelist', 'security', 'ip_whitelist'),
     (re.compile(r'/api/v1/security/ip-whitelist/(\d+)/?$'), 'manage_whitelist', 'security', 'ip_whitelist'),
     (re.compile(r'/api/v1/security/ip-blacklist/?$'), 'manage_blacklist', 'security', 'ip_blacklist'),
     (re.compile(r'/api/v1/security/ip-blacklist/(\d+)/?$'), 'manage_blacklist', 'security', 'ip_blacklist'),
+    # 敏感词 CRUD 属安全相关操作，需落审计便于追溯词库变更历史
+    (re.compile(r'/api/v1/security/sensitive-words/?$'), 'manage_sensitive_word', 'security', 'sensitive_word'),
+    (re.compile(r'/api/v1/security/sensitive-words/(\d+)/?$'), 'manage_sensitive_word', 'security', 'sensitive_word'),
 ]
 
 _AUDIT_METHODS = {'POST', 'PUT', 'PATCH', 'DELETE'}

@@ -237,6 +237,34 @@ LLM_BASE_URL = LLMConfig.base_url()
 LLM_BASE_MODEL = LLMConfig.default_model()         # 基础模型（用于简单任务）
 LLM_ADVANCED_MODEL = LLMConfig.advanced_model()    # 高级模型（用于复杂任务）
 
+# --- Agent 配置（Agentic RAG 工具调用）---
+# TAVILY_API_KEY: 联网搜索工具的 API Key（https://tavily.com，免费 1000 次/月）
+# 未配置时自动降级到 DuckDuckGo（免费、无需 Key）
+TAVILY_API_KEY = os.getenv('TAVILY_API_KEY', '')
+# BUSINESS_DB_DSN: Text2SQL 工具的业务数据库连接串
+# 留空时使用 django 默认数据库；格式：postgresql://user:pass@host:port/dbname
+BUSINESS_DB_DSN = os.getenv('BUSINESS_DB_DSN', '')
+# BUSINESS_DB_TABLES: Text2SQL 可查询表的名称白名单（逗号分隔）
+# 留空表示允许 public schema 下的全部表（生产环境建议配置白名单）
+BUSINESS_DB_TABLES = os.getenv('BUSINESS_DB_TABLES', '')
+# AGENT_DEFAULT_MODE: 默认问答模式（auto / rag / agent）
+# auto: Agent 模式，LLM 自主决定是否调用工具
+# rag: 传统 RAG 模式，预检索 + LLM 生成
+# agent: 强制 Agent 模式
+AGENT_DEFAULT_MODE = os.getenv('AGENT_DEFAULT_MODE', 'auto')
+
+# --- 敏感词流式审查（输出侧内容安全防线）---
+# 总开关：关闭后 LLM 输出不再过审（仅在调试或低风险场景关闭）
+SENSITIVE_FILTER_ENABLED = os.getenv('SENSITIVE_FILTER_ENABLED', '1') == '1'
+# 累积多少字符送审一次（过小会增加审查开销，过大延迟感知到违规）
+SENSITIVE_FILTER_CHUNK_SIZE = int(os.getenv('SENSITIVE_FILTER_CHUNK_SIZE', '32'))
+# 滑动窗口大小：保留尾部 N 字符防止关键词被 delta 边界切分
+SENSITIVE_FILTER_WINDOW_SIZE = int(os.getenv('SENSITIVE_FILTER_WINDOW_SIZE', '16'))
+# 脱敏替换字符串（mask 动作使用）
+SENSITIVE_FILTER_MASK_STR = os.getenv('SENSITIVE_FILTER_MASK_STR', '***')
+# 词库缓存 TTL 秒：超过后自动从 DB 刷新（避免每次请求都查库）
+SENSITIVE_FILTER_RELOAD_TTL = int(os.getenv('SENSITIVE_FILTER_RELOAD_TTL', '300'))
+
 # --- Embedding & Rerank ---
 # 使用通用变量名，支持切换不同平台
 EMBEDDING_API_KEY = EmbeddingConfig.api_key()

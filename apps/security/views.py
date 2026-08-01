@@ -327,16 +327,62 @@ class SensitiveWordView(APIView):
         if not word:
             return Response({"detail": "word 必填"}, status=400)
 
+        # word 预处理：strip 去除首尾空白 + 长度校验
+        # 避免纯空格词污染词库、超长词拖慢 AC 自动机构建
+        word = word.strip()
+        if not word:
+            return Response({"detail": "word 不能为空白"}, status=400)
+        if len(word) > 128:
+            return Response({"detail": "word 长度不能超过 128"}, status=400)
+
+        # choices 校验：objects.create 不触发 full_clean，需在视图层显式校验
+        # 非法 action 会导致 SensitiveFilter 的 block/mask/warn 分支全部失配，安全防线被绕过
+        valid_actions = [c[0] for c in SensitiveWord.ACTION_CHOICES]
+        if action not in valid_actions:
+            return Response({"detail": f"action 必须是 {valid_actions} 之一"}, status=400)
+        valid_categories = [c[0] for c in SensitiveWord.CATEGORY_CHOICES]
+        if category not in valid_categories:
+            return Response({"detail": f"category 必须是 {valid_categories} 之一"}, status=400)
+
+        # 正则词合法性校验：非法正则会在 _load_from_db 被静默跳过，
+        # 用户以为已生效但实际未入词库，提前校验给即时反馈
+        if is_regex:
+            import re as re_module
+            try:
+                re_module.compile(word)
+            except re_module.error as e:
+                return Response({"detail": f"正则表达式非法: {e}"}, status=400)
+
         if SensitiveWord.objects.filter(word=word).exists():
             return Response({"detail": "该敏感词已存在"}, status=400)
 
-        obj = SensitiveWord.objects.create(
-            word=word, category=category, action=action, is_regex=is_regex, is_enabled=True
-        )
+        # exists() 检查与 create 之间存在竞态：并发创建相同 word 时数据库
+        # unique 约束会抛 IntegrityError，捕获后返回友好的 400 而非 500
+        from django.db import IntegrityError
+        try:
+            obj = SensitiveWord.objects.create(
+                word=word, category=category, action=action, is_regex=is_regex, is_enabled=True
+            )
+        except IntegrityError:
+            return Response({"detail": "该敏感词已存在"}, status=400)
+        # 词库变更：触发 SensitiveFilter 重建 AC 自动机（异步失败不影响接口）
+        self._trigger_reload()
         return Response({
             "id": obj.id, "word": obj.word, "category": obj.category,
             "action": obj.action, "created_at": obj.created_at.isoformat()
         }, status=201)
+
+    @staticmethod
+    def _trigger_reload():
+        """词库变更后触发 SensitiveFilter 重建
+
+        放在 try/except 中：过滤器未启用或初始化失败不应阻断 CRUD 接口。
+        """
+        try:
+            from apps.security.sensitive_filter import SensitiveFilter
+            SensitiveFilter.force_reload()
+        except Exception:
+            logger.exception('[SensitiveWord] force_reload failed, other workers will reload on TTL')
 
 
 class SensitiveWordDetailView(APIView):
@@ -346,9 +392,15 @@ class SensitiveWordDetailView(APIView):
     def put(self, request, pk):
         try:
             obj = SensitiveWord.objects.get(id=pk)
-            obj.action = request.data.get("action", obj.action)
+            action = request.data.get("action", obj.action)
+            # choices 校验：防止非法 action 导致审查分支失配
+            valid_actions = [c[0] for c in SensitiveWord.ACTION_CHOICES]
+            if action not in valid_actions:
+                return Response({"detail": f"action 必须是 {valid_actions} 之一"}, status=400)
+            obj.action = action
             obj.is_enabled = request.data.get("is_enabled", obj.is_enabled)
             obj.save()
+            SensitiveWordView._trigger_reload()
             return Response({
                 "id": obj.id, "word": obj.word, "action": obj.action,
                 "is_enabled": obj.is_enabled
@@ -360,6 +412,7 @@ class SensitiveWordDetailView(APIView):
         try:
             obj = SensitiveWord.objects.get(id=pk)
             obj.delete()
+            SensitiveWordView._trigger_reload()
             return Response(status=204)
         except SensitiveWord.DoesNotExist:
             return Response({"detail": "敏感词不存在"}, status=404)

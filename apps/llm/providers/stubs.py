@@ -23,50 +23,82 @@ class _OpenAICompatibleProvider(BaseLLMProvider):
         self.client = OpenAI(api_key=api_key or 'sk-stub', base_url=base_url, timeout=timeout)
 
     def chat(self, messages, temperature=0.3, max_tokens=2048, **kwargs):
+        """同步 chat，支持 function calling（tools/tool_choice 通过 kwargs 透传）"""
         t0 = time.time()
+        tools = kwargs.get('tools')
+        tool_choice = kwargs.get('tool_choice')
         try:
-            resp = self.client.chat.completions.create(
+            request_kwargs = dict(
                 model=self.model, messages=messages,
                 temperature=temperature, max_tokens=max_tokens, stream=False,
             )
+            if tools:
+                request_kwargs['tools'] = tools
+                if tool_choice is not None:
+                    request_kwargs['tool_choice'] = tool_choice
+            resp = self.client.chat.completions.create(**request_kwargs)
             latency_ms = int((time.time() - t0) * 1000)
-            content = resp.choices[0].message.content or ''
+            message = resp.choices[0].message
+            content = message.content or ''
             usage = resp.usage
             pt = getattr(usage, 'prompt_tokens', 0) if usage else 0
             ct = getattr(usage, 'completion_tokens', 0) if usage else 0
+            tool_calls = self._extract_tool_calls(message)
             return {'content': content, 'prompt_tokens': pt, 'completion_tokens': ct,
                     'total_tokens': pt + ct, 'latency_ms': latency_ms,
                     'model': self.model, 'provider': self.name, 'cost': 0,
-                    'finish_reason': resp.choices[0].finish_reason}
+                    'finish_reason': resp.choices[0].finish_reason,
+                    'tool_calls': tool_calls}
         except Exception as e:
             logger.exception('[%s] chat error', self.name)
             return {'content': f'[{self.name} 调用失败: {e}]', 'prompt_tokens': 0,
                     'completion_tokens': 0, 'total_tokens': 0,
                     'latency_ms': int((time.time() - t0) * 1000),
                     'model': self.model, 'provider': self.name, 'cost': 0,
-                    'finish_reason': 'error', 'error': str(e)}
+                    'finish_reason': 'error', 'error': str(e), 'tool_calls': []}
 
     def stream(self, messages, temperature=0.3, max_tokens=2048, **kwargs) -> Iterator[Dict[str, Any]]:
+        """流式生成，支持流式 function calling（tool_calls 分片累积）"""
         t0 = time.time()
+        tools = kwargs.get('tools')
+        tool_choice = kwargs.get('tool_choice')
         try:
-            resp = self.client.chat.completions.create(
+            request_kwargs = dict(
                 model=self.model, messages=messages,
                 temperature=temperature, max_tokens=max_tokens, stream=True,
             )
+            if tools:
+                request_kwargs['tools'] = tools
+                if tool_choice is not None:
+                    request_kwargs['tool_choice'] = tool_choice
+            resp = self.client.chat.completions.create(**request_kwargs)
             full = []
+            accumulated_tool_calls = []
+            finish_reason = None
             for chunk in resp:
                 if not chunk.choices:
                     continue
-                delta = chunk.choices[0].delta.content or ''
-                if delta:
-                    full.append(delta)
-                    yield {'delta': delta, 'finish': False}
+                choice = chunk.choices[0]
+                if getattr(choice, 'finish_reason', None):
+                    finish_reason = choice.finish_reason
+                delta = choice.delta
+                text_delta = getattr(delta, 'content', None) or ''
+                if text_delta:
+                    full.append(text_delta)
+                    yield {'delta': text_delta, 'finish': False}
+                tc_delta = getattr(delta, 'tool_calls', None)
+                if tc_delta:
+                    accumulated_tool_calls = self._merge_tool_call_deltas(
+                        accumulated_tool_calls, tc_delta)
             yield {'delta': '', 'finish': True, 'content': ''.join(full),
                    'latency_ms': int((time.time() - t0) * 1000),
-                   'model': self.model, 'provider': self.name}
+                   'model': self.model, 'provider': self.name,
+                   'tool_calls': accumulated_tool_calls,
+                   'finish_reason': finish_reason or 'stop'}
         except Exception as e:
             logger.exception('[%s] stream error', self.name)
-            yield {'delta': f'[流式失败: {e}]', 'finish': True, 'error': str(e)}
+            yield {'delta': f'[流式失败: {e}]', 'finish': True, 'error': str(e),
+                   'tool_calls': [], 'finish_reason': 'error'}
 
 
 class QwenProvider(_OpenAICompatibleProvider):

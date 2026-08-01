@@ -8,3 +8,31 @@
 	flex-direction: column;
 	overflow: hidden;
 }
+
+/* ============ 敏感词管理 ============ */
+/* tag-default：中性灰，用于"启用/禁用/告警"等状态展示
+ * common.css 的 .tag 基础样式已有灰色背景，此处显式定义便于后续主题调整
+ */
+.tag-default {
+	background: var(--hover);
+	color: var(--text-sub)
+}
+
+/* 编辑模式下禁用字段：明显灰色 + 禁用光标，提示用户该字段不可改 */
+#modal-sensitive input:disabled,
+#modal-sensitive select:disabled {
+	background: var(--bg);
+	color: var(--text-sub);
+	cursor: not-allowed;
+	opacity: 0.75;
+}
+
+/* checkbox 行对齐优化：label 之间间距 + 防止换行错位 */
+#modal-sensitive .sensitive-input-regex,
+#modal-sensitive .sensitive-input-enabled {
+	width: 16px;
+	height: 16px;
+	accent-color: var(--primary);
+	cursor: pointer;
+	flex-shrink: 0;
+}

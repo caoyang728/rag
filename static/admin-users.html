@@ -39,9 +39,6 @@
 						<select id="filterTeam" class="select" style="width:130px" onchange="searchUsers()" disabled>
 							<option value="">全部团队</option>
 						</select>
-						<select id="filterRole" class="select" style="width:110px" onchange="searchUsers()">
-							<option value="">全部角色</option>
-						</select>
 						<select id="filterStatus" class="select" style="width:110px" onchange="searchUsers()">
 							<option value="">全部状态</option>
 							<option value="active">启用</option>
@@ -71,9 +68,9 @@
 								<th class="th-sortable" onclick="onSortChange('email')">邮箱 <span id="sort-email" class="sort-indicator"></span></th>
 								<th>部门</th>
 								<th>团队</th>
-								<th>角色</th>
+								<th>最后登录</th>
 								<th>状态</th>
-								<th style="width:180px">操作</th>
+								<th style="width:240px">操作</th>
 							</tr>
 						</thead>
 						<tbody id="userTable">
@@ -132,16 +129,9 @@
 					</select>
 				</div>
 			</div>
-
-			<!-- ===== 角色与组织 ===== -->
-			<div class="form-section-title">角色与组织</div>
+			<!-- ===== 组织架构 ===== -->
+			<div class="form-section-title">组织架构</div>
 			<div class="form-row">
-				<div class="form-item flex-1">
-					<label class="form-label">角色</label>
-					<select id="userRoleSelect" class="select" onchange="onRoleChange()">
-						<option value="">— 无 —</option>
-					</select>
-				</div>
 				<div class="form-item flex-1">
 					<label class="form-label">部门</label>
 					<select id="userDept" class="select" onchange="onDeptChange()">
@@ -155,7 +145,6 @@
 					</select>
 				</div>
 			</div>
-			<div id="rolePermSummary" class="text-sub text-sm" style="padding:4px 0"></div>
 		</div>
 		<div class="modal-footer">
 			<button class="btn-delete hidden mr-auto" id="modalDeleteBtn" onclick="deleteUserFromModal()">删除用户</button>
@@ -175,16 +164,46 @@
 			<td>{{email}}</td>
 			<td>{{dept_name}}</td>
 			<td>{{team_name}}</td>
-			<td><span class="text-sm">{{role_names}}</span></td>
+			<td><span class="text-sm text-sub">{{last_login}}</span></td>
 			<td>{{status_tag}}</td>
 			<td>
-				<div class="flex gap-4">
-					<button class="btn btn-sm btn-outline" onclick="openUserModal({{id}})">编辑</button>
-					<button class="btn btn-sm btn-outline" onclick="toggleUserStatus({{id}})">{{toggle_label}}</button>
+				<div class="flex gap-4" data-user-id="{{id}}">
+					<button class="btn btn-sm btn-outline user-action-perm">权限</button>
+					<button class="btn btn-sm btn-outline user-action-edit">编辑</button>
+					<button class="btn btn-sm btn-outline user-action-toggle">{{toggle_label}}</button>
 				</div>
 			</td>
 		</tr>
 	</template>
+
+	<!-- 通用确认弹窗：填充内容后 showModal('confirmModal') 打开，确认按钮回调 confirmCallback -->
+	<div id="confirmModal" class="modal modal-sm">
+		<div class="modal-header">
+			<div class="modal-title" id="confirmTitle">确认操作</div>
+			<button class="modal-close" onclick="closeConfirmModal(false)">×</button>
+		</div>
+		<div class="modal-body">
+			<div id="confirmMessage" style="padding:12px 0;font-size:14px;line-height:1.6"></div>
+		</div>
+		<div class="modal-footer">
+			<button class="btn-cancel" onclick="closeConfirmModal(false)" id="confirmCancelBtn">取消</button>
+			<button class="btn-delete" onclick="closeConfirmModal(true)" id="confirmOkBtn">确认</button>
+		</div>
+	</div>
+
+	<!-- 用户权限详情弹窗 -->
+	<div id="permModal" class="modal" style="width:720px;max-width:90vw">
+		<div class="modal-header">
+			<div class="modal-title" id="permModalTitle">用户权限详情</div>
+			<button class="modal-close" onclick="closeModal('permModal')">&times;</button>
+		</div>
+		<div class="modal-body overflow-y-auto" style="max-height:70vh" id="permModalBody">
+			<div class="text-sub text-center" style="padding:30px">加载中...</div>
+		</div>
+		<div class="modal-footer">
+			<button class="btn btn-outline" onclick="closeModal('permModal')">关闭</button>
+		</div>
+	</div>
 
 	<div id="mask" class="mask"></div>
 	<div id="toast-wrap" class="toast-wrap"></div>

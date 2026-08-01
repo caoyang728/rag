@@ -322,7 +322,7 @@ async function initNodeSelect() {
 		const roles = getUserRoles();
 		const u = JSON.parse(localStorage.getItem('rag_user') || '{}');
 		const myDeptId = u.department_id;
-		const myTeamIds = (u.teams || []).map(function (t) { return t.id; });
+		const myTeamIds = u.team ? [u.team.id] : [];
 
 		// 可管理文档的角色：超级管理员 / 文档管理员
 		const isAdmin = roles.includes('super_admin') || roles.includes('kb_admin');
@@ -995,7 +995,7 @@ function initDeptTeamSelect() {
 	const roles = getUserRoles();
 	const u = JSON.parse(localStorage.getItem('rag_user') || '{}');
 	const myDeptId = u.department_id;
-	const myTeamIds = (u.teams || []).map(function (t) { return t.id; });
+	const myTeamIds = u.team ? [u.team.id] : [];
 
 	const deptTrigger = document.querySelector('#uploadDeptSelect .multi-select-trigger');
 	const teamTrigger = document.querySelector('#uploadTeamSelect .multi-select-trigger');

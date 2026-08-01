@@ -15,6 +15,7 @@ from django.db import models, transaction, IntegrityError
 from django.http import HttpResponse
 from rest_framework import viewsets
 from rest_framework.decorators import action
+from rest_framework import serializers
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -24,13 +25,13 @@ from pypinyin import pinyin, Style
 
 from apps.users.models import (
     Department, Team, Role, Permission,
-    RolePermissionRel, UserRoleRel, has_permission,
+    RolePermissionRel, UserRoleRel, UserDeptScopeRel, UserTeamScopeRel, has_permission,
     get_user_permissions, get_user_managed_depts,
     get_user_managed_teams, get_user_data_scope_level, DataScope,
 )
 from apps.users.permissions import CanManageUsers
 from apps.users.serializers import (
-    UserSerializer, UserCreateSerializer, UserUpdateSerializer,
+    UserSerializer, UserListSerializer, UserCreateSerializer, UserUpdateSerializer,
     DepartmentSerializer, DepartmentWriteSerializer, TeamSerializer, TeamWriteSerializer,
     RoleSerializer, PermissionSerializer, ProfileUpdateSerializer,
 )
@@ -85,16 +86,14 @@ def _export_users_csv(users_qs, filename="users_export.csv"):
     buf = io.StringIO()
     buf.write('\ufeff')  # BOM for Excel Chinese support
     writer = csv.writer(buf)
-    writer.writerow(["ID", "用户名", "邮箱", "真实姓名", "部门", "团队", "角色", "状态", "最后登录", "创建时间"])
-    for u in users_qs.select_related('department', 'team').prefetch_related('user_role_rels__role'):
+    writer.writerow(["用户名", "邮箱", "真实姓名", "部门", "团队", "状态", "最后登录", "创建时间"])
+    for u in users_qs.select_related('department', 'team'):
         # 单团队 FK：user.team 指向唯一团队
         team_names = u.team.name if u.team and not u.team.is_deleted else ''
-        role_names = ', '.join(r.role.name for r in u.user_role_rels.all() if r.role) or ''
         writer.writerow([
-            u.id, u.username, u.email, u.real_name,
+            u.username, u.email, u.real_name,
             u.department.name if u.department else "",
             team_names,
-            role_names,
             u.get_status_display() if hasattr(u, "get_status_display") else u.status,
             u.last_login_at.strftime("%Y-%m-%d %H:%M") if u.last_login_at else "",
             u.created_at.strftime("%Y-%m-%d %H:%M") if u.created_at else "",
@@ -480,13 +479,13 @@ class UserViewSet(viewsets.ModelViewSet):
         return {u.id}
 
     def _filter_downward_roles(self, role_ids, is_dept):
-        """组长只能分配普通员工；部门经理只能分配组长/普通员工（不能分配其他部门经理）
+        """组长只能分配 contributor/viewer；部门经理可额外分配 team_leader
 
-        employee 为随人事归属生效的默认兜底角色；read_only_employee 为显式授权的只读角色。
+        viewer 为默认准入只读角色；contributor 为申请通过后获得的读/写/下载角色。
         """
-        allowed_keys = ['employee', 'read_only_employee']
+        allowed_keys = ['contributor', 'viewer']
         if is_dept:
-            allowed_keys = ['team_leader', 'employee', 'read_only_employee']
+            allowed_keys = ['team_leader', 'contributor', 'viewer']
         allowed_ids = set(Role.objects.filter(role_key__in=allowed_keys).values_list('id', flat=True))
         return [rid for rid in (role_ids or []) if rid in allowed_ids]
 
@@ -618,6 +617,8 @@ class UserViewSet(viewsets.ModelViewSet):
         return qs
 
     def get_serializer_class(self):
+        if self.action == "list":
+            return UserListSerializer
         if self.action == "create":
             return UserCreateSerializer
         if self.action in ("update", "partial_update"):
@@ -640,7 +641,38 @@ class UserViewSet(viewsets.ModelViewSet):
         if not is_super and not can_manage_all and not is_dept and not is_team:
             return Response({"detail": "无用户管理权限"}, status=403)
         ser = UserCreateSerializer(data=request.data)
-        ser.is_valid(raise_exception=True)
+        # EAFP：99% 场景无冲突，直接走校验；命中唯一冲突时再判断是否为"邮箱命中已删除用户"
+        # —— 避免每个新建都多做一次 SELECT 预检测
+        try:
+            ser.is_valid(raise_exception=True)
+        except serializers.ValidationError as exc:
+            # 仅 email 字段的唯一错误需要额外判断"是否命中已删除用户 → 走恢复"
+            # username 冲突（"具有 username 的 user 已存在"）按规则不提供恢复，直接报错
+            email_errors = exc.detail.get("email") if isinstance(exc.detail, dict) else None
+            if email_errors:
+                email_value = request.data.get("email")
+                if email_value:
+                    revivable = User.objects.filter(
+                        email__iexact=email_value.strip(), is_deleted=True,
+                    ).first()
+                    if revivable:
+                        return Response(
+                            {
+                                "detail": "该邮箱曾属于已删除用户，是否恢复原账号？",
+                                "code": "USER_REVIVABLE",
+                                "revivable_user": {
+                                    "id": revivable.id,
+                                    "username": revivable.username,
+                                    "real_name": revivable.real_name,
+                                    "deleted_at": (
+                                        revivable.deleted_at.isoformat()
+                                        if revivable.deleted_at else None
+                                    ),
+                                },
+                            },
+                            status=409,
+                        )
+            raise
         role_ids = ser.validated_data.pop("role_ids", [])
         team_ids = ser.validated_data.pop("team_ids", [])
         department_id = ser.validated_data.pop("department_id", None)
@@ -790,16 +822,22 @@ class UserViewSet(viewsets.ModelViewSet):
         return Response(UserSerializer(user).data)
 
     # ---- 软删除 ----
+    def _soft_delete(self, user):
+        """软删除用户：仅标记 is_deleted，保留原 username/email 供恢复识别
+        username 全局唯一阻止同名新建；email partial unique 允许同邮箱命中软删除记录 → 询问恢复
+        """
+        user.is_deleted = True
+        user.deleted_at = timezone.now()
+        user.status = "disabled"
+        user.save()
+
     def destroy(self, request, *args, **kwargs):
         u = self.get_object()
         # 检查删除权限（所有规则都在这里判断）
         can_delete, msg = self._check_can_manage_user(u)
         if not can_delete:
             return Response({"detail": msg}, status=403)
-        u.is_deleted = True
-        u.deleted_at = timezone.now()
-        u.status = "disabled"
-        u.save()
+        self._soft_delete(u)
         return Response(status=204)
 
     # ---- 批量删除 ----
@@ -821,14 +859,10 @@ class UserViewSet(viewsets.ModelViewSet):
         
         if not valid_ids:
             return Response({"detail": "所选用户中无可用删除的"}, status=403)
-        
-        now = timezone.now()
+
         for target_user in targets:
             if target_user.id in valid_ids:
-                target_user.is_deleted = True
-                target_user.deleted_at = now
-                target_user.status = "disabled"
-                target_user.save()
+                self._soft_delete(target_user)
         return Response({"ok": True, "deleted": len(valid_ids)})
 
     # ---- 禁用/启用 ----
@@ -845,6 +879,146 @@ class UserViewSet(viewsets.ModelViewSet):
             u.status = "disabled"
         u.save()
         return Response({"id": u.id, "status": u.status})
+
+    # ---- 恢复已软删除用户 ----
+    @action(detail=True, methods=["post"])
+    def revive(self, request, pk=None):
+        """恢复软删除用户：清除删除标记，清空原显式角色重新按 viewer 兜底
+        业务背景：同邮箱视为同一人，恢复后保留原审计历史，但权限需重新申请
+        """
+        # 直接从全量数据中查询（包括已软删除），避免被默认 queryset 过滤掉
+        u = User.objects.filter(pk=pk).first()
+        if not u:
+            return Response({"detail": "No User matches the given query."}, status=404)
+        if not u.is_deleted:
+            return Response({"detail": "该用户未处于删除状态"}, status=400)
+        # 权限校验：复用删除权限，能删就能恢复
+        can_revive, msg = self._check_can_manage_user(u)
+        if not can_revive:
+            return Response({"detail": msg}, status=403)
+        # 恢复字段：可选覆盖 real_name/department_id/team_id/status
+        real_name = request.data.get("real_name") or u.real_name
+        department_id = request.data.get("department_id", u.department_id)
+        team_ids = request.data.get("team_ids") or []
+        status = request.data.get("status", "active")
+        with transaction.atomic():
+            u.is_deleted = False
+            u.deleted_at = None
+            u.status = status
+            u.real_name = real_name
+            u.department_id = department_id
+            # 单团队 FK：取第一个 team_id
+            u.team_id = team_ids[0] if team_ids else None
+            u.save()
+            # 清空原显式授权（global/dept/team 三张表），避免离职前权限直接复活
+            UserRoleRel.objects.filter(user=u).delete()
+            UserDeptScopeRel.objects.filter(user=u).delete()
+            UserTeamScopeRel.objects.filter(user=u).delete()
+            # 重新分配 viewer 兜底（写入 global 表，与新建用户一致）
+            viewer_role = Role.objects.filter(role_key='viewer').first()
+            if viewer_role:
+                UserRoleRel.objects.create(
+                    user=u, role=viewer_role,
+                    status='ACTIVE', granted_by=request.user,
+                )
+        return Response(UserSerializer(u).data)
+
+    # ---- 用户权限详情（弹窗用）----
+    @action(detail=True, methods=["get"], url_path='permission-detail')
+    def permission_detail(self, request, pk=None):
+        """返回用户权限的扁平行列表，用于弹窗表格展示
+        每行：部门-团队-权限-截至日期
+        人事归属团队默认只读(viewer/永久)，有显式团队授权则替换
+        部门级授权显示为"全部团队"，全局角色显示为"全部/全部"
+        """
+        u = self.get_object()
+        from apps.users.models import _active_grant_filter
+
+        active_q = _active_grant_filter()
+        rows = []
+
+        # 1) 团队级授权：先查显式授权，人事归属团队无显式授权时补 viewer 兜底
+        team_rels = list(
+            UserTeamScopeRel.objects.filter(active_q, user=u)
+            .select_related('role', 'team', 'team__department')
+            .values('role__role_key', 'role__name',
+                    'team__id', 'team__name',
+                    'team__department__id', 'team__department__name',
+                    'effective_from', 'expires_at')
+        )
+        # 按 team_id 索引，方便人事归属团队查找替换
+        team_grant_map = {}
+        for tr in team_rels:
+            row = {
+                'dept_name': tr['team__department__name'] or '—',
+                'team_name': tr['team__name'] or '—',
+                'role_name': tr['role__name'],
+                'role_code': tr['role__role_key'],
+                'effective_from': tr['effective_from'].date().isoformat() if tr['effective_from'] else None,
+                'expires_at': tr['expires_at'].date().isoformat() if tr['expires_at'] else None,
+            }
+            team_grant_map[tr['team__id']] = row
+            rows.append(row)
+
+        # 人事归属团队：无显式授权时补 viewer 兜底
+        hr_dept_name = u.department.name if (u.department and not u.department.is_deleted) else None
+        hr_team_name = u.team.name if (u.team and not u.team.is_deleted) else None
+        if u.team_id and u.team and not u.team.is_deleted:
+            if u.team_id not in team_grant_map:
+                rows.insert(0, {
+                    'dept_name': hr_dept_name or '—',
+                    'team_name': hr_team_name or '—',
+                    'role_name': '查看者',
+                    'role_code': 'viewer',
+                    'effective_from': None,
+                    'expires_at': None,
+                })
+
+        # 2) 部门级授权：显示为"全部团队"
+        dept_rels = list(
+            UserDeptScopeRel.objects.filter(active_q, user=u)
+            .select_related('role', 'dept')
+            .values('role__role_key', 'role__name', 'dept__name',
+                    'effective_from', 'expires_at')
+        )
+        for dr in dept_rels:
+            rows.append({
+                'dept_name': dr['dept__name'] or '—',
+                'team_name': '全部团队',
+                'role_name': dr['role__name'],
+                'role_code': dr['role__role_key'],
+                'effective_from': dr['effective_from'].date().isoformat() if dr['effective_from'] else None,
+                'expires_at': dr['expires_at'].date().isoformat() if dr['expires_at'] else None,
+            })
+
+        # 3) 全局角色：显示为"全部/全部"，跳过 viewer（已在兜底中处理）
+        global_rels = list(
+            UserRoleRel.objects.filter(active_q, user=u)
+            .select_related('role')
+            .values('role__role_key', 'role__name', 'effective_from', 'expires_at')
+        )
+        for gr in global_rels:
+            if gr['role__role_key'] == 'viewer':
+                continue
+            rows.append({
+                'dept_name': '全部',
+                'team_name': '全部',
+                'role_name': gr['role__name'],
+                'role_code': gr['role__role_key'],
+                'effective_from': gr['effective_from'].date().isoformat() if gr['effective_from'] else None,
+                'expires_at': gr['expires_at'].date().isoformat() if gr['expires_at'] else None,
+            })
+
+        return Response({
+            'user': {
+                'id': u.id,
+                'username': u.username,
+                'real_name': u.real_name or u.username,
+            },
+            'hr_dept_name': hr_dept_name,
+            'hr_team_name': hr_team_name,
+            'rows': rows,
+        })
 
     # ---- 分配角色（仅超管） ----
     @action(detail=True, methods=["post"])
@@ -928,7 +1102,8 @@ class UserViewSet(viewsets.ModelViewSet):
     def batch_import(self, request):
         """POST /api/v1/auth/users/batch_import/
         上传 CSV 文件批量导入员工，返回带「结果」和「原因」两列的 CSV 供下载。
-        CSV 列：用户名, 姓名, 邮箱, 部门, 团队, 角色, 状态
+        CSV 列：用户名, 姓名, 邮箱, 部门, 团队, 状态
+        导入用户默认 viewer 角色，不支持通过 CSV 指定角色
         """
         u = request.user
         # 权限校验：与 create 一致，仅管理角色可导入
@@ -969,22 +1144,14 @@ class UserViewSet(viewsets.ModelViewSet):
         if missing:
             return Response({"detail": f"CSV 缺少必要列：{','.join(missing)}"}, status=400)
 
-        # 预加载部门、团队、角色映射（按名称查找，减少 N+1 查询）
+        # 预加载部门、团队映射（按名称查找，减少 N+1 查询）
         dept_map = {d.name: d for d in Department.objects.filter(is_deleted=False)}
         team_map = {(t.name, t.department_id): t for t in Team.objects.filter(is_deleted=False)}
-        role_map = {r.name: r for r in Role.objects.all()}
 
-        # 非超管可分配的角色ID集合（与 _filter_downward_roles 一致）
-        # employee 为兜底角色，read_only_employee 为显式授权只读角色
-        if is_super or can_manage_all:
-            allowed_role_ids = set(Role.objects.values_list('id', flat=True))
-        elif is_dept:
-            allowed_role_ids = set(Role.objects.filter(role_key__in=['team_leader', 'employee', 'read_only_employee']).values_list('id', flat=True))
-        else:  # is_team
-            allowed_role_ids = set(Role.objects.filter(role_key__in=['employee', 'read_only_employee']).values_list('id', flat=True))
+        # 导入用户默认 viewer 角色
+        viewer_role = Role.objects.filter(role_key='viewer').first()
 
         # 组长锁定部门/团队，与 create 逻辑一致
-        # get_user_managed_teams（含属地授权团队）
         my_team_ids = list(get_user_managed_teams(u)) if is_team else []
 
         # 输出 CSV：原列 + 结果 + 原因
@@ -1007,7 +1174,6 @@ class UserViewSet(viewsets.ModelViewSet):
             email = get_col("邮箱")
             dept_name = get_col("部门")
             team_name = get_col("团队")
-            role_name = get_col("角色")
             status_str = get_col("状态")
 
             result = "失败"
@@ -1054,18 +1220,6 @@ class UserViewSet(viewsets.ModelViewSet):
                         if is_team and team_id not in my_team_ids:
                             reason = "组长只能导入本团队员工"
 
-                # 解析角色
-                role_id = None
-                if not reason and role_name:
-                    role = role_map.get(role_name)
-                    if not role:
-                        reason = f"角色「{role_name}」不存在"
-                    else:
-                        role_id = role.id
-                        # 非超管不能分配高级角色
-                        if role_id not in allowed_role_ids:
-                            reason = f"无权分配角色「{role_name}」"
-
                 # 解析状态
                 status_val = "active"
                 if status_str:
@@ -1075,13 +1229,6 @@ class UserViewSet(viewsets.ModelViewSet):
                         status_val = "disabled"
                     else:
                         reason = f"状态「{status_str}」无效，应为 启用/禁用"
-
-                # 校验部门经理/团队leader唯一性
-                if not reason:
-                    role_ids_list = [role_id] if role_id else []
-                    conflict = self._validate_role_uniqueness(None, role_ids_list, dept_id, [team_id] if team_id else [])
-                    if conflict:
-                        reason = conflict
 
                 # 创建用户
                 if not reason:
@@ -1098,17 +1245,15 @@ class UserViewSet(viewsets.ModelViewSet):
                             )
                             user.set_password(pwd)
                             user.save()
-                            if role_id:
+                            # 导入用户默认 viewer 角色
+                            if viewer_role:
                                 UserRoleRel.objects.create(
-                                    user=user, role_id=role_id, status='ACTIVE', granted_by=u
+                                    user=user, role_id=viewer_role.id, status='ACTIVE', granted_by=u
                                 )
                             # 单团队 FK：直接设置 user.team_id
                             if team_id:
                                 user.team_id = team_id
                                 user.save(update_fields=['team', 'updated_at'])
-                            # 同步 Team.leader_id / Department.leader_id
-                            if role_id:
-                                self._sync_role_leader(user, {role_id})
                         result = "成功"
                         success_count += 1
                     except Exception as e:
@@ -1136,10 +1281,10 @@ class UserViewSet(viewsets.ModelViewSet):
         buf = io.StringIO()
         buf.write('\ufeff')
         writer = csv.writer(buf)
-        writer.writerow(["用户名", "姓名", "邮箱", "部门", "团队", "角色", "状态"])
-        writer.writerow(["zhangsan", "张三", "zhangsan@example.com", "研发部", "后端组", "普通员工", "启用"])
-        writer.writerow(["lisi", "李四", "lisi@example.com", "研发部", "前端组", "只读员工", "启用"])
-        writer.writerow(["wangwu", "王五", "王五@example.com", "", "", "文档管理员", "禁用"])
+        writer.writerow(["用户名", "姓名", "邮箱", "部门", "团队", "状态"])
+        writer.writerow(["zhangsan", "张三", "zhangsan@example.com", "研发部", "后端组", "启用"])
+        writer.writerow(["lisi", "李四", "lisi@example.com", "研发部", "前端组", "启用"])
+        writer.writerow(["wangwu", "王五", "王五@example.com", "", "", "禁用"])
         resp = HttpResponse(buf.getvalue(), content_type="text/csv; charset=utf-8")
         resp["Content-Disposition"] = f'attachment; filename="users_import_template.csv"'
         return resp
@@ -1165,13 +1310,13 @@ class UserViewSet(viewsets.ModelViewSet):
         elif has_permission(u, 'user.manage'):
             u_scope = get_user_data_scope_level(u)
             if u_scope == DataScope.DEPT:
-                # 部门经理：可见普通角色，可分配 team_leader/employee/read_only_employee
+                # 部门经理：可见普通角色，可分配 team_leader/contributor/viewer
                 roles = _role_values(Role.objects.exclude(role_key__in=['super_admin', 'user_admin']))
-                assignable = _role_values(Role.objects.filter(role_key__in=['team_leader', 'employee', 'read_only_employee']))
+                assignable = _role_values(Role.objects.filter(role_key__in=['team_leader', 'contributor', 'viewer']))
             else:
-                # 团队组长：可见 team_leader/employee/read_only_employee，仅可分配 employee/read_only_employee
-                roles = _role_values(Role.objects.filter(role_key__in=['team_leader', 'employee', 'read_only_employee']))
-                assignable = _role_values(Role.objects.filter(role_key__in=['employee', 'read_only_employee']))
+                # 团队组长：可见 team_leader/contributor/viewer，仅可分配 contributor/viewer
+                roles = _role_values(Role.objects.filter(role_key__in=['team_leader', 'contributor', 'viewer']))
+                assignable = _role_values(Role.objects.filter(role_key__in=['contributor', 'viewer']))
         else:
             roles = []
             assignable = []

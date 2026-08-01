@@ -126,7 +126,7 @@ class UserSerializer(serializers.ModelSerializer):
     roles = serializers.SerializerMethodField()
     department_name = serializers.CharField(source="department.name", read_only=True, default="")
     permission_map = serializers.SerializerMethodField()
-    teams = serializers.SerializerMethodField()
+    team = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -134,19 +134,27 @@ class UserSerializer(serializers.ModelSerializer):
             "id", "username", "email", "real_name", "avatar_url", "phone",
             "department_id", "department_name", "status",
             "last_login_at", "last_login_ip",
-            "created_at", "updated_at", "roles", "teams",
+            "created_at", "updated_at", "roles", "team",
             "permission_map", "is_deleted",
         ]
         read_only_fields = ["last_login_at", "last_login_ip", "created_at", "updated_at", "is_deleted"]
 
     def get_roles(self, obj):
         # related_name='user_role_rels'；响应字段名保持 code（前端兼容），内部取 role__role_key
-        return [
+        rels = [
             {"id": r["role__id"], "code": r["role__role_key"], "name": r["role__name"]}
             for r in obj.user_role_rels.select_related("role").values(
                 "role__id", "role__role_key", "role__name"
             )
         ]
+        # viewer 兜底展示：与 get_user_permissions 保持一致
+        # 无 contributor + 无 super_admin → 补 viewer 作为人事归属的只读基础角色
+        codes = {r["code"] for r in rels}
+        if "contributor" not in codes and "super_admin" not in codes and "viewer" not in codes:
+            viewer = Role.objects.filter(role_key="viewer").values("id", "role_key", "name").first()
+            if viewer:
+                rels.append({"id": viewer["id"], "code": viewer["role_key"], "name": viewer["name"]})
+        return rels
 
     def get_permission_map(self, obj):
         # 按模块分组返回 permission_key 集合，便于前端按模块渲染权限列表
@@ -157,19 +165,49 @@ class UserSerializer(serializers.ModelSerializer):
             groups.setdefault(module, []).append(key)
         return groups
 
-    def get_teams(self, obj):
-        # 单团队 FK（user.team）：用户最多归属一个团队，返回单元素列表以兼容前端数组结构
+    def get_team(self, obj):
+        # 单团队 FK（user.team）：用户人事归属最多一个团队，直接返回单对象
         if not obj.team_id:
-            return []
+            return None
         team = obj.team
         if not team or team.is_deleted:
-            return []
-        return [{
+            return None
+        return {
             "id": team.id,
             "name": team.name,
             "code": team.code,
             "department_id": team.department_id,
-        }]
+        }
+
+
+class UserListSerializer(serializers.ModelSerializer):
+    """用户列表精简版 Serializer
+    去掉列表页不展示的大字段（permission_map、avatar、phone、roles 等），减少传输和计算开销
+    列表页不直接展示角色，权限详情通过单独的权限按钮弹窗查看
+    """
+    department_name = serializers.CharField(source="department.name", read_only=True, default="")
+    team = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = [
+            "id", "username", "email", "real_name",
+            "department_id", "department_name", "status",
+            "team", "last_login_at",
+        ]
+
+    def get_team(self, obj):
+        if not obj.team_id:
+            return None
+        team = obj.team
+        if not team or team.is_deleted:
+            return None
+        return {
+            "id": team.id,
+            "name": team.name,
+            "code": team.code,
+            "department_id": team.department_id,
+        }
 
 
 class UserCreateSerializer(serializers.ModelSerializer):
@@ -185,7 +223,8 @@ class UserCreateSerializer(serializers.ModelSerializer):
 
 
 class UserUpdateSerializer(serializers.ModelSerializer):
-    role_ids = serializers.ListField(child=serializers.IntegerField(), required=False, default=list)
+    # role_ids 不传时保留原有角色（不传 ≠ 清空），故不设 default
+    role_ids = serializers.ListField(child=serializers.IntegerField(), required=False)
     team_ids = serializers.ListField(child=serializers.IntegerField(), required=False, default=list)
     department_id = serializers.IntegerField(required=False, allow_null=True)
 

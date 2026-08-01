@@ -24,6 +24,19 @@ function initUsersPage() {
 	if (searchInput) {
 		searchInput.value = '';
 	}
+	// 表格按钮事件委托：用 data-user-id 取 ID，避免每行内联 onclick 拼接
+	const userTable = $id('userTable');
+	if (userTable) {
+		userTable.addEventListener('click', e => {
+			const wrap = e.target.closest('[data-user-id]');
+			if (!wrap) return;
+			const id = parseInt(wrap.dataset.userId, 10);
+			if (!id) return;
+			if (e.target.closest('.user-action-perm')) openPermModal(id);
+			else if (e.target.closest('.user-action-edit')) openUserModal(id);
+			else if (e.target.closest('.user-action-toggle')) toggleUserStatus(id);
+		});
+	}
 	loadFilterOptions();
 	loadUsers();
 }
@@ -47,7 +60,7 @@ async function loadFilterOptions(force = false) {
 				data.departments = (data.departments || []).filter(d => d.id === myDeptId);
 				if (isTeamLeader) {
 					// 组长仅保留自己所在的团队
-					const myTeamIds = (u.teams || []).map(t => t.id);
+					const myTeamIds = u.team ? [u.team.id] : [];
 					data.teams = (data.teams || []).filter(t => myTeamIds.includes(t.id));
 				}
 			}
@@ -57,15 +70,12 @@ async function loadFilterOptions(force = false) {
 		const fDept = $id('filterDept');
 		fDept.innerHTML = '<option value="">全部部门</option>' +
 			(filterOptions.departments || []).map(d => `<option value="${d.id}">${escapeHtml(d.name)}</option>`).join('');
-		const fRole = $id('filterRole');
-		fRole.innerHTML = '<option value="">全部角色</option>' +
-			(filterOptions.roles || []).map(r => `<option value="${r.id}">${escapeHtml(r.name)}</option>`).join('');
+		// 角色筛选已移除（页面不再直接展示/按角色筛选）
 		const uDept = $id('userDept');
 		uDept.innerHTML = '<option value="">— 无 —</option>' +
 			(filterOptions.departments || []).map(d => `<option value="${d.id}">${escapeHtml(d.name)}</option>`).join('');
 		// 初始化时未选择部门，团队筛选应禁用
 		$id('filterTeam').disabled = true;
-		populateRoleSelect(null);
 		populateTeamSelect(0, null);
 	} catch (e) { console.error('加载筛选项失败:', e); }
 }
@@ -114,8 +124,6 @@ async function loadUsers() {
 	if (fd) params.set('department_id', fd);
 	const ft = $id('filterTeam').value;
 	if (ft) params.set('team_id', ft);
-	const fr = $id('filterRole').value;
-	if (fr) params.set('role_id', fr);
 	const fs = $id('filterStatus').value;
 	if (fs) params.set('status', fs);
 	// 排序参数：DRF OrderingFilter 接受 ordering=field（升序）或 ordering=-field（降序）
@@ -171,9 +179,9 @@ function renderTable(users) {
 		return;
 	}
 	tbody.innerHTML = users.map(u => {
-		const roleNames = (u.roles || []).map(r => escapeHtml(r.name)).join(', ') || '—';
 		const deptName = escapeHtml(u.department_name) || '—';
-		const teamName = (u.teams || []).map(t => escapeHtml(t.name)).join(', ') || '—';
+		const teamName = u.team ? escapeHtml(u.team.name) : '—';
+		const lastLogin = u.last_login_at ? formatDate(u.last_login_at) : '—';
 		const statusTag = u.status === 'active'
 			? '<span class="tag tag-sm" style="background:#e8f5e9;color:#2e7d32">启用</span>'
 			: '<span class="tag tag-sm" style="background:#fce4ec;color:#c62828">禁用</span>';
@@ -185,7 +193,7 @@ function renderTable(users) {
 			email: escapeHtml(u.email) || '—',
 			dept_name: deptName,
 			team_name: teamName,
-			role_names: roleNames,
+			last_login: escapeHtml(lastLogin),
 			status_tag: statusTag,
 			toggle_label: toggleLabel,
 		});
@@ -313,17 +321,69 @@ function downloadBlob(blob, filename) {
 	URL.revokeObjectURL(url);
 }
 
+// ===== 通用确认弹窗（基于静态 DOM + showModal/closeModal 范式） =====
+let confirmCallback = null;
+
+/**
+ * 打开静态确认弹窗
+ * @param {string} message - 提示消息
+ * @param {object} [opts] - 配置
+ * @param {string} [opts.title='确认操作'] - 标题
+ * @param {string} [opts.confirmText='确认'] - 确认按钮文字
+ * @param {string} [opts.cancelText='取消'] - 取消按钮文字
+ * @param {boolean} [opts.danger=true] - 确认按钮是否危险样式
+ * @param {Function} [opts.onConfirm] - 点击确认时的回调（异步函数也支持）
+ */
+function openConfirm(message, opts = {}) {
+	const {
+		title = '确认操作',
+		confirmText = '确认',
+		cancelText = '取消',
+		danger = true,
+		onConfirm,
+	} = opts;
+	$id('confirmTitle').textContent = title;
+	$id('confirmMessage').innerHTML = message;
+	const okBtn = $id('confirmOkBtn');
+	okBtn.textContent = confirmText;
+	okBtn.classList.toggle('btn-delete', danger);
+	okBtn.classList.toggle('btn-save', !danger);
+	$id('confirmCancelBtn').textContent = cancelText;
+	confirmCallback = onConfirm || null;
+	showModal('confirmModal');
+}
+
+/**
+ * 关闭确认弹窗，用户点击取消/确认/关闭按钮时触发
+ * @param {boolean} confirmed - true 表示用户点了确认
+ */
+async function closeConfirmModal(confirmed) {
+	const cb = confirmCallback;
+	confirmCallback = null;
+	closeModal('confirmModal');
+	if (confirmed && typeof cb === 'function') {
+		try {
+			await cb();
+		} catch (e) {
+			toast('操作失败: ' + escapeHtml(e.message || String(e)), 'error');
+		}
+	}
+}
+
 async function deleteUserFromModal() {
 	const id = $id('editUserId').value;
 	const username = $id('userUsername').value;
 	if (!id) return;
-	if (!confirm(`确认删除用户 "${username}"？此操作为软删除。`)) return;
-	try {
-		await api.deleteJson(`/api/v1/auth/users/${id}/`);
-		closeModal('userModal');
-		loadUsers();
-		toast('已删除', 'success');
-	} catch (e) { toast('删除失败: ' + escapeHtml(e.message), 'error'); }
+	openConfirm(`确认删除用户 "${username}"？此操作为软删除。`, {
+		title: '删除用户',
+		confirmText: '删除',
+		onConfirm: async () => {
+			await api.deleteJson(`/api/v1/auth/users/${id}/`);
+			closeModal('userModal');
+			loadUsers();
+			toast('已删除', 'success');
+		},
+	});
 }
 
 async function toggleUserStatus(id) {
@@ -338,13 +398,17 @@ async function toggleUserStatus(id) {
 function _getMyRoleInfo() {
 	const u = JSON.parse(localStorage.getItem('rag_user') || '{}');
 	const codes = getUserRoles();
+	const isSuper = codes.includes('super_admin');
+	const isUserAdmin = codes.includes('user_admin');
 	return {
-		// 超级管理员可在任意部门/团队创建/编辑用户
-		isSuper: codes.includes('super_admin'),
+		isSuper,
+		isUserAdmin,
+		// 超管/用户管理员可管理任意部门/团队
+		canManageAll: isSuper || isUserAdmin,
 		isDept: codes.includes('dept_manager'),
 		isTeam: codes.includes('team_leader'),
 		deptId: u.department_id || 0,
-		teamIds: (u.teams || []).map(t => t.id),
+		teamIds: u.team ? [u.team.id] : [],
 	};
 }
 
@@ -355,10 +419,8 @@ function openUserModal(id) {
 	$id('userEmail').value = '';
 	$id('userDept').value = '';
 	$id('userDeptTeam').innerHTML = '<option value="">请先选择部门</option>';
-	$id('userRoleSelect').value = '';
 	$id('userStatus').value = 'active';
 	$id('userModalTitle').textContent = '新建用户';
-	$id('rolePermSummary').textContent = '';
 	$id('modalDeleteBtn').classList.add('hidden');
 
 	// 用户名：新建时可编辑，编辑时禁用
@@ -372,60 +434,30 @@ function openUserModal(id) {
 		usernameInput.style.color = '';
 	}
 
-	populateRoleSelect(null, true);
 	populateTeamSelect(0, null);
-
-	// 非超管创建用户时，锁定部门/团队
-	if (!id) {
-		const me = _getMyRoleInfo();
-		if (!me.isSuper) {
-			const deptSel = $id('userDept');
-			const teamSel = $id('userDeptTeam');
-			if (me.isTeam) {
-				// 组长：锁定部门，团队可选（仅限自己的团队）
-				deptSel.value = me.deptId;
-				deptSel.disabled = true;
-				if (me.teamIds.length === 1) {
-					populateTeamSelect(me.deptId, me.teamIds[0]);
-					teamSel.disabled = true;
-				} else {
-					populateTeamSelect(me.deptId, null);
-				}
-			} else if (me.isDept) {
-				// 部门经理：锁定部门，团队可选
-				deptSel.value = me.deptId;
-				deptSel.disabled = true;
-				populateTeamSelect(me.deptId, null);
-			}
-		}
-	}
 
 	if (id) {
 		$id('userModalTitle').textContent = '编辑用户';
 		$id('modalDeleteBtn').classList.remove('hidden');
 		const me = _getMyRoleInfo();
 		const loadUserData = () => {
-			// 重新用 assignable_roles 填充（loadFilterOptions 可能覆盖了）
-			populateRoleSelect(null, true);
 			return api.getJson(`/api/v1/auth/users/${id}/`).then(u => {
 				$id('editUserId').value = u.id;
 				$id('userUsername').value = u.username;
 				$id('userRealName').value = u.real_name || '';
 				$id('userEmail').value = u.email || '';
 				const deptId = u.department_id || 0;
-				$id('userDept').value = deptId;
+				// "— 无 —" 的 option value 为空字符串，无部门时需显式置空才能选中
+				$id('userDept').value = deptId || '';
 				$id('userStatus').value = u.status || 'active';
-				const roleId = (u.roles && u.roles.length > 0) ? u.roles[0].role__id : null;
-				const selectedTeamId = (u.teams && u.teams.length > 0) ? u.teams[0].id : null;
-				$id('userRoleSelect').value = roleId || '';
-				// 先填充团队下拉（会默认启用），再调用 onRoleChange 由 updateTeamDisabledState 覆盖禁用状态
-				// 顺序不能反过来，否则 populateTeamSelect 的 disabled=false 会覆盖 dept_manager 的禁用
+				const selectedTeamId = u.team ? u.team.id : null;
+				// populateTeamSelect 会根据 deptId 启用/禁用团队下拉
 				populateTeamSelect(deptId, selectedTeamId);
-				onRoleChange();
-				// 防止越权：组长锁定部门和团队，部门经理锁定部门
-				const teamSel = $id('userDeptTeam');
+				// 越权锁定：组长锁部门+团队，部门经理锁部门；超管/用户管理员可自由修改
 				const deptSel = $id('userDept');
-				if (!me.isSuper) {
+				const teamSel = $id('userDeptTeam');
+				deptSel.disabled = false;
+				if (!me.canManageAll) {
 					if (me.isTeam) { deptSel.disabled = true; teamSel.disabled = true; }
 					else if (me.isDept) deptSel.disabled = true;
 				}
@@ -437,63 +469,46 @@ function openUserModal(id) {
 			loadUserData();
 		}
 	} else {
+		// 新建用户：按当前用户权限锁定部门/团队，角色默认 viewer（兜底只读）
+		const applyNewUserDefaults = () => {
+			const me = _getMyRoleInfo();
+			const deptSel = $id('userDept');
+			const teamSel = $id('userDeptTeam');
+			deptSel.disabled = false;
+			if (me.canManageAll) {
+				// 超管/用户管理员：部门默认"— 无 —"，可自由选择
+				deptSel.value = '';
+				populateTeamSelect(0, null);
+			} else if (me.isTeam) {
+				// 组长：锁定部门/团队
+				deptSel.value = me.deptId;
+				deptSel.disabled = true;
+				if (me.teamIds.length === 1) {
+					populateTeamSelect(me.deptId, me.teamIds[0]);
+					teamSel.disabled = true;
+				} else {
+					populateTeamSelect(me.deptId, null);
+				}
+			} else if (me.isDept) {
+				// 部门经理：锁定部门，团队默认"— 无 —"
+				deptSel.value = me.deptId;
+				deptSel.disabled = true;
+				populateTeamSelect(me.deptId, null);
+			}
+		};
 		if (!filterOptions.roles) {
-			loadFilterOptions();
+			loadFilterOptions().then(applyNewUserDefaults);
+		} else {
+			applyNewUserDefaults();
 		}
 	}
 	showModal('userModal');
-}
-
-// ====================== 角色下拉框 ======================
-function populateRoleSelect(selectedId, useAssignable = false) {
-	const roles = (useAssignable ? filterOptions.assignable_roles : filterOptions.roles) || [];
-	$id('userRoleSelect').innerHTML = '<option value="">— 无 —</option>' +
-		roles.map(r => `<option value="${r.id}" ${selectedId === r.id ? 'selected' : ''}>${escapeHtml(r.name)}</option>`).join('');
-}
-
-function onRoleChange() {
-	renderRolePermSummary();
-	updateTeamDisabledState();
-}
-
-function renderRolePermSummary() {
-	const roleId = parseInt($id('userRoleSelect').value) || 0;
-	if (!roleId) {
-		$id('rolePermSummary').textContent = '';
-		return;
-	}
-	const roles = filterOptions.roles || [];
-	const r = roles.find(r => r.id === roleId);
-	if (!r) { $id('rolePermSummary').textContent = ''; return; }
-	const desc = {
-		super_admin: '最高权限（系统级快路径）',
-		user_admin: '组织/人员管理，不可操作文档',
-		kb_admin: '知识库/文档管理，不可管理人',
-		compliance_admin: '审计日志/合规校验（只读）',
-		dept_manager: '本部门人员/团队/节点/文档管理',
-		team_leader: '本团队人员/节点/文档管理',
-		employee: '本团队文档读/上传/下载',
-		read_only_employee: '仅可读取文档，无下载/写权限',
-	};
-	$id('rolePermSummary').innerHTML = `${escapeHtml(r.name)}: ${desc[r.code] || '自定义权限'}`;
-}
-
-function updateTeamDisabledState() {
-	// 团队下拉的禁用条件：1) 角色为部门经理（不需要团队）；2) 未选择部门
-	const roleId = parseInt($id('userRoleSelect').value) || 0;
-	const roles = filterOptions.roles || [];
-	const r = roles.find(r => r.id === roleId);
-	const isDeptManager = r && r.code === 'dept_manager';
-	const deptId = parseInt($id('userDept').value) || 0;
-	$id('userDeptTeam').disabled = isDeptManager || !deptId;
 }
 
 // ====================== 部门变更 ======================
 function onDeptChange() {
 	const deptId = parseInt($id('userDept').value) || 0;
 	populateTeamSelect(deptId, null);
-	// 部门变更后需要重新评估团队禁用状态
-	updateTeamDisabledState();
 }
 
 // ====================== 团队下拉（弹窗内） ======================
@@ -507,19 +522,18 @@ function populateTeamSelect(deptId, selectedTeamId) {
 		sel.disabled = true;
 		return;
 	}
-	// 选中部门时默认启用团队下拉；dept_manager 角色等场景由 updateTeamDisabledState 二次覆盖
+	// 选中部门时启用团队下拉；组长单团队等锁定场景由 openUserModal 覆盖
 	sel.disabled = false;
 	if (filtered.length === 0) {
 		sel.innerHTML = '<option value="">该部门暂无团队</option>';
 		return;
 	}
-	sel.innerHTML = '<option value="">— 未选择 —</option>' +
+	sel.innerHTML = '<option value="">— 无 —</option>' +
 		filtered.map(t => `<option value="${t.id}" ${selectedTeamId === t.id ? 'selected' : ''}>${escapeHtml(t.name)}</option>`).join('');
 }
 
 async function saveUser() {
 	const id = $id('editUserId').value;
-	const roleId = parseInt($id('userRoleSelect').value) || null;
 	const teamId = parseInt($id('userDeptTeam').value) || 0;
 	const deptId = $id('userDept').value ? parseInt($id('userDept').value) : null;
 
@@ -528,26 +542,112 @@ async function saveUser() {
 		email: $id('userEmail').value.trim(),
 		department_id: deptId,
 		status: $id('userStatus').value,
-		role_ids: roleId ? [roleId] : [],
 		team_ids: teamId ? [teamId] : [],
 	};
-	// 新建时需验证用户名
+	// 新建时需验证用户名；角色默认 viewer（人事归属兜底只读，写权限需后续申请 contributor）
 	if (!id) {
 		base.username = $id('userUsername').value.trim();
 		if (!base.username) { toast('用户名不能为空', 'warning'); return; }
+		const viewerRole = (filterOptions.roles || []).find(r => r.code === 'viewer');
+		if (viewerRole) base.role_ids = [viewerRole.id];
 	}
 	if (!base.real_name) { toast('姓名为必填', 'warning'); return; }
 	try {
 		if (id) {
 			await api.patchJson(`/api/v1/auth/users/${id}/`, base);
 			toast('用户已更新', 'success');
+			closeModal('userModal');
+			loadUsers();
 		} else {
 			await api.postJson('/api/v1/auth/users/', base);
 			toast('用户已创建', 'success');
+			closeModal('userModal');
+			loadUsers();
 		}
-		closeModal('userModal');
-		loadUsers();
-	} catch (e) { toast('保存失败: ' + escapeHtml(e.message), 'error'); }
+	} catch (e) {
+		// 409 + USER_REVIVABLE：邮箱命中已删除用户，弹窗询问是否恢复
+		// 恢复 → 调用 revive 接口传当前表单数据（覆盖姓名/部门/团队）
+		if (e.status === 409 && e.data && e.data.code === 'USER_REVIVABLE' && e.data.revivable_user) {
+			const rv = e.data.revivable_user;
+			const deletedAt = rv.deleted_at ? new Date(rv.deleted_at).toLocaleString('zh-CN') : '';
+			openConfirm(
+				`该邮箱曾属于已删除用户 <b>${escapeHtml(rv.real_name || rv.username)}</b>（删除于 ${deletedAt}）。是否恢复原账号？<br><br>恢复后原账号的姓名/部门/团队将被当前表单内容覆盖，权限重置为查看者（需重新申请）。`,
+				{
+					title: '检测到已删除用户',
+					confirmText: '恢复原账号',
+					cancelText: '取消',
+					danger: false,
+					onConfirm: async () => {
+						await api.postJson(`/api/v1/auth/users/${rv.id}/revive/`, {
+							real_name: base.real_name,
+							department_id: base.department_id,
+							team_ids: base.team_ids,
+							status: base.status,
+						});
+						toast('用户已恢复', 'success');
+						closeModal('userModal');
+						loadUsers();
+					},
+				}
+			);
+			return;
+		}
+		toast('保存失败: ' + escapeHtml(e.message), 'error');
+	}
+}
+
+// ====================== 权限详情弹窗 ======================
+
+async function openPermModal(userId) {
+	$id('permModalTitle').textContent = '用户权限详情';
+	$id('permModalBody').innerHTML = '<div class="text-sub text-center" style="padding:30px">加载中...</div>';
+	showModal('permModal');
+	try {
+		const data = await api.getJson(`/api/v1/auth/users/${userId}/permission-detail/`);
+		const u = data.user || {};
+		const rows = data.rows || [];
+		$id('permModalTitle').textContent = `权限详情 · ${escapeHtml(u.real_name || u.username || '')}`;
+
+		if (rows.length === 0) {
+			$id('permModalBody').innerHTML = '<div class="text-sub text-center" style="padding:30px">该用户暂无任何权限授权</div>';
+			return;
+		}
+
+		// 简洁表格：部门-团队-权限-截至日期
+		const tagStyle = {
+			viewer: 'background:#e3f2fd;color:#1565c0',
+			contributor: 'background:#e8f5e9;color:#2e7d32',
+		};
+		const rowsHtml = rows.map(r => {
+			const eff = r.effective_from || '—';
+			const exp = r.expires_at || '永久';
+			const style = tagStyle[r.role_code] || 'background:#fff3e0;color:#ef6c00';
+			return `<tr>
+				<td style="padding:8px 12px">${escapeHtml(r.dept_name)}</td>
+				<td style="padding:8px 12px">${escapeHtml(r.team_name)}</td>
+				<td style="padding:8px 12px"><span class="tag tag-sm" style="${style}">${escapeHtml(r.role_name)}</span></td>
+				<td style="padding:8px 12px" class="text-sub">${escapeHtml(eff)}</td>
+				<td style="padding:8px 12px" class="text-sub">${escapeHtml(exp)}</td>
+			</tr>`;
+		}).join('');
+
+		$id('permModalBody').innerHTML = `
+			<table class="table" style="width:100%">
+				<thead>
+					<tr>
+						<th style="padding:8px 12px">部门</th>
+						<th style="padding:8px 12px">团队</th>
+						<th style="padding:8px 12px">权限</th>
+						<th style="padding:8px 12px">生效时间</th>
+						<th style="padding:8px 12px">截至日期</th>
+					</tr>
+				</thead>
+				<tbody>${rowsHtml}</tbody>
+			</table>
+		`;
+	} catch (e) {
+		$id('permModalBody').innerHTML = `<div style="padding:20px;color:var(--danger)">加载失败：${escapeHtml(e.message || String(e))}</div>`;
+	}
 }
 
 // 页面加载时自动初始化

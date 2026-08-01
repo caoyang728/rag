@@ -54,6 +54,51 @@ def _detect_error_type(llm_stats: dict) -> str:
     return 'unknown'
 
 
+def _check_full_text(text: str):
+    """对完整文本做一次性审查（用于缓存命中/任务拆分等非流式场景）
+
+    与流式审查的区别：不需要缓冲窗口，一次扫描全文。
+    - 命中 block：返回原文 + hit（调用方发 content_filtered 事件，不下发 delta）
+    - 命中 mask：返回替换后的脱敏文本
+    - 无命中：返回原文
+
+    Returns:
+        (safe_text, hit_or_none)
+    """
+    if not text:
+        return text, None
+    try:
+        from apps.security.sensitive_filter import get_sensitive_filter
+        sf = get_sensitive_filter()
+        hits = sf.check(text)
+        block_hits = [h for h in hits if h.action == 'block']
+        if block_hits:
+            # 命中 block：原文返回（用于审计落库），hit 标记拦截
+            return text, block_hits[0]
+        # 按 start 降序切片替换：避免 str.replace 的两个坑
+        #   1) 子串覆盖：词库含 "ab" 和 "abc" 时，replace("ab") 先执行后 "abc" 失配
+        #   2) 正则词失配：h.word 是 pattern 字符串，replace 找不到实际匹配文本
+        # 降序替换保证后续替换不破坏前面 hit 的索引（与 sensitive_filter._review_buffer 一致）
+        masked = text
+        mask_hits = sorted([h for h in hits if h.action == 'mask'],
+                           key=lambda x: x.start, reverse=True)
+        for h in mask_hits:
+            masked = masked[:h.start] + sf.MASK_STR + masked[h.end:]
+        return masked, None
+    except Exception:
+        logger.exception('[executor] full text filter failed, skip')
+        return text, None
+
+
+def _make_filtered_event(hit) -> dict:
+    """构造 content_filtered SSE 事件（与 react.py 保持一致）"""
+    return {
+        'type': 'content_filtered',
+        'reason': '检测到违规内容，已拦截',
+        'category': getattr(hit, 'category', 'other'),
+    }
+
+
 
 def _normalize(q: str) -> str:
     return ''.join(q.strip().lower().split())
@@ -77,9 +122,17 @@ def ask(user, question: str, session: Session,
         node_ids: list = None,
         use_cache: bool = True,
         do_task_split: bool = False,
-        do_rerank: bool = True) -> dict:
+        do_rerank: bool = True,
+        mode: str = 'auto') -> dict:
     """一次完整问答
-    返回 QaRecord 数据 + 检索命中"""
+    返回 QaRecord 数据 + 检索命中
+
+    Args:
+        mode: 问答模式
+            - 'auto': Agent 模式，LLM 自主决定是否调用工具（默认）
+            - 'rag': 传统 RAG 模式，预检索 + LLM 生成
+            - 'agent': 强制 Agent 模式（与 auto 行为一致，语义明确）
+    """
     from apps.agent.task_splitter import maybe_split, execute_split
 
     t0 = time.time()
@@ -103,13 +156,20 @@ def ask(user, question: str, session: Session,
                     'citations': cached.get('citations', []),
                     'chunks': [], 'is_hit_cache': True, 'stats': {'total_ms': qa.latency_total_ms}}
 
-    # 2. 任务拆分判断
+    # 2. Agent 模式分流（auto / agent 走 ReAct 工具调用循环）
+    # Auto 模式下 LLM 通过 tool_choice='auto' 自主决定是否调用工具，
+    # 不调用工具时等价于普通 chat（但无预检索 context，由 LLM 判断是否需要检索）
+    if mode in ('auto', 'agent'):
+        return _ask_via_agent(user, question, session, root_types, node_ids,
+                              root_type, turn_index, t0)
+
+    # 3. 任务拆分判断（仅 RAG 模式生效）
     if do_task_split:
         split = maybe_split(question)
         if split.get('need_split'):
             return execute_split(user, session, question, split, root_types=root_types)
 
-    # 3. 混合检索
+    # 4. 混合检索
     try:
         retrieval = hybrid_search(question, user, root_types=root_types, node_ids=node_ids, do_rerank=do_rerank)
         chunks = retrieval['chunks']
@@ -273,12 +333,105 @@ def ask(user, question: str, session: Session,
     }
 
 
+def _ask_via_agent(user, question, session, root_types, node_ids,
+                   root_type, turn_index, t0):
+    """Agent 模式同步问答入口（auto / agent 模式走这里）
+
+    调用 agent_ask 获取答案 + 工具调用链，统一落 QaRecord + LlmCallLog + 缓存 + 记忆。
+    与 RAG 模式的区别：不预检索，由 LLM 自主决定是否调用 knowledge_search 等工具。
+
+    Returns:
+        与 ask() 相同结构的返回值，额外包含 tool_traces
+    """
+    from apps.agent.react import agent_ask
+
+    result = agent_ask(user, question, session, root_types=root_types,
+                       node_ids=node_ids)
+    answer = result['answer']
+    citations = result['citations']
+    chunks = result['chunks']
+    tool_traces = result['tool_traces']
+    llm_stats = result['llm_stats']
+
+    # answer_type 区分：有工具调用→agent，无工具调用→general，无内容→refused
+    if not answer or answer == '[未生成内容]':
+        answer_type = 'refused'
+    elif tool_traces:
+        answer_type = 'agent'
+    else:
+        answer_type = 'general'
+
+    # retrieval_hits 从 knowledge_search 命中的 chunks 提取
+    retrieval_hits = [c['chunk_id'] for c in chunks]
+    retrieval_scores = [
+        {'chunk_id': c['chunk_id'], 'rrf': c.get('rrf_score', 0),
+         'rerank': c.get('rerank_score', 0)} for c in chunks
+    ]
+
+    total_ms = int((time.time() - t0) * 1000)
+    detected_error = _detect_error_type(llm_stats)
+    qa = _persist_qa(
+        user=user, session=session, question=question, answer=answer,
+        citations=citations,
+        retrieval_hits=retrieval_hits, retrieval_scores=retrieval_scores,
+        stats={'latency_total_ms': total_ms, 'latency_ttfb_ms': 0},
+        llm_stats=llm_stats, root_type=root_type, turn_index=turn_index,
+        answer_type=answer_type, is_success=not detected_error,
+        error_type=detected_error,
+    )
+
+    # 记录 Agent 工具调用链（失败不影响主流程，为 Tracing 体系铺路）
+    if tool_traces:
+        try:
+            from apps.agent.models import AgentTrace
+            AgentTrace.batch_create_from_traces(qa, user, session, tool_traces)
+        except Exception:
+            logger.exception('[Executor] AgentTrace batch_create failed')
+
+    # 记录 LlmCallLog（Agent 模式可能多次调用 LLM，统计累加）
+    try:
+        LlmCallLog.objects.create(
+            provider=llm_stats.get('llm_provider', 'deepseek'),
+            model=llm_stats.get('llm_model', 'deepseek-chat'),
+            scene='qa',
+            user=user if user and getattr(user, 'is_authenticated', False) else None,
+            prompt_tokens=llm_stats.get('tokens_prompt', 0),
+            completion_tokens=llm_stats.get('tokens_completion', 0),
+            total_tokens=llm_stats.get('tokens_prompt', 0) + llm_stats.get('tokens_completion', 0),
+            cost=Decimal(str(llm_stats.get('cost', 0))),
+            latency_ms=llm_stats.get('latency_llm_ms', 0),
+            status='error' if detected_error else 'success',
+        )
+    except Exception:
+        logger.exception('llm_call_log write failed (agent)')
+
+    # 记忆 + 缓存（仅当有引用时更新缓存，避免无引用的通用回答被缓存）
+    MemoryManager().append_turn(session, question, answer)
+    if answer_type == 'agent' and citations:
+        _update_cache(question, root_type, user, answer, citations)
+
+    return {
+        'qa_id': qa.id,
+        'answer': answer,
+        'citations': citations,
+        'chunks': chunks,
+        'is_hit_cache': False,
+        'tool_traces': tool_traces,
+        'stats': {
+            'total_ms': total_ms,
+            'llm': llm_stats,
+            'tool_rounds': len(tool_traces),
+        },
+    }
+
+
 def ask_stream(user, question: str, session: Session,
                root_types: list = None,
                node_ids: list = None,
                use_cache: bool = True,
                do_task_split: bool = False,
-               do_rerank: bool = True):
+               do_rerank: bool = True,
+               mode: str = 'auto'):
     """流式问答主流程，yield SSE 事件 dict
 
     与 ``ask`` 相同的全链路（热点缓存 → 任务拆分 → 混合检索 → 记忆 → LLM 流式生成 → 落库 → 缓存），
@@ -300,11 +453,66 @@ def ask_stream(user, question: str, session: Session,
     root_type = root_types[0] if root_types else 'company_doc'
     turn_index = (session.turn_count or 0) + 1
 
+    # 输入侧 question 审查（先于任何业务逻辑，避免浪费检索/LLM 算力）
+    # 输入输出双审，"问题包含敏感词就拒答"
+    q_filter_hit = None
+    try:
+        from apps.security.sensitive_filter import get_sensitive_filter
+        _sf = get_sensitive_filter()
+        _hits = _sf.check(question)
+        _block = [h for h in _hits if h.action == 'block']
+        if _block:
+            q_filter_hit = _block[0]
+    except Exception:
+        logger.exception('[ask_stream] question input filter failed, skip input review')
+
+    if q_filter_hit:
+        # 输入侧命中 block：立即发 start + first_token + content_filtered + done
+        # 不落缓存，不跑检索/LLM，节省算力
+        ttfb = int((time.time() - t0) * 1000)
+        yield {
+            'type': 'start',
+            'session_id': session.id,
+            'citations': [],
+            'is_hit_cache': False,
+        }
+        yield {'type': 'first_token', 'ttfb_ms': ttfb}
+        yield _make_filtered_event(q_filter_hit)
+        # 落 QaRecord：is_filtered=True，answer 空（无合法输出）
+        qa = _persist_qa(
+            user=user, session=session, question=question, answer='',
+            citations=[],
+            retrieval_hits=[], retrieval_scores=[],
+            stats={'latency_total_ms': int((time.time() - t0) * 1000),
+                   'latency_ttfb_ms': ttfb},
+            llm_stats={}, root_type=root_type, turn_index=turn_index,
+            answer_type='refused', is_hit_cache=False,
+            is_filtered=True, filter_reason=f'input:{q_filter_hit.word}',
+            # 输入侧拦截：链路完整，is_success=True 表示服务正常，
+            # answer_type='refused' 表示业务拒答
+            is_success=True,
+        )
+        yield {
+            'type': 'done',
+            'message_id': qa.id,
+            'session_id': session.id,
+            'citations': [],
+            'is_filtered': True,
+            'stats': {
+                'total_ms': int((time.time() - t0) * 1000),
+                'ttfb_ms': ttfb,
+                'is_hit_cache': False,
+            },
+        }
+        return
+
     # 1. 热点缓存命中：一次性输出完整答案，ttfb 即缓存命中耗时
     if use_cache:
         cached = _try_cache(question, root_type, user)
         if cached:
             ttfb_ms = int((time.time() - t0) * 1000)
+            # 缓存命中也需过审：历史答案可能含违规内容（词库更新后）
+            safe_answer, cache_hit = _check_full_text(cached['answer'])
             yield {
                 'type': 'start',
                 'session_id': session.id,
@@ -312,7 +520,11 @@ def ask_stream(user, question: str, session: Session,
                 'is_hit_cache': True,
             }
             yield {'type': 'first_token', 'ttfb_ms': ttfb_ms}
-            yield {'type': 'delta', 'delta': cached['answer']}
+            if cache_hit:
+                # 命中 block：不下发 delta，发拦截事件
+                yield _make_filtered_event(cache_hit)
+            else:
+                yield {'type': 'delta', 'delta': safe_answer}
 
             qa = _persist_qa(
                 user=user, session=session, question=question, answer=cached['answer'],
@@ -322,14 +534,20 @@ def ask_stream(user, question: str, session: Session,
                        'latency_ttfb_ms': ttfb_ms},
                 llm_stats={}, root_type=root_type, turn_index=turn_index,
                 answer_type='rag', is_hit_cache=True,
+                is_filtered=cache_hit is not None,
+                filter_reason=(f'cache:{cache_hit.word}' if cache_hit else ''),
             )
-            MemoryManager().append_turn(session, question, cached['answer'])
+            # 命中 block 时不应把原文写入 Memory（含违规内容，后续会绕过审查再次吐给用户）
+            # mask 命中时 safe_answer 已脱敏，可安全写入
+            memory_answer = '' if cache_hit else safe_answer
+            MemoryManager().append_turn(session, question, memory_answer)
 
             yield {
                 'type': 'done',
                 'message_id': qa.id,
                 'session_id': session.id,
                 'citations': cached.get('citations', []),
+                'is_filtered': cache_hit is not None,
                 'stats': {
                     'total_ms': int((time.time() - t0) * 1000),
                     'ttfb_ms': ttfb_ms,
@@ -337,6 +555,14 @@ def ask_stream(user, question: str, session: Session,
                 },
             }
             return
+
+    # Agent 模式分流（auto / agent 走 ReAct 流式循环）
+    # 转发 agent_ask_stream 的 tool_call/tool_result/delta 事件，
+    # 在 done 事件时统一落 QaRecord + 缓存 + 记忆
+    if mode in ('auto', 'agent'):
+        yield from _ask_stream_via_agent(user, question, session, root_types,
+                                         node_ids, root_type, turn_index, t0)
+        return
 
     # 2. 任务拆分：流式模式下不支持真流式（execute_split 内部走同步 ask），
     #    这里降级为一次性输出最终合并答案，仍保留 start/first_token/delta/done 协议
@@ -356,13 +582,19 @@ def ask_stream(user, question: str, session: Session,
                 yield {'type': 'error', 'detail': f'任务拆分执行失败: {e}'}
                 return
             ttfb_ms = int((time.time() - t0) * 1000)
+            # 任务拆分合并答案也需过审（一次性全量审查）
+            safe_answer, split_hit = _check_full_text(result.get('answer', ''))
             yield {'type': 'first_token', 'ttfb_ms': ttfb_ms}
-            yield {'type': 'delta', 'delta': result.get('answer', '')}
+            if split_hit:
+                yield _make_filtered_event(split_hit)
+            else:
+                yield {'type': 'delta', 'delta': safe_answer}
             yield {
                 'type': 'done',
                 'message_id': result.get('qa_id'),
                 'session_id': session.id,
                 'citations': result.get('citations', []),
+                'is_filtered': split_hit is not None,
                 'stats': {
                     'total_ms': int((time.time() - t0) * 1000),
                     'ttfb_ms': ttfb_ms,
@@ -466,8 +698,10 @@ def ask_stream(user, question: str, session: Session,
 
     # 7. LLM 流式生成（或拒答降级）
     llm_stats = {}
+    # 内容审查状态：filter_hit 非 None 表示命中 block，用于落库标记 is_filtered
+    filter_hit = None
     if not chunks:
-        # 无相关片段：直接吐拒答文案
+        # 无相关片段：直接吐拒答文案（固定文案不过审，词库不会命中）
         answer = '当前选择的知识库范围内未找到相关资料。请尝试选择其他知识库节点，或调整搜索关键词。'
         answer_type = 'refused'
         ttfb_ms = int((time.time() - t0) * 1000)
@@ -480,6 +714,16 @@ def ask_stream(user, question: str, session: Session,
         ttfb_ms = None
         llm_error = None
         t_llm = time.time()
+        # 初始化流式审查器（失败则降级为不审查，保证服务可用）
+        sf = None
+        filter_state = None
+        try:
+            from apps.security.sensitive_filter import get_sensitive_filter
+            sf = get_sensitive_filter()
+            filter_state = sf.new_state()
+        except Exception:
+            logger.exception('[ask_stream] SensitiveFilter init failed, skip filter')
+
         try:
             for chunk in llm.stream(messages, temperature=0.3, max_tokens=2048):
                 # finish 帧：Provider 会在最后发一帧 finish=True，可能带 error
@@ -489,12 +733,26 @@ def ask_stream(user, question: str, session: Session,
                     break
                 delta = chunk.get('delta', '')
                 if delta:
-                    # 首个 delta 触发 first_token 事件（仅一次）
-                    if ttfb_ms is None:
-                        ttfb_ms = int((time.time() - t0) * 1000)
-                        yield {'type': 'first_token', 'ttfb_ms': ttfb_ms}
-                    full_answer.append(delta)
-                    yield {'type': 'delta', 'delta': delta}
+                    # 流式敏感词审查：block 立即中断 / mask 脱敏后下发
+                    if sf and filter_state:
+                        outputs, hit = sf.feed(filter_state, delta)
+                        if hit and hit.action == 'block':
+                            filter_hit = hit
+                            yield _make_filtered_event(hit)
+                            break
+                        for safe in outputs:
+                            if ttfb_ms is None:
+                                ttfb_ms = int((time.time() - t0) * 1000)
+                                yield {'type': 'first_token', 'ttfb_ms': ttfb_ms}
+                            full_answer.append(safe)
+                            yield {'type': 'delta', 'delta': safe}
+                    else:
+                        # 审查未启用：原样下发
+                        if ttfb_ms is None:
+                            ttfb_ms = int((time.time() - t0) * 1000)
+                            yield {'type': 'first_token', 'ttfb_ms': ttfb_ms}
+                        full_answer.append(delta)
+                        yield {'type': 'delta', 'delta': delta}
         except GeneratorExit:
             # 客户端主动终止流式：保存已生成的部分回答到 QaRecord（不能 yield，连接已断）
             logger.info('[ask_stream] client aborted, saving partial answer (%d chars)', len(full_answer))
@@ -539,6 +797,20 @@ def ask_stream(user, question: str, session: Session,
                 ttfb_ms = int((time.time() - t0) * 1000)
                 yield {'type': 'first_token', 'ttfb_ms': ttfb_ms}
             yield {'type': 'delta', 'delta': f'\n\n[流式中断: {e}]'}
+
+        # 流式收尾：flush 审查 buffer，输出残余安全文本（命中 block 时跳过）
+        if sf and filter_state and not filter_hit:
+            try:
+                outputs, hit = sf.flush(filter_state)
+                if hit and hit.action == 'block':
+                    filter_hit = hit
+                    yield _make_filtered_event(hit)
+                else:
+                    for safe in outputs:
+                        full_answer.append(safe)
+                        yield {'type': 'delta', 'delta': safe}
+            except Exception:
+                logger.exception('[ask_stream] flush filter failed')
 
         # 极端情况：LLM 未产出任何 delta（如首帧即 finish/error），补 first_token 协议
         if ttfb_ms is None:
@@ -600,11 +872,17 @@ def ask_stream(user, question: str, session: Session,
         answer_type=answer_type,
         error_type=detected_error_type_stream,
         is_success=not bool(llm_stats.get('error')),
+        # 内容审查命中标记：is_filtered=True 不影响 is_success（审查拦截视为正常完成）
+        is_filtered=filter_hit is not None,
+        filter_reason=(f'output:{filter_hit.word}' if filter_hit else ''),
     )
 
     # 9. 记录短时记忆 + 更新热点缓存
-    mm.append_turn(session, question, answer)
-    if answer_type == 'rag':
+    # 命中 block 时不更新缓存和记忆（避免违规内容被缓存复用或污染上下文）
+    # 与缓存命中路径（memory_answer='' if cache_hit）和 Agent 路径（answer='' if is_filtered）保持一致
+    memory_answer = '' if filter_hit else answer
+    mm.append_turn(session, question, memory_answer)
+    if answer_type == 'rag' and not filter_hit:
         _update_cache(question, root_type, user, answer, citations)
 
     # 10. 发送 done 事件
@@ -613,6 +891,7 @@ def ask_stream(user, question: str, session: Session,
         'message_id': qa.id,
         'session_id': session.id,
         'citations': citations,
+        'is_filtered': filter_hit is not None,
         'stats': {
             'total_ms': total_ms,
             'ttfb_ms': ttfb_ms,
@@ -679,13 +958,16 @@ def _update_cache(question: str, root_type: str, user, answer: str, citations: l
 def _persist_qa(*, user, session, question, answer, citations,
                 retrieval_hits, retrieval_scores, stats, llm_stats,
                 root_type, turn_index, answer_type='rag', is_hit_cache=False,
-                is_task_split=False, error_type='', is_success=True):
+                is_task_split=False, error_type='', is_success=True,
+                is_filtered=False, filter_reason=''):
     """持久化问答记录 + 实时指标上报
     - error_type / is_success / tokens_per_second 字段填充
       error_type 分类记录 LLM/Embedding 错误原因，便于统计细分指标
       is_success=False 表示链路中断（LLM 错误、Embedding 失败等），
       区别于 answer_type='refused'（正常的"无相关资料"拒答）
       tokens_per_second 在保存时计算，避免 Dashboard 端重复计算
+    - is_filtered / filter_reason 记录内容审查命中情况
+      is_filtered=True 不影响 is_success（审查拦截视为正常完成，只是内容被过滤）
     - QaRecord 创建后立即调用 increment_realtime_metrics()，
       保证 Redis 实时指标与 PG 数据的一致性
     - 即使实时指标上报失败也不影响 QaRecord 保存（try/except 包裹）
@@ -728,6 +1010,8 @@ def _persist_qa(*, user, session, question, answer, citations,
         is_task_split=is_task_split,
         error_type=error_type,
         is_success=is_success,
+        is_filtered=is_filtered,
+        filter_reason=filter_reason[:128],
         tokens_per_second=round(tokens_per_second, 2),
         # 保留原有 error_message 写入逻辑（如有需要可后续关联 error_type）
         error_message=llm_stats.get('error', ''),
@@ -741,3 +1025,191 @@ def _persist_qa(*, user, session, question, answer, citations,
         logger.exception('[Executor] Failed to report realtime metrics (non-critical)')
 
     return qa
+
+
+def _ask_stream_via_agent(user, question, session, root_types, node_ids,
+                          root_type, turn_index, t0):
+    """Agent 模式流式问答入口（auto / agent 模式走这里）
+
+    转发 agent_ask_stream 的 tool_call/tool_result/first_token/delta 事件，
+    在 done 事件时统一落 QaRecord + LlmCallLog + 缓存 + 记忆，
+    最后 yield 带 message_id 的 done 事件。
+
+    与 _ask_via_agent 的区别：流式输出最终答案，且工具调用过程通过事件实时下发前端。
+    """
+    from apps.agent.react import agent_ask_stream
+
+    # 先发送 start 事件（前端先渲染问答气泡 + 思考过程区）
+    yield {
+        'type': 'start',
+        'session_id': session.id,
+        'citations': [],
+        'is_hit_cache': False,
+        'is_agent': True,
+    }
+
+    answer_parts = []
+    citations = []
+    tool_traces = []
+    chunks = []
+    llm_stats = {}
+    ttfb_ms = None
+    # 内容审查命中标记（从 agent_ask_stream 的 done/content_filtered 事件提取）
+    is_filtered = False
+    filter_reason = ''
+    # Agent 内部 error 事件标记：收到后不 return，让循环自然结束继续走落库 + done
+    # 否则前端只收到 error 事件，无 done 事件（message_id 缺失导致反馈按钮不可用）
+    agent_error = ''
+
+    try:
+        for event in agent_ask_stream(user, question, session,
+                                       root_types=root_types, node_ids=node_ids):
+            etype = event.get('type')
+            if etype == 'delta':
+                answer_parts.append(event.get('delta', ''))
+                yield event
+            elif etype == 'first_token':
+                ttfb_ms = event.get('ttfb_ms')
+                yield event
+            elif etype in ('tool_call', 'tool_result'):
+                # 工具调用过程事件直接转发（前端渲染思考过程区）
+                yield event
+            elif etype == 'content_filtered':
+                # Agent 内部命中 block：转发拦截事件给前端
+                is_filtered = True
+                yield event
+            elif etype == 'done':
+                # 提取 agent_ask_stream 的 done 事件数据，落库后再发新 done
+                citations = event.get('citations', [])
+                tool_traces = event.get('tool_traces', [])
+                chunks = event.get('chunks', [])
+                llm_stats = event.get('stats', {}).get('llm', {})
+                # 优先使用 done 事件中的 answer（避免从 delta 重建，且能正确处理 flush 后的内容）
+                done_answer = event.get('answer', '')
+                if done_answer:
+                    answer_parts = [done_answer]
+                # 同步 agent 内部的审查标记（content_filtered 事件已设置 is_filtered=True）
+                if event.get('is_filtered'):
+                    is_filtered = True
+                    filter_reason = event.get('filter_reason', '')
+            elif etype == 'error':
+                # 转发 error 事件给前端，但不 return：agent_ask_stream 发完 error 会
+                # return 导致 generator 结束，for 循环自然退出后继续走落库 + done 逻辑
+                agent_error = event.get('detail', 'Agent 内部错误')
+                yield event
+    except GeneratorExit:
+        # 客户端断开：保存已生成的部分答案（与 ask_stream 的处理一致）
+        # 注意：若 content_filtered 事件已到达（is_filtered=True），block 命中前的部分
+        # delta 仍在 answer_parts 中，落库时需标记 is_filtered 以保证审计一致性
+        logger.info('[ask_stream_via_agent] client aborted, saving partial answer')
+        answer = '' if is_filtered else ''.join(answer_parts)
+        if answer or is_filtered:
+            try:
+                _persist_qa(
+                    user=user, session=session, question=question,
+                    answer=answer,
+                    citations=citations,
+                    retrieval_hits=[c['chunk_id'] for c in chunks],
+                    retrieval_scores=[
+                        {'chunk_id': c['chunk_id'], 'rrf': c.get('rrf_score', 0),
+                         'rerank': c.get('rerank_score', 0)} for c in chunks
+                    ],
+                    stats={'latency_total_ms': int((time.time() - t0) * 1000),
+                           'latency_ttfb_ms': ttfb_ms or 0},
+                    llm_stats=llm_stats, root_type=root_type,
+                    turn_index=turn_index, answer_type='agent',
+                    is_success=True,
+                    is_filtered=is_filtered,
+                    filter_reason=filter_reason,
+                )
+            except Exception:
+                logger.exception('[ask_stream_via_agent] failed to persist partial answer')
+        raise
+
+    # 命中审查拦截：answer 存空字符串（避免与"模型没生成内容"混淆）
+    # 未命中：answer_parts 为空时兜底为 '[未生成内容]'
+    if is_filtered:
+        answer = ''
+    else:
+        answer = ''.join(answer_parts) or '[未生成内容]'
+
+    # answer_type 区分
+    if is_filtered:
+        # 审查拦截：统一标记为 refused（与 ask_stream 输入侧拦截语义一致）
+        answer_type = 'refused'
+    elif not answer or answer == '[未生成内容]':
+        answer_type = 'refused'
+    elif tool_traces:
+        answer_type = 'agent'
+    else:
+        answer_type = 'general'
+
+    retrieval_hits = [c['chunk_id'] for c in chunks]
+    retrieval_scores = [
+        {'chunk_id': c['chunk_id'], 'rrf': c.get('rrf_score', 0),
+         'rerank': c.get('rerank_score', 0)} for c in chunks
+    ]
+
+    total_ms = int((time.time() - t0) * 1000)
+    detected_error = _detect_error_type(llm_stats)
+    # Agent 内部 error 事件（如 for-else else 块 LLM 异常）：标记为链路中断
+    if agent_error and not detected_error:
+        detected_error = 'agent_error'
+    qa = _persist_qa(
+        user=user, session=session, question=question, answer=answer,
+        citations=citations,
+        retrieval_hits=retrieval_hits, retrieval_scores=retrieval_scores,
+        stats={'latency_total_ms': total_ms, 'latency_ttfb_ms': ttfb_ms or 0},
+        llm_stats=llm_stats, root_type=root_type, turn_index=turn_index,
+        answer_type=answer_type, is_success=not detected_error,
+        error_type=detected_error,
+        # 内容审查命中标记（从 agent_ask_stream 透传）
+        is_filtered=is_filtered,
+        filter_reason=filter_reason,
+    )
+
+    # 记录 Agent 工具调用链（失败不影响主流程，为 Tracing 体系铺路）
+    if tool_traces:
+        try:
+            from apps.agent.models import AgentTrace
+            AgentTrace.batch_create_from_traces(qa, user, session, tool_traces)
+        except Exception:
+            logger.exception('[Executor] AgentTrace batch_create failed (stream)')
+
+    # 记录 LlmCallLog
+    try:
+        LlmCallLog.objects.create(
+            provider=llm_stats.get('llm_provider', 'deepseek'),
+            model=llm_stats.get('llm_model', 'deepseek-chat'),
+            scene='qa',
+            user=user if user and getattr(user, 'is_authenticated', False) else None,
+            prompt_tokens=llm_stats.get('tokens_prompt', 0),
+            completion_tokens=llm_stats.get('tokens_completion', 0),
+            total_tokens=llm_stats.get('tokens_prompt', 0) + llm_stats.get('tokens_completion', 0),
+            cost=Decimal(str(llm_stats.get('cost', 0))),
+            latency_ms=llm_stats.get('latency_llm_ms', 0),
+            status='error' if detected_error else 'success',
+        )
+    except Exception:
+        logger.exception('llm_call_log write failed (agent stream)')
+
+    # 记忆 + 缓存（命中 block 时不更新缓存，避免违规内容被缓存复用）
+    MemoryManager().append_turn(session, question, answer)
+    if answer_type == 'agent' and citations and not is_filtered:
+        _update_cache(question, root_type, user, answer, citations)
+
+    yield {
+        'type': 'done',
+        'message_id': qa.id,
+        'session_id': session.id,
+        'citations': citations,
+        'tool_traces': tool_traces,
+        'is_filtered': is_filtered,
+        'stats': {
+            'total_ms': total_ms,
+            'ttfb_ms': ttfb_ms,
+            'llm': llm_stats,
+            'tool_rounds': len(tool_traces),
+            'is_agent': True,
+        },
+    }

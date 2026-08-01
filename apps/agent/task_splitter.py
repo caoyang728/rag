@@ -14,7 +14,6 @@ from apps.llm.prompts import (
     TASK_SPLIT_SYSTEM, TASK_SPLIT_USER_TEMPLATE,
     TASK_MERGE_SYSTEM, TASK_MERGE_USER_TEMPLATE,
 )
-from apps.chat.models import TaskDecomposition
 
 
 
@@ -43,19 +42,9 @@ def maybe_split(question: str) -> Dict[str, Any]:
 def execute_split(user, session, question: str, split: Dict[str, Any],
                   root_types: list = None) -> Dict[str, Any]:
     """执行子任务并合并"""
-    from apps.agent.executor import ask  # 避免循环导入
     sub_tasks: List[Dict[str, Any]] = split.get('sub_tasks', [])
     if not sub_tasks:
         return {'answer': '（任务拆分为空）', 'chunks': [], 'is_hit_cache': False, 'qa_id': None}
-
-    # 记录拆分
-    td = TaskDecomposition.objects.create(
-        qa_record_id=0,  # 临时（无 QaRecord 时用 0 占位）→ 稍后回填 or 简化
-        original_question=question,
-        sub_tasks=[{'index': t['index'], 'question': t['question'],
-                    'depends_on': t.get('depends_on', [])} for t in sub_tasks],
-        status='executing',
-    ) if False else None  # 简化：跳过 TD 记录，需要 qa_record
 
     # 按依赖分层
     answers: Dict[int, str] = {}

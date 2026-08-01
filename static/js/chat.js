@@ -21,6 +21,7 @@ function elemFromTpl(id, fillFn) {
 
 /* ---- 知识库范围选择器状态 ---- */
 const SCOPE_STORAGE_KEY = 'rag_chat_scope';
+const MODE_STORAGE_KEY = 'rag_chat_mode';  // 问答模式持久化 key
 let scopeOpen = false;
 let allScopeIds = [];
 let selectedScopeIds = new Set();  // 统一存储字符串 ID，避免与 API 数字 ID 混淆
@@ -31,11 +32,14 @@ let currentAbortController = null;  // 当前流式请求的 AbortController，�
 let userAborted = false;  // 标记是否用户主动终止（区分超时中断）
 let heartbeatTimer = null;
 let isOnline = true;
+// 问答模式：auto（LLM 自主决定是否调用工具）/ rag（传统 RAG）/ agent（强制 Agent）
+let currentMode = 'auto';
 
 document.addEventListener('DOMContentLoaded', () => {
 	initChatPage();
 	initScopePicker();
 	initSessionList();
+	initModeSwitcher();
 	const wrap = $('#scopeNavWrap');
 	if (wrap) wrap.style.display = '';
 	document.addEventListener('click', (e) => {
@@ -45,6 +49,43 @@ document.addEventListener('DOMContentLoaded', () => {
 	});
 	startHeartbeat();
 });
+
+/* ---- 问答模式切换器初始化 ----
+ * 从 localStorage 恢复上次选择的模式，默认 auto。
+ * 模式说明：
+ *   - auto: Agent 模式，LLM 通过 tool_choice='auto' 自主决定是否调用工具（推荐）
+ *   - rag:  传统 RAG，预检索 + LLM 生成，不调用工具
+ *   - agent: 强制 Agent 模式，必定走 ReAct 工具循环
+ */
+function initModeSwitcher() {
+	const saved = localStorage.getItem(MODE_STORAGE_KEY);
+	if (saved && ['auto', 'rag', 'agent'].includes(saved)) {
+		currentMode = saved;
+	}
+	// 同步 UI 高亮
+	const switcher = $('#modeSwitcher');
+	if (switcher) {
+		switcher.querySelectorAll('.mode-btn').forEach(btn => {
+			btn.classList.toggle('active', btn.dataset.mode === currentMode);
+		});
+	}
+}
+
+/* 切换问答模式（由 UI 按钮点击触发） */
+function setChatMode(mode) {
+	if (!['auto', 'rag', 'agent'].includes(mode)) return;
+	if (mode === currentMode) return;
+	currentMode = mode;
+	localStorage.setItem(MODE_STORAGE_KEY, mode);
+	const switcher = $('#modeSwitcher');
+	if (switcher) {
+		switcher.querySelectorAll('.mode-btn').forEach(btn => {
+			btn.classList.toggle('active', btn.dataset.mode === mode);
+		});
+	}
+	const label = { auto: 'Auto（LLM 自主）', rag: 'RAG（传统检索）', agent: 'Agent（强制工具）' }[mode];
+	toast('已切换为 ' + label + ' 模式', 'success');
+}
 
 function startHeartbeat() {
 	if (heartbeatTimer) clearInterval(heartbeatTimer);
@@ -293,6 +334,84 @@ function handleChatKey(e) {
 	if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
 }
 
+/* ---- Agent 思考过程辅助函数 ---- */
+
+/**
+ * 格式化工具参数为可读字符串
+ * - 对象类型：JSON.stringify 并限制长度
+ * - 字符串类型：直接返回（截断）
+ */
+function formatToolArgs(args) {
+	if (args == null) return '';
+	if (typeof args === 'string') return args.length > 200 ? args.slice(0, 200) + '...' : args;
+	try {
+		const json = JSON.stringify(args, null, 2);
+		return json.length > 500 ? json.slice(0, 500) + '\n...' : json;
+	} catch (e) {
+		return String(args);
+	}
+}
+
+/**
+ * 更新思考区摘要文本
+ * @param {Element} summaryEl - .thinking-summary 元素
+ * @param {number} toolCount - 工具调用总次数
+ * @param {number|null} totalMs - 总耗时（ms），null 表示进行中
+ */
+function updateThinkingSummary(summaryEl, toolCount, totalMs) {
+	if (!summaryEl) return;
+	let text = toolCount + ' 次工具调用';
+	if (totalMs != null) {
+		text += ' · 总计 ' + (totalMs / 1000).toFixed(2) + 's';
+	} else {
+		text += ' · 执行中...';
+	}
+	summaryEl.textContent = text;
+}
+
+/**
+ * 折叠/展开思考区（由 .thinking-header 点击触发）
+ */
+function toggleThinkingArea(headerEl) {
+	const area = headerEl.closest('.thinking-area');
+	if (!area) return;
+	area.classList.toggle('collapsed');
+}
+
+/**
+ * 从 tool_traces 数组渲染完整思考区 HTML
+ * 用于历史会话加载场景：done 事件返回的 tool_traces 或后端历史记录中存储的工具调用链
+ * @param {Array} toolTraces - [{tool_name, tool_args, tool_result, result_ok, latency_ms}]
+ * @returns {string} 思考区 HTML，空数组返回空字符串
+ */
+function buildThinkingAreaHtml(toolTraces) {
+	if (!toolTraces || !toolTraces.length) return '';
+	const cardsHtml = toolTraces.map((t, idx) => {
+		return htmlFromTpl('tmpl-tool-call', (frag) => {
+			frag.querySelector('.tool-call').dataset.callId = 'hist_' + idx;
+			frag.querySelector('.tool-call-name').textContent = t.tool_name || 'unknown';
+			const statusEl = frag.querySelector('.tool-call-status');
+			const ok = t.result_ok !== false;
+			statusEl.textContent = ok ? '成功' : '失败';
+			statusEl.className = 'tool-call-status ' + (ok ? 'ok' : 'fail');
+			if (t.latency_ms != null) {
+				frag.querySelector('.tool-call-latency').textContent = (t.latency_ms / 1000).toFixed(2) + 's';
+			}
+			frag.querySelector('.tool-call-args').textContent = formatToolArgs(t.tool_args);
+			const resultEl = frag.querySelector('.tool-call-result');
+			resultEl.textContent = t.tool_result || '';
+			resultEl.className = 'tool-call-result ' + (ok ? 'ok' : 'fail');
+		});
+	}).join('');
+	// 思考区默认折叠（历史记录展示时不打扰阅读）
+	return htmlFromTpl('tmpl-thinking-area', (frag) => {
+		frag.querySelector('.thinking-summary').textContent = toolTraces.length + ' 次工具调用';
+		frag.querySelector('.thinking-body').innerHTML = cardsHtml;
+		const area = frag.querySelector('.thinking-area');
+		if (area) area.classList.add('collapsed');
+	});
+}
+
 /* 切换发送按钮状态：idle=发送，stopping=终止 */
 function setSendButtonState(state) {
 	const btn = $('#chatSendBtn');
@@ -348,29 +467,67 @@ async function sendChat() {
 	scrollChatBottom();
 
 	// 流式状态
-	let answerText = '';
+	let answerText = '';           // 完整 answer 文本（后端已到达的全部 delta 合并）
+	let displayText = '';          // 已展示到前端的文本（打字机效果用，<= answerText）
 	let ttfbMs = 0;
 	let totalMs = 0;
 	let messageId = null;
 	let citations = [];
 	let answerContentEl = null;   // .msg-ai-content 容器
 	let answerTextEl = null;      // .ai-answer-text 文本节点
-	let renderPending = false;    // rAF 节流标志，避免高频 delta 卡顿
+	let thinkingAreaEl = null;    // .ai-thinking-area 思考过程区容器（Agent 模式）
+	let thinkingBodyEl = null;    // .thinking-body 工具调用列表容器
+	let thinkingSummaryEl = null; // .thinking-summary 摘要文本节点（工具数 + 总耗时）
+	let toolCallEls = {};         // call_id -> tool-call DOM 元素映射，供 tool_result 回填
+	let toolCallCount = 0;        // 工具调用总次数（用于摘要展示）
+	let typingAnimTimer = null;   // 打字机逐字符补帧的 rAF / interval 引用
 
-	// 用 rAF 节流 markdown 重渲染：delta 高频到达时只在每帧合并渲染一次
-	const flushRender = () => {
-		renderPending = false;
+	/* ---- 打字机逐字符补帧渲染 ----
+	 * 解决两个痛点：
+	 *   1) 后端一次吐出大段 delta（段落式）：前端逐字显示，保持视觉连贯
+	 *   2) 前端 rAF 节流合并导致的"跳跃式"：去掉节流直接用 16ms interval 逐字补
+	 *
+	 * displayText 逐步逼近 answerText，每次补 1~3 字符（16ms 约 60fps，视觉≈120 字/秒，
+	 * 略快于真实模型 streaming 但用户不会感到卡顿或跳跃）。
+	 */
+	const TYPING_CHARS_PER_STEP = 3;
+	const TYPING_INTERVAL_MS = 16;
+
+	function startTypingAnimation() {
+		if (typingAnimTimer) return;
+		typingAnimTimer = setInterval(() => {
+			if (displayText.length >= answerText.length) {
+				// 已追上，停止
+				clearInterval(typingAnimTimer);
+				typingAnimTimer = null;
+				return;
+			}
+			// 每次补 1~3 个字符，保持节奏
+			const end = Math.min(answerText.length, displayText.length + TYPING_CHARS_PER_STEP);
+			displayText = answerText.slice(0, end);
+			if (answerTextEl) {
+				answerTextEl.innerHTML = formatAnswer(displayText);
+			}
+			scrollChatBottom();
+		}, TYPING_INTERVAL_MS);
+	}
+
+	function stopTypingAnimation() {
+		if (typingAnimTimer) {
+			clearInterval(typingAnimTimer);
+			typingAnimTimer = null;
+		}
+	}
+
+	// 强制把 displayText 对齐到 answerText（done / 用户终止等收尾场景）
+	function flushDisplayText() {
+		stopTypingAnimation();
+		displayText = answerText;
 		if (answerTextEl) {
-			answerTextEl.innerHTML = formatAnswer(answerText);
+			answerTextEl.innerHTML = formatAnswer(displayText);
 			scrollChatBottom();
 		}
-	};
-	const scheduleRender = () => {
-		if (!renderPending) {
-			renderPending = true;
-			requestAnimationFrame(flushRender);
-		}
-	};
+	}
 
 	// 动态获取根类型（如果没有选中节点，由后端动态返回默认根类型）
 	const rootTypes = [];
@@ -380,7 +537,8 @@ async function sendChat() {
 		root_types: rootTypes,
 		node_ids: [...selectedScopeIds].map(Number),
 		use_cache: true,
-		do_task_split: false
+		do_task_split: false,
+		mode: currentMode  // 问答模式：auto / rag / agent
 	};
 	if (currentSessionId) {
 		body.session_id = currentSessionId;
@@ -427,6 +585,15 @@ async function sendChat() {
 					answerContentEl.innerHTML = '';
 					const answerFrag = tpl('tmpl-ai-answer').content.cloneNode(true);
 					answerTextEl = answerFrag.querySelector('.ai-answer-text');
+					// 答案区占位文本：避免 start→delta 间隔显示空白框
+					// Agent 模式用更友好的"LLM 分析中..."占位，
+					// RAG 模式用"检索并生成中..."占位，直到 first_token 才清空
+					if (chunk.is_agent) {
+						thinkingAreaEl = answerFrag.querySelector('.ai-thinking-area');
+						answerTextEl.innerHTML = '<p style="color:var(--text-sub)">🧠 LLM 正在分析问题，必要时会调用工具... 请稍候</p>';
+					} else {
+						answerTextEl.innerHTML = '<p style="color:var(--text-sub)">🔎 正在检索知识库并生成答案，请稍候...</p>';
+					}
 					const sourceArea = answerFrag.querySelector('.ai-source-area');
 					const sourceHtml = buildSourceHtml(citations);
 					if (sourceHtml) sourceArea.innerHTML = sourceHtml;
@@ -440,8 +607,65 @@ async function sendChat() {
 					scrollChatBottom();
 					break;
 				}
+				case 'tool_call': {
+					// Agent 工具调用开始：在思考区追加一张工具调用卡片
+					// 首次 tool_call 时惰性初始化思考区骨架
+					if (!thinkingAreaEl) break;
+					if (!thinkingBodyEl) {
+						const tFrag = tpl('tmpl-thinking-area').content.cloneNode(true);
+						thinkingAreaEl.appendChild(tFrag);
+						thinkingBodyEl = thinkingAreaEl.querySelector('.thinking-body');
+						thinkingSummaryEl = thinkingAreaEl.querySelector('.thinking-summary');
+					}
+					toolCallCount++;
+					const callId = chunk.call_id || ('call_' + toolCallCount);
+					const toolName = chunk.tool_name || 'unknown';
+					const toolArgs = chunk.tool_args || {};
+					const cardEl = elemFromTpl('tmpl-tool-call', (frag) => {
+						frag.querySelector('.tool-call').dataset.callId = callId;
+						frag.querySelector('.tool-call-name').textContent = toolName;
+						const statusEl = frag.querySelector('.tool-call-status');
+						statusEl.textContent = '执行中...';
+						statusEl.className = 'tool-call-status running';
+						frag.querySelector('.tool-call-args').textContent = formatToolArgs(toolArgs);
+					});
+					// 新工具卡片插入思考区底部，保持调用顺序与 LLM 决策一致
+					thinkingBodyEl.appendChild(cardEl);
+					toolCallEls[callId] = cardEl;
+					updateThinkingSummary(thinkingSummaryEl, toolCallCount, null);
+					scrollChatBottom();
+					break;
+				}
+				case 'tool_result': {
+					// 工具执行完成：回填对应卡片的 status / latency / result
+					const callId = chunk.call_id || ('call_' + toolCallCount);
+					const cardEl = toolCallEls[callId];
+					if (!cardEl) break;
+					const statusEl = cardEl.querySelector('.tool-call-status');
+					const ok = !!chunk.ok;
+					statusEl.textContent = ok ? '成功' : '失败';
+					statusEl.className = 'tool-call-status ' + (ok ? 'ok' : 'fail');
+					const latency = chunk.latency_ms;
+					if (latency != null) {
+						cardEl.querySelector('.tool-call-latency').textContent = (latency / 1000).toFixed(2) + 's';
+					}
+					const resultEl = cardEl.querySelector('.tool-call-result');
+					const preview = chunk.result_preview || '';
+					resultEl.textContent = preview;
+					resultEl.className = 'tool-call-result ' + (ok ? 'ok' : 'fail');
+					updateThinkingSummary(thinkingSummaryEl, toolCallCount, null);
+					scrollChatBottom();
+					break;
+				}
 				case 'first_token': {
 					ttfbMs = chunk.ttfb_ms || 0;
+					// first_token 到达时：清空占位文本，重置 answerText/displayText 为空
+					// （真正的文本会由紧随其后的 delta 逐字输出）
+					answerText = '';
+					displayText = '';
+					if (answerTextEl) {
+						answerTextEl.innerHTML = '';
+					}
 					if (answerContentEl) {
 						const latencyEl = answerContentEl.querySelector('.feedback-latency');
 						if (latencyEl) {
@@ -451,8 +675,9 @@ async function sendChat() {
 					break;
 				}
 				case 'delta': {
+					// 合并到 answerText，打字机补帧动画自行显示（16ms 间隔逐字补）
 					answerText += chunk.delta || '';
-					scheduleRender();
+					startTypingAnimation();
 					break;
 				}
 				case 'done': {
@@ -461,10 +686,12 @@ async function sendChat() {
 					ttfbMs = chunk.stats?.ttfb_ms || ttfbMs;
 					citations = chunk.citations || citations;
 
-					// 最终再渲染一次（确保完整 markdown）
-					if (answerTextEl) {
-						answerTextEl.innerHTML = formatAnswer(answerText);
+					// 命中审查拦截时跳过 flushDisplayText：content_filtered 事件已清空
+					// answerText 并渲染拦截卡片，flush 会用 formatAnswer('') 覆盖卡片为"暂无回答"
+					if (!chunk.is_filtered) {
+						flushDisplayText();
 					}
+
 					if (answerContentEl) {
 						// 刷新溯源区
 						const sourceArea = answerContentEl.querySelector('.ai-source-area');
@@ -483,12 +710,81 @@ async function sendChat() {
 							const total = (totalMs / 1000).toFixed(2);
 							latencyEl.textContent = '首字 ' + ttfb + 's · 总计 ' + total + 's';
 						}
+						// 内容审查拦截收尾：done 事件先于用户点击反馈按钮到达，
+						// 此时 messageId 已就绪，启用"反馈误判"按钮并把 qa_id 写入 dataset
+						// 命中 block 时已清空答案区，仅保留拦截卡片，无需再追写文本
+						if (chunk.is_filtered) {
+							const filteredCard = answerContentEl.querySelector('.content-filtered-card');
+							if (filteredCard) {
+								filteredCard.dataset.qaId = messageId;
+								const fbtn = filteredCard.querySelector('.filtered-feedback-btn');
+								if (fbtn) fbtn.disabled = false;
+							}
+						}
+					}
+					// 思考区摘要收尾：补全总耗时；若全流程无工具调用，则移除空思考区
+					if (thinkingAreaEl) {
+						if (toolCallCount === 0) {
+							thinkingAreaEl.innerHTML = '';
+						} else {
+							updateThinkingSummary(thinkingSummaryEl, toolCallCount, totalMs);
+						}
 					}
 					scrollChatBottom();
 					initSessionList(true);
 					break;
 				}
+				case 'content_filtered': {
+					// 命中敏感词 block：立即停止打字机，清空已展示内容，显示拦截提示卡片
+					// 不暴露具体命中词（避免二次传播违规内容），仅提示"违规已拦截"
+					stopTypingAnimation();
+					answerText = '';
+					displayText = '';
+					if (answerTextEl) {
+						answerTextEl.innerHTML = '';
+					}
+					const target = answerContentEl || aMsg.querySelector('.msg-ai-content');
+					if (target) {
+						// 渲染拦截提示卡片：含说明 + 误判反馈按钮
+						// 反馈按钮初始 disabled：content_filtered 事件先于 done 到达，
+						// 此时 messageId（qa_id）尚未就绪，需等 done 事件回填后才能启用反馈
+						const category = chunk.category || 'other';
+						const reason = chunk.reason || '检测到违规内容，已拦截';
+						const filteredCard = document.createElement('div');
+						filteredCard.className = 'content-filtered-card';
+						filteredCard.dataset.mid = mid;
+						filteredCard.dataset.category = category;
+						filteredCard.innerHTML =
+							'<div class="filtered-icon">🚫</div>' +
+							'<div class="filtered-body">' +
+								'<div class="filtered-title">' + escapeHtml(reason) + '</div>' +
+								'<div class="filtered-hint">本回答因包含违规内容被系统拦截。' +
+									'如果您认为这是误判，请点击反馈，管理员会人工复核。</div>' +
+							'</div>' +
+							'<button class="btn btn-sm filtered-feedback-btn" disabled onclick="reportFilterFalsePositive(this)">💬 反馈误判</button>';
+						// 替换答案区内容（保留 feedback-bar 等其他元素）
+						const existingAnswer = target.querySelector('.ai-answer-text');
+						if (existingAnswer) {
+							existingAnswer.innerHTML = '';
+							existingAnswer.appendChild(filteredCard);
+						} else {
+							target.appendChild(filteredCard);
+						}
+						// 隐藏溯源区（拦截时无引用）
+						const sourceArea = target.querySelector('.ai-source-area');
+						if (sourceArea) sourceArea.innerHTML = '';
+						// 更新耗时标签
+						const latencyEl = target.querySelector('.feedback-latency');
+						if (latencyEl) {
+							latencyEl.textContent = '已拦截' + (ttfbMs > 0 ? ' · 首字 ' + (ttfbMs / 1000).toFixed(2) + 's' : '');
+						}
+					}
+					scrollChatBottom();
+					break;
+				}
 				case 'error': {
+					// 错误时立即停止打字机动画，避免对已脱离 DOM 的节点空转
+					stopTypingAnimation();
 					const detail = chunk.detail || '未知错误';
 					const target = answerContentEl || aMsg.querySelector('.msg-ai-content');
 					if (target) {
@@ -501,7 +797,8 @@ async function sendChat() {
 	} catch (e) {
 		// 区分：用户主动终止 vs 网络/超时异常
 		if (userAborted) {
-			// 用户主动终止：保留已生成的部分回答，标注"已终止"
+			// 用户主动终止：停止打字机动画，保留已生成的部分回答，标注"已终止"
+			flushDisplayText();
 			if (answerText && answerTextEl) {
 				answerTextEl.innerHTML = formatAnswer(answerText);
 			}
@@ -517,6 +814,8 @@ async function sendChat() {
 			scrollChatBottom();
 		} else {
 			console.error('stream chat failed:', e);
+			// 异常时也停止打字机动画，避免空转
+			stopTypingAnimation();
 			const isTimeout = e.name === 'AbortError';
 			const btn = document.createElement('button');
 			btn.className = 'btn btn-sm btn-primary';
@@ -635,8 +934,13 @@ function renderUserMessageHTML(text, time) {
 	return renderUserMessageElement(text, time).outerHTML;
 }
 
-function renderAIMessageHTML(answer, citations, messageId, stats) {
+function renderAIMessageHTML(answer, citations, messageId, stats, toolTraces) {
 	return htmlFromTpl('tmpl-ai-msg', (frag) => {
+		// 思考过程区（Agent 模式历史记录，默认折叠）
+		const thinkingHtml = buildThinkingAreaHtml(toolTraces);
+		if (thinkingHtml) {
+			frag.querySelector('.ai-thinking-area').innerHTML = thinkingHtml;
+		}
 		frag.querySelector('.ai-answer-text').innerHTML = formatAnswer(answer || '');
 		const sourceHtml = buildSourceHtml(citations);
 		if (sourceHtml) {
@@ -724,6 +1028,69 @@ async function submitDetailedFeedback(mid, qaId) {
 }
 
 function closeFeedback(mid) { $('#fbd-' + mid).classList.remove('show'); }
+
+/* ---- 内容审查误判反馈 ----
+ * content_filtered 事件命中后，用户可点击"反馈误判"提交申诉。
+ * 流程：done 事件回填 qaId 到 .content-filtered-card[data-qa-id] →
+ *      点击按钮 → 展开内联表单 → 提交到 /api/v1/chat/feedback/（tags 标记 false_positive）
+ */
+function reportFilterFalsePositive(btn) {
+	// 找到所属拦截卡片（按钮在卡片内）
+	const card = btn.closest('.content-filtered-card');
+	if (!card) return;
+	const qaId = card.dataset.qaId;
+	// done 事件未到达或后端未落库时 qaId 为空，提示用户稍候
+	if (!qaId) {
+		toast('记录尚未就绪，请稍后重试', 'error');
+		return;
+	}
+	const category = card.dataset.category || 'other';
+	// 已展开过则不重复创建
+	if (card.querySelector('.filtered-feedback-form')) return;
+
+	const form = document.createElement('div');
+	form.className = 'filtered-feedback-form';
+	form.innerHTML =
+		'<textarea class="filtered-feedback-text" placeholder="请简要说明为什么认为是误判（可选）..." rows="3"></textarea>' +
+		'<div class="filtered-feedback-actions">' +
+			'<button class="btn btn-sm filtered-cancel-btn" type="button">取消</button>' +
+			'<button class="btn btn-sm btn-primary filtered-submit-btn" type="button">提交反馈</button>' +
+		'</div>';
+	card.appendChild(form);
+
+	// 绑定事件（避免 inline onclick 字符串拼接 qaId 注入风险）
+	form.querySelector('.filtered-cancel-btn').addEventListener('click', () => form.remove());
+	form.querySelector('.filtered-submit-btn').addEventListener('click', () => {
+		const comment = (form.querySelector('.filtered-feedback-text')?.value || '').trim();
+		submitFilterFalsePositive(qaId, category, comment, card);
+	});
+}
+
+/* 提交误判反馈到后端 FeedbackView
+ * rating=0 表示中性（既非满意也非不满意），用 tags 标记为审查误判
+ */
+async function submitFilterFalsePositive(qaId, category, comment, card) {
+	try {
+		await api.postJson('/api/v1/chat/feedback/', {
+			qa_record_id: qaId,
+			rating: 0,
+			comment: comment || '内容审查误判反馈',
+			tags: ['false_positive', 'filter_' + category]
+		});
+		toast('反馈已提交，管理员会人工复核', 'success');
+		// 提交成功后移除表单和按钮，避免重复提交
+		const form = card.querySelector('.filtered-feedback-form');
+		if (form) form.remove();
+		const btn = card.querySelector('.filtered-feedback-btn');
+		if (btn) {
+			btn.disabled = true;
+			btn.textContent = '✓ 已反馈';
+		}
+	} catch (e) {
+		console.error('submit filter false positive failed:', e);
+		toast('反馈提交失败', 'error');
+	}
+}
 
 async function loadSessionMessages(id) {
 	try {
@@ -927,7 +1294,7 @@ function renderMessagesFromRecords(records) {
 			renderAIMessageHTML(r.answer, r.citations, r.id, {
 				latency_total_ms: r.latency_total_ms,
 				latency_ttfb_ms: r.latency_ttfb_ms
-			});
+			}, r.tool_traces);
 	}).join('');
 	const wrapper = document.createElement('div');
 	wrapper.appendChild(frag);

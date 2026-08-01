@@ -10,6 +10,8 @@ let auditFilter = {
 };
 let _auditDetailCache = [];
 let _whitelistCache = [];
+let _sensitiveCache = [];      // 敏感词列表缓存，供编辑按钮按 idx 取记录
+let _sensitiveEditId = null;   // 当前编辑的敏感词 id（null 表示新增模式）
 
 document.addEventListener('DOMContentLoaded', () => {
 	initAuditPage();
@@ -22,7 +24,7 @@ async function initAuditPage() {
 async function setAuditTab(tab) {
 	STATE.currentAuditTab = tab;
 	$$('.tab-item').forEach((t, i) => {
-		t.classList.toggle('active', ['audit', 'white', 'black', 'login'][i] === tab);
+		t.classList.toggle('active', ['audit', 'white', 'black', 'sensitive', 'login'][i] === tab);
 	});
 	const body = $('#auditBody');
 	if (body) {
@@ -201,6 +203,44 @@ async function renderAuditTab(tab) {
 		}
 	}
 
+	if (tab === 'sensitive') {
+		// 敏感词列表 tab：渲染表格 + 启用/正则状态徽章
+		// 不做分页（词库通常百级以内），全量加载
+		try {
+			const data = await api.getJson('/api/v1/security/sensitive-words/');
+			const items = data.rows || [];
+			_sensitiveCache = items;
+
+			const tmpl = document.getElementById('tmpl-sensitive-tab');
+			const frag = tmpl.content.cloneNode(true);
+
+			const tbody = frag.querySelector('.sensitive-tbody');
+			if (items.length === 0) {
+				tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:20px;color:var(--text-sub)">暂无敏感词，点击右上角新增</td></tr>';
+			} else {
+				tbody.innerHTML = items.map((x, i) => `
+					<tr>
+						<td><code style="background:var(--hover);padding:2px 6px;border-radius:3px">${escapeHtml(x.word)}</code></td>
+						<td>${categoryTag(x.category)}</td>
+						<td>${actionTag(x.action)}</td>
+						<td>${x.is_regex ? '<span class="tag tag-primary">是</span>' : '<span class="tag tag-default">否</span>'}</td>
+						<td>${x.is_enabled ? '<span class="tag tag-success">启用</span>' : '<span class="tag tag-default">禁用</span>'}</td>
+						<td class="text-sub">${formatDate(x.created_at)}</td>
+						<td><div class="table-actions"><button class="btn-link btn-sm" onclick="editSensitive(${i})">编辑</button><button class="btn-link btn-sm" style="color:var(--danger)" onclick="deleteSensitive(${x.id})">删除</button></div></td>
+					</tr>
+				`).join('');
+			}
+
+			return frag;
+		} catch (e) {
+			console.error('load sensitive words failed:', e);
+			const div = document.createElement('div');
+			div.style.cssText = 'padding:20px;text-align:center;color:var(--text-sub)';
+			div.textContent = '加载失败';
+			return div;
+		}
+	}
+
 	if (tab === 'login') {
 		try {
 			let url = '/api/v1/security/login-attempts/';
@@ -247,12 +287,14 @@ async function renderAuditTab(tab) {
 	return div;
 }
 
-const _OP_TAG_MAP = { 'login': 'info', 'upload_document': 'primary', 'delete_document': 'danger', 'update_user': 'warning', 'toggle_user_status': 'warning', 'export': 'success', 'create_node': 'default', 'chat_ask': 'default', 'manage_whitelist': 'default', 'manage_blacklist': 'danger', 'logout': 'info', 'reset_password': 'warning', 'feedback': 'default', 'admin_users': 'warning', 'update_node': 'default', 'token_refresh': 'info' };
-const _OP_LABEL_MAP = { 'login': '登录', 'upload_document': '上传', 'delete_document': '删除', 'update_user': '用户变更', 'toggle_user_status': '启禁用', 'export': '导出', 'create_node': '知识库', 'chat_ask': '问答', 'manage_whitelist': '白名单', 'manage_blacklist': '黑名单', 'logout': '登出', 'reset_password': '改密', 'feedback': '反馈', 'admin_users': '用户管理', 'update_node': '节点变更', 'token_refresh': '令牌刷新' };
+const _OP_TAG_MAP = { 'login': 'info', 'upload_document': 'primary', 'delete_document': 'danger', 'update_user': 'warning', 'toggle_user_status': 'warning', 'export': 'success', 'create_node': 'default', 'chat_ask': 'default', 'manage_whitelist': 'default', 'manage_blacklist': 'danger', 'manage_sensitive_word': 'warning', 'logout': 'info', 'reset_password': 'warning', 'feedback': 'default', 'admin_users': 'warning', 'update_node': 'default', 'token_refresh': 'info' };
+const _OP_LABEL_MAP = { 'login': '登录', 'upload_document': '上传', 'delete_document': '删除', 'update_user': '用户变更', 'toggle_user_status': '启禁用', 'export': '导出', 'create_node': '知识库', 'chat_ask': '问答', 'manage_whitelist': '白名单', 'manage_blacklist': '黑名单', 'manage_sensitive_word': '敏感词', 'logout': '登出', 'reset_password': '改密', 'feedback': '反馈', 'admin_users': '用户管理', 'update_node': '节点变更', 'token_refresh': '令牌刷新' };
 const _RESULT_TAG_MAP = { 'success': '<span class="tag tag-success">✓ 成功</span>', 'failed': '<span class="tag tag-danger">✕ 失败</span>', 'denied': '<span class="tag tag-warning">⚠ 拒绝</span>' };
 
 function opTag(op) {
-	return `<span class="tag tag-${_OP_TAG_MAP[op] || 'default'}">${_OP_LABEL_MAP[op] || op}</span>`;
+	// 未知 op 转义防 XSS（后端可能返回未枚举的 action）
+	const label = _OP_LABEL_MAP[op] || escapeHtml(op);
+	return `<span class="tag tag-${_OP_TAG_MAP[op] || 'default'}">${label}</span>`;
 }
 
 function resultTag(result) {
@@ -361,6 +403,141 @@ async function unblockIp(id) {
 		await setAuditTab('black');
 	} catch (e) {
 		toast(e.message || '解封失败', 'error');
+	}
+}
+
+/* ---- 敏感词管理 CRUD ----
+ * 后端契约：
+ *   POST /api/v1/security/sensitive-words/        {word, category, action, is_regex}
+ *   PUT  /api/v1/security/sensitive-words/{id}/   {action, is_enabled}（word/category 不可改）
+ *   DELETE /api/v1/security/sensitive-words/{id}/
+ * CRUD 后后端会自动触发 SensitiveFilter 重建（AC 自动机重载）
+ */
+
+// 分类 → 彩色 tag 映射（仅用于展示，不影响处理逻辑）
+const _SENSITIVE_CATEGORY_MAP = {
+	'phone': { label: '手机号', tag: 'info' },
+	'id_card': { label: '身份证', tag: 'warning' },
+	'email': { label: '邮箱', tag: 'info' },
+	'bank_card': { label: '银行卡', tag: 'warning' },
+	'secret': { label: '内部机密', tag: 'danger' },
+	'other': { label: '其它', tag: 'default' },
+};
+
+// 动作 → 彩色 tag 映射（block=红 / mask=黄 / warn=灰，颜色与拦截卡片视觉一致）
+const _SENSITIVE_ACTION_MAP = {
+	'mask': { label: '脱敏', tag: 'warning' },
+	'block': { label: '拦截', tag: 'danger' },
+	'warn': { label: '告警', tag: 'default' },
+};
+
+function categoryTag(c) {
+	// 未知分类转义防 XSS
+	const m = _SENSITIVE_CATEGORY_MAP[c] || { label: escapeHtml(c || '-'), tag: 'default' };
+	return `<span class="tag tag-${m.tag}">${m.label}</span>`;
+}
+
+function actionTag(a) {
+	// 未知动作转义防 XSS
+	const m = _SENSITIVE_ACTION_MAP[a] || { label: escapeHtml(a || '-'), tag: 'default' };
+	return `<span class="tag tag-${m.tag}">${m.label}</span>`;
+}
+
+/* 打开"新增敏感词"弹窗：重置表单 + 启用所有字段 */
+function showAddSensitive() {
+	_sensitiveEditId = null;
+	$('#modal-sensitive-title').textContent = '新增敏感词';
+	$('.sensitive-input-word').value = '';
+	$('.sensitive-input-word').disabled = false;
+	$('.sensitive-input-category').value = 'other';
+	$('.sensitive-input-category').disabled = false;
+	$('.sensitive-input-action').value = 'mask';
+	$('.sensitive-input-regex').checked = false;
+	$('.sensitive-input-regex').disabled = false;
+	$('.sensitive-input-enabled').checked = true;
+	// 新增时强制启用：后端 POST 硬编码 is_enabled=True，不接受该字段
+	// 禁用复选框避免用户误以为取消勾选可以创建即禁用
+	$('.sensitive-input-enabled').disabled = true;
+	showMask(true);
+	$('#modal-sensitive').classList.add('show');
+	// 延迟聚焦，等 modal 显示后再 focus
+	setTimeout(() => $('.sensitive-input-word')?.focus(), 50);
+}
+
+/* 打开"编辑敏感词"弹窗：回填数据 + 禁用 word/category/is_regex（后端 PUT 不支持修改）
+ * 仅 action 和 is_enabled 可编辑
+ */
+function editSensitive(idx) {
+	const x = _sensitiveCache[idx];
+	if (!x) return;
+	_sensitiveEditId = x.id;
+	$('#modal-sensitive-title').textContent = '编辑敏感词';
+	$('.sensitive-input-word').value = x.word || '';
+	$('.sensitive-input-word').disabled = true;
+	$('.sensitive-input-category').value = x.category || 'other';
+	$('.sensitive-input-category').disabled = true;
+	$('.sensitive-input-action').value = x.action || 'mask';
+	$('.sensitive-input-regex').checked = !!x.is_regex;
+	$('.sensitive-input-regex').disabled = true;
+	$('.sensitive-input-enabled').checked = x.is_enabled !== false;
+	$('.sensitive-input-enabled').disabled = false;
+	showMask(true);
+	$('#modal-sensitive').classList.add('show');
+}
+
+/* 保存敏感词：根据 _sensitiveEditId 区分新增/编辑
+ * - 新增：POST，提交 word/category/action/is_regex
+ * - 编辑：PUT，仅提交 action/is_enabled（后端限制）
+ */
+async function saveSensitive() {
+	const action = $('.sensitive-input-action').value;
+	const isEnabled = $('.sensitive-input-enabled').checked;
+
+	if (_sensitiveEditId === null) {
+		// 新增模式
+		const word = $('.sensitive-input-word').value.trim();
+		if (!word) {
+			toast('请输入敏感词', 'error');
+			$('.sensitive-input-word')?.focus();
+			return;
+		}
+		const category = $('.sensitive-input-category').value;
+		const isRegex = $('.sensitive-input-regex').checked;
+		try {
+			await api.postJson('/api/v1/security/sensitive-words/', {
+				word, category, action, is_regex: isRegex
+			});
+			toast('已添加，词库已生效', 'success');
+			_sensitiveEditId = null;  // 状态收口：关闭前重置，防止残留
+			closeAllOverlays();
+			await setAuditTab('sensitive');
+		} catch (e) {
+			toast(e.message || '添加失败', 'error');
+		}
+	} else {
+		// 编辑模式：仅 action 和 is_enabled 可改
+		try {
+			await api.put(`/api/v1/security/sensitive-words/${_sensitiveEditId}/`, {
+				action, is_enabled: isEnabled
+			});
+			toast('已更新，词库已生效', 'success');
+			_sensitiveEditId = null;  // 状态收口：关闭前重置，防止残留
+			closeAllOverlays();
+			await setAuditTab('sensitive');
+		} catch (e) {
+			toast(e.message || '更新失败', 'error');
+		}
+	}
+}
+
+async function deleteSensitive(id) {
+	if (!confirm('确定删除此敏感词？删除后立即从审查词库移除。')) return;
+	try {
+		await api.deleteJson(`/api/v1/security/sensitive-words/${id}/`);
+		toast('已删除', 'success');
+		await setAuditTab('sensitive');
+	} catch (e) {
+		toast(e.message || '删除失败', 'error');
 	}
 }
 

@@ -29,6 +29,7 @@
 					<div class="tab-item active" onclick="setAuditTab('audit')">📋 审计日志</div>
 					<div class="tab-item" onclick="setAuditTab('white')">✅ IP 白名单</div>
 					<div class="tab-item" onclick="setAuditTab('black')">🚫 IP 黑名单</div>
+					<div class="tab-item" onclick="setAuditTab('sensitive')">🛡️ 敏感词</div>
 					<div class="tab-item" onclick="setAuditTab('login')">🔐 登录尝试</div>
 				</div>
 				<div id="auditBody"></div>
@@ -51,6 +52,9 @@
 				<option value="export">导出</option>
 				<option value="create_node">知识库</option>
 				<option value="chat_ask">问答</option>
+				<option value="manage_whitelist">白名单</option>
+				<option value="manage_blacklist">黑名单</option>
+				<option value="manage_sensitive_word">敏感词</option>
 			</select>
 			<input class="input audit-filter-ip" style="width:200px" placeholder="🌐 IP 地址">
 			<input class="input audit-filter-start" type="date" style="width:150px">
@@ -121,6 +125,35 @@
 		</div>
 	</template>
 
+	<!-- 敏感词管理 tab：列表 + 新增/编辑/删除
+		字段说明：
+		- 动作 action：mask=脱敏（替换为***）/ block=拦截（中断流式）/ warn=仅告警
+		- 分类 category：用于审计归类，不影响处理逻辑
+		- 新增/编辑统一走 #modal-sensitive 弹窗（word 和 category 仅新增时可编辑）
+	-->
+	<template id="tmpl-sensitive-tab">
+		<div class="flex justify-between mb-16 shrink-0">
+			<div class="text-sub text-sm">LLM 输出实时审查词库，命中 block 立即中断流式，mask 脱敏后下发，warn 仅记录告警</div>
+			<button class="btn btn-primary btn-sm" onclick="showAddSensitive()">＋ 新增敏感词</button>
+		</div>
+		<div class="card-scroll">
+			<table class="table" style="border:1px solid var(--border);border-radius:var(--radius)">
+				<thead>
+					<tr>
+						<th>敏感词</th>
+						<th>分类</th>
+						<th>动作</th>
+						<th>正则</th>
+						<th>启用</th>
+						<th>添加时间</th>
+						<th style="width:140px">操作</th>
+					</tr>
+				</thead>
+				<tbody class="sensitive-tbody"></tbody>
+			</table>
+		</div>
+	</template>
+
 	<template id="tmpl-login-tab">
 		<div class="flex justify-between mb-16 shrink-0">
 			<div class="text-sub text-sm">近 24 小时登录尝试记录，异常尝试将自动加入黑名单</div>
@@ -182,6 +215,59 @@
 		<div class="modal-footer">
 			<button class="btn-cancel" onclick="closeAllOverlays()">关闭</button>
 			<button class="btn-save" onclick="copyAuditJson()">复制 JSON</button>
+		</div>
+	</div>
+
+	<!-- 敏感词新增/编辑弹窗
+		新增：word + category + action + is_regex 可编辑
+		编辑：仅 action + is_enabled 可编辑（后端 PUT 限制），word/category 显示但禁用
+	-->
+	<div class="modal" id="modal-sensitive">
+		<div class="modal-header">
+			<div class="modal-title" id="modal-sensitive-title">新增敏感词</div>
+			<button class="modal-close" onclick="closeAllOverlays()">✕</button>
+		</div>
+		<div class="modal-body">
+			<form id="form-sensitive" autocomplete="off">
+				<div class="form-item">
+					<label class="form-label">敏感词 <span style="color:var(--danger)">*</span></label>
+					<input class="input sensitive-input-word" type="text" maxlength="128" placeholder="输入敏感词（最长 128 字符）">
+				</div>
+				<div class="form-item">
+					<label class="form-label">分类</label>
+					<select class="select sensitive-input-category" style="width:100%">
+						<option value="other">其它</option>
+						<option value="phone">手机号</option>
+						<option value="id_card">身份证</option>
+						<option value="email">邮箱</option>
+						<option value="bank_card">银行卡</option>
+						<option value="secret">内部机密</option>
+					</select>
+				</div>
+				<div class="form-item">
+					<label class="form-label">处理动作</label>
+					<select class="select sensitive-input-action" style="width:100%">
+						<option value="mask">mask · 脱敏替换</option>
+						<option value="block">block · 拦截中断</option>
+						<option value="warn">warn · 仅告警</option>
+					</select>
+				</div>
+				<div class="form-item">
+					<label class="form-label">高级选项</label>
+					<div class="flex gap-8 items-center" style="flex-wrap:wrap">
+						<label class="flex items-center gap-4" style="font-size:13px;cursor:pointer">
+							<input class="sensitive-input-regex" type="checkbox"> 作为正则表达式处理
+						</label>
+						<label class="flex items-center gap-4" style="font-size:13px;cursor:pointer">
+							<input class="sensitive-input-enabled" type="checkbox" checked> 启用
+						</label>
+					</div>
+				</div>
+			</form>
+		</div>
+		<div class="modal-footer">
+			<button class="btn-cancel" onclick="closeAllOverlays()">取消</button>
+			<button class="btn-save" onclick="saveSensitive()">保存</button>
 		</div>
 	</div>
 

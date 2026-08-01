@@ -134,14 +134,6 @@
 	flex-shrink: 0
 }
 
-.scope-item.child {
-	padding-left: 36px
-}
-
-.scope-item.grandchild {
-	padding-left: 56px
-}
-
 /* ============ 历史会话右栏 ============ */
 .chat-sessions {
 	width: 260px;
@@ -558,7 +550,7 @@
 
 .source-card-count {
 	font-size: 10px;
-	color: var(--text-muted)
+	color: var(--text-sub)
 }
 
 .source-score {
@@ -629,57 +621,320 @@
 	resize: vertical;
 }
 
-/* 任务拆解 */
-.task-split {
-	margin: 12px 0;
+/* ============ 问答模式切换器（auto / rag / agent） ============ */
+/* 三段式分段按钮，active 高亮当前模式；点击切换 mode 并持久化到 localStorage */
+.mode-switcher {
+	display: inline-flex;
 	background: var(--bg);
 	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	padding: 2px;
+	gap: 2px;
+}
+
+.mode-btn {
+	padding: 4px 10px;
+	font-size: 12px;
+	font-weight: 500;
+	color: var(--text-sub);
+	background: transparent;
+	border: none;
+	border-radius: var(--radius-sm);
+	cursor: pointer;
+	transition: all 0.15s;
+	white-space: nowrap;
+}
+
+.mode-btn:hover {
+	color: var(--text);
+	background: var(--hover);
+}
+
+.mode-btn.active {
+	background: var(--primary);
+	color: #fff;
+	box-shadow: 0 1px 2px rgba(37, 99, 235, 0.2);
+}
+
+/* ============ Agent 思考过程区（可折叠） ============ */
+/* 仅在 Agent / auto 模式且有工具调用时显示；折叠态保留摘要（工具数 + 总耗时） */
+.ai-thinking-area {
+	margin-bottom: 10px;
+}
+
+.ai-thinking-area:empty {
+	display: none;
+}
+
+.thinking-area {
+	background: linear-gradient(135deg, #fafbff 0%, #f5f7ff 100%);
+	border: 1px solid #e0e7ff;
 	border-radius: var(--radius);
 	overflow: hidden;
 }
 
-.task-split-title {
-	padding: 8px 14px;
+.thinking-header {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 8px 12px;
+	cursor: pointer;
+	user-select: none;
+	font-size: 12px;
+	color: var(--text-sub);
+	transition: background 0.1s;
+}
+
+.thinking-header:hover {
+	background: rgba(99, 102, 241, 0.05);
+}
+
+.thinking-icon {
 	font-size: 13px;
+}
+
+.thinking-title {
 	font-weight: 600;
-	background: var(--primary-light);
-	color: var(--primary);
+	color: var(--text);
+}
+
+.thinking-summary {
+	flex: 1;
+	color: var(--text-sub);
+	font-size: 11px;
+}
+
+.thinking-toggle {
+	transition: transform 0.2s;
+	font-size: 10px;
+	color: var(--text-sub);
+}
+
+/* 折叠态：旋转 ▾ 为 ▸，隐藏 body */
+.thinking-area.collapsed .thinking-toggle {
+	transform: rotate(-90deg);
+}
+
+.thinking-body {
+	padding: 8px 12px 10px;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	border-top: 1px solid #e0e7ff;
+}
+
+.thinking-area.collapsed .thinking-body {
+	display: none;
+}
+
+/* ============ 单次工具调用卡片 ============ */
+.tool-call {
+	background: var(--white);
+	border: 1px solid var(--border);
+	border-radius: var(--radius-sm);
+	overflow: hidden;
+}
+
+.tool-call-header {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 6px 10px;
+	font-size: 12px;
+	background: var(--bg);
 	border-bottom: 1px solid var(--border);
 }
 
-.task-step {
-	padding: 12px 14px;
-	border-bottom: 1px solid var(--border)
+.tool-call-icon {
+	font-size: 12px;
 }
 
-.task-step:last-child {
-	border-bottom: none
+.tool-call-name {
+	font-weight: 600;
+	color: var(--text);
+	font-family: 'Courier New', monospace;
 }
 
-.task-step-header {
-	display: flex;
-	align-items: center;
-	gap: 8px;
-	margin-bottom: 4px;
-	font-size: 13px;
-	font-weight: 500
-}
-
-.task-step-num {
-	width: 20px;
-	height: 20px;
-	border-radius: 50%;
-	background: var(--primary);
-	color: #fff;
-	display: inline-flex;
-	align-items: center;
-	justify-content: center;
+.tool-call-status {
 	font-size: 11px;
+	color: var(--text-sub);
+	margin-left: auto;
+}
+
+/* 执行中：橙色脉冲；成功：绿色；失败：红色 */
+.tool-call-status.running {
+	color: #d97706;
+}
+
+.tool-call-status.running::before {
+	content: '●';
+	margin-right: 3px;
+	animation: pulse 1.2s ease-in-out infinite;
+}
+
+.tool-call-status.ok {
+	color: #059669;
+}
+
+.tool-call-status.fail {
+	color: var(--danger);
+}
+
+@keyframes pulse {
+	0%, 100% { opacity: 1; }
+	50% { opacity: 0.4; }
+}
+
+.tool-call-latency {
+	font-size: 10px;
+	color: var(--text-sub);
+}
+
+.tool-call-args,
+.tool-call-result {
+	padding: 6px 10px;
+	font-size: 11px;
+	font-family: 'Courier New', monospace;
+	color: var(--text-sub);
+	white-space: pre-wrap;
+	word-break: break-all;
+	line-height: 1.5;
+}
+
+.tool-call-args {
+	border-bottom: 1px dashed var(--border);
+}
+
+.tool-call-result:empty {
+	display: none;
+}
+
+.tool-call-result.ok {
+	color: #047857;
+}
+
+.tool-call-result.fail {
+	color: var(--danger);
+	background: #fef2f2;
+}
+
+/* ============ 内容审查拦截卡片 ============ */
+/* 命中 block 类敏感词时，答案区被替换为该卡片，提示用户回答已被拦截。
+ * 配色：浅红底 + 红色边框 + 警示图标，区别于正常回答和错误信息。
+ */
+.content-filtered-card {
+	display: flex;
+	align-items: flex-start;
+	gap: 12px;
+	padding: 14px 16px;
+	background: #fef2f2;
+	border: 1px solid #fecaca;
+	border-left: 3px solid var(--danger);
+	border-radius: var(--radius);
+	margin: 4px 0 8px;
+	/* 允许反馈表单（flex-basis:100%）换行到卡片底部，避免与图标/按钮挤在同一行 */
+	flex-wrap: wrap;
+}
+
+.content-filtered-card .filtered-icon {
+	font-size: 20px;
+	line-height: 1.4;
 	flex-shrink: 0;
 }
 
-.task-step-result {
+.content-filtered-card .filtered-body {
+	flex: 1;
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.content-filtered-card .filtered-title {
+	font-size: 14px;
+	font-weight: 600;
+	color: #b91c1c;
+}
+
+.content-filtered-card .filtered-hint {
+	font-size: 12px;
+	color: #991b1b;
+	line-height: 1.6;
+	opacity: 0.85;
+}
+
+.content-filtered-card .filtered-feedback-btn {
+	flex-shrink: 0;
+	align-self: center;
+	padding: 5px 12px;
+	font-size: 12px;
+	color: #b91c1c;
+	background: #fff;
+	border: 1px solid #fecaca;
+	border-radius: var(--radius-sm);
+	cursor: pointer;
+	transition: all 0.15s;
+	white-space: nowrap;
+}
+
+.content-filtered-card .filtered-feedback-btn:hover:not(:disabled) {
+	background: #fee2e2;
+	border-color: var(--danger);
+}
+
+.content-filtered-card .filtered-feedback-btn:disabled {
+	color: var(--text-sub);
+	background: var(--bg);
+	border-color: var(--border);
+	cursor: not-allowed;
+	opacity: 0.7;
+}
+
+/* 误判反馈内联表单：在拦截卡片底部展开，与卡片整体视觉一致 */
+.content-filtered-card .filtered-feedback-form {
+	flex-basis: 100%;
+	margin-top: 10px;
+	padding-top: 10px;
+	border-top: 1px dashed #fecaca;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.content-filtered-card .filtered-feedback-text {
+	width: 100%;
+	min-height: 60px;
+	padding: 8px 10px;
+	border: 1px solid #fecaca;
+	border-radius: var(--radius-sm);
+	font-size: 12px;
+	background: #fff;
+	outline: none;
+	resize: vertical;
+	transition: border-color 0.15s;
+}
+
+.content-filtered-card .filtered-feedback-text:focus {
+	border-color: var(--danger);
+	box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.08);
+}
+
+.content-filtered-card .filtered-feedback-actions {
+	display: flex;
+	justify-content: flex-end;
+	gap: 8px;
+}
+
+.content-filtered-card .filtered-cancel-btn {
+	padding: 5px 12px;
 	font-size: 12px;
 	color: var(--text-sub);
-	line-height: 1.6
+	background: transparent;
+	border: 1px solid var(--border);
+	border-radius: var(--radius-sm);
+	cursor: pointer;
+}
+
+.content-filtered-card .filtered-cancel-btn:hover {
+	background: var(--hover);
 }

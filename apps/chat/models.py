@@ -94,6 +94,16 @@ class QaRecord(models.Model):
     is_success = models.BooleanField(default=True,
                                       help_text='对话是否成功完成（False=链路中断）')
 
+    # --- 内容安全审查标记 ---
+    # is_filtered=True 表示 LLM 输出命中敏感词被拦截/脱敏（区别于链路错误的 is_success）
+    # - block 动作：流式中断，answer 字段保存已生成的部分内容（审计用，前端不展示）
+    # - mask 动作：answer 字段保存脱敏后的内容（与前端展示一致）
+    # filter_reason 记录命中的敏感词分类，便于运营分析高频违规类型
+    is_filtered = models.BooleanField(default=False,
+                                       help_text='是否命中敏感词审查（block/mask）')
+    filter_reason = models.CharField(max_length=128, blank=True, default='',
+                                      help_text='命中原因：敏感词分类或命中词列表（审计用）')
+
     # --- Token 生成速率 ---
     # 保存时计算 completion_tokens / (latency_llm_ms / 1000)，
     # 避免 Dashboard 端重复计算；缓存命中时为 0

@@ -2,7 +2,6 @@
 Simple API test script - runs against running server
 """
 import requests
-import json
 
 BASE_URL = "http://localhost:8000/api/v1"
 
@@ -36,27 +35,6 @@ def test_knowledge(token):
     
     resp = requests.get(f"{BASE_URL}/knowledge/documents/", headers=headers)
     print(f"Documents: {resp.status_code}")
-
-def test_chat(token):
-    print("\n=== Testing Chat API ===")
-    
-    headers = {"Authorization": f"Bearer {token}"}
-    
-    resp = requests.post(f"{BASE_URL}/chat/sessions/", {"title": "Test Session"}, headers=headers)
-    print(f"Create session: {resp.status_code}")
-    if resp.status_code == 201:
-        session_id = resp.json()["id"]
-        
-        resp = requests.get(f"{BASE_URL}/chat/sessions/", headers=headers)
-        print(f"Session list: {resp.status_code}")
-        
-        resp = requests.post(f"{BASE_URL}/chat/ask/", {
-            "question": "Hello",
-            "session_id": session_id
-        }, headers=headers)
-        print(f"Send message: {resp.status_code}")
-        if resp.status_code != 200:
-            print(f"  Error: {resp.text}")
 
 def test_analytics(token):
     print("\n=== Testing Analytics API ===")

@@ -201,18 +201,21 @@ const api = {
 	},
 
 	async handleError(res) {
-		const status = res.status;
-		if (status === 403) {
-			toast('无权限访问此资源', 'error');
-			throw new Error('Forbidden');
-		}
 		if (!res.ok) {
 			let detail = '请求失败';
+			let data = null;
 			try {
-				const data = await res.json();
+				data = await res.json();
 				detail = this._formatError(data);
-			} catch (e) { }
-			throw new Error(detail);
+			} catch (e) {
+				if (res.status === 403) detail = '无权限访问此资源';
+			}
+			// 错误提示统一交给调用方 catch 处理，避免 handleError 内部 toast 与调用方 catch 造成双重告警
+			// 同时挂载 status/data 供调用方做条件分支（如 409 恢复用户场景）
+			const err = new Error(detail);
+			err.status = res.status;
+			err.data = data;
+			throw err;
 		}
 		return res;
 	},
@@ -661,8 +664,9 @@ function isAdminOrOps() {
 }
 
 function renderSidebar(active) {
-	// read_only_employee 角色：隐藏文档上传
-	const isReadonly = hasAnyRole('read_only_employee');
+	// 非 contributor 且无管理角色 = viewer 只读准入，隐藏上传
+	// 管理角色（team_leader/dept_manager/*_admin）即使 viewer 兜底也可操作上传
+	const isReadonly = !hasAnyRole('contributor', 'super_admin', 'kb_admin', 'user_admin', 'dept_manager', 'team_leader');
 	// 拥有管理权限的角色可见全部管理后台项
 	// 包含：超级管理员 / 文档管理员 / 人员管理员 / 部门经理 / 团队组长
 	const isManagerRole = hasAnyRole('super_admin', 'kb_admin', 'user_admin', 'dept_manager', 'team_leader');

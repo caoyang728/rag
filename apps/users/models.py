@@ -210,7 +210,9 @@ class User(AbstractBaseUser):
     - is_super_admin 判定 role_key='super_admin'（系统级快路径）
     - is_kb_admin / is_user_admin 基于 permission_key 判定，不硬编码角色
     """
+    # username 全局唯一, 新用户使用相同账号会被阻止创建（规则：账号冲突不提供恢复，需改名）
     username = models.CharField(max_length=64, unique=True)
+    # email 全局唯一, 冲突后由 create 接口检测是命中活跃记录（拒绝）还是已删除记录（询问恢复）
     email = models.EmailField(max_length=128, unique=True)
     # password 字段由 AbstractBaseUser 提供
     real_name = models.CharField(max_length=64, default='')
@@ -708,30 +710,30 @@ def get_user_permissions(user) -> set:
         _active_grant_filter(), user=user,
     ).values_list('role_id', flat=True)
 
-    # 一次性查出兜底/限制类角色的 ID，避免逐个 Role 查询（原 3 次查询合并为 1 次）
-    # 需要：employee(兜底)、read_only_employee(限制不叠加)、super_admin(高级不叠加)
+    # 一次性查出内置角色 ID，避免逐个 Role 查询
+    # viewer(默认准入只读兜底)、contributor(申请后获得的读/写/下载角色)、super_admin(高级不叠加)
     builtin_role_map = dict(
         Role.objects.filter(
-            role_key__in=['employee', 'read_only_employee', 'super_admin'],
+            role_key__in=['viewer', 'contributor', 'super_admin'],
         ).values_list('role_key', 'id')
     )
-    staff_role = builtin_role_map.get('employee')
-    read_only_role = builtin_role_map.get('read_only_employee')
-    # 高级角色（super_admin）用户不应叠加 employee 兜底权限
-    # 避免超级管理员意外获得普通员工的文档读权限（与角色定位冲突）
+    viewer_role = builtin_role_map.get('viewer')
+    contributor_role = builtin_role_map.get('contributor')
+    # super_admin 不叠加 viewer：避免超级管理员意外降权（与快路径定位冲突）
     super_admin_role_ids = {
         rid for key, rid in builtin_role_map.items()
         if key == 'super_admin' and rid is not None
     }
     all_role_ids = set(global_role_ids) | set(dept_role_ids) | set(team_role_ids)
 
-    # 判断是否应跳过 employee 兜底：
-    # - 显式授权 read_only_employee：只读角色不应叠加下载/写权限
-    # - 显式授权 super_admin：高级角色不叠加普通员工兜底
-    has_read_only = read_only_role is not None and read_only_role in all_role_ids
+    # 叠加兜底逻辑：
+    # - 显式授权 contributor：用户已升级，不叠加 viewer，直接使用 contributor 权限（读+写+下载）
+    # - 未授权 contributor + 未授权 super_admin：默认 viewer 兜底（只读）
+    # - 显式授权 super_admin：不叠加任何普通兜底
+    has_contributor = contributor_role is not None and contributor_role in all_role_ids
     has_super_admin = bool(all_role_ids & super_admin_role_ids)
-    if staff_role is not None and not has_read_only and not has_super_admin:
-        all_role_ids.add(staff_role)
+    if not has_contributor and not has_super_admin and viewer_role is not None:
+        all_role_ids.add(viewer_role)
 
     if not all_role_ids:
         # 空集也回填缓存，避免无角色用户反复穿透 DB
@@ -771,10 +773,11 @@ def get_user_data_scope_level(user) -> str:
     ):
         scopes.extend(rel_qs.values_list('role__data_scope', flat=True))
 
-    # employee 兜底
-    staff_scope = Role.objects.filter(role_key='employee').values_list('data_scope', flat=True).first()
-    if staff_scope:
-        scopes.append(staff_scope)
+    # viewer 兜底（无 contributor 时 viewer 作为基础数据范围）；
+    # contributor 已显式授权时其 data_scope 已在上方 scopes 中，无需重复追加
+    viewer_scope = Role.objects.filter(role_key='viewer').values_list('data_scope', flat=True).first()
+    if viewer_scope:
+        scopes.append(viewer_scope)
 
     if DataScope.GLOBAL in scopes:
         return DataScope.GLOBAL

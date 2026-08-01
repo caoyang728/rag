@@ -38,7 +38,7 @@ from apps.knowledge.access import resolve_doc_access, build_user_context, build_
 from apps.knowledge.storage import get_document_storage
 # 权限体系：ResourceShare/ResourceBlockList(文档级共享与黑名单) + PermissionApprovalTicket(审批工单)
 from apps.users.models import (
-    User, PermissionApprovalTicket, TicketStatus, TicketChangeType,
+    User, Role, UserRoleRel, PermissionApprovalTicket, TicketStatus, TicketChangeType,
     has_permission, get_user_managed_teams, get_user_managed_depts,
 )
 from apps.users.permissions import IsAdminOrOps
@@ -99,8 +99,17 @@ def _get_user_role(user):
     if has_permission(user, 'user.manage') and managed_team_ids:
         return 'team_leader', dept_id, managed_team_ids
 
-    # 普通员工
-    return 'employee', dept_id, managed_team_ids
+    # 只有显式授权 contributor 的用户才能获得写权限分类
+    # viewer 兜底用户返回 None，调用方会将其视为无上传权限
+    has_contributor_role = Role.objects.filter(
+        role_key='contributor',
+        id__in=UserRoleRel.objects.filter(
+            user=user, status='ACTIVE',
+        ).values_list('role_id', flat=True),
+    ).exists()
+    if has_contributor_role:
+        return 'contributor', dept_id, managed_team_ids
+    return None, dept_id, managed_team_ids
 
 
 # 旧 visible_scope → 新 visibility_level 映射（兼容前端旧参数）
@@ -1843,7 +1852,7 @@ class DocumentUploadView(APIView):
             if node.parent and node.parent.node_level == 2 and node.parent.ref_id == dept_id:
                 return True
 
-        if role in ('team_leader', 'employee') and team_ids:
+        if role in ('team_leader', 'contributor') and team_ids:
             if node.node_level == 3 and node.ref_id in team_ids:
                 return True
             if node.parent and node.parent.node_level == 3 and node.parent.ref_id in team_ids:

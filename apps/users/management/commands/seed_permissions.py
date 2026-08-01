@@ -8,8 +8,8 @@ RBAC 权限种子数据脚本 —— 写入 8 个内置角色、权限点清单�
 - compliance_admin: 合规审计员
 - dept_manager: 部门经理
 - team_leader: 团队组长
-- employee: 普通员工（兜底角色）
-- read_only_employee: 只读员工（仅可读取文档，无下载/写权限）
+- viewer: 查看者（兜底角色，随人事归属生效自带只读）
+- contributor: 参与者（显式授权角色，需申请获得，读/写/下载本人团队文档）
 
 幂等设计：重复执行不会报错、不会产生重复记录，已存在的记录跳过不覆盖人工改动。
 适用场景：系统初始化部署、权限点清单/绑定关系升级后再次对齐。
@@ -123,14 +123,14 @@ BUILTIN_ROLES = [
         '管理指定团队人员/团队级知识库',
     ),
     (
-        'employee', '普通员工',
+        'viewer', '查看者',
         RoleType.NORMAL_USER, DataScope.TEAM,
-        '随人事归属生效的兜底角色，仅查看/上传/下载本人团队文档',
+        '兜底角色，随人事归属生效自带只读，未显式授权 contributor 时自动叠加',
     ),
     (
-        'read_only_employee', '只读员工',
+        'contributor', '参与者',
         RoleType.NORMAL_USER, DataScope.TEAM,
-        '显式授权角色，仅可读取文档，无下载/写操作权限',
+        '显式授权角色，需申请获得，获得后覆盖 viewer 兜底，可查看/上传/下载文档',
     ),
 ]
 
@@ -192,14 +192,14 @@ ROLE_PERMISSIONS = {
         'analytics.org.read',
     ],
 
-    # 普通员工：随人事归属生效的兜底角色，仅本团队文档读/上传/下载
-    'employee': [
+    # 参与者：随人事归属生效的兜底角色，仅本团队文档读/上传/下载
+    'contributor': [
         'kb.document.read', 'kb.document.upload', 'kb.document.download',
     ],
 
-    # 只读员工：显式授权角色，仅可读取文档，无下载/写操作权限
-    # 注意：此角色不做兜底，需显式授权才生效
-    'read_only_employee': [
+    # 查看者：默认准入角色，仅可读取文档，无下载/写操作权限
+    # 需通过申请流程升级为 contributor 获得写权限
+    'viewer': [
         'kb.document.read',
     ],
 }

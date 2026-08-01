@@ -66,19 +66,18 @@ roles:
     role_type: TEAM_SCOPE
     data_scope: TEAM
 
-  # ---- 普通用户 ----
-  # employee 随人事归属生效的兜底角色（无需显式授权）
-  - code: employee
-    name: 普通员工
-    description: 随人事归属生效的兜底角色，仅查看/上传/下载本人团队文档
+  # contributor 显式授权角色，需申请获得，获得后覆盖 viewer 兜底
+  - code: contributor
+    name: 参与者
+    description: 显式授权角色，需申请获得，获得后覆盖 viewer 兜底，可查看/上传/下载文档
     is_builtin: true
     role_type: NORMAL_USER
     data_scope: TEAM
 
-  # read_only_employee 显式授权的只读角色（需显式授权才生效，不做兜底）
-  - code: read_only_employee
-    name: 只读员工
-    description: 显式授权角色，仅可读取文档，无下载/写操作权限
+  # viewer 普通用户 兜底角色，随人事归属生效自带只读，未显式授权 contributor 时自动叠加
+  - code: viewer
+    name: 查看者
+    description: 兜底角色，随人事归属生效自带只读，未显式授权 contributor 时自动叠加
     is_builtin: true
     role_type: NORMAL_USER
     data_scope: TEAM
@@ -402,15 +401,15 @@ role_permissions:
     - kb.document.block.manage
     - analytics.org.read
 
-  # 普通员工：随人事归属生效的兜底角色，仅本团队文档读/上传/下载
-  employee:
+  # 参与者：随人事归属生效的兜底角色，仅本团队文档读/上传/下载
+  contributor:
     - kb.document.read
     - kb.document.upload
     - kb.document.download
 
-  # 只读员工：显式授权角色，仅可读取文档，无下载/写操作权限
-  # 注意：此角色不做兜底，需显式授权才生效
-  read_only_employee:
+  # 查看者：默认准入角色，仅可读取文档，无下载/写操作权限
+  # 需通过申请流程升级为 contributor 获得写权限
+  viewer:
     - kb.document.read
 
 # ------------------------------

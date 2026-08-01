@@ -10,7 +10,7 @@ import time
 
 from django.db import connection
 from django.contrib.auth import get_user_model
-from rest_framework.permissions import IsAuthenticated, AllowAny, IsAdminUser
+from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -74,6 +74,9 @@ class SystemConfigView(APIView):
         return Response({"configs": [self._ser(c) for c in rows]})
 
     def put(self, request, key=None):
+        # 系统配置写入仅超级管理员可操作，避免普通用户篡改运行参数
+        if not getattr(request.user, 'is_super_admin', False):
+            return Response({"detail": "仅超级管理员可修改系统配置"}, status=403)
         if not key:
             return Response({"detail": "key required"}, status=400)
         value = request.data.get("value", "")

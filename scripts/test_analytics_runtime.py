@@ -25,7 +25,9 @@ from django.utils import timezone
 from django.test import Client
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from apps.users.models import User, Role, UserRole, RolePermission, Permission
+from apps.users.models import (
+    User, Role, UserRoleRel, RolePermissionRel, Permission, GrantStatus,
+)
 from apps.chat.models import QaRecord, QaFeedback
 from apps.memory.models import Session
 from apps.analytics.models import (
@@ -185,20 +187,29 @@ check('aggregate_org_usage 不崩溃',
 section('4. 权限体系验证')
 
 def make_user(username, is_admin=False, perms=None):
+    """创建测试用户并分配权限
+
+    - Role 用 role_key 标识；Permission 用 permission_key 标识
+    - UserRoleRel 需显式设置 status=ACTIVE
+    - 超级管理员角色 role_key='super_admin'
+    """
     u = User.objects.create_user(username=username, password='testpass123',
                                  email=f'{username}@test.com')
     if is_admin:
-        admin_role, _ = Role.objects.get_or_create(code='super_admin',
-                                                   defaults={'name': 'super_admin'})
-        UserRole.objects.create(user=u, role=admin_role)
+        admin_role, _ = Role.objects.get_or_create(
+            role_key='super_admin',
+            defaults={'name': '超级管理员', 'is_builtin': True})
+        UserRoleRel.objects.create(
+            user=u, role=admin_role, status=GrantStatus.ACTIVE)
     if perms:
         role, _ = Role.objects.get_or_create(
-            code=f'role_{username}',
+            role_key=f'role_{username}',
             defaults={'name': f'{username} Role'})
-        UserRole.objects.create(user=u, role=role)
+        UserRoleRel.objects.create(user=u, role=role, status=GrantStatus.ACTIVE)
         for p in perms:
-            perm, _ = Permission.objects.get_or_create(code=p, defaults={'name': p})
-            RolePermission.objects.get_or_create(
+            perm, _ = Permission.objects.get_or_create(
+                permission_key=p, defaults={'permission_name': p})
+            RolePermissionRel.objects.get_or_create(
                 role=role, permission=perm,
                 defaults={'granted_by': u})
     return u
@@ -207,7 +218,7 @@ client = Client()
 
 # --- 清理之前测试残留数据 ---
 User.objects.filter(username__startswith='perm_test_').delete()
-Role.objects.filter(code__startswith='role_perm_test_').delete()
+Role.objects.filter(role_key__startswith='role_perm_test_').delete()
 
 # 匿名用户访问系统级 API 返回 403
 anon_resp = client.get('/api/v1/analytics/keywords/')
@@ -225,7 +236,7 @@ check('普通用户访问 keywords/ 返回 403',
       f'  实际: {normal_resp.status_code}')
 
 # 有 system:read 权限的用户可以访问
-reader = make_user('perm_test_reader', perms=['analytics:system:read'])
+reader = make_user('perm_test_reader', perms=['analytics.system.read'])
 token_r = str(RefreshToken.for_user(reader).access_token)
 reader_resp = client.get('/api/v1/analytics/keywords/',
                           HTTP_AUTHORIZATION=f'Bearer {token_r}')
@@ -234,7 +245,7 @@ check('sys_reader 访问 keywords/ 返回 200',
       f'  实际: {reader_resp.status_code}')
 
 # org_reader 不能访问 system 接口
-org_reader = make_user('perm_test_org', perms=['analytics:org:read'])
+org_reader = make_user('perm_test_org', perms=['analytics.org.read'])
 token_o = str(RefreshToken.for_user(org_reader).access_token)
 org_resp = client.get('/api/v1/analytics/system-metrics/?date=2024-01-01',
                        HTTP_AUTHORIZATION=f'Bearer {token_o}')
@@ -429,7 +440,7 @@ if kw:
           f'  当前值: {kw.weight_score}')
 
 # BadFeedback 无效状态（使用 writer 权限）
-sys_writer = make_user('perm_test_writer', perms=['analytics:system:read', 'analytics:system:write'])
+sys_writer = make_user('perm_test_writer', perms=['analytics.system.read', 'analytics.system.write'])
 token_w = str(RefreshToken.for_user(sys_writer).access_token)
 fb = QaFeedback.objects.first()
 if fb:

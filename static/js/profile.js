@@ -22,7 +22,7 @@ async function loadProfile() {
 				email: data.email || '',
 				dept: data.department_name || '',
 				team: '',
-				role: (data.roles && data.roles.length > 0) ? (data.roles[0].role__name || '用户') : '用户',
+				role: (data.roles && data.roles.length > 0) ? (data.roles[0].name || '用户') : '用户',
 				avatar: (data.real_name || data.username || '?').charAt(0),
 				phone: data.phone || '',
 				created_at: data.created_at || ''
@@ -453,7 +453,10 @@ async function loadMyPermissions() {
 
 		// 渲染角色
 		if (rolesBox) {
-			if (data.is_super_admin) {
+			// 超级管理员展示"超级管理员"标签
+		const isSuperAdminUser = data.is_super_admin ||
+			(data.roles || []).some(r => r.code === 'super_admin');
+			if (isSuperAdminUser) {
 				rolesBox.innerHTML = '<span class="tag tag-danger">👑 超级管理员</span>' +
 					(data.roles || []).map(r => `<span class="tag tag-primary">${escapeHtml(r.name)}</span>`).join('');
 			} else if ((data.roles || []).length === 0) {
@@ -480,10 +483,10 @@ async function loadMyPermissions() {
 					const clone = cardTmpl.content.cloneNode(true);
 					clone.querySelector('.perm-mod-title').textContent = label + ' 模块';
 					clone.querySelector('.perm-mod-tags').innerHTML = items.map(it =>
-						'<span class="tag tag-sm" style="background:var(--primary-light);color:var(--primary)">' +
-						escapeHtml(it.action) + ' · ' + (it.scopes || []).map(s => SCOPE_LABELS[s] || s).join(',') +
-						'</span>'
-					).join('');
+					'<span class="tag tag-sm" style="background:var(--primary-light);color:var(--primary)">' +
+					escapeHtml(it.action) + ' · ' + (it.scopes || []).map(s => escapeHtml(SCOPE_LABELS[s] || s)).join(',') +
+					'</span>'
+				).join('');
 					permsBox.appendChild(clone);
 				});
 			}

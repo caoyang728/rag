@@ -10,7 +10,6 @@ import tempfile
 import time
 import uuid
 import hashlib
-from typing import List
 
 def _sanitize_content(content: str) -> str:
     """清理内容中的非法字符，特别是 PostgreSQL 不允许的 NUL 字节"""
@@ -337,14 +336,13 @@ def _log_batch_import_failure(filename, node_name, error_msg):
 
 @shared_task(name='knowledge.batch_import_single_file', queue='parse')
 def batch_import_single_file(temp_file_path, node_id, owner_id, visibility, owner_team_id, filename):
-    """
-    批量导入单个文件的 Celery 任务
-    
+    """批量导入单个文件的 Celery 任务
+
     参数：
         temp_file_path: 临时文件路径（脚本上传时创建）
         node_id: 目标节点ID
         owner_id: 上传者ID
-        visibility: 可见范围
+        visibility: 可见范围（兼容旧版 int 1-4 或 str team/dept/public，内部归一化为 visibility_level）
         owner_team_id: 团队ID
         filename: 原始文件名
     """
@@ -439,6 +437,51 @@ def batch_import_single_file(temp_file_path, node_id, owner_id, visibility, owne
         ).aggregate(models.Max('version'))['version__max'] or 0
         version_tag = f'v{max_version + 1}'
 
+        # 可见性归一化：兼容旧版脚本传入的 int(1-4) 或 str(team/dept/public)
+        from apps.knowledge.models import VisibilityLevel
+        _VIS_INT_MAP = {
+            1: VisibilityLevel.TEAM_ONLY,    # private → TEAM_ONLY
+            2: VisibilityLevel.DEPT_ONLY,    # department → DEPT_ONLY
+            3: VisibilityLevel.TEAM_ONLY,    # team → TEAM_ONLY
+            4: VisibilityLevel.PUBLIC,  # public → PUBLIC
+        }
+        _VIS_STR_MAP = {
+            'team': VisibilityLevel.TEAM_ONLY,
+            'dept': VisibilityLevel.DEPT_ONLY,
+            'department': VisibilityLevel.DEPT_ONLY,
+            'public': VisibilityLevel.PUBLIC,
+            'private': VisibilityLevel.TEAM_ONLY,
+        }
+        if isinstance(visibility, int):
+            visibility_level = _VIS_INT_MAP.get(visibility, VisibilityLevel.TEAM_ONLY)
+        elif isinstance(visibility, str) and visibility in VisibilityLevel.values:
+            visibility_level = visibility
+        elif isinstance(visibility, str):
+            visibility_level = _VIS_STR_MAP.get(visibility.lower(), VisibilityLevel.TEAM_ONLY)
+        else:
+            visibility_level = VisibilityLevel.TEAM_ONLY
+
+        # 从节点祖先链推导 dept_id（Level 2 节点 ref_id = dept.id）
+        dept_id = None
+        team_id = owner_team_id
+        if node.node_level >= 2:
+            ancestors = []
+            current = node
+            while current:
+                ancestors.append(current)
+                current = current.parent
+            for n in ancestors:
+                if n.node_level == 2 and n.ref_id:
+                    dept_id = n.ref_id
+                elif n.node_level == 3 and n.ref_id and not team_id:
+                    # 若调用方未传 owner_team_id，从 Level 3 节点推导
+                    team_id = n.ref_id
+        # 回退到上传者的主部门
+        if not dept_id:
+            dept_id = getattr(owner, 'department_id', None)
+        if not team_id:
+            team_id = getattr(owner, 'team_id', None)
+
         doc = Document.objects.create(
             node=node,
             title=filename,
@@ -449,8 +492,11 @@ def batch_import_single_file(temp_file_path, node_id, owner_id, visibility, owne
             file_path=file_path,
             mime_type=mime_type,
             owner=owner,
-            owner_team_id=owner_team_id,
-            visible_scope=visibility,
+            # node(FK) + dept_id + team_id 标识文档归属
+            dept_id=dept_id,
+            team_id=team_id,
+            # visibility_level 控制可见范围
+            visibility_level=visibility_level,
             root_type=node.root_type,
             status='pending',
             version=max_version + 1,

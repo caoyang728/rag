@@ -44,6 +44,10 @@ class RefineMemoryView(APIView):
         session_id = request.data.get("session_id")
         if not session_id:
             return Response({"detail": "session_id 必填"}, status=400)
+        # 校验会话归属，防止越权触发他人会话的记忆提炼
+        from apps.memory.models import Session
+        if not Session.objects.filter(id=session_id, user=request.user).exists():
+            return Response({"detail": "session 不存在"}, status=404)
         try:
             from apps.memory.tasks import refine_session_memory
             refine_session_memory.delay(session_id)

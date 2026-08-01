@@ -12,7 +12,7 @@ const STATE = {
 				const u = JSON.parse(saved);
 				return {
 					name: u.real_name || u.username || '用户',
-					role: (u.roles && u.roles.length > 0) ? (u.roles[0].role__name || '用户') : '用户',
+					role: (u.roles && u.roles.length > 0) ? (u.roles[0].name || '用户') : '用户',
 					dept: u.department_name || '',
 					team: '',
 					email: u.email || '',
@@ -642,7 +642,7 @@ async function loadNotifications() {
 function getUserRoles() {
 	try {
 		const u = JSON.parse(localStorage.getItem('rag_user') || '{}');
-		return (u.roles || []).map(r => r.role__code);
+		return (u.roles || []).map(r => r.code);
 	} catch (e) { return []; }
 }
 
@@ -656,14 +656,16 @@ function isSuperAdmin() {
 }
 
 function isAdminOrOps() {
+	// 可管理文档的角色：超级管理员 / 文档管理员
 	return hasAnyRole('super_admin', 'kb_admin');
 }
 
 function renderSidebar(active) {
-	// readonly 角色：隐藏文档上传
-	const isReadonly = hasAnyRole('readonly');
+	// read_only_employee 角色：隐藏文档上传
+	const isReadonly = hasAnyRole('read_only_employee');
 	// 拥有管理权限的角色可见全部管理后台项
-	const isManagerRole = hasAnyRole('super_admin', 'kb_admin', 'kb_ops', 'dept_manager', 'team_leader');
+	// 包含：超级管理员 / 文档管理员 / 人员管理员 / 部门经理 / 团队组长
+	const isManagerRole = hasAnyRole('super_admin', 'kb_admin', 'user_admin', 'dept_manager', 'team_leader');
 
 	const adminItems = [];
 	// 用户与角色、反馈与报表、审计与安全：仅管理角色可见
@@ -679,7 +681,7 @@ function renderSidebar(active) {
 			{ icon: '🛡️', name: '审计与安全', page: 'admin-audit', key: 'admin-audit' },
 		);
 	}
-	// 组织架构 & RBAC 权限配置：仅超级管理员和kb_admin可见
+	// 组织架构 & RBAC 权限配置：仅超级管理员和文档管理员可见
 	if (isAdminOrOps()) {
 		adminItems.push(
 			{ icon: '🏢', name: '组织架构', page: 'admin-org', key: 'admin-org' },

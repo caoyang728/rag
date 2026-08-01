@@ -16,7 +16,9 @@ from django.test import TestCase, Client
 from django.utils import timezone
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from apps.users.models import User, Role, UserRole, RolePermission, Permission
+from apps.users.models import (
+    User, Role, UserRoleRel, RolePermissionRel, Permission, GrantStatus,
+)
 from apps.chat.models import QaRecord, QaFeedback
 from apps.memory.models import Session
 from apps.analytics.models import (
@@ -28,19 +30,34 @@ from apps.knowledge.models import KnowledgeNode
 
 def _create_test_user(username='testuser', password='testpass123',
                       is_super_admin=False, perms=None):
-    """创建测试用户并分配权限"""
+    """创建测试用户并分配权限
+
+    - Role.code → Role.role_key；Permission.code → Permission.permission_key
+    - UserRole → UserRoleRel；RolePermission → RolePermissionRel
+    """
     user = User.objects.create_user(
         username=username, password=password,
-        is_super_admin=is_super_admin,
+        email=f'{username}@test.com',
     )
+    if is_super_admin:
+        # is_super_admin 基于 role_key='super_admin' 的属性判定
+        admin_role, _ = Role.objects.get_or_create(
+            role_key='super_admin',
+            defaults={'name': '超级管理员', 'is_builtin': True}
+        )
+        UserRoleRel.objects.get_or_create(
+            user=user, role=admin_role,
+            defaults={'status': GrantStatus.ACTIVE}
+        )
     if perms:
         role = Role.objects.create(
-            name=f'{username}_role', code=f'role_{username}', is_active=True)
-        UserRole.objects.create(user=user, role=role, is_active=True)
-        for perm_code in perms:
+            name=f'{username}_role', role_key=f'role_{username}')
+        UserRoleRel.objects.create(
+            user=user, role=role, status=GrantStatus.ACTIVE)
+        for perm_key in perms:
             perm, _ = Permission.objects.get_or_create(
-                code=perm_code, defaults={'name': perm_code})
-            RolePermission.objects.create(
+                permission_key=perm_key, defaults={'permission_name': perm_key})
+            RolePermissionRel.objects.create(
                 role=role, permission=perm, is_active=True)
     return user
 
@@ -66,13 +83,13 @@ class AnalyticsAPITestBase(TestCase):
             username='admin', password='admin12345', is_super_admin=True)
         self.system_reader = _create_test_user(
             username='sys_reader', password='pass12345',
-            perms=['analytics:system:read'])
+            perms=['analytics.system.read'])
         self.system_writer = _create_test_user(
             username='sys_writer', password='pass12345',
-            perms=['analytics:system:read', 'analytics:system:write'])
+            perms=['analytics.system.read', 'analytics.system.write'])
         self.org_reader = _create_test_user(
             username='org_reader', password='pass12345',
-            perms=['analytics:org:read'])
+            perms=['analytics.org.read'])
 
         # --- 认证头 ---
         self.anon_headers = {}

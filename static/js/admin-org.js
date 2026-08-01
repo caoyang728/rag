@@ -7,13 +7,11 @@ let _leaderSearchSeq = 0;
 let _currentManageDeptId = null;
 
 function isKbAdmin() {
-	try {
-		const u = JSON.parse(localStorage.getItem('rag_user') || '{}');
-		return (u.roles || []).some(r => r.role__code === 'kb_admin');
-	} catch (e) { return false; }
+	return hasAnyRole('kb_admin');
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+	// 可访问组织架构页：超级管理员 / 文档管理员
 	const canAccess = isSuperAdmin() || isKbAdmin();
 	if (!canAccess) {
 		document.body.innerHTML = document.getElementById('tmpl-no-permission').innerHTML;

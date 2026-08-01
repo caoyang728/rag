@@ -436,17 +436,16 @@ def run_faithfulness_evaluation():
 
 
 # ============================================================================
-# 6. 旧版每日报表（仅保留向后兼容，不再执行实际聚合）
+# 6. 每日报表聚合入口（仅保留兼容，实际聚合由独立 Beat 任务执行）
 # ============================================================================
 
 @shared_task(name='analytics.aggregate_daily_report', queue='analytics')
 def aggregate_daily_report():
-    """旧版每日报表 — 已迁移至独立任务调度，此函数仅打印警告
+    """每日报表聚合入口 — 已拆分为独立定时任务，此函数仅保留兼容
 
-    - 2026-07 重构：原先 Beat 配置引用此任务名，内部委托两个子任务
-      会导致与新的独立 Beat 任务重复执行
-    - 改为 no-op，保留任务名注册以兼容可能的外部调用
-    - 若需手动触发聚合，请直接调用 compute_system_metrics_daily / compute_org_usage_daily
+    - 此任务已拆分为 compute_system_metrics_daily / compute_org_usage_daily 两个独立 Beat 任务
+    - 保留函数名注册以兼容可能的外部调用，实际为 no-op
+    - 如需手动触发聚合，请直接调用上述两个子任务
     """
     logger.warning(
         '[DailyReport] aggregate_daily_report is deprecated and now a no-op. '

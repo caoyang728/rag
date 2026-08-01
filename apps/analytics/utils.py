@@ -141,7 +141,6 @@ def aggregate_system_metrics(report_date: Optional[date] = None) -> dict:
 
     # --- 总量统计（单次聚合，避免 3 次 count 查询）---
     # 用条件聚合一次查出 total/cache_hit/normal 三个计数，
-    # 比 qs.count() + cache_hit_qs.count() + normal_qa_qs.count() 快 3 倍
     agg_counts = qs.aggregate(
         total_qa=models.Count('id'),
         cache_hit_count=models.Count('id', filter=models.Q(is_hit_cache=True)),
@@ -281,7 +280,6 @@ def aggregate_org_usage(report_date: Optional[date] = None) -> list:
     说明：
     - 返回 list，每个元素是一个 OrgUsageReport 的 dict 数据
     - 同时生成部门级汇总（team_id=None）和团队明细
-    - 使用 QaRecord.user → user.profile.department/team 反查组织归属
     - 好评率计算：QaFeedback 中 rating>0 / (rating>0 + rating<0)
 
     Args:
@@ -291,7 +289,7 @@ def aggregate_org_usage(report_date: Optional[date] = None) -> list:
         list[dict]，每个 dict 对应一个 (department, team) 组合
     """
     from apps.chat.models import QaRecord, QaFeedback
-    from apps.users.models import User, UserTeam
+    from apps.users.models import User
 
     if report_date is None:
         report_date = (timezone.now() - timedelta(days=1)).date()
@@ -299,32 +297,29 @@ def aggregate_org_usage(report_date: Optional[date] = None) -> list:
     qs = QaRecord.objects.filter(created_at__date=report_date)
 
     # 构建 user → org 映射
-    # User 模型直接有 department FK，团队通过 UserTeam 关联
+    # User 直接有 department FK 和 team FK
     user_ids = list(qs.values_list('user_id', flat=True).distinct())
 
-    # --- User 部门信息（直接从 User.department 获取）---
+    # --- User 部门 + 团队信息（单团队，从 User 直接获取，一次查询）---
     user_dept_map = {}  # user_id → {department_id, department_name}
-    for u in User.objects.filter(id__in=user_ids).select_related('department'):
+    user_teams_map = {}  # user_id → [{team_id, team_name, team_dept_id, team_dept_name}]
+    for u in User.objects.filter(id__in=user_ids).select_related('department', 'team__department'):
         if u.department_id:
             user_dept_map[u.id] = {
                 'department_id': u.department_id,
                 'department_name': u.department.name if u.department else '',
             }
-
-    # --- User 团队信息（通过 UserTeam 关联，一个用户可属于多个团队）---
-    user_teams_map = {}  # user_id → [{team_id, team_name}, ...]
-    for ut in UserTeam.objects.filter(user_id__in=user_ids).select_related('team__department'):
-        if ut.user_id not in user_teams_map:
-            user_teams_map[ut.user_id] = []
-        # 团队的部门归属以团队自身的 department FK 为准
-        team_dept_id = ut.team.department_id if ut.team else None
-        team_dept_name = ut.team.department.name if ut.team and ut.team.department else ''
-        user_teams_map[ut.user_id].append({
-            'team_id': ut.team_id,
-            'team_name': ut.team.name if ut.team else '',
-            'team_dept_id': team_dept_id,
-            'team_dept_name': team_dept_name,
-        })
+        # 单团队归属：user.team 是 FK，None 表示无团队
+        # 保留 list 结构以兼容下游多团队遍历逻辑（每用户最多 1 个团队）
+        if u.team_id:
+            team_dept_id = u.team.department_id if u.team else None
+            team_dept_name = u.team.department.name if u.team and u.team.department else ''
+            user_teams_map[u.id] = [{
+                'team_id': u.team_id,
+                'team_name': u.team.name if u.team else '',
+                'team_dept_id': team_dept_id,
+                'team_dept_name': team_dept_name,
+            }]
 
     # --- 按 (dept, team) 聚合 ---
     org_data = {}  # key: (dept_id, team_id), value: agg dict
@@ -400,8 +395,7 @@ def aggregate_org_usage(report_date: Optional[date] = None) -> list:
                 td['cache_hit_count'] += 1
 
     # --- 计算好评率（QA 记录级，避免多团队用户重复计数）---
-    # 原实现按用户级聚合：用户属于多团队时，其所有反馈会被每个团队重复计数
-    # 改为：遍历 QaFeedback → 通过 QaRecord.user_id 定位所属 (dept, team) → 仅给对应团队 +1
+    # 遍历 QaFeedback → 通过 QaRecord.user_id 定位所属 (dept, team) → 仅给对应团队 +1
     feedback_qs = QaFeedback.objects.filter(
         qa_record__created_at__date=report_date
     ).select_related('qa_record__user')

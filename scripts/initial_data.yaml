@@ -13,247 +13,405 @@ users:
     email: admin@example.com
     real_name: 系统管理员
     password: Admin@1234
+    # 初始化为超级管理员（系统级快路径，鉴权绕过 permission_key 判定）
     role: super_admin
 
 # ------------------------------
-# 系统内置角色
+# 系统内置角色（8 个，与 seed_permissions.py 完全对齐）
+# role_type: GLOBAL(全局) / DEPT_SCOPE(部门属地) / TEAM_SCOPE(团队属地) / NORMAL_USER(普通)
+# data_scope: GLOBAL(全局级) / DEPT(部门级) / TEAM(团队级) —— 决定数据可见范围等级
 # ------------------------------
 roles:
+  # ---- 全局 ----
   - code: super_admin
     name: 超级管理员
-    description: 全部配置权限、绕过双审直接发布、可物理销毁文档
+    description: 最高权限（系统级快路径，鉴权绕过 permission_key）
     is_builtin: true
+    role_type: GLOBAL
+    data_scope: GLOBAL
 
-  - code: dept_manager
-    name: 部门负责人
-    description: 管辖本部门全部团队、审批扩大可见范围申请
+  - code: user_admin
+    name: 人员管理员
+    description: 管理组织/人员/部门/团队，不可操作文档
     is_builtin: true
+    role_type: GLOBAL
+    data_scope: GLOBAL
+
+  - code: kb_admin
+    name: 文档管理员
+    description: 管理全部知识库/文档，不可管理人
+    is_builtin: true
+    role_type: GLOBAL
+    data_scope: GLOBAL
+
+  - code: compliance_admin
+    name: 合规审计员
+    description: 查看审计日志/合规校验，只读
+    is_builtin: true
+    role_type: GLOBAL
+    data_scope: GLOBAL
+
+  # ---- 部门/团队属地 ----
+  - code: dept_manager
+    name: 部门经理
+    description: 管理指定部门人员/部门级知识库
+    is_builtin: true
+    role_type: DEPT_SCOPE
+    data_scope: DEPT
 
   - code: team_leader
     name: 团队组长
-    description: 本团队文档一审、管理文档、调整可见范围、直接收回对外权限
+    description: 管理指定团队人员/团队级知识库
     is_builtin: true
+    role_type: TEAM_SCOPE
+    data_scope: TEAM
 
-  - code: compliance_reviewer
-    name: 文档审核员
-    description: 专职合规风控、敏感内容二审校验、无日常检索问答权限
-    is_builtin: true
-
+  # ---- 普通用户 ----
+  # employee 随人事归属生效的兜底角色（无需显式授权）
   - code: employee
     name: 普通员工
-    description: 检索已审核文档、上传发起双审工单、发起权限申请
+    description: 随人事归属生效的兜底角色，仅查看/上传/下载本人团队文档
     is_builtin: true
+    role_type: NORMAL_USER
+    data_scope: TEAM
 
-  - code: readonly
+  # read_only_employee 显式授权的只读角色（需显式授权才生效，不做兜底）
+  - code: read_only_employee
     name: 只读员工
-    description: 检索已发布文档、发起read权限申请、禁止上传
+    description: 显式授权角色，仅可读取文档，无下载/写操作权限
     is_builtin: true
-
-  # ---- 权限拆分（超级管理员权力拆分，避免单人权限过大） ----
-  # TODO: 后续可实现双路校验（super_admin + kb_admin / user_admin 联合审批关键操作）
-  - code: kb_admin
-    name: 知识库管理员
-    description: 管理全部文档（CRUD/审核/授权/删除/恢复），可操作节点树。注：不包含用户管理权限
-    is_builtin: true
-
-  - code: user_admin
-    name: 用户管理员
-    description: 管理全部用户（CRUD/角色分配/部门团队），可配置系统参数。注：不包含文档管理权限
-    is_builtin: true
+    role_type: NORMAL_USER
+    data_scope: TEAM
 
 # ------------------------------
-# 系统内置权限
+# 系统内置权限点（三段式 permission_key = {module}.{resource}.{action}，个别四级 key）
+# 与 seed_permissions.py 的 PERMISSIONS 清单完全对齐
 # ------------------------------
 permissions:
-  # 知识库权限 - read
-  - code: knowledge:read:all
-    name: 知识库全局只读
-    module: knowledge
-    action: read
-    scope: all
+  # ---- org 模块 —— 组织架构管理（部门 / 团队） ----
+  - code: org.dept.create
+    name: 创建部门
+    module: org
+    is_builtin: true
 
-  - code: knowledge:read:department
-    name: 知识库部门只读
-    module: knowledge
-    action: read
-    scope: department
+  - code: org.dept.update
+    name: 更新部门
+    module: org
+    is_builtin: true
 
-  - code: knowledge:read:team
-    name: 知识库团队只读
-    module: knowledge
-    action: read
-    scope: team
+  - code: org.dept.delete
+    name: 删除部门
+    module: org
+    is_builtin: true
 
-  # 知识库权限 - upload
-  - code: knowledge:upload:all
-    name: 全局上传文档
-    module: knowledge
-    action: upload
-    scope: all
+  - code: org.team.create
+    name: 创建团队
+    module: org
+    is_builtin: true
 
-  - code: knowledge:upload:department
-    name: 部门上传文档
-    module: knowledge
-    action: upload
-    scope: department
+  - code: org.team.update
+    name: 更新团队
+    module: org
+    is_builtin: true
 
-  - code: knowledge:upload:team
-    name: 团队上传文档
-    module: knowledge
-    action: upload
-    scope: team
+  - code: org.team.delete
+    name: 删除团队
+    module: org
+    is_builtin: true
 
-  # 知识库权限 - manage
-  - code: knowledge:manage:all
-    name: 全局文档管理
-    module: knowledge
-    action: manage
-    scope: all
+  # ---- user 模块 —— 人员管理（邀请 / 部门团队内管理 / 全局管理 / 调岗 / 禁用） ----
+  - code: user.invite
+    name: 邀请员工
+    module: user
+    is_builtin: true
 
-  - code: knowledge:manage:department
-    name: 部门文档管理
-    module: knowledge
-    action: manage
-    scope: department
+  - code: user.manage
+    name: 管理部门/团队内用户
+    module: user
+    is_builtin: true
 
-  - code: knowledge:manage:team
-    name: 团队文档管理
-    module: knowledge
-    action: manage
-    scope: team
-
-  # 知识库权限 - download
-  - code: knowledge:download:all
-    name: 全局下载文档
-    module: knowledge
-    action: download
-    scope: all
-
-  - code: knowledge:download:department
-    name: 部门下载文档
-    module: knowledge
-    action: download
-    scope: department
-
-  - code: knowledge:download:team
-    name: 团队下载文档
-    module: knowledge
-    action: download
-    scope: team
-
-  # 用户管理权限
-  - code: user:manage_users:all
+  - code: user.manage_all
     name: 全局用户管理
     module: user
-    action: manage_users
-    scope: all
+    is_builtin: true
 
-  - code: user:manage_users:department
-    name: 部门用户管理
+  - code: user.transfer
+    name: 员工调岗
     module: user
-    action: manage_users
-    scope: department
+    is_builtin: true
 
-  - code: user:manage_users:team
-    name: 团队用户管理
+  - code: user.disable
+    name: 禁用用户
     module: user
-    action: manage_users
-    scope: team
+    is_builtin: true
 
-  # 系统配置权限
-  - code: system:config:all
-    name: 系统配置
-    module: system
-    action: config
-    scope: all
+  # ---- role 模块 —— 角色授权与撤销（按授权 Scope 区分审批链路） ----
+  - code: role.grant.global
+    name: 授予全局角色
+    module: role
+    is_builtin: true
 
-  # 审计日志权限
-  - code: audit:read:all
-    name: 审计日志全局只读
+  - code: role.grant.dept
+    name: 授予部门角色
+    module: role
+    is_builtin: true
+
+  - code: role.grant.team
+    name: 授予团队角色
+    module: role
+    is_builtin: true
+
+  - code: role.revoke
+    name: 撤销角色
+    module: role
+    is_builtin: true
+
+  # ---- kb 模块 —— 知识库全局管理 / 节点管理 / 文档管理 ----
+  - code: kb.manage_all
+    name: 知识库全局管理
+    module: kb
+    is_builtin: true
+
+  - code: kb.node.manage
+    name: 知识节点管理
+    module: kb
+    is_builtin: true
+
+  - code: kb.node.create
+    name: 创建节点
+    module: kb
+    is_builtin: true
+
+  - code: kb.node.move
+    name: 移动节点
+    module: kb
+    is_builtin: true
+
+  - code: kb.node.delete
+    name: 删除节点
+    module: kb
+    is_builtin: true
+
+  - code: kb.document.read
+    name: 读取文档
+    module: kb
+    is_builtin: true
+
+  - code: kb.document.upload
+    name: 上传文档
+    module: kb
+    is_builtin: true
+
+  - code: kb.document.delete
+    name: 删除文档
+    module: kb
+    is_builtin: true
+
+  - code: kb.document.update
+    name: 更新文档
+    module: kb
+    is_builtin: true
+
+  - code: kb.document.download
+    name: 下载文档
+    module: kb
+    is_builtin: true
+
+  - code: kb.document.share
+    name: 分享文档
+    module: kb
+    is_builtin: true
+
+  - code: kb.document.promote_to_dept
+    name: 文档上推至部门级
+    module: kb
+    is_builtin: true
+
+  - code: kb.document.access.approve
+    name: 批准文档访问申请
+    module: kb
+    is_builtin: true
+
+  - code: kb.document.block.manage
+    name: 管理文档黑名单
+    module: kb
+    is_builtin: true
+
+  # ---- audit 模块 —— 审计日志与完整性校验（合规要求只读不可删） ----
+  - code: audit.log.read
+    name: 查看审计日志
     module: audit
-    action: read
-    scope: all
+    is_builtin: true
 
-  # 运营分析权限 - 系统级（全平台报表/队列监控/实时监控）
-  - code: analytics:system:read
-    name: 运营分析系统只读
-    module: analytics
-    action: system_read
-    scope: all
+  - code: audit.log.export
+    name: 导出审计日志
+    module: audit
+    is_builtin: true
 
-  - code: analytics:system:write
-    name: 运营分析系统写（关键词/反馈状态管理）
-    module: analytics
-    action: system_write
-    scope: all
+  - code: audit.integrity.check
+    name: 完整性校验
+    module: audit
+    is_builtin: true
 
-  # 运营分析权限 - 组织级（部门/团队统计报表）
-  - code: analytics:org:read
-    name: 运营分析组织只读（部门经理/团队负责人查看本组织报表）
+  # ---- analytics 模块 —— 运营分析报表 ----
+  - code: analytics.system.read
+    name: 系统级指标
     module: analytics
-    action: org_read
-    scope: department
+    is_builtin: true
 
-  - code: analytics:org:write
-    name: 运营分析组织写（预留）
+  - code: analytics.system.write
+    name: 系统级写（关键词权重/反馈状态/报告删除）
     module: analytics
-    action: org_write
-    scope: department
+    is_builtin: true
+
+  - code: analytics.org.read
+    name: 组织使用报表
+    module: analytics
+    is_builtin: true
+
+  # ---- compliance 模块 —— 合规审计 ----
+  - code: compliance.audit
+    name: 合规审计
+    module: compliance
+    is_builtin: true
 
 # ------------------------------
-# 角色-权限映射
+# 角色-权限映射（key = role_key，value = permission_key 列表）
+# 与 seed_permissions.py 的 ROLE_PERMISSIONS 完全对齐（通配符已展开为具体 key）
 # ------------------------------
 role_permissions:
+  # 超级管理员：权限全部放开
   super_admin:
-    - knowledge:read:all
-    - knowledge:upload:all
-    - knowledge:manage:all
-    - knowledge:download:all
-    - user:manage_users:all
-    - system:config:all
-    - audit:read:all
-    - analytics:system:read
-    - analytics:system:write
-    - analytics:org:read
-    - analytics:org:write
+    - org.dept.create
+    - org.dept.update
+    - org.dept.delete
+    - org.team.create
+    - org.team.update
+    - org.team.delete
+    - user.invite
+    - user.manage
+    - user.manage_all
+    - user.transfer
+    - user.disable
+    - role.grant.global
+    - role.grant.dept
+    - role.grant.team
+    - role.revoke
+    - kb.manage_all
+    - kb.node.manage
+    - kb.node.create
+    - kb.node.move
+    - kb.node.delete
+    - kb.document.read
+    - kb.document.upload
+    - kb.document.delete
+    - kb.document.update
+    - kb.document.download
+    - kb.document.share
+    - kb.document.promote_to_dept
+    - kb.document.access.approve
+    - kb.document.block.manage
+    - audit.log.read
+    - audit.log.export
+    - audit.integrity.check
+    - analytics.system.read
+    - analytics.system.write
+    - analytics.org.read
+    - compliance.audit
 
-  dept_manager:
-    - knowledge:read:all
-    - knowledge:upload:all
-    - knowledge:manage:department
-    - knowledge:download:all
-    - user:manage_users:department
-    - analytics:org:read
-
-  team_leader:
-    - knowledge:read:all
-    - knowledge:upload:all
-    - knowledge:manage:team
-    - knowledge:download:all
-    - user:manage_users:team
-    - analytics:org:read
-
-  compliance_reviewer:
-    - knowledge:upload:all
-
-  employee:
-    - knowledge:read:all
-    - knowledge:upload:all
-
-  readonly:
-    - knowledge:read:all
-
-  # kb_admin：管文档不管用户，权限对标 super_admin 的知识库部分
-  kb_admin:
-    - knowledge:read:all
-    - knowledge:upload:all
-    - knowledge:manage:all
-    - knowledge:download:all
-
-  # user_admin：管用户不管文档，权限对标 super_admin 的用户管理部分
+  # 人员管理员：组织+人员全域管理，不持有任何 kb.* 文档权限
   user_admin:
-    - user:manage_users:all
-    - system:config:all
+    - org.dept.create
+    - org.dept.update
+    - org.dept.delete
+    - org.team.create
+    - org.team.update
+    - org.team.delete
+    - user.invite
+    - user.manage
+    - user.manage_all
+    - user.transfer
+    - user.disable
+    - role.grant.dept
+    - role.grant.team
+    - role.revoke
+    - audit.log.read
+
+  # 文档管理员：知识库+文档全域管理，不持有任何 org.*/user.* 人员权限
+  kb_admin:
+    - kb.manage_all
+    - kb.node.manage
+    - kb.node.create
+    - kb.node.move
+    - kb.node.delete
+    - kb.document.read
+    - kb.document.upload
+    - kb.document.delete
+    - kb.document.update
+    - kb.document.download
+    - kb.document.share
+    - kb.document.promote_to_dept
+    - kb.document.access.approve
+    - kb.document.block.manage
+    - audit.log.read
+
+  # 合规审计员：只读审计/合规/分析，不持有任何写操作权限
+  compliance_admin:
+    - audit.log.read
+    - audit.log.export
+    - audit.integrity.check
+    - compliance.audit
+    - analytics.system.read
+    - analytics.org.read
+
+  # 部门经理：本部门人员/团队/节点/文档管理
+  dept_manager:
+    - org.team.create
+    - org.team.update
+    - user.invite
+    - user.manage
+    - role.grant.team
+    - role.revoke
+    - kb.node.manage
+    - kb.node.create
+    - kb.node.move
+    - kb.document.read
+    - kb.document.upload
+    - kb.document.delete
+    - kb.document.update
+    - kb.document.download
+    - kb.document.share
+    - kb.document.access.approve
+    - kb.document.block.manage
+    - analytics.org.read
+
+  # 团队组长：本团队人员/节点/文档管理，可上推文档至部门级
+  team_leader:
+    - user.invite
+    - role.revoke
+    - kb.node.manage
+    - kb.node.create
+    - kb.document.read
+    - kb.document.upload
+    - kb.document.delete
+    - kb.document.update
+    - kb.document.download
+    - kb.document.share
+    - kb.document.promote_to_dept
+    - kb.document.access.approve
+    - kb.document.block.manage
+    - analytics.org.read
+
+  # 普通员工：随人事归属生效的兜底角色，仅本团队文档读/上传/下载
+  employee:
+    - kb.document.read
+    - kb.document.upload
+    - kb.document.download
+
+  # 只读员工：显式授权角色，仅可读取文档，无下载/写操作权限
+  # 注意：此角色不做兜底，需显式授权才生效
+  read_only_employee:
+    - kb.document.read
 
 # ------------------------------
 # 全局记忆（公司规则）

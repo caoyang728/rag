@@ -31,7 +31,7 @@ class KeywordWeightListView(APIView):
     - POST 时校验 keyword 非空 + weight_score 范围 0.1~5.0
     """
     permission_classes = [IsAuthenticated, CanViewAnalytics]
-    required_perm = 'analytics:system:read'
+    required_perm = 'analytics.system.read'
 
     def get(self, request):
         try:
@@ -86,7 +86,7 @@ class KeywordWeightDetailView(APIView):
     - 仅限管理员操作，需记录审计日志
     """
     permission_classes = [IsAuthenticated, CanViewAnalytics]
-    required_perm = 'analytics:system:write'
+    required_perm = 'analytics.system.write'
 
     def put(self, request, kw_id):
         delta = request.data.get("delta")
@@ -122,7 +122,7 @@ class DailyReportView(APIView):
     - 支持 root_type 参数（知识库类型过滤），与前端 loadDailyReport 传参对齐
     """
     permission_classes = [IsAuthenticated, CanViewAnalytics]
-    required_perm = 'analytics:system:read'
+    required_perm = 'analytics.system.read'
 
     def get(self, request):
         from django.db.models.functions import TruncDate
@@ -180,7 +180,7 @@ class TrendReportView(APIView):
     - 系统级统计，需具备 analytics:system:read 权限
     """
     permission_classes = [IsAuthenticated, CanViewAnalytics]
-    required_perm = 'analytics:system:read'
+    required_perm = 'analytics.system.read'
 
     def get(self, request):
         from django.db.models.functions import TruncDate
@@ -287,7 +287,7 @@ class BadFeedbackListView(APIView):
     - top 参数限制 1-500，防止恶意拉取全表
     """
     permission_classes = [IsAuthenticated, CanViewAnalytics]
-    required_perm = 'analytics:system:read'
+    required_perm = 'analytics.system.read'
 
     def get(self, request):
         try:
@@ -328,7 +328,7 @@ class OverviewStatsView(APIView):
     - 系统级统计，需具备 analytics:system:read 权限
     """
     permission_classes = [IsAuthenticated, CanViewAnalytics]
-    required_perm = 'analytics:system:read'
+    required_perm = 'analytics.system.read'
 
     def get(self, request):
         from apps.knowledge.models import Document
@@ -410,7 +410,7 @@ class QaRecordView(APIView):
     - feedback 是 OneToOne，需用 hasattr 判断存在性（select_related 做 LEFT JOIN，无反馈时为 None）
     """
     permission_classes = [IsAuthenticated, CanViewAnalytics]
-    required_perm = 'analytics:system:read'
+    required_perm = 'analytics.system.read'
 
     def get(self, request):
 
@@ -520,7 +520,7 @@ class BadFeedbackDetailView(APIView):
     - 仅限管理员操作，需记录审计日志
     """
     permission_classes = [IsAuthenticated, CanViewAnalytics]
-    required_perm = 'analytics:system:write'
+    required_perm = 'analytics.system.write'
 
     def put(self, request, fb_id):
         status = request.data.get("status", "resolved")
@@ -552,7 +552,7 @@ class SystemMetricsReportView(APIView):
     - 仅管理员可访问（系统级敏感指标）
     """
     permission_classes = [IsAuthenticated, CanViewAnalytics]
-    required_perm = 'analytics:system:read'
+    required_perm = 'analytics.system.read'
 
     def get(self, request):
         date_str = request.query_params.get('date')
@@ -618,10 +618,14 @@ class OrgUsageReportView(APIView):
       团队负责人仅能看本团队（不能看其他团队或部门级汇总）
     """
     permission_classes = [IsAuthenticated, CanViewAnalytics]
-    required_perm = 'analytics:org:read'
+    required_perm = 'analytics.org.read'
 
     def get(self, request):
-        from apps.users.models import UserTeam
+        # 权限模型：user.department FK 直接获取部门，团队管辖通过 UserTeamScopeRel 判定，
+        # 部门管辖通过 UserDeptScopeRel 判定
+        from apps.users.models import (
+            UserDeptScopeRel, UserTeamScopeRel, GrantStatus, Team,
+        )
 
         date_str = request.query_params.get('date')
         department_id = request.query_params.get('department_id')
@@ -651,10 +655,12 @@ class OrgUsageReportView(APIView):
         qs = OrgUsageReport.objects.filter(report_date=report_date)
 
         # --- 权限过滤：按用户角色分级控制可见范围 ---
+        # super_admin 看全部；部门管理者看本部门所有团队 + 部门级汇总；
+        # 团队负责人仅看本团队（不能看其他团队或部门级汇总）
         user = request.user
         if not user.is_super_admin:
-            profile = getattr(user, 'profile', None)
-            user_dept_id = profile.department_id if (profile and profile.department_id) else None
+            # User 直接有 department FK（单主部门）
+            user_dept_id = user.department_id
 
             if not user_dept_id:
                 # 无部门归属的非 admin 用户无法查看任何组织数据
@@ -668,17 +674,20 @@ class OrgUsageReportView(APIView):
             qs = qs.filter(department_id=user_dept_id)
             department_id = user_dept_id  # 固定为本部门，后续逻辑复用
 
-            # 3) 团队级限制：若用户仅是某团队负责人（非部门负责人），仅可见本团队
-            # 判断是否为团队负责人：遍历 UserTeam 中 role='leader' 的团队
-            leading_team_ids = list(UserTeam.objects.filter(
-                user_id=user.id,
-                role='leader',
+            # 3) 判断部门管理者：有 UserDeptScopeRel 活跃授权 → 可见本部门所有团队 + 部门级汇总
+            #    基于 RBAC 授权关系判定，非硬编码标记
+            is_dept_manager = UserDeptScopeRel.objects.filter(
+                user=user, dept_id=user_dept_id, status=GrantStatus.ACTIVE,
+            ).exists()
+
+            # 4) 团队级限制：通过 UserTeamScopeRel 获取用户管辖的团队（限本部门内）
+            #    user.team 为单团队 FK，团队管辖授权通过 UserTeamScopeRel 显式绑定
+            leading_team_ids = list(UserTeamScopeRel.objects.filter(
+                user=user, status=GrantStatus.ACTIVE,
                 team__department_id=user_dept_id,
             ).values_list('team_id', flat=True))
 
-            # 部门负责人（profile 中 is_dept_head 标记）可见本部门所有团队 + 部门级汇总
-            is_dept_head = bool(getattr(profile, 'is_dept_head', False))
-            if not is_dept_head and leading_team_ids:
+            if not is_dept_manager and leading_team_ids:
                 # 团队负责人：仅允许访问 leading_team_ids 中的团队
                 # 禁止访问 team_id=-1（部门级汇总），禁止访问其他团队
                 if team_id is not None:
@@ -689,10 +698,10 @@ class OrgUsageReportView(APIView):
                 else:
                     # 未指定 team_id，限制在用户负责的团队范围（过滤掉 -1 汇总和其他团队）
                     qs = qs.filter(team_id__in=leading_team_ids)
-            elif not is_dept_head:
-                # 非部门负责人且非任何团队负责人 → 仅看个人维度不开放组织数据
+            elif not is_dept_manager:
+                # 非部门管理者且非任何团队负责人 → 仅看个人维度不开放组织数据
                 return Response({'detail': '无权限访问组织报表，请联系管理员'}, status=403)
-            # else: 部门负责人 → 保持在本部门范围，允许查看所有团队 + 部门级汇总
+            # else: 部门管理者 → 保持在本部门范围，允许查看所有团队 + 部门级汇总
 
         if department_id is not None:
             qs = qs.filter(department_id=department_id)
@@ -742,7 +751,7 @@ class QueueDepthView(APIView):
     - 需具备 analytics:system:read 权限
     """
     permission_classes = [IsAuthenticated, CanViewAnalytics]
-    required_perm = 'analytics:system:read'
+    required_perm = 'analytics.system.read'
 
     def get(self, request):
         try:
@@ -780,7 +789,7 @@ class RealtimeSnapshotView(APIView):
     - 需具备 analytics:system:read 权限
     """
     permission_classes = [IsAuthenticated, CanViewAnalytics]
-    required_perm = 'analytics:system:read'
+    required_perm = 'analytics.system.read'
 
     def get(self, request):
         try:
@@ -806,7 +815,7 @@ class QualityReportView(APIView):
     - 仅管理员可访问
     """
     permission_classes = [IsAuthenticated, CanViewAnalytics]
-    required_perm = 'analytics:system:read'
+    required_perm = 'analytics.system.read'
 
     def get(self, request):
         start_date = request.query_params.get('start_date')
@@ -892,7 +901,7 @@ class QualityReportView(APIView):
 class GoldenDatasetListView(APIView):
     """GET/POST /api/v1/analytics/golden-datasets/"""
     permission_classes = [IsAuthenticated, CanViewAnalytics]
-    required_perm = 'analytics:system:read'
+    required_perm = 'analytics.system.read'
 
     def get(self, request):
         from apps.analytics.models import GoldenDataset
@@ -928,6 +937,7 @@ class GoldenDatasetListView(APIView):
 class GoldenDatasetDetailView(APIView):
     """GET/PUT/DELETE /api/v1/analytics/golden-datasets/<id>/"""
     permission_classes = [IsAuthenticated, CanViewAnalytics]
+    required_perm = 'analytics.system.write'
 
     def get(self, request, ds_id):
         from apps.analytics.models import GoldenDataset, GoldenQuestion
@@ -1013,6 +1023,7 @@ class GoldenDatasetExportView(APIView):
 class GoldenQuestionView(APIView):
     """POST/DELETE /api/v1/analytics/golden-datasets/<ds_id>/questions/"""
     permission_classes = [IsAuthenticated, CanViewAnalytics]
+    required_perm = 'analytics.system.write'
 
     def post(self, request, ds_id):
         from apps.analytics.offline_eval import import_questions_from_json
@@ -1052,6 +1063,7 @@ class GoldenQuestionView(APIView):
 class RunRetrievalEvalView(APIView):
     """POST /api/v1/analytics/eval/retrieval/ - 执行离线检索评估"""
     permission_classes = [IsAuthenticated, CanViewAnalytics]
+    required_perm = 'analytics.system.write'
 
     def post(self, request):
         from apps.analytics.offline_eval import run_retrieval_evaluation
@@ -1166,6 +1178,7 @@ class DocumentQualityReportView(APIView):
 class RunDocQualityEvalView(APIView):
     """POST /api/v1/analytics/doc-quality/evaluate/ - 触发文档质量评估"""
     permission_classes = [IsAuthenticated, CanViewAnalytics]
+    required_perm = 'analytics.system.write'
 
     def post(self, request):
         from apps.analytics.doc_quality import evaluate_document_quality, batch_evaluate_document_quality
@@ -1206,8 +1219,6 @@ class DocumentQualityReportListView(APIView):
                 return Response({'detail': 'min_score 必须为数字'}, status=400)
 
         total = qs.count()
-        # 用 Serializer 替代手动循环构造 dict；document_name/quality_issues 切片等
-        # 计算字段已在序列化器中统一实现
         rows = DocumentQualityReportSerializer(qs[:50], many=True).data
         return Response({'total': total, 'rows': rows})
 
@@ -1268,6 +1279,7 @@ class MultiDimensionScoreView(APIView):
 class RunMultiDimEvalView(APIView):
     """POST /api/v1/analytics/multi-dim-eval/ - 触发多维度评估"""
     permission_classes = [IsAuthenticated, CanViewAnalytics]
+    required_perm = 'analytics.system.write'
 
     def post(self, request):
         from apps.analytics.models import QaRecord
@@ -1344,6 +1356,7 @@ class FeedbackLoopView(APIView):
 class GenerateCoverageReportView(APIView):
     """POST /api/v1/analytics/coverage/generate/ - 生成覆盖率报告"""
     permission_classes = [IsAuthenticated, CanViewAnalytics]
+    required_perm = 'analytics.system.write'
 
     def post(self, request):
         from apps.analytics.coverage import generate_coverage_report
@@ -1394,7 +1407,7 @@ class CoverageReportDetailView(APIView):
     - 删除操作记录审计日志
     """
     permission_classes = [IsAuthenticated, CanViewAnalytics]
-    required_perm = 'analytics:system:write'
+    required_perm = 'analytics.system.write'
 
     def delete(self, request, report_id):
         from apps.analytics.models import CoverageReport

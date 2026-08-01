@@ -19,9 +19,14 @@ from apps.retrieval.permission import build_permission_q
 
 
 def _apply_ef_search(cursor, ef: int):
-    """设置本次连接的 HNSW ef_search 参数"""
+    """设置本次连接的 HNSW ef_search 参数
+
+    使用参数化查询避免 SQL 注入：ef 来自 settings/调用方传入，虽已 int() 钳制，
+    但仍统一走占位符，避免动态拼接 SQL 字符串。
+    """
     try:
-        cursor.execute(f'SET LOCAL hnsw.ef_search = {int(ef)};')
+        # 参数化查询：ef 已在外层 int() 钳制为整数，此处用占位符防止 SQL 注入
+        cursor.execute('SET LOCAL hnsw.ef_search = %s;', (int(ef),))
     except Exception as e:
         logger.warning('[VectorStore] set hnsw.ef_search failed: %s', e)
 
@@ -36,7 +41,7 @@ def vector_search(query_vector: List[float],
     """向量检索
     返回：[{
         'chunk_id','document_id','node_id','content','score',
-        'visible_scope','root_type','node_path','doc_title'(可空)
+        'visibility_level','root_type','node_path','doc_title'(可空)
     }] 按 score 降序（1 - 距离）"""
     t0 = time.time()
     ef = ef_search or settings.HNSW_EF_SEARCH
@@ -51,7 +56,7 @@ def vector_search(query_vector: List[float],
         .filter(q)
         .annotate(distance=CosineDistance('embedding', query_vector))
         .order_by('distance')
-        .values('id', 'chunk_id', 'document_id', 'node_id', 'visible_scope',
+        .values('id', 'chunk_id', 'document_id', 'node_id', 'visibility_level',
                 'root_type', 'node_path', 'content_preview', 'chunk_type', 'distance')[:top_k]
     )
     results = []
@@ -65,7 +70,7 @@ def vector_search(query_vector: List[float],
             'node_id': row['node_id'],
             'content': row['content_preview'],
             'chunk_type': row['chunk_type'],
-            'visible_scope': row['visible_scope'],
+            'visibility_level': row['visibility_level'],
             'root_type': row['root_type'],
             'node_path': row['node_path'],
             'score': score,
@@ -77,19 +82,17 @@ def vector_search(query_vector: List[float],
 
 def upsert_vector(chunk, embedding: List[float]) -> DocumentVector:
     """写入或更新一个 chunk 的向量
-    从 chunk 反查冗余权限字段"""
-    doc = chunk.document
-    from apps.users.models import UserTeam
-    team_node_id = doc.team_node_id or doc.owner_team_id
-    if team_node_id is None:
-        team = UserTeam.objects.filter(user_id=doc.owner_id).first()
-        team_node_id = team.team_id if team else None
 
-    dept_node_id = doc.dept_node_id
-    if dept_node_id is None and doc.owner_id:
-        from apps.users.models import User
-        owner = User.objects.filter(id=doc.owner_id).only('department_id').first()
-        dept_node_id = owner.department_id if owner else None
+    从 chunk.document 同步冗余权限字段到 DocumentVector，保证检索时无需 JOIN document 表。
+    字段对齐：visibility_level / dept_id / team_id / owner_id / node_id / node_path /
+              has_resource_share / has_block_user / root_type
+    """
+    doc = chunk.document
+    # 团队/部门归属直接从 Document 冗余字段读取（写入文档时已同步）
+    team_id = doc.team_id
+    dept_id = doc.dept_id
+    # 节点 path 从关联节点读取（用于节点级共享前缀匹配）
+    node_path = getattr(doc.node, 'path', '/') if doc.node else '/'
 
     keywords = _extract_keywords(chunk.content)
 
@@ -98,15 +101,15 @@ def upsert_vector(chunk, embedding: List[float]) -> DocumentVector:
         defaults={
             'document_id': doc.id,
             'embedding': embedding,
-            'visible_scope': doc.visible_scope,
-            'has_cross_team': doc.has_cross_team,
-            'has_allow_user': doc.has_allow_user,
+            'visibility_level': doc.visibility_level,
+            'dept_id': dept_id,
+            'team_id': team_id,
             'owner_id': doc.owner_id,
-            'team_node_id': team_node_id,
-            'dept_node_id': dept_node_id,
             'root_type': doc.root_type,
             'node_id': doc.node_id,
-            'node_path': getattr(doc.node, 'path', '/') if doc.node else '/',
+            'node_path': node_path,
+            'has_resource_share': doc.has_resource_share,
+            'has_block_user': doc.has_block_user,
             'chunk_type': chunk.chunk_type,
             'content_preview': (chunk.content or '')[:200],
             'keywords': keywords,

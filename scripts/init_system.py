@@ -134,9 +134,12 @@ def check_table_exists(table_name):
 
 def import_models():
     try:
-        from apps.users.models import User, Role, Permission, RolePermission, UserRole, Department, Team
+        # 导入权限相关模型
+        from apps.users.models import (
+            User, Role, Permission, RolePermissionRel, UserRoleRel, Department, Team,
+        )
         logger.info('模型导入成功')
-        return User, Role, Permission, RolePermission, UserRole, Department, Team
+        return User, Role, Permission, RolePermissionRel, UserRoleRel, Department, Team
     except Exception as e:
         logger.info(f'模型导入失败: {e}')
         traceback.print_exc()
@@ -161,27 +164,33 @@ def create_roles(config, dry_run=False):
     skipped = 0
 
     for role_data in roles_config:
-        code = role_data['code']
+        # YAML 中的 code 值作为 role_key
+        # role_type / data_scope 决定授权时是否需要绑定管辖 Scope
+        role_key = role_data['code']
         name = role_data['name']
         description = role_data.get('description', '')
         is_builtin = role_data.get('is_builtin', False)
+        role_type = role_data.get('role_type', 'NORMAL_USER')
+        data_scope = role_data.get('data_scope', 'TEAM')
 
         try:
-            if Role.objects.filter(code=code).exists():
-                logger.info(f'  ⏭️  角色 "{code}" 已存在，跳过')
+            if Role.objects.filter(role_key=role_key).exists():
+                logger.info(f'  ⏭️  角色 "{role_key}" 已存在，跳过')
                 skipped += 1
             else:
                 if not dry_run:
                     Role.objects.create(
-                        code=code,
+                        role_key=role_key,
                         name=name,
                         description=description,
-                        is_builtin=is_builtin
+                        is_builtin=is_builtin,
+                        role_type=role_type,
+                        data_scope=data_scope,
                     )
-                logger.info(f'  ✅ 创建角色: {code} - {name}')
+                logger.info(f'  ✅ 创建角色: {role_key} - {name}')
                 created += 1
         except Exception as e:
-            logger.info(f'  ❌ 创建角色 "{code}" 失败: {e}')
+            logger.info(f'  ❌ 创建角色 "{role_key}" 失败: {e}')
             traceback.print_exc()
 
     logger.info(f'  总计: 创建 {created} 个，跳过 {skipped} 个')
@@ -196,31 +205,30 @@ def create_permissions(config, dry_run=False):
     skipped = 0
 
     for perm_data in perms_config:
-        code = perm_data['code']
-        name = perm_data['name']
+        # permission_key 三段式：module.resource.action
+        perm_key = perm_data['code']
+        perm_name = perm_data['name']
         module = perm_data.get('module', '')
-        action = perm_data.get('action', 'read')
-        scope = perm_data.get('scope', 'team')
         description = perm_data.get('description', '')
+        is_builtin = perm_data.get('is_builtin', False)
 
         try:
-            if Permission.objects.filter(code=code).exists():
-                logger.info(f'  ⏭️  权限 "{code}" 已存在，跳过')
+            if Permission.objects.filter(permission_key=perm_key).exists():
+                logger.info(f'  ⏭️  权限 "{perm_key}" 已存在，跳过')
                 skipped += 1
             else:
                 if not dry_run:
                     Permission.objects.create(
-                        code=code,
-                        name=name,
+                        permission_key=perm_key,
+                        permission_name=perm_name,
                         module=module,
-                        action=action,
-                        scope=scope,
-                        description=description
+                        description=description,
+                        is_builtin=is_builtin,
                     )
-                logger.info(f'  ✅ 创建权限: {code}')
+                logger.info(f'  ✅ 创建权限: {perm_key}')
                 created += 1
         except Exception as e:
-            logger.info(f'  ❌ 创建权限 "{code}" 失败: {e}')
+            logger.info(f'  ❌ 创建权限 "{perm_key}" 失败: {e}')
             traceback.print_exc()
 
     logger.info(f'  总计: 创建 {created} 个，跳过 {skipped} 个')
@@ -229,31 +237,31 @@ def create_permissions(config, dry_run=False):
 
 def create_role_permissions(config, dry_run=False):
     logger.info('\n=== 创建角色-权限映射 ===')
-    from apps.users.models import Role, Permission, RolePermission
+    from apps.users.models import Role, Permission, RolePermissionRel
     rp_config = config.get('role_permissions', {})
     created = 0
     skipped = 0
 
     for role_code, perm_codes in rp_config.items():
         try:
-            role = Role.objects.get(code=role_code)
+            role = Role.objects.get(role_key=role_code)
         except Role.DoesNotExist:
             logger.info(f'  ❌ 角色 "{role_code}" 不存在，跳过')
             continue
 
         for perm_code in perm_codes:
             try:
-                perm = Permission.objects.get(code=perm_code)
+                perm = Permission.objects.get(permission_key=perm_code)
             except Permission.DoesNotExist:
                 logger.info(f'  ❌ 权限 "{perm_code}" 不存在，跳过')
                 continue
 
             try:
-                if RolePermission.objects.filter(role=role, permission=perm).exists():
+                if RolePermissionRel.objects.filter(role=role, permission=perm).exists():
                     skipped += 1
                 else:
                     if not dry_run:
-                        RolePermission.objects.create(role=role, permission=perm)
+                        RolePermissionRel.objects.create(role=role, permission=perm)
                     logger.info(f'  ✅ {role_code} -> {perm_code}')
                     created += 1
             except Exception as e:
@@ -342,7 +350,8 @@ def create_teams(config, dry_run=False):
 
 def create_users(config, dry_run=False):
     logger.info('\n=== 创建用户 ===')
-    from apps.users.models import User, Role, UserRole
+    # UserRole → UserRoleRel，Role.code → Role.role_key
+    from apps.users.models import User, Role, UserRoleRel, GrantStatus
     users_config = config.get('users', [])
     created = 0
     skipped = 0
@@ -368,12 +377,15 @@ def create_users(config, dry_run=False):
                 user.real_name = real_name
                 user.save()
 
-                # 处理角色分配
+                # 处理角色分配 —— 通过 UserRoleRel 绑定，需指定 status=ACTIVE
                 role_code = user_data.get('role')
                 if role_code:
                     try:
-                        role = Role.objects.get(code=role_code)
-                        UserRole.objects.get_or_create(user=user, role=role)
+                        role = Role.objects.get(role_key=role_code)
+                        UserRoleRel.objects.get_or_create(
+                            user=user, role=role,
+                            defaults={'status': GrantStatus.ACTIVE},
+                        )
                     except Role.DoesNotExist:
                         logger.info(f'  ⚠️  角色 "{role_code}" 不存在，用户 "{username}" 将没有角色')
 
@@ -468,7 +480,8 @@ def main():
 
     logger.info('\n--- 步骤6: 检查系统是否已初始化 ---')
     from apps.users.models import Role
-    if Role.objects.filter(code='super_admin').exists():
+    # super_admin → super_admin（is_super_admin 判定 role_key='super_admin'）
+    if Role.objects.filter(role_key='super_admin').exists():
         logger.info('❌ 检测到 super_admin 角色已存在，系统可能已初始化')
         logger.info('   如果需要重新初始化，请先清空数据库或使用 --force 参数')
         if not args.force:

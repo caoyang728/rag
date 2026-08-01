@@ -47,7 +47,7 @@ async function loadFilterOptions(force = false) {
 				data.departments = (data.departments || []).filter(d => d.id === myDeptId);
 				if (isTeamLeader) {
 					// 组长仅保留自己所在的团队
-					const myTeamIds = (u.teams || []).map(t => t.team__id);
+					const myTeamIds = (u.teams || []).map(t => t.id);
 					data.teams = (data.teams || []).filter(t => myTeamIds.includes(t.id));
 				}
 			}
@@ -171,9 +171,9 @@ function renderTable(users) {
 		return;
 	}
 	tbody.innerHTML = users.map(u => {
-		const roleNames = (u.roles || []).map(r => escapeHtml(r.role__name)).join(', ') || '—';
+		const roleNames = (u.roles || []).map(r => escapeHtml(r.name)).join(', ') || '—';
 		const deptName = escapeHtml(u.department_name) || '—';
-		const teamName = (u.teams || []).map(t => escapeHtml(t.team__name)).join(', ') || '—';
+		const teamName = (u.teams || []).map(t => escapeHtml(t.name)).join(', ') || '—';
 		const statusTag = u.status === 'active'
 			? '<span class="tag tag-sm" style="background:#e8f5e9;color:#2e7d32">启用</span>'
 			: '<span class="tag tag-sm" style="background:#fce4ec;color:#c62828">禁用</span>';
@@ -339,11 +339,12 @@ function _getMyRoleInfo() {
 	const u = JSON.parse(localStorage.getItem('rag_user') || '{}');
 	const codes = getUserRoles();
 	return {
+		// 超级管理员可在任意部门/团队创建/编辑用户
 		isSuper: codes.includes('super_admin'),
 		isDept: codes.includes('dept_manager'),
 		isTeam: codes.includes('team_leader'),
 		deptId: u.department_id || 0,
-		teamIds: (u.teams || []).map(t => t.team__id),
+		teamIds: (u.teams || []).map(t => t.id),
 	};
 }
 
@@ -415,7 +416,7 @@ function openUserModal(id) {
 				$id('userDept').value = deptId;
 				$id('userStatus').value = u.status || 'active';
 				const roleId = (u.roles && u.roles.length > 0) ? u.roles[0].role__id : null;
-				const selectedTeamId = (u.teams && u.teams.length > 0) ? u.teams[0].team__id : null;
+				const selectedTeamId = (u.teams && u.teams.length > 0) ? u.teams[0].id : null;
 				$id('userRoleSelect').value = roleId || '';
 				// 先填充团队下拉（会默认启用），再调用 onRoleChange 由 updateTeamDisabledState 覆盖禁用状态
 				// 顺序不能反过来，否则 populateTeamSelect 的 disabled=false 会覆盖 dept_manager 的禁用
@@ -465,15 +466,16 @@ function renderRolePermSummary() {
 	const r = roles.find(r => r.id === roleId);
 	if (!r) { $id('rolePermSummary').textContent = ''; return; }
 	const desc = {
-		super_admin: '全部文档+人员管理',
-		kb_admin: '知识库管理+人员管理',
-		kb_ops: '知识库全部操作（无人员管理）',
-		dept_manager: '本部门文档全部操作',
-		team_leader: '本团队文档全部操作',
-		employee: '编辑个人文档，检索本部门/团队',
-		readonly: '仅检索和在线预览',
+		super_admin: '最高权限（系统级快路径）',
+		user_admin: '组织/人员管理，不可操作文档',
+		kb_admin: '知识库/文档管理，不可管理人',
+		compliance_admin: '审计日志/合规校验（只读）',
+		dept_manager: '本部门人员/团队/节点/文档管理',
+		team_leader: '本团队人员/节点/文档管理',
+		employee: '本团队文档读/上传/下载',
+		read_only_employee: '仅可读取文档，无下载/写权限',
 	};
-	$id('rolePermSummary').innerHTML = `${r.name}: ${desc[r.code] || '自定义权限'}`;
+	$id('rolePermSummary').innerHTML = `${escapeHtml(r.name)}: ${desc[r.code] || '自定义权限'}`;
 }
 
 function updateTeamDisabledState() {

@@ -322,8 +322,9 @@ async function initNodeSelect() {
 		const roles = getUserRoles();
 		const u = JSON.parse(localStorage.getItem('rag_user') || '{}');
 		const myDeptId = u.department_id;
-		const myTeamIds = (u.teams || []).map(function (t) { return t.team__id; });
+		const myTeamIds = (u.teams || []).map(function (t) { return t.id; });
 
+		// 可管理文档的角色：超级管理员 / 文档管理员
 		const isAdmin = roles.includes('super_admin') || roles.includes('kb_admin');
 		const isDeptManager = roles.includes('dept_manager');
 		const isTeamLeader = roles.includes('team_leader');
@@ -723,7 +724,7 @@ async function startUpload() {
 					errorMsg = err.response.error;
 				}
 			}
-			if (metaEl) metaEl.innerHTML = info.type + ' · ' + formatSize(info.size) + ' · ' + errorMsg;
+			if (metaEl) metaEl.innerHTML = escapeHtml(info.type) + ' · ' + formatSize(info.size) + ' · ' + escapeHtml(errorMsg);
 			return 'failed';
 		} finally {
 			completedCount++;
@@ -994,7 +995,7 @@ function initDeptTeamSelect() {
 	const roles = getUserRoles();
 	const u = JSON.parse(localStorage.getItem('rag_user') || '{}');
 	const myDeptId = u.department_id;
-	const myTeamIds = (u.teams || []).map(function (t) { return t.team__id; });
+	const myTeamIds = (u.teams || []).map(function (t) { return t.id; });
 
 	const deptTrigger = document.querySelector('#uploadDeptSelect .multi-select-trigger');
 	const teamTrigger = document.querySelector('#uploadTeamSelect .multi-select-trigger');
@@ -1074,14 +1075,14 @@ function fileTypeIcon(t) {
 
 function visTag(v) {
 	const map = { 'team': '团队', 'dept': '部门', 'public': '公开' };
-	const tagMap = { 'team': 'default', 'dept': 'info', 'public': 'success' };
-	return `<span class="tag tag-${tagMap[v] || 'default'}">${map[v] || v}</span>`;
+	const tagMap = { 'team': 'default', 'dept': 'info', 'public': 'primary' };
+	return `<span class="tag tag-${tagMap[v] || 'default'}">${escapeHtml(map[v] || v)}</span>`;
 }
 
 function statusTag(s) {
-	const map = { 'done': 'success', 'parsing': 'warning', 'failed': 'danger', 'pending': 'default', 'desensitizing': 'warning', 'chunking': 'warning', 'embedding': 'warning' };
-	const labelMap = { 'done': '已完成', 'parsing': '解析中', 'failed': '失败', 'pending': '等待', 'desensitizing': '脱敏中', 'chunking': '切片中', 'embedding': '向量化中' };
-	return `<span class="tag tag-${map[s] || 'default'}">${labelMap[s] || s}</span>`;
+	const map = { 'done': 'success', 'parsing': 'warning', 'failed': 'danger', 'pending': 'default', 'desensitizing': 'warning', 'chunking': 'warning', 'embedding': 'warning', 'embedding_failed': 'danger' };
+	const labelMap = { 'done': '已完成', 'parsing': '解析中', 'failed': '失败', 'pending': '等待', 'desensitizing': '脱敏中', 'chunking': '切片中', 'embedding': '向量化中', 'embedding_failed': '向量化失败' };
+	return `<span class="tag tag-${map[s] || 'default'}">${escapeHtml(labelMap[s] || s)}</span>`;
 }
 
 /* ============ 已删除文件三选项对话框 ============ */

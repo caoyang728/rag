@@ -162,3 +162,99 @@ def on_user_delete_clean_memory(sender, instance, **kwargs):
         logger.info(f'[Signal] 清理用户记忆: user_id={instance.id}')
     except Exception as e:
         logger.error(f'[Signal] 用户记忆清理失败: {e}')
+
+
+# ── 权限缓存失效（L1~L4 延迟双删）─────────────────────────────
+# 授权表 / 角色权限绑定变更时，精准失效对应用户的权限缓存，
+# 避免鉴权层读到过期权限集合（对齐 RAG_RBAC_权限架构设计.md 第十章失效映射表）。
+
+def _safe_invalidate_user(user_id):
+    """安全失效某用户的 L1~L4 缓存 —— 失败仅记日志不阻断主业务
+
+    审计与权限写入是主流程，缓存失效为旁路增强，任何异常都不应回滚事务。
+    """
+    try:
+        from apps.users.perm_cache import invalidate_user_perms
+        invalidate_user_perms(user_id)
+    except Exception as e:
+        logger.error(f'[Signal] 用户权限缓存失效失败: user_id={user_id}, error={e}')
+
+
+def _safe_invalidate_role(role_id):
+    """安全失效某角色绑定所有用户的 L1 缓存 —— 角色权限点变更影响面大"""
+    try:
+        from apps.users.perm_cache import invalidate_role_perms
+        invalidate_role_perms(role_id)
+    except Exception as e:
+        logger.error(f'[Signal] 角色权限缓存失效失败: role_id={role_id}, error={e}')
+
+
+@receiver(post_save, sender=__import__('apps.users.models').users.models.UserRoleRel)
+def on_user_role_rel_changed(sender, instance, **kwargs):
+    """全局角色授权变更 → 失效该用户 L1, L4（功能权限并集 + 数据范围等级）"""
+    if kwargs.get('raw', False):
+        return
+    _safe_invalidate_user(instance.user_id)
+
+
+@receiver(post_delete, sender=__import__('apps.users.models').users.models.UserRoleRel)
+def on_user_role_rel_deleted(sender, instance, **kwargs):
+    """全局角色授权删除 → 失效该用户 L1, L4"""
+    _safe_invalidate_user(instance.user_id)
+
+
+@receiver(post_save, sender=__import__('apps.users.models').users.models.UserDeptScopeRel)
+def on_user_dept_scope_rel_changed(sender, instance, **kwargs):
+    """部门属地授权变更 → 失效该用户 L1, L2, L4（含可见部门集合）"""
+    if kwargs.get('raw', False):
+        return
+    _safe_invalidate_user(instance.user_id)
+
+
+@receiver(post_delete, sender=__import__('apps.users.models').users.models.UserDeptScopeRel)
+def on_user_dept_scope_rel_deleted(sender, instance, **kwargs):
+    """部门属地授权删除 → 失效该用户 L1, L2, L4"""
+    _safe_invalidate_user(instance.user_id)
+
+
+@receiver(post_save, sender=__import__('apps.users.models').users.models.UserTeamScopeRel)
+def on_user_team_scope_rel_changed(sender, instance, **kwargs):
+    """团队属地授权变更 → 失效该用户 L1, L3, L4（含可见团队集合）"""
+    if kwargs.get('raw', False):
+        return
+    _safe_invalidate_user(instance.user_id)
+
+
+@receiver(post_delete, sender=__import__('apps.users.models').users.models.UserTeamScopeRel)
+def on_user_team_scope_rel_deleted(sender, instance, **kwargs):
+    """团队属地授权删除 → 失效该用户 L1, L3, L4"""
+    _safe_invalidate_user(instance.user_id)
+
+
+@receiver(post_save, sender=__import__('apps.users.models').users.models.RolePermissionRel)
+def on_role_permission_rel_changed(sender, instance, **kwargs):
+    """角色-权限点绑定变更 → 失效所有持有该 role 用户的 L1（批量反查）
+
+    角色权限点改动影响所有拥有该角色的用户，必须批量失效其功能权限并集缓存。
+    """
+    if kwargs.get('raw', False):
+        return
+    _safe_invalidate_role(instance.role_id)
+
+
+@receiver(post_delete, sender=__import__('apps.users.models').users.models.RolePermissionRel)
+def on_role_permission_rel_deleted(sender, instance, **kwargs):
+    """角色-权限点绑定删除 → 失效所有持有该 role 用户的 L1"""
+    _safe_invalidate_role(instance.role_id)
+
+
+@receiver(post_save, sender=__import__('apps.users.models').users.models.User)
+def on_user_org_changed(sender, instance, **kwargs):
+    """用户调岗（department_id / team_id 变化）→ 失效 L1, L2, L3, L4 全部
+
+    人事归属变化会影响自然可见范围与数据范围等级，需全量失效该用户权限缓存。
+    仅在更新时触发（created 时无旧值可比，且新用户无缓存）。
+    """
+    if kwargs.get('raw', False) or kwargs.get('created', False):
+        return
+    _safe_invalidate_user(instance.id)

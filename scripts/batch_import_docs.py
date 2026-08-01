@@ -166,10 +166,10 @@ def import_documents(args):
             print(f"[ERROR] 上传者不存在: {args.owner}")
             return 1
     else:
-        from apps.users.models import UserRole, Role
-        sa_role = Role.objects.filter(code='super_admin').first()
+        from apps.users.models import UserRoleRel, Role
+        sa_role = Role.objects.filter(role_key='super_admin').first()
         if sa_role:
-            sa_user_ids = UserRole.objects.filter(role=sa_role).values_list('user_id', flat=True)
+            sa_user_ids = UserRoleRel.objects.filter(role=sa_role).values_list('user_id', flat=True)
             owner = User.objects.filter(id__in=sa_user_ids, is_deleted=False).first()
         else:
             owner = None

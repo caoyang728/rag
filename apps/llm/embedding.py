@@ -11,7 +11,6 @@ import time
 import random
 
 import requests
-from django.conf import settings
 from rag_project.config import EmbeddingConfig
 
 
@@ -90,7 +89,7 @@ class ApiEmbeddingClient:
                     error_detail = ''
                     try:
                         error_detail = resp.json().get('error', {}).get('message', str(resp.text))
-                    except:
+                    except Exception:
                         error_detail = resp.text[:200]
                     logger.error('[API Embedding] HTTP错误 %d: %s', resp.status_code, error_detail)
                     if resp.status_code == 429:

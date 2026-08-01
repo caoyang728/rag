@@ -59,24 +59,39 @@ class DocumentSerializer(serializers.ModelSerializer):
     can_read = serializers.SerializerMethodField()
     can_download = serializers.SerializerMethodField()
     can_share = serializers.SerializerMethodField()
+    # 前端友好字段：visibility_level → visible_scope（team/dept/public）
+    visible_scope = serializers.SerializerMethodField()
 
     class Meta:
         model = Document
         fields = [
             "id", "uuid", "node_id", "node_name", "title", "file_name", "file_type",
             "file_size", "file_hash", "mime_type", "owner_id", "owner_name",
-            "kb_node_id", "dept_node_id", "team_node_id", "category_node_id",
-            "visible_scope", "secret_level", "audit_status",
-            "has_deny_user", "has_cross_team", "has_allow_user", "allow_download", "allow_share",
-            "root_type", "status", "error_message", "chunk_count", "version", "tags",
+            # 归属：node(FK) + dept_id + team_id（二选一非空）
+            "dept_id", "team_id",
+            # 可见性层级：TEAM_ONLY / DEPT_ONLY / PUBLIC
+            "visibility_level", "visible_scope", "secret_level", "audit_status",
+            # 权限冗余标志位：has_block_user(黑名单) + has_resource_share(跨范围共享)
+            "has_block_user", "has_resource_share", "allow_download", "allow_share",
+            # 轻量申请入口（最终计划）
+            "allow_share_request", "preview_content", "preview_chunks",
+            "version", "version_tag", "tags",
+            "root_type", "status", "error_message", "chunk_count",
             "is_deleted", "delete_time", "created_at", "updated_at",
             "restored_at", "restored_by", "restored_by_name",
             "is_owner", "is_manager", "can_read", "can_download", "can_share",
         ]
         read_only_fields = ["uuid", "file_hash", "status", "chunk_count",
-                            "created_at", "updated_at", "restored_at", "restored_by"]
+                            "created_at", "updated_at", "restored_at", "restored_by",
+                            # 冗余标志位由授权操作维护，不允许直接通过 API 修改
+                            "has_block_user", "has_resource_share"]
 
     def _access(self, obj):
+        """调用 access.py 的 resolve_doc_access 获取当前用户对该文档的权限标志
+
+        优先使用 view 层预计算的 _user_ctx（build_user_context）和 _grants_map（批量共享/黑名单），
+        避免列表页 N+1 查询。
+        """
         request = self.context.get("request")
         ctx = self.context.get("_user_ctx")
         grants_map = self.context.get("_grants_map")
@@ -96,6 +111,14 @@ class DocumentSerializer(serializers.ModelSerializer):
 
     def get_can_share(self, obj):
         return self._access(obj)["can_share"]
+
+    def get_visible_scope(self, obj):
+        """visibility_level → 前端友好值（team/dept/public）"""
+        return {
+            'TEAM_ONLY': 'team',
+            'DEPT_ONLY': 'dept',
+            'PUBLIC': 'public',
+        }.get(obj.visibility_level, obj.visibility_level)
 
 
 class DocumentChunkSerializer(serializers.ModelSerializer):

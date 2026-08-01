@@ -15,7 +15,8 @@ const MODULE_LABELS = {
 };
 
 document.addEventListener('DOMContentLoaded', async () => {
-	if (!isSuperAdmin()) {
+	// RBAC 权限配置页：超级管理员可访问（持有 '*' 全权限）
+	if (!hasAnyRole('super_admin')) {
 		document.body.innerHTML = document.getElementById('tmpl-no-permission').innerHTML;
 		return;
 	}

@@ -2,7 +2,10 @@
 import re
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
-from apps.users.models import Department, Team, Role, Permission, UserRole, UserTeam, get_user_permission_map
+from apps.users.models import (
+    Department, Team, Role, Permission,
+    UserRoleRel, get_user_permissions,
+)
 
 User = get_user_model()
 
@@ -33,7 +36,7 @@ class DepartmentSerializer(serializers.ModelSerializer):
         return [{"id": t.id, "name": t.name, "code": t.code,
                  "leader_id": t.leader_id,
                  "leader_name": (t.leader.real_name or t.leader.username) if t.leader else None}
-                for t in obj.team_set.all() if not t.is_deleted]
+                for t in obj.teams.all() if not t.is_deleted]
 
 
 class TeamSerializer(serializers.ModelSerializer):
@@ -52,7 +55,8 @@ class TeamSerializer(serializers.ModelSerializer):
         return None
 
     def get_user_count(self, obj):
-        return UserTeam.objects.filter(team=obj).count()
+        # 单团队 FK：直接统计 User.team 指向该团队的活跃用户
+        return User.objects.filter(team=obj, is_deleted=False).count()
 
 
 class DepartmentWriteSerializer(serializers.ModelSerializer):
@@ -83,6 +87,8 @@ class TeamWriteSerializer(serializers.ModelSerializer):
 
 class RoleSerializer(serializers.ModelSerializer):
     permission_ids = serializers.SerializerMethodField()
+    # 保持 API 字段名 code 不变，内部映射到 role_key 字段
+    code = serializers.CharField(source='role_key', required=True)
 
     class Meta:
         model = Role
@@ -92,8 +98,8 @@ class RoleSerializer(serializers.ModelSerializer):
     def validate_code(self, value):
         if not re.match(r'^[a-z][a-z0-9_]*$', value):
             raise serializers.ValidationError("角色编码只能包含小写字母、数字和下划线，且以字母开头")
-        if len(value) > 32:
-            raise serializers.ValidationError("角色编码长度不能超过32个字符")
+        if len(value) > 64:
+            raise serializers.ValidationError("角色编码长度不能超过64个字符")
         return value
 
     def get_permission_ids(self, obj):
@@ -105,9 +111,15 @@ class RoleSerializer(serializers.ModelSerializer):
 
 
 class PermissionSerializer(serializers.ModelSerializer):
+    # 保持 API 字段名 code/name 不变，内部映射到 permission_key / permission_name
+    # permission_key 三段式已包含完整语义，无需 action/scope 字段
+    code = serializers.CharField(source='permission_key')
+    name = serializers.CharField(source='permission_name')
+
     class Meta:
         model = Permission
-        fields = ["id", "code", "name", "module", "action", "scope", "description"]
+        fields = ["id", "code", "name", "module", "is_builtin", "description"]
+        read_only_fields = ["is_builtin"]
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -128,15 +140,36 @@ class UserSerializer(serializers.ModelSerializer):
         read_only_fields = ["last_login_at", "last_login_ip", "created_at", "updated_at", "is_deleted"]
 
     def get_roles(self, obj):
-        return list(obj.roles.select_related("role").values("role__id", "role__code", "role__name"))
+        # related_name='user_role_rels'；响应字段名保持 code（前端兼容），内部取 role__role_key
+        return [
+            {"id": r["role__id"], "code": r["role__role_key"], "name": r["role__name"]}
+            for r in obj.user_role_rels.select_related("role").values(
+                "role__id", "role__role_key", "role__name"
+            )
+        ]
 
     def get_permission_map(self, obj):
-        return get_user_permission_map(obj)
+        # 按模块分组返回 permission_key 集合，便于前端按模块渲染权限列表
+        perms = get_user_permissions(obj)
+        groups = {}
+        for key in perms:
+            module = key.split('.')[0] if '.' in key else key
+            groups.setdefault(module, []).append(key)
+        return groups
 
     def get_teams(self, obj):
-        return list(UserTeam.objects.filter(user=obj).select_related("team").values(
-            "team__id", "team__name", "team__code", "team__department_id", "role_in_team"
-        ))
+        # 单团队 FK（user.team）：用户最多归属一个团队，返回单元素列表以兼容前端数组结构
+        if not obj.team_id:
+            return []
+        team = obj.team
+        if not team or team.is_deleted:
+            return []
+        return [{
+            "id": team.id,
+            "name": team.name,
+            "code": team.code,
+            "department_id": team.department_id,
+        }]
 
 
 class UserCreateSerializer(serializers.ModelSerializer):

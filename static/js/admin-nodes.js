@@ -24,7 +24,7 @@ function getTeamLeaderTeamNodeIds() {
 	if (!isTeamLeader()) return [];
 	try {
 		var u = JSON.parse(localStorage.getItem('rag_user') || '{}');
-		var teamIds = (u.teams || []).map(function (t) { return t.team__id; });
+		var teamIds = (u.teams || []).map(function (t) { return t.id; });
 	} catch (e) { return []; }
 	if (!teamIds.length) return [];
 	var ids = [];

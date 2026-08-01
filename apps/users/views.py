@@ -22,7 +22,12 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 from pypinyin import pinyin, Style
 
-from apps.users.models import Department, Team, Role, Permission, RolePermission, UserRole, UserTeam, has_permission
+from apps.users.models import (
+    Department, Team, Role, Permission,
+    RolePermissionRel, UserRoleRel, has_permission,
+    get_user_permissions, get_user_managed_depts,
+    get_user_managed_teams, get_user_data_scope_level, DataScope,
+)
 from apps.users.permissions import CanManageUsers
 from apps.users.serializers import (
     UserSerializer, UserCreateSerializer, UserUpdateSerializer,
@@ -81,9 +86,10 @@ def _export_users_csv(users_qs, filename="users_export.csv"):
     buf.write('\ufeff')  # BOM for Excel Chinese support
     writer = csv.writer(buf)
     writer.writerow(["ID", "用户名", "邮箱", "真实姓名", "部门", "团队", "角色", "状态", "最后登录", "创建时间"])
-    for u in users_qs.select_related('department').prefetch_related('roles__role', 'user_teams__team'):
-        team_names = ', '.join(t.team.name for t in u.user_teams.all() if not t.team.is_deleted) or ''
-        role_names = ', '.join(r.role.name for r in u.roles.all()) or ''
+    for u in users_qs.select_related('department', 'team').prefetch_related('user_role_rels__role'):
+        # 单团队 FK：user.team 指向唯一团队
+        team_names = u.team.name if u.team and not u.team.is_deleted else ''
+        role_names = ', '.join(r.role.name for r in u.user_role_rels.all() if r.role) or ''
         writer.writerow([
             u.id, u.username, u.email, u.real_name,
             u.department.name if u.department else "",
@@ -191,12 +197,13 @@ class ProfileView(APIView):
     def get(self, request):
         u = request.user
         # 使用 prefetch_related 预加载关联数据，避免 N+1
+        # UserRoleRel 通过 status='ACTIVE' 过滤有效授权
+        # user.team 为单团队 FK，select_related 直接加载
         from django.db.models import Prefetch
         user_with_related = User.objects.filter(id=u.id)\
-            .select_related('department')\
+            .select_related('department', 'team')\
             .prefetch_related(
-                Prefetch('roles', queryset=UserRole.objects.select_related('role').filter(is_active=True)),
-                Prefetch('user_teams', queryset=UserTeam.objects.select_related('team')),
+                Prefetch('user_role_rels', queryset=UserRoleRel.objects.select_related('role').filter(status='ACTIVE')),
             ).first()
         return Response(UserSerializer(user_with_related).data)
 
@@ -360,123 +367,148 @@ class UserViewSet(viewsets.ModelViewSet):
     ordering = '-created_at'
 
     # ---------- 权限辅助 ----------
-    def _get_user_roles(self, user):
-        """获取用户的所有角色代码列表（带请求级缓存）"""
-        if not hasattr(self, '_role_cache'):
-            self._role_cache = {}
-        if user.id not in self._role_cache:
-            self._role_cache[user.id] = list(UserRole.objects.filter(user=user, is_active=True).values_list('role__code', flat=True))
-        return self._role_cache[user.id]
-
     def _check_user_manage(self, target_user=None):
-        """检查请求者是否有用户管理权限（及其范围）"""
+        """检查请求者是否有用户管理权限（及其范围）
+
+        基于 permission_key + data_scope 判定：
+        - user.manage_all：全局用户管理
+        - user.manage + DEPT scope：部门属地范围内用户管理
+        - user.manage + TEAM scope：团队属地范围内用户管理
+        """
         u = self.request.user
-        # 超级管理员永远放行
+        # 超级管理员永远放行（系统级快路径）
         if u.is_super_admin:
             return True
-        if not has_permission(u, 'user:manage_users:all'):
+        # 拥有 user.manage_all 权限可管理全局用户
+        if has_permission(u, 'user.manage_all'):
+            return True
+        # 拥有 user.manage 权限：按数据范围等级判定
+        if has_permission(u, 'user.manage'):
             if target_user:
-                # 部门经理只能管理同部门
-                if has_permission(u, 'user:manage_users:department'):
-                    if u.department_id and target_user.department_id == u.department_id:
+                u_scope = get_user_data_scope_level(u)
+                # 部门级：可管理本部门（含属地授权部门）用户
+                if u_scope == DataScope.DEPT:
+                    managed_depts = get_user_managed_depts(u)
+                    if target_user.department_id and target_user.department_id in managed_depts:
                         return True
-                # 团队组长只能管理同团队
-                if has_permission(u, 'user:manage_users:team'):
-                    target_teams = set(
-                        UserTeam.objects.filter(user=target_user).values_list('team_id', flat=True)
-                    )
-                    my_teams = set(
-                        UserTeam.objects.filter(user=u).values_list('team_id', flat=True)
-                    )
-                    if target_teams & my_teams:
+                # 团队级：可管理本团队（含属地授权团队）用户
+                if u_scope == DataScope.TEAM:
+                    managed_teams = get_user_managed_teams(u)
+                    if target_user.team_id and target_user.team_id in managed_teams:
                         return True
             return False
-        return True
+        return False
 
     def _check_can_manage_user(self, target_user):
-        """检查是否可以禁用/启用/删除用户（统一的用户操作权限控制）"""
+        """检查是否可以禁用/启用/删除用户（基于 permission_key 判定，避免角色硬编码）
+
+        通过 permission_key + data_scope 判定：
+        - super_admin 系统级快路径
+        - user.manage_all（GLOBAL scope）：可禁用除超管和其他 manage_all 持有者外的用户
+        - user.manage（DEPT scope）：只能禁用本部门非管理者
+        - user.manage（TEAM scope）：只能禁用本团队非管理者
+        """
         u = self.request.user
-        user_roles = self._get_user_roles(u)
-        target_roles = self._get_user_roles(target_user)
-        
-        # 规则1：只有特定角色才有禁用权限
-        allowed_roles = ['super_admin', 'user_admin', 'dept_manager', 'team_leader']
-        if not set(user_roles) & set(allowed_roles):
+        # 规则1：必须有用户管理权限（super_admin / user.manage_all / user.manage）
+        if not (u.is_super_admin or has_permission(u, 'user.manage_all') or has_permission(u, 'user.manage')):
             return False, "没有禁用权限"
-        
+
         # 规则2：不能操作自己
         if u.id == target_user.id:
             return False, "不能禁用自己"
-        
-        # 规则3：超级管理员不能被禁用
-        if 'super_admin' in target_roles:
+
+        # 规则3：超级管理员不能被禁用（系统级快路径保护，防止锁死管理入口）
+        if target_user.is_super_admin:
             return False, "超级管理员不能被禁用"
-        
+
         # 规则4：超级管理员可以禁用除超级管理员以外的所有用户
-        if 'super_admin' in user_roles:
+        if u.is_super_admin:
             return True, ""
-        
-        # 规则5：部门经理：只能禁用本部门的员工（排除同级部门经理和user_admin）
-        if 'dept_manager' in user_roles and u.department_id:
-            if target_user.department_id != u.department_id:
-                return False, "只能禁用本部门员工"
-            # 不能禁用同级：部门经理、user_admin
-            if set(target_roles) & {'dept_manager', 'user_admin'}:
-                return False, "不能禁用同级部门经理"
-            return True, ""
-        
-        # 规则6：团队组长：只能禁用同组成员（排除同级团队组长和部门经理）
-        if 'team_leader' in user_roles:
-            my_team_ids = set(UserTeam.objects.filter(user=u).values_list('team_id', flat=True))
-            target_teams = set(UserTeam.objects.filter(user=target_user).values_list('team_id', flat=True))
-            if not (my_team_ids & target_teams):
-                return False, "只能禁用本组员工"
-            # 不能禁用同级：团队组长、部门经理、user_admin
-            if set(target_roles) & {'team_leader', 'dept_manager', 'user_admin'}:
-                return False, "不能禁用同级团队组长"
-            return True, ""
-        
-        # 规则7：user_admin：可以禁用除超级管理员和其他user_admin以外的用户
-        if 'user_admin' in user_roles:
-            if set(target_roles) & {'super_admin', 'user_admin'}:
+
+        # 以下按数据范围等级判定（GLOBAL > DEPT > TEAM）
+        u_scope = get_user_data_scope_level(u)
+
+        # 规则5：全局级（user.manage_all）——可禁用除超管和其他 manage_all 持有者外的用户
+        if u_scope == DataScope.GLOBAL:
+            if has_permission(target_user, 'user.manage_all'):
                 return False, "不能禁用同级用户管理员"
             return True, ""
-        
+
+        # 规则6：部门级管理者——只能操作本部门（含属地授权部门）用户
+        if u_scope == DataScope.DEPT:
+            managed_depts = get_user_managed_depts(u)
+            if not target_user.department_id or target_user.department_id not in managed_depts:
+                return False, "只能禁用本部门员工"
+            # 不能禁用同级管理者（拥有 user.manage / user.manage_all 的用户）
+            if has_permission(target_user, 'user.manage') or has_permission(target_user, 'user.manage_all'):
+                return False, "不能禁用同级部门经理"
+            return True, ""
+
+        # 规则7：团队级管理者——只能操作本团队（含属地授权团队）用户
+        if u_scope == DataScope.TEAM:
+            managed_teams = get_user_managed_teams(u)
+            if not target_user.team_id or target_user.team_id not in managed_teams:
+                return False, "只能禁用本组员工"
+            # 不能禁用同级管理者
+            if has_permission(target_user, 'user.manage') or has_permission(target_user, 'user.manage_all'):
+                return False, "不能禁用同级团队组长"
+            return True, ""
+
         return False, "无权限操作"
 
     def _get_manageable_user_ids(self):
-        """获取当前用户可管理的用户ID集合"""
+        """获取当前用户可管理的用户ID集合
+
+        返回 None 表示可管理所有用户（super_admin / user.manage_all）。
+        """
         u = self.request.user
-        # 拥有 user:manage_users:all 权限可管理所有用户（RBAC）
-        if u.is_super_admin or has_permission(u, 'user:manage_users:all'):
+        # 拥有 user.manage_all 权限可管理所有用户（RBAC）
+        if u.is_super_admin or has_permission(u, 'user.manage_all'):
             return None
-        # 部门经理可管理本部门用户
-        if has_permission(u, 'user:manage_users:department') and u.department_id:
-            return set(User.objects.filter(department_id=u.department_id, is_deleted=False).values_list('id', flat=True))
-        # 团队组长可管理同团队用户
-        if has_permission(u, 'user:manage_users:team'):
-            my_team_ids = list(UserTeam.objects.filter(user=u).values_list('team_id', flat=True))
-            return set(UserTeam.objects.filter(team_id__in=my_team_ids).values_list('user_id', flat=True))
+        # 拥有 user.manage 权限：按 data_scope 判定管理范围
+        if has_permission(u, 'user.manage'):
+            u_scope = get_user_data_scope_level(u)
+            # 部门级：可管理本部门（含属地授权部门）用户
+            if u_scope == DataScope.DEPT:
+                managed_depts = get_user_managed_depts(u)
+                return set(User.objects.filter(department_id__in=managed_depts, is_deleted=False).values_list('id', flat=True))
+            # 团队级：可管理本团队（含属地授权团队）用户
+            if u_scope == DataScope.TEAM:
+                managed_teams = get_user_managed_teams(u)
+                return set(User.objects.filter(team_id__in=managed_teams, is_deleted=False).values_list('id', flat=True))
         # 普通用户只能管理自己
         return {u.id}
 
     def _filter_downward_roles(self, role_ids, is_dept):
-        """组长只能分配普通员工/只读员工；部门经理只能分配组长/员工/只读（不能分配其他部门经理）"""
-        allowed_codes = ['employee', 'readonly']
+        """组长只能分配普通员工；部门经理只能分配组长/普通员工（不能分配其他部门经理）
+
+        employee 为随人事归属生效的默认兜底角色；read_only_employee 为显式授权的只读角色。
+        """
+        allowed_keys = ['employee', 'read_only_employee']
         if is_dept:
-            allowed_codes = ['team_leader', 'employee', 'readonly']
-        allowed_ids = set(Role.objects.filter(code__in=allowed_codes).values_list('id', flat=True))
+            allowed_keys = ['team_leader', 'employee', 'read_only_employee']
+        allowed_ids = set(Role.objects.filter(role_key__in=allowed_keys).values_list('id', flat=True))
         return [rid for rid in (role_ids or []) if rid in allowed_ids]
 
     def _filter_role_ids(self, role_ids):
-        """检查角色ID，非超管不能分配高级角色，检测到受限角色时抛出403错误"""
+        """检查角色ID，非超管不能分配高级角色，检测到受限角色时抛出403错误
+
+        通过 permission_key 判定受限角色：拥有 kb.manage_all / user.manage_all
+        权限的角色视为高级角色；super_admin 角色也受限（系统级快路径角色）。
+        """
         u = self.request.user
         # 超级管理员可以分配任意角色
         if u.is_super_admin:
             return role_ids
-        # 非超管不能分配高级角色
-        restricted_roles = ['super_admin', 'kb_admin', 'kb_ops']
-        restricted_ids = set(Role.objects.filter(code__in=restricted_roles).values_list('id', flat=True))
+        # 非超管不能分配高级角色：通过 RolePermissionRel 反查拥有 *_manage_all 权限的角色
+        restricted_ids = set(RolePermissionRel.objects.filter(
+            permission__permission_key__in=['kb.manage_all', 'user.manage_all'],
+            is_active=True,
+        ).values_list('role_id', flat=True))
+        # super_admin 角色也受限（系统级快路径角色，不可委派）
+        sa_role_id = Role.objects.filter(role_key='super_admin').values_list('id', flat=True).first()
+        if sa_role_id:
+            restricted_ids.add(sa_role_id)
         has_restricted = role_ids and restricted_ids & set(role_ids)
         if has_restricted:
             raise PermissionDenied("无权分配高级角色")
@@ -486,21 +518,21 @@ class UserViewSet(viewsets.ModelViewSet):
         """校验 dept_manager 和 team_leader 的唯一性约束"""
         if not role_ids:
             return None
-        # 批量查询所有 role_id 对应的 code，避免 N+1
-        role_map = dict(Role.objects.filter(id__in=role_ids).values_list('id', 'code'))
+        # 批量查询所有 role_id 对应的 role_key，避免 N+1
+        role_map = dict(Role.objects.filter(id__in=role_ids).values_list('id', 'role_key'))
         dept_manager_role_id = None
         team_leader_role_id = None
-        for rid, code in role_map.items():
-            if code == 'dept_manager':
+        for rid, rkey in role_map.items():
+            if rkey == 'dept_manager':
                 dept_manager_role_id = rid
-            if code == 'team_leader':
+            if rkey == 'team_leader':
                 team_leader_role_id = rid
 
         # 部门经理唯一性：同一部门只能有一个部门经理
         if dept_manager_role_id and department_id:
-            existing = UserRole.objects.filter(
-                role__code='dept_manager',
-                is_active=True
+            existing = UserRoleRel.objects.filter(
+                role__role_key='dept_manager',
+                status='ACTIVE'
             ).exclude(user=user).filter(
                 user__department_id=department_id,
                 user__is_deleted=False
@@ -509,13 +541,14 @@ class UserViewSet(viewsets.ModelViewSet):
                 return f"该部门已有部门经理：{existing.user.real_name or existing.user.username}"
 
         # 团队 leader 唯一性：同一团队只能有一个 team_leader
+        # 单团队 FK：user__team_id 直接匹配
         if team_leader_role_id and team_ids:
             for tid in team_ids:
-                existing = UserRole.objects.filter(
-                    role__code='team_leader',
-                    is_active=True
+                existing = UserRoleRel.objects.filter(
+                    role__role_key='team_leader',
+                    status='ACTIVE'
                 ).exclude(user=user).filter(
-                    user__user_teams__team_id=tid,
+                    user__team_id=tid,
                     user__is_deleted=False
                 ).first()
                 if existing:
@@ -526,18 +559,26 @@ class UserViewSet(viewsets.ModelViewSet):
     # ---------- 查询（限定范围）----------
     def get_queryset(self):
         qs = super().get_queryset()
-        # 添加预加载，减少N+1查询
-        qs = qs.select_related('department')\
-               .prefetch_related('roles__role', 'user_teams__team')
+        # 添加预加载，减少N+1查询（user_role_rels 为用户-角色关联；team 单 FK select_related）
+        qs = qs.select_related('department', 'team')\
+               .prefetch_related('user_role_rels__role')
         u = self.request.user
-        # 拥有 user:manage_users:all 权限 -> 看全部（RBAC）
-        if u.is_super_admin or has_permission(u, 'user:manage_users:all'):
+        # 拥有 user.manage_all 权限 -> 看全部（RBAC）
+        if u.is_super_admin or has_permission(u, 'user.manage_all'):
             pass
-        elif has_permission(u, 'user:manage_users:department') and u.department_id:
-            qs = qs.filter(department_id=u.department_id)
-        elif has_permission(u, 'user:manage_users:team'):
-            my_team_ids = list(UserTeam.objects.filter(user=u).values_list('team_id', flat=True))
-            qs = qs.filter(user_teams__team_id__in=my_team_ids).distinct()
+        elif has_permission(u, 'user.manage'):
+            u_scope = get_user_data_scope_level(u)
+            # 部门级：可见本部门（含属地授权部门）用户
+            if u_scope == DataScope.DEPT:
+                managed_depts = get_user_managed_depts(u)
+                qs = qs.filter(department_id__in=managed_depts)
+            # 团队级：可见本团队（含属地授权团队）用户
+            elif u_scope == DataScope.TEAM:
+                managed_teams = get_user_managed_teams(u)
+                qs = qs.filter(team_id__in=managed_teams)
+            else:
+                # 普通员工/只读员工：只能看到自己
+                qs = qs.filter(id=u.id)
         else:
             # 普通员工/只读员工：只能看到自己
             qs = qs.filter(id=u.id)
@@ -560,13 +601,15 @@ class UserViewSet(viewsets.ModelViewSet):
         team_id = self.request.query_params.get("team_id")
         if team_id:
             try:
-                qs = qs.filter(user_teams__team_id=int(team_id)).distinct()
+                # 单团队 FK：直接 filter team_id
+                qs = qs.filter(team_id=int(team_id))
             except (ValueError, TypeError):
                 pass
         role_id = self.request.query_params.get("role_id")
         if role_id:
             try:
-                qs = qs.filter(roles__role_id=int(role_id))
+                # user_role_rels 为用户-角色关联表
+                qs = qs.filter(user_role_rels__role_id=int(role_id))
             except (ValueError, TypeError):
                 pass
         status = self.request.query_params.get("status")
@@ -584,11 +627,16 @@ class UserViewSet(viewsets.ModelViewSet):
     # ---- 新建用户 ----
     def create(self, request, *args, **kwargs):
         u = request.user
-        # 超管或拥有 user:manage_users:all 权限直接放行
+        # 超管或拥有 user.manage_all 权限直接放行
         is_super = u.is_super_admin
-        can_manage_all = has_permission(u, 'user:manage_users:all')
-        is_dept = not is_super and not can_manage_all and has_permission(u, 'user:manage_users:department')
-        is_team = not is_super and not can_manage_all and not is_dept and has_permission(u, 'user:manage_users:team')
+        can_manage_all = has_permission(u, 'user.manage_all')
+        # user.manage 权限 + data_scope 区分部门级/团队级
+        is_dept = (not is_super and not can_manage_all
+                   and has_permission(u, 'user.manage')
+                   and get_user_data_scope_level(u) == DataScope.DEPT)
+        is_team = (not is_super and not can_manage_all and not is_dept
+                   and has_permission(u, 'user.manage')
+                   and get_user_data_scope_level(u) == DataScope.TEAM)
         if not is_super and not can_manage_all and not is_dept and not is_team:
             return Response({"detail": "无用户管理权限"}, status=403)
         ser = UserCreateSerializer(data=request.data)
@@ -596,7 +644,7 @@ class UserViewSet(viewsets.ModelViewSet):
         role_ids = ser.validated_data.pop("role_ids", [])
         team_ids = ser.validated_data.pop("team_ids", [])
         department_id = ser.validated_data.pop("department_id", None)
-        # 过滤角色ID，非超管不能分配高级角色；组长只能分配组长/员工/只读
+        # 过滤角色ID，非超管不能分配高级角色；组长只能分配组长/普通员工
         role_ids = self._filter_role_ids(
             role_ids if (is_super or can_manage_all) else self._filter_downward_roles(role_ids, is_dept)
         )
@@ -604,12 +652,13 @@ class UserViewSet(viewsets.ModelViewSet):
         if is_team:
             department_id = u.department_id
             if not team_ids:
-                team_ids = list(UserTeam.objects.filter(user=u).values_list('team_id', flat=True))
+                # 单团队 FK：组长默认分配到自己所属团队
+                team_ids = [u.team_id] if u.team_id else []
         elif is_dept:
             department_id = department_id or u.department_id
-        # 组长只能分配到自己所在的团队
+        # 组长只能分配到自己可管理的团队
         if is_team and team_ids:
-            my_teams = set(UserTeam.objects.filter(user=u).values_list('team_id', flat=True))
+            my_teams = get_user_managed_teams(u)
             invalid = set(team_ids) - my_teams
             if invalid:
                 return Response({"detail": "只能分配到自己的团队"}, status=403)
@@ -629,19 +678,19 @@ class UserViewSet(viewsets.ModelViewSet):
             user.save()
             # 批量创建角色关联
             if role_ids:
-                objs = [UserRole(user=user, role_id=rid) for rid in role_ids]
-                UserRole.objects.bulk_create(
+                objs = [UserRoleRel(user=user, role_id=rid, status='ACTIVE', granted_by=u) for rid in role_ids]
+                UserRoleRel.objects.bulk_create(
                     objs,
                     update_conflicts=True,
-                    update_fields=['is_active', 'revoked_at', 'revoked_by'],
+                    update_fields=['status', 'revoked_at', 'revoked_by'],
                     unique_fields=['user_id', 'role_id']
                 )
-            # 批量创建团队关联
+            # 单团队 FK：取第一个 team_id（兼容前端传入数组）
             if team_ids:
-                existing_ut = set(UserTeam.objects.filter(user=user).values_list('team_id', flat=True))
-                valid_teams = [tid for tid in team_ids if Team.objects.filter(id=tid).exists() and tid not in existing_ut]
-                if valid_teams:
-                    UserTeam.objects.bulk_create([UserTeam(user=user, team_id=tid) for tid in valid_teams])
+                new_team_id = team_ids[0]
+                if Team.objects.filter(id=new_team_id, is_deleted=False).exists():
+                    user.team_id = new_team_id
+                    user.save(update_fields=['team', 'updated_at'])
             # 同步 Team.leader_id / Department.leader_id
             if role_ids:
                 self._sync_role_leader(user, set(role_ids))
@@ -664,8 +713,11 @@ class UserViewSet(viewsets.ModelViewSet):
         team_ids = ser.validated_data.pop("team_ids", None)
         # 权限范围校验：防止组长/部门经理越权提权或移动用户
         u = request.user
-        has_team = has_permission(u, 'user:manage_users:team')
-        has_dept = has_permission(u, 'user:manage_users:department')
+        # user.manage 权限 + data_scope 区分部门级/团队级
+        has_team = (has_permission(u, 'user.manage')
+                    and get_user_data_scope_level(u) == DataScope.TEAM)
+        has_dept = (has_permission(u, 'user.manage')
+                    and get_user_data_scope_level(u) == DataScope.DEPT)
         is_super = u.is_super_admin
         if not is_super:
             if not has_dept and not has_team:
@@ -675,7 +727,7 @@ class UserViewSet(viewsets.ModelViewSet):
                 role_ids = self._filter_downward_roles(role_ids, is_dept=has_dept)
             # 组长（含双重角色）：只能操作自己的团队
             if has_team:
-                my_teams = set(UserTeam.objects.filter(user=u).values_list('team_id', flat=True))
+                my_teams = get_user_managed_teams(u)
                 if team_ids is not None:
                     if not team_ids:
                         return Response({"detail": "不能清空所有团队"}, status=403)
@@ -697,7 +749,7 @@ class UserViewSet(viewsets.ModelViewSet):
         # 校验部门经理/团队leader唯一性 —— 必须在 ser.save() 之前，避免部分更新已写入
         if role_ids is not None or 'department_id' in request.data or team_ids is not None:
             check_role_ids = role_ids if role_ids is not None else list(
-                UserRole.objects.filter(user=instance, is_active=True).values_list('role_id', flat=True)
+                UserRoleRel.objects.filter(user=instance, status='ACTIVE').values_list('role_id', flat=True)
             )
             actual_dept_id = ser.validated_data.get('department_id') if 'department_id' in ser.validated_data else instance.department_id
             if isinstance(actual_dept_id, str) and actual_dept_id == '':
@@ -708,35 +760,33 @@ class UserViewSet(viewsets.ModelViewSet):
         user = ser.save()
         with transaction.atomic():
             if role_ids is not None:
-                UserRole.objects.filter(
+                # 撤销不再保留的角色（status='REVOKED'）
+                UserRoleRel.objects.filter(
                     user=user,
-                    is_active=True,
+                    status='ACTIVE',
                 ).exclude(role_id__in=role_ids).update(
-                    is_active=False,
+                    status='REVOKED',
                     revoked_at=timezone.now(),
                     revoked_by=request.user
                 )
 
-                objs = [UserRole(user=user, role_id=rid) for rid in role_ids]
-                UserRole.objects.bulk_create(
+                objs = [UserRoleRel(user=user, role_id=rid, status='ACTIVE', granted_by=request.user) for rid in role_ids]
+                UserRoleRel.objects.bulk_create(
                     objs,
                     update_conflicts=True,
-                    update_fields=['is_active', 'revoked_at', 'revoked_by'],
+                    update_fields=['status', 'revoked_at', 'revoked_by'],
                     unique_fields=['user_id', 'role_id']
                 )
 
                 self._sync_role_leader(user, set(role_ids))
             if team_ids is not None:
-                old_team_ids = set(UserTeam.objects.filter(user=user).values_list('team_id', flat=True))
-                new_team_ids = set(team_ids)
-                # 删除不再需要的团队
-                to_remove = old_team_ids - new_team_ids
-                if to_remove:
-                    UserTeam.objects.filter(user=user, team_id__in=to_remove).delete()
-                # 添加新团队
-                valid_to_add = [tid for tid in (new_team_ids - old_team_ids) if Team.objects.filter(id=tid).exists()]
-                if valid_to_add:
-                    UserTeam.objects.bulk_create([UserTeam(user=user, team_id=tid) for tid in valid_to_add])
+                # 单团队 FK：取第一个 team_id（兼容前端传入数组）
+                new_team_id = team_ids[0] if team_ids else None
+                if new_team_id:
+                    if not Team.objects.filter(id=new_team_id, is_deleted=False).exists():
+                        return Response({"detail": "指定的团队不存在"}, status=400)
+                user.team_id = new_team_id
+                user.save(update_fields=['team', 'updated_at'])
         return Response(UserSerializer(user).data)
 
     # ---- 软删除 ----
@@ -804,25 +854,27 @@ class UserViewSet(viewsets.ModelViewSet):
         u = self.get_object()
         role_ids = request.data.get("role_ids", [])
         with transaction.atomic():
-            UserRole.objects.filter(
+            # 撤销不再保留的角色
+            UserRoleRel.objects.filter(
                 user=u,
-                is_active=True,
+                status='ACTIVE',
             ).exclude(role_id__in=role_ids).update(
-                is_active=False,
+                status='REVOKED',
                 revoked_at=timezone.now(),
                 revoked_by=request.user
             )
 
             if role_ids:
-                objs = [UserRole(
+                objs = [UserRoleRel(
                     user=u,
                     role_id=rid,
-                    granted_by=request.user
+                    granted_by=request.user,
+                    status='ACTIVE',
                 ) for rid in role_ids]
-                UserRole.objects.bulk_create(
+                UserRoleRel.objects.bulk_create(
                     objs,
                     update_conflicts=True,
-                    update_fields=['is_active', 'revoked_at', 'revoked_by'],
+                    update_fields=['status', 'revoked_at', 'revoked_by'],
                     unique_fields=['user_id', 'role_id']
                 )
 
@@ -831,17 +883,17 @@ class UserViewSet(viewsets.ModelViewSet):
 
     def _sync_role_leader(self, user, role_ids_set):
         """分配/移除 team_leader / dept_manager 角色时，同步更新 Team.leader_id / Department.leader_id"""
-        role_code_map = dict(Role.objects.filter(
-            code__in=['team_leader', 'dept_manager']
-        ).values_list('id', 'code'))
+        role_key_map = dict(Role.objects.filter(
+            role_key__in=['team_leader', 'dept_manager']
+        ).values_list('id', 'role_key'))
 
-        has_tl = any(role_code_map.get(rid) == 'team_leader' for rid in role_ids_set)
-        has_dm = any(role_code_map.get(rid) == 'dept_manager' for rid in role_ids_set)
+        has_tl = any(role_key_map.get(rid) == 'team_leader' for rid in role_ids_set)
+        has_dm = any(role_key_map.get(rid) == 'dept_manager' for rid in role_ids_set)
 
         if has_tl:
-            user_team_ids = list(UserTeam.objects.filter(user=user).values_list('team_id', flat=True))
-            if user_team_ids:
-                Team.objects.filter(id__in=user_team_ids, leader__isnull=True).update(leader=user)
+            # 单团队 FK：用户只有一个 team
+            if user.team_id:
+                Team.objects.filter(id=user.team_id, leader__isnull=True).update(leader=user)
         else:
             Team.objects.filter(leader=user).update(leader=None)
 
@@ -881,9 +933,14 @@ class UserViewSet(viewsets.ModelViewSet):
         u = request.user
         # 权限校验：与 create 一致，仅管理角色可导入
         is_super = u.is_super_admin
-        can_manage_all = has_permission(u, 'user:manage_users:all')
-        is_dept = not is_super and not can_manage_all and has_permission(u, 'user:manage_users:department')
-        is_team = not is_super and not can_manage_all and not is_dept and has_permission(u, 'user:manage_users:team')
+        can_manage_all = has_permission(u, 'user.manage_all')
+        # user.manage 权限 + data_scope 区分部门级/团队级
+        is_dept = (not is_super and not can_manage_all
+                   and has_permission(u, 'user.manage')
+                   and get_user_data_scope_level(u) == DataScope.DEPT)
+        is_team = (not is_super and not can_manage_all and not is_dept
+                   and has_permission(u, 'user.manage')
+                   and get_user_data_scope_level(u) == DataScope.TEAM)
         if not is_super and not can_manage_all and not is_dept and not is_team:
             return Response({"detail": "无用户管理权限"}, status=403)
 
@@ -917,16 +974,18 @@ class UserViewSet(viewsets.ModelViewSet):
         team_map = {(t.name, t.department_id): t for t in Team.objects.filter(is_deleted=False)}
         role_map = {r.name: r for r in Role.objects.all()}
 
-        # 非超管可分配的角色ID集合（与 _filter_downward_roles / _filter_role_ids 一致）
+        # 非超管可分配的角色ID集合（与 _filter_downward_roles 一致）
+        # employee 为兜底角色，read_only_employee 为显式授权只读角色
         if is_super or can_manage_all:
             allowed_role_ids = set(Role.objects.values_list('id', flat=True))
         elif is_dept:
-            allowed_role_ids = set(Role.objects.filter(code__in=['team_leader', 'employee', 'readonly']).values_list('id', flat=True))
+            allowed_role_ids = set(Role.objects.filter(role_key__in=['team_leader', 'employee', 'read_only_employee']).values_list('id', flat=True))
         else:  # is_team
-            allowed_role_ids = set(Role.objects.filter(code__in=['employee', 'readonly']).values_list('id', flat=True))
+            allowed_role_ids = set(Role.objects.filter(role_key__in=['employee', 'read_only_employee']).values_list('id', flat=True))
 
         # 组长锁定部门/团队，与 create 逻辑一致
-        my_team_ids = list(UserTeam.objects.filter(user=u).values_list('team_id', flat=True)) if is_team else []
+        # get_user_managed_teams（含属地授权团队）
+        my_team_ids = list(get_user_managed_teams(u)) if is_team else []
 
         # 输出 CSV：原列 + 结果 + 原因
         out_buf = io.StringIO()
@@ -1040,9 +1099,13 @@ class UserViewSet(viewsets.ModelViewSet):
                             user.set_password(pwd)
                             user.save()
                             if role_id:
-                                UserRole.objects.create(user=user, role_id=role_id)
+                                UserRoleRel.objects.create(
+                                    user=user, role_id=role_id, status='ACTIVE', granted_by=u
+                                )
+                            # 单团队 FK：直接设置 user.team_id
                             if team_id:
-                                UserTeam.objects.create(user=user, team_id=team_id)
+                                user.team_id = team_id
+                                user.save(update_fields=['team', 'updated_at'])
                             # 同步 Team.leader_id / Department.leader_id
                             if role_id:
                                 self._sync_role_leader(user, {role_id})
@@ -1086,27 +1149,29 @@ class UserViewSet(viewsets.ModelViewSet):
     def form_options(self, request):
         depts = list(Department.objects.filter(is_deleted=False).values("id", "name", "code"))
         teams = list(Team.objects.filter(is_deleted=False).values("id", "name", "code", "department_id"))
-        # 根据当前用户角色过滤可分配的角色
+        # 根据当前用户权限过滤可分配的角色（基于 permission_key 判定，清除角色硬编码）
         u = request.user
-        user_codes = list(UserRole.objects.filter(user=u, is_active=True).values_list('role__code', flat=True))
-        if 'super_admin' in user_codes:
-            roles = list(Role.objects.all().values("id", "code", "name", "description"))
+        # 辅助函数：annotate code=F('role_key') 保持 API 字段名 code 不变
+        def _role_values(qs):
+            return list(qs.annotate(code=models.F("role_key")).values("id", "code", "name", "description"))
+
+        if u.is_super_admin:
+            roles = _role_values(Role.objects.all())
             assignable = roles
-        elif 'kb_admin' in user_codes:
-            roles = list(Role.objects.exclude(code='super_admin').values("id", "code", "name", "description"))
+        elif has_permission(u, 'kb.manage_all'):
+            # 知识库管理员：除 super_admin 外全可见
+            roles = _role_values(Role.objects.exclude(role_key='super_admin'))
             assignable = roles
-        elif 'kb_ops' in user_codes or 'dept_manager' in user_codes:
-            excluded = ['super_admin', 'kb_admin', 'kb_ops']
-            roles = list(Role.objects.exclude(code__in=excluded).values("id", "code", "name", "description"))
-            # 部门经理不能分配其他部门经理
-            assignable = list(Role.objects.filter(code__in=['team_leader', 'employee', 'readonly'])
-                              .values("id", "code", "name", "description"))
-        elif 'team_leader' in user_codes:
-            roles = list(Role.objects.filter(code__in=['team_leader', 'employee', 'readonly'])
-                         .values("id", "code", "name", "description"))
-            # 组长不能分配其他组长，仅能分配普通/只读员工
-            assignable = list(Role.objects.filter(code__in=['employee', 'readonly'])
-                              .values("id", "code", "name", "description"))
+        elif has_permission(u, 'user.manage'):
+            u_scope = get_user_data_scope_level(u)
+            if u_scope == DataScope.DEPT:
+                # 部门经理：可见普通角色，可分配 team_leader/employee/read_only_employee
+                roles = _role_values(Role.objects.exclude(role_key__in=['super_admin', 'user_admin']))
+                assignable = _role_values(Role.objects.filter(role_key__in=['team_leader', 'employee', 'read_only_employee']))
+            else:
+                # 团队组长：可见 team_leader/employee/read_only_employee，仅可分配 employee/read_only_employee
+                roles = _role_values(Role.objects.filter(role_key__in=['team_leader', 'employee', 'read_only_employee']))
+                assignable = _role_values(Role.objects.filter(role_key__in=['employee', 'read_only_employee']))
         else:
             roles = []
             assignable = []
@@ -1133,7 +1198,8 @@ class UserViewSet(viewsets.ModelViewSet):
         if dept_id:
             qs = qs.filter(department_id=int(dept_id))
         if team_id:
-            qs = qs.filter(user_teams__team_id=int(team_id))
+            # 单团队 FK：直接 filter team_id
+            qs = qs.filter(team_id=int(team_id))
         users = list(qs[:20].values("id", "username", "real_name", "email", "department_id"))
         return Response({"users": users})
 
@@ -1147,11 +1213,11 @@ class DepartmentViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         from django.db.models import Prefetch
         return super().get_queryset().prefetch_related(
-            Prefetch('team_set', queryset=Team.objects.filter(is_deleted=False).select_related('leader'))
+            Prefetch('teams', queryset=Team.objects.filter(is_deleted=False).select_related('leader'))
         ).annotate(user_count=models.Count('users', filter=models.Q(users__is_deleted=False)))
 
     def _check_can_manage_dept(self):
-        """检查是否有部门管理权限（RBAC：user:manage_users:all）"""
+        """检查是否有部门管理权限（RBAC：user.manage_all，通过 is_user_admin 属性判定）"""
         u = self.request.user
         if u.is_user_admin:
             return True
@@ -1249,11 +1315,10 @@ class DepartmentViewSet(viewsets.ModelViewSet):
 
 class PermissionViewSet(viewsets.ModelViewSet):
     """权限点 CRUD（仅超级管理员可操作）"""
-    queryset = Permission.objects.all().order_by("module", "action", "scope")
+    # Permission 使用 permission_key 三段式（module.resource.action）标识权限点
+    queryset = Permission.objects.all().order_by("module", "permission_key")
     serializer_class = PermissionSerializer
     permission_classes = [IsAuthenticated]
-
-    BUILTIN_PERM_PREFIXES = ('user:', 'system:', 'audit:')
 
     def _check_super_admin(self):
         if not self.request.user.is_super_admin:
@@ -1275,24 +1340,25 @@ class PermissionViewSet(viewsets.ModelViewSet):
     def update(self, request, *args, **kwargs):
         self._check_super_admin()
         perm = self.get_object()
-        if perm.code and perm.code.startswith(self.BUILTIN_PERM_PREFIXES):
+        # 内置权限点（is_builtin=True）核心字段不可修改
+        if perm.is_builtin:
             forbidden = [k for k in request.data if k not in ('description', 'name')]
             if forbidden:
-                logger.warning(f"Permission.update - user {request.user.username} tried to modify builtin fields of {perm.code}")
+                logger.warning(f"Permission.update - user {request.user.username} tried to modify builtin fields of {perm.permission_key}")
                 return Response({"detail": "内置系统权限不允许修改核心字段"}, status=403)
-        logger.info(f"Permission.update - user: {request.user.username}, perm: {perm.code}, data: {request.data}")
+        logger.info(f"Permission.update - user: {request.user.username}, perm: {perm.permission_key}, data: {request.data}")
         return super().update(request, *args, **kwargs)
 
     def destroy(self, request, *args, **kwargs):
         self._check_super_admin()
         perm = self.get_object()
-        if perm.code and perm.code.startswith(self.BUILTIN_PERM_PREFIXES):
-            logger.warning(f"Permission.destroy - user {request.user.username} tried to delete builtin perm {perm.code}")
+        if perm.is_builtin:
+            logger.warning(f"Permission.destroy - user {request.user.username} tried to delete builtin perm {perm.permission_key}")
             return Response({"detail": "内置系统权限不允许删除"}, status=403)
-        ref_count = RolePermission.objects.filter(permission=perm, is_active=True).count()
+        ref_count = RolePermissionRel.objects.filter(permission=perm, is_active=True).count()
         if ref_count > 0:
             return Response({"detail": f"该权限点被 {ref_count} 个角色引用，请先解除角色关联"}, status=400)
-        logger.info(f"Permission.destroy - user: {request.user.username}, perm: {perm.code}")
+        logger.info(f"Permission.destroy - user: {request.user.username}, perm: {perm.permission_key}")
         perm.delete()
         return Response(status=204)
 
@@ -1331,33 +1397,33 @@ class RoleViewSet(viewsets.ModelViewSet):
         self._check_super_admin()
         partial = kwargs.get('partial', False)
         role = self.get_object()
-        # 内置角色的 code 和 is_builtin 不可修改
+        # 内置角色的 role_key 和 is_builtin 不可修改（API 字段名仍为 code，内部映射 role_key）
         if role.is_builtin:
-            if 'code' in request.data and request.data['code'] != role.code:
-                logger.warning(f"Role.update - user {request.user.username} tried to change code of builtin role {role.code}")
+            if 'code' in request.data and request.data['code'] != role.role_key:
+                logger.warning(f"Role.update - user {request.user.username} tried to change code of builtin role {role.role_key}")
                 return Response({"detail": "内置角色编码不可修改"}, status=400)
             if 'is_builtin' in request.data and request.data['is_builtin'] != role.is_builtin:
-                logger.warning(f"Role.update - user {request.user.username} tried to change is_builtin of role {role.code}")
+                logger.warning(f"Role.update - user {request.user.username} tried to change is_builtin of role {role.role_key}")
                 return Response({"detail": "内置角色标记不可修改"}, status=400)
         if 'is_builtin' in request.data:
-            logger.warning(f"Role.update - user {request.user.username} tried to set is_builtin on role {role.code}")
+            logger.warning(f"Role.update - user {request.user.username} tried to set is_builtin on role {role.role_key}")
             return Response({"detail": "is_builtin 字段不可通过API修改"}, status=400)
         serializer = self.get_serializer(role, data=request.data, partial=partial)
         serializer.is_valid(raise_exception=True)
         self.perform_update(serializer)
-        logger.info(f"Role.update - user: {request.user.username}, role: {role.code}, data: {request.data}")
+        logger.info(f"Role.update - user: {request.user.username}, role: {role.role_key}, data: {request.data}")
         return Response(serializer.data)
 
     def destroy(self, request, *args, **kwargs):
         self._check_super_admin()
         role = self.get_object()
         if role.is_builtin:
-            logger.warning(f"Role.destroy - user {request.user.username} tried to delete builtin role {role.code}")
+            logger.warning(f"Role.destroy - user {request.user.username} tried to delete builtin role {role.role_key}")
             return Response({"detail": "内置角色不可删除"}, status=400)
-        user_count = UserRole.objects.filter(role=role, is_active=True).count()
+        user_count = UserRoleRel.objects.filter(role=role, status='ACTIVE').count()
         if user_count > 0:
             return Response({"detail": f"该角色被 {user_count} 个用户使用，请先解除用户关联"}, status=400)
-        logger.info(f"Role.destroy - user: {request.user.username}, role: {role.code}")
+        logger.info(f"Role.destroy - user: {request.user.username}, role: {role.role_key}")
         role.delete()
         return Response(status=204)
 
@@ -1389,7 +1455,7 @@ class RoleViewSet(viewsets.ModelViewSet):
         invalid_count = len(clean_ids) - len(valid_ids)
 
         with transaction.atomic():
-            RolePermission.objects.filter(
+            RolePermissionRel.objects.filter(
                 role=role,
                 is_active=True,
             ).exclude(permission_id__in=valid_ids).update(
@@ -1399,18 +1465,18 @@ class RoleViewSet(viewsets.ModelViewSet):
             )
 
             if valid_ids:
-                objs = [RolePermission(
+                objs = [RolePermissionRel(
                     role=role,
                     permission_id=pid,
                     granted_by=request.user
                 ) for pid in valid_ids]
-                RolePermission.objects.bulk_create(
+                RolePermissionRel.objects.bulk_create(
                     objs,
                     update_conflicts=True,
                     update_fields=['is_active', 'revoked_at', 'revoked_by'],
                     unique_fields=['role_id', 'permission_id']
                 )
-        logger.info(f"Role.assign_permissions - user: {request.user.username}, role: {role.code}, count: {len(valid_ids)}")
+        logger.info(f"Role.assign_permissions - user: {request.user.username}, role: {role.role_key}, count: {len(valid_ids)}")
         resp = {"detail": f"已更新 {len(valid_ids)} 个权限"}
         if invalid_count > 0:
             resp["skipped"] = invalid_count
@@ -1424,16 +1490,18 @@ class TeamViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
 
     def _check_can_manage_team(self, dept_id=None):
-        """检查是否有团队管理权限（RBAC：user:manage_users:all 或 department scope）"""
+        """检查是否有团队管理权限（RBAC：user.manage_all 或 user.manage + DEPT scope）"""
         u = self.request.user
+        # is_user_admin 判定 user.manage_all 权限（全局用户管理）
         if u.is_user_admin:
             return True
-        # 部门经理只能管理自己部门的团队（RBAC：user:manage_users:department）
-        if has_permission(u, 'user:manage_users:department'):
+        # 部门经理只能管理自己部门的团队（user.manage + DEPT scope）
+        if has_permission(u, 'user.manage') and get_user_data_scope_level(u) == DataScope.DEPT:
             if dept_id is None:
                 from rest_framework.exceptions import PermissionDenied
                 raise PermissionDenied("部门经理仅可操作本部门团队")
-            manager_depts = set(Department.objects.filter(leader=u, is_deleted=False).values_list('id', flat=True))
+            # get_user_managed_depts（含属地授权部门）
+            manager_depts = get_user_managed_depts(u)
             if dept_id in manager_depts:
                 return True
         from rest_framework.exceptions import PermissionDenied
@@ -1548,7 +1616,8 @@ class TeamViewSet(viewsets.ModelViewSet):
     def destroy(self, request, *args, **kwargs):
         team = self.get_object()
         self._check_can_manage_team(team.department_id)
-        user_count = UserTeam.objects.filter(team=team).count()
+        # 单团队 FK：统计 User.team 指向该团队的用户
+        user_count = User.objects.filter(team=team, is_deleted=False).count()
         if user_count > 0:
             return Response({"detail": f"该团队下还有 {user_count} 个成员，无法删除"}, status=400)
 
@@ -1581,29 +1650,31 @@ class MyPermissionsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        from apps.users.models import get_user_permission_map
         u = request.user
         roles = [
             {
                 "id": ur.role.id,
-                "code": ur.role.code,
+                "code": ur.role.role_key,
                 "name": ur.role.name,
                 "is_builtin": ur.role.is_builtin,
             }
-            for ur in u.roles.select_related("role").all()
+            for ur in u.user_role_rels.select_related("role").filter(status='ACTIVE').all()
         ]
-        perm_map = get_user_permission_map(u)
-        # 转换为前端友好的分组结构
+        # get_user_permissions（返回 permission_key 集合）
+        perm_set = get_user_permissions(u)
+        # 按模块分组，转换为前端友好的分组结构
+        # 新权限点格式为三段式 module.resource.action（如 kb.document.read）
         groups = {}
-        for key, scopes in perm_map.items():
-            module, action = key.split(":", 1) if ":" in key else (key, "")
+        for key in perm_set:
+            parts = key.split('.')
+            module = parts[0] if parts else key
+            action = parts[-1] if len(parts) > 1 else ""
             if module not in groups:
                 groups[module] = []
             groups[module].append({
-                "code": f"{module}:{action}:{scopes[0]}" if scopes else key,
+                "code": key,
                 "action": action,
-                "scopes": scopes,
-                "label": f"{action} / {','.join(scopes)}",
+                "label": key,
             })
         return Response({
             "roles": roles,
@@ -1616,7 +1687,7 @@ class PermissionApproversView(APIView):
     """GET /api/v1/auth/permissions/approvers/?scope=team|department|all
     返回当前用户可选择的审批人列表。
     - team: 团队 leader + 部门经理
-    - department: 部门经理 + 知识库管理员(kb_ops)
+    - department: 部门经理 + 知识库管理员
     - all: 部门经理 + 知识库管理员 + 超级管理员
     """
     permission_classes = [IsAuthenticated]
@@ -1639,11 +1710,12 @@ class PermissionApproversView(APIView):
                 "role_label": role_label,
             })
 
-        # 用户所属团队的 leader
+        # 用户所属团队的 leader（单团队 FK）
         if scope in ("team", "department", "all"):
-            team_ids = list(UserTeam.objects.filter(user=u).values_list("team_id", flat=True))
-            for t in Team.objects.filter(id__in=team_ids, is_deleted=False):
-                _add(t.leader, f"{t.name} · 团队负责人")
+            if u.team_id:
+                team = Team.objects.filter(id=u.team_id, is_deleted=False).first()
+                if team:
+                    _add(team.leader, f"{team.name} · 团队负责人")
 
         # 用户所属部门的 leader
         if scope in ("department", "all"):
@@ -1651,17 +1723,24 @@ class PermissionApproversView(APIView):
                 dept = u.department
                 _add(dept.leader, f"{dept.name} · 部门经理") if dept else None
 
-        # 知识库管理员 + 超级管理员（部门及以上级别）
+        # 知识库管理员（部门及以上级别）
+        # 通过 RolePermissionRel 反查拥有 kb.manage_all 权限的活跃用户
         if scope in ("department", "all"):
-            kb_ops_users = User.objects.filter(
-                roles__role__code__in=["kb_ops"], is_deleted=False, status="active"
+            kb_admin_users = User.objects.filter(
+                is_deleted=False, status="active",
+                user_role_rels__status='ACTIVE',
+                user_role_rels__role__role_permissions__is_active=True,
+                user_role_rels__role__role_permissions__permission__permission_key='kb.manage_all',
             ).distinct()
-            for k in kb_ops_users:
+            for k in kb_admin_users:
                 _add(k, "知识库管理员")
 
+        # 超级管理员（all 级别）——通过 role_key='super_admin' 反查
         if scope == "all":
             sa_users = User.objects.filter(
-                roles__role__code="super_admin", is_deleted=False, status="active"
+                is_deleted=False, status="active",
+                user_role_rels__status='ACTIVE',
+                user_role_rels__role__role_key='super_admin',
             ).distinct()
             for s in sa_users:
                 _add(s, "超级管理员")
@@ -1677,29 +1756,40 @@ class AccessApplicationView(APIView):
     """GET/POST /api/v1/auth/permissions/applications/
     GET: 当前用户的访问申请列表
     POST: 提交新的文档/团队/部门访问申请
+
+    使用 PermissionApprovalTicket 实现访问申请工单。
+    响应字段名保持不变（target_type/target_id/action 等）以兼容前端。
     """
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        from apps.users.models import AccessApplication
-        apps = AccessApplication.objects.filter(applicant=request.user).order_by("-created_at")[:50]
+        from apps.users.models import PermissionApprovalTicket
+        apps = PermissionApprovalTicket.objects.filter(applicant=request.user).order_by("-created_at")[:50]
         rows = []
         for a in apps:
+            # 从 approval_chain 提取审批意见（最后一个节点的 comment）
+            reviewer_comment = ""
+            if a.approval_chain:
+                last_step = a.approval_chain[-1] if isinstance(a.approval_chain, list) else {}
+                reviewer_comment = last_step.get("comment", "") if isinstance(last_step, dict) else ""
             rows.append({
                 "id": a.id,
-                "target_type": a.target_type,
-                "target_id": a.target_id,
-                "action": a.action,
+                "target_type": a.scope_type.lower() if a.scope_type else "",
+                "target_id": a.scope_id,
+                "action": a.change_type.lower() if a.change_type else "",
                 "reason": a.reason,
-                "status": a.status,
-                "reviewer_comment": a.reviewer_comment,
+                "status": a.status.lower() if a.status else "",
+                "reviewer_comment": reviewer_comment,
                 "created_at": a.created_at.isoformat() if a.created_at else "",
-                "reviewed_at": a.reviewed_at.isoformat() if a.reviewed_at else "",
+                "reviewed_at": a.approved_at.isoformat() if a.approved_at else "",
             })
         return Response({"rows": rows, "count": len(rows)})
 
     def post(self, request):
-        from apps.users.models import AccessApplication
+        import uuid
+        from apps.users.models import (
+            PermissionApprovalTicket, ScopeType, TicketChangeType, TicketStatus,
+        )
         target_type = (request.data.get("target_type") or "").strip()
         target_id = request.data.get("target_id")
         action = (request.data.get("action") or "read").strip()
@@ -1714,15 +1804,24 @@ class AccessApplicationView(APIView):
         if not reason:
             return Response({"detail": "请填写申请理由"}, status=400)
 
-        app = AccessApplication.objects.create(
+        # 映射旧 target_type → 新 scope_type
+        scope_type_map = {
+            "doc": ScopeType.NONE, "team": ScopeType.TEAM,
+            "dept": ScopeType.DEPT, "all": ScopeType.GLOBAL,
+        }
+        # 生成唯一工单号
+        ticket_no = f"APP-{uuid.uuid4().hex[:12].upper()}"
+        app = PermissionApprovalTicket.objects.create(
+            ticket_no=ticket_no,
             applicant=request.user,
-            target_type=target_type,
-            target_id=target_id,
-            action=action,
+            target_user=request.user,  # 自助申请：被授权对象为申请人自身
+            change_type=TicketChangeType.GRANT,
+            scope_type=scope_type_map.get(target_type, ScopeType.NONE),
+            scope_id=target_id,
             reason=reason,
-            status="pending",
+            status=TicketStatus.PENDING,
         )
-        logger.info(f"AccessApplication created: id={app.id}, applicant={request.user.username}, "
+        logger.info(f"PermissionApprovalTicket created: id={app.id}, applicant={request.user.username}, "
                     f"target={target_type}:{target_id}, action={action}")
         return Response({
             "id": app.id,
@@ -1738,13 +1837,128 @@ class AccessApplicationWithdrawView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        from apps.users.models import AccessApplication
+        from apps.users.models import PermissionApprovalTicket, TicketStatus
         try:
-            app = AccessApplication.objects.get(id=pk, applicant=request.user)
-        except AccessApplication.DoesNotExist:
+            app = PermissionApprovalTicket.objects.get(id=pk, applicant=request.user)
+        except PermissionApprovalTicket.DoesNotExist:
             return Response({"detail": "申请不存在"}, status=404)
-        if app.status != "pending":
+        if app.status != TicketStatus.PENDING:
             return Response({"detail": f"当前状态 {app.status} 不可撤回"}, status=400)
-        app.status = "withdrawn"
+        # CANCELLED（工单状态机）
+        app.status = TicketStatus.CANCELLED
         app.save(update_fields=["status", "updated_at"])
-        return Response({"detail": "已撤回", "status": "withdrawn"})
+        return Response({"detail": "已撤回", "status": "cancelled"})
+
+
+class PendingApprovalTicketsView(APIView):
+    """GET /api/v1/auth/permissions/pending-approvals/
+    当前用户待审批的工单列表（共享审批池）
+
+    筛选逻辑：
+    - 工单 status=PENDING
+    - 当前审批节点的 approver_role 匹配当前用户的角色/身份
+    - 排除申请人自己的工单
+    - 排除已被其他管理员处理的节点（approver_id 已回填且非当前用户）
+
+    多人可见：多个管理员同时可见同一待审批工单
+    先到先得：一人审批后，工单从其他人的待办列表消失
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from apps.users.models import PermissionApprovalTicket, TicketStatus
+        from apps.users.ticket_service import _can_approve_for_role
+
+        user = request.user
+        # 全量 PENDING 工单，在应用层过滤角色匹配（JSONField 不支持 ORM 查询 approver_role）
+        pending_tickets = PermissionApprovalTicket.objects.filter(
+            status=TicketStatus.PENDING,
+        ).select_related('applicant', 'target_user')
+
+        rows = []
+        for ticket in pending_tickets:
+            chain = ticket.approval_chain or []
+            if ticket.current_step >= len(chain):
+                continue
+            node = chain[ticket.current_step]
+            approver_role = node['approver_role']
+
+            # 如果节点已被其他管理员处理（approver_id 已回填且非当前用户），跳过
+            if node.get('approver_id') and node['approver_id'] != user.id:
+                continue
+
+            # 角色匹配校验
+            if _can_approve_for_role(user, approver_role, ticket):
+                rows.append({
+                    'id': ticket.id,
+                    'ticket_no': ticket.ticket_no,
+                    'change_type': ticket.change_type,
+                    'applicant_name': ticket.applicant.real_name or ticket.applicant.username,
+                    'target_user_name': ticket.target_user.real_name or ticket.target_user.username,
+                    'role_name': ticket.role.name if ticket.role else '',
+                    'scope_type': ticket.scope_type,
+                    'scope_id': ticket.scope_id,
+                    'reason': ticket.reason,
+                    'approver_role': approver_role,
+                    'approver_id': node.get('approver_id'),
+                    'created_at': ticket.created_at.isoformat() if ticket.created_at else '',
+                    'current_step': ticket.current_step,
+                    'total_steps': len(chain),
+                })
+
+        return Response({
+            'rows': rows,
+            'count': len(rows),
+        })
+
+
+class MyTicketsView(APIView):
+    """GET /api/v1/auth/permissions/my-tickets/
+    当前用户发起的工单列表（含待审批、已通过、已驳回、已执行等所有状态）
+
+    用于查看自己申请的权限变更进度和历史。
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from apps.users.models import PermissionApprovalTicket
+
+        tickets = PermissionApprovalTicket.objects.filter(
+            applicant=request.user,
+        ).select_related('target_user', 'role').order_by('-created_at')[:100]
+
+        rows = []
+        for t in tickets:
+            chain = t.approval_chain or []
+            approver_name = ''
+            if t.status in ('APPROVED', 'EXECUTED', 'REJECTED') and chain:
+                # 取最后一个审批节点的 approver_id 对应的用户名
+                for node in reversed(chain):
+                    if node.get('approver_id'):
+                        from apps.users.models import User
+                        approver = User.objects.filter(id=node['approver_id']).first()
+                        if approver:
+                            approver_name = approver.real_name or approver.username
+                        break
+
+            rows.append({
+                'id': t.id,
+                'ticket_no': t.ticket_no,
+                'change_type': t.change_type,
+                'status': t.status,
+                'role_name': t.role.name if t.role else '',
+                'scope_type': t.scope_type,
+                'scope_id': t.scope_id,
+                'reason': t.reason,
+                'approver_name': approver_name,
+                'created_at': t.created_at.isoformat() if t.created_at else '',
+                'approved_at': t.approved_at.isoformat() if t.approved_at else '',
+                'executed_at': t.executed_at.isoformat() if t.executed_at else '',
+                'current_step': t.current_step,
+                'total_steps': len(chain),
+            })
+
+        return Response({
+            'rows': rows,
+            'count': len(rows),
+        })

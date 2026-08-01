@@ -5,7 +5,7 @@ chat views - 会话 / 问答 / 反馈
 from loguru import logger
 
 from django.db.models import Q, F, OuterRef, Subquery
-from rest_framework import viewsets, status
+from rest_framework import viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -58,99 +58,6 @@ class SessionViewSet(viewsets.ModelViewSet):
         records = QaRecord.objects.filter(session=s).prefetch_related('agent_traces').order_by("turn_index")
         return Response(QaRecordSerializer(records, many=True).data)
 
-
-# [软删除 - 2026-08-01] 同步问答接口 ChatAskView
-# 原因：
-#   1. 前端已完全迁移到 SSE 流式接口（ChatAskStreamView / chat/ask_stream/）
-#   2. executor.ask 同步调用仍保留给 AgentTaskRunView 等后端内部场景使用（非 HTTP 出口）
-#   3. 后续如需恢复对外同步接口，可重新取消以下注释；URL 路由与审计中间件需同步启用
-#
-# class ChatAskView(APIView):
-#     """
-#     POST /api/v1/chat/ask/
-#     Body: {session_id?, question, mode?, root_types?[], node_ids?[], use_cache?, do_task_split?}
-#     Response: {answer, citations, message_id, session_id, stats, tool_traces?}
-#
-#     热点缓存 → (Agent 工具调用循环 / 任务拆分 / 混合检索) → 记忆加载 → LLM 生成 → 落 QaRecord
-#
-#     mode 取值：
-#     - auto（默认）: Agent 模式，LLM 自主决定是否调用工具（knowledge_search/web_search 等）
-#     - rag: 传统 RAG 模式，预检索 + LLM 生成
-#     - agent: 强制 Agent 模式（与 auto 行为一致，语义明确）
-#     """
-#     permission_classes = [IsAuthenticated]
-#
-#     def post(self, request):
-#         question = (request.data.get("question") or "").strip()
-#         if not question:
-#             return Response({"detail": "question 必填"}, status=400)
-#
-#         session_id = request.data.get("session_id")
-#         mode = request.data.get("mode", "auto")  # auto / rag / agent
-#         root_types = request.data.get("root_types")
-#         node_ids = request.data.get("node_ids")
-#         use_cache = bool(request.data.get("use_cache", True))
-#         do_task_split = bool(request.data.get("do_task_split", False))
-#
-#         # 动态获取默认根类型
-#         if not root_types or not root_types[0]:
-#             default_root = KnowledgeNode.objects.filter(
-#                 node_type='root', is_deleted=False
-#             ).first()
-#             root_types = [default_root.root_type] if default_root else ['company_doc']
-#
-#         # 会话
-#         if session_id:
-#             try:
-#                 session = Session.objects.get(id=session_id, user=request.user, is_deleted=False)
-#             except Session.DoesNotExist:
-#                 return Response({"detail": "session 不存在"}, status=404)
-#         else:
-#             session = Session.objects.create(
-#                 user=request.user,
-#                 title=question[:32],
-#                 root_type=root_types[0],
-#             )
-#
-#         # 调用 executor
-#         try:
-#             from apps.agent.executor import ask as executor_ask
-#             result = executor_ask(
-#                 user=request.user,
-#                 question=question,
-#                 session=session,
-#                 root_types=root_types,
-#                 node_ids=node_ids,
-#                 use_cache=use_cache,
-#                 do_task_split=do_task_split,
-#                 do_rerank=True,
-#                 mode=mode,
-#             )
-#         except Exception as e:
-#             logger.exception("chat.ask executor error")
-#             return Response({"detail": "服务端处理异常，请稍后重试"}, status=500)
-#
-#         # 会话轮次+1（原子更新）
-#         Session.objects.filter(id=session.id).update(turn_count=F('turn_count') + 1)
-#
-#         response_data = {
-#             "message_id": result.get("qa_id"),
-#             "session_id": session.id,
-#             "answer": result.get("answer", ""),
-#             "citations": result.get("citations", []),
-#             "is_hit_cache": result.get("is_hit_cache", False),
-#             "stats": result.get("stats", {}),
-#         }
-#         # Agent 模式返回工具调用链，供前端展示思考过程
-#         if result.get("tool_traces"):
-#             response_data["tool_traces"] = result["tool_traces"]
-#         
-#         # 如果有错误信息，添加到响应中
-#         stats = result.get("stats", {})
-#         if stats.get("error"):
-#             response_data["error"] = stats.get("error")
-#         
-#         return Response(response_data)
 
 
 class ChatAskStreamView(APIView):

@@ -25,14 +25,22 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.knowledge.models import KnowledgeNode, Document, DocumentChunk, DocOperationLog
+from apps.knowledge.models import (
+    KnowledgeNode, Document, DocumentChunk, DocOperationLog,
+    ResourceShare, ResourceBlockList,
+    VisibilityLevel, ResourceType, ShareScopeType, AccessLevel, InheritMode, ShareStatus,
+)
 from apps.knowledge.serializers import (
     KnowledgeNodeSerializer, KnowledgeNodeCreateSerializer,
     DocumentSerializer, DocumentChunkSerializer,
 )
 from apps.knowledge.access import resolve_doc_access, build_user_context, build_grants_map
 from apps.knowledge.storage import get_document_storage
-from apps.users.models import User, DocDenyUser, DocAllowUser, DocCrossTeam, AccessApplication
+# 权限体系：ResourceShare/ResourceBlockList(文档级共享与黑名单) + PermissionApprovalTicket(审批工单)
+from apps.users.models import (
+    User, PermissionApprovalTicket, TicketStatus, TicketChangeType,
+    has_permission, get_user_managed_teams, get_user_managed_depts,
+)
 from apps.users.permissions import IsAdminOrOps
 
 
@@ -58,61 +66,128 @@ def _log_operation(request, action, document=None, node=None, detail=None):
 
 
 def _get_user_role(user):
-    """获取用户角色信息（严格权限检查）"""
+    """获取用户角色信息（基于 RBAC permission_key 判定，清除角色硬编码）
+
+    返回 (role, dept_id, team_ids)：
+    - role: super_admin / kb_admin / dept_manager / team_leader / employee
+    - dept_id: 用户主部门 ID
+    - team_ids: 用户可管理的团队 ID 列表（含本团队 + 授权团队）
+
+    判定优先级：super_admin → kb_admin → dept_manager(有 user.manage 且管理部门) → team_leader(有 user.manage 且管理团队) → employee
+    """
     if not user or not getattr(user, 'is_authenticated', False):
         return None, None, []
 
-    # 检查是否是超级管理员（直接使用属性，不使用 getattr）
-    if hasattr(user, 'is_super_admin') and user.is_super_admin:
+    # super_admin 系统级快路径
+    if getattr(user, 'is_super_admin', False):
         return 'super_admin', None, []
 
-    # 检查是否是知识库管理员（文档管理权限等同于超管）
-    try:
-        user_roles = list(user.user_roles.values_list('role__code', flat=True))
-    except Exception:
-        user_roles = []
-
+    # kb_admin：有 kb.manage_all 权限（is_kb_admin 属性内部已走 has_permission）
     if getattr(user, 'is_kb_admin', False):
         return 'kb_admin', None, []
 
-    if 'dept_manager' in user_roles:
-        return 'dept_manager', getattr(user, 'department_id', None), []
-    elif 'team_leader' in user_roles:
-        # 获取用户所在的团队
-        try:
-            team_ids = list(user.user_teams.values_list('team_id', flat=True))
-        except Exception:
-            team_ids = []
-        return 'team_leader', getattr(user, 'department_id', None), team_ids
-    else:
-        # 普通员工
-        try:
-            team_ids = list(user.user_teams.values_list('team_id', flat=True))
-        except Exception:
-            team_ids = []
-        return 'employee', getattr(user, 'department_id', None), team_ids
+    dept_id = getattr(user, 'department_id', None)
+    # user.team 为单团队 FK，managed_teams 含本团队 + UserTeamScopeRel 授权团队
+    managed_team_ids = list(get_user_managed_teams(user))
+    managed_dept_ids = get_user_managed_depts(user)
+
+    # 部门管理员：有 user.manage 权限且可管理部门多于主部门（即有属地授权）
+    if has_permission(user, 'user.manage') and managed_dept_ids:
+        return 'dept_manager', dept_id, managed_team_ids
+
+    # 团队组长：有 user.manage 权限且管理团队非空
+    if has_permission(user, 'user.manage') and managed_team_ids:
+        return 'team_leader', dept_id, managed_team_ids
+
+    # 普通员工
+    return 'employee', dept_id, managed_team_ids
 
 
-def _validate_visibility_scope(user, visible_scope):
+# 旧 visible_scope → 新 visibility_level 映射（兼容前端旧参数）
+_LEGACY_SCOPE_MAP = {
+    'team': VisibilityLevel.TEAM_ONLY,
+    'dept': VisibilityLevel.DEPT_ONLY,
+    'public': VisibilityLevel.PUBLIC,
+}
+
+
+def _normalize_visibility_level(value):
+    """将前端传入的可见性参数归一化为 VisibilityLevel 枚举值
+
+    兼容两种输入：
+    - 新版 visibility_level: TEAM_ONLY / DEPT_ONLY / PUBLIC
+    - 旧版 visible_scope: team / dept / public
+    返回 VisibilityLevel 枚举值或 None（非法值）
     """
-    验证用户是否有权限设置指定的可见范围
+    if not value:
+        return None
+    if value in VisibilityLevel.values:
+        return value
+    return _LEGACY_SCOPE_MAP.get(value)
+
+
+def _validate_visibility_level(user, visibility_level):
+    """验证用户是否有权限设置指定的可见性层级
+
     返回 (is_valid, error_message)
 
-    visible_scope 三档: team(仅归属团队) / dept(归属全部门) / public(全公司)
+    visibility_level 三档:
+    - TEAM_ONLY: 仅归属团队可见
+    - DEPT_ONLY: 仅归属部门（含下属团队）可见
+    - PUBLIC: 全局全员可见（扩大范围需审批）
     """
-    if visible_scope not in ('team', 'dept', 'public'):
-        return False, "无效的可见范围设置"
+    if visibility_level not in VisibilityLevel.values:
+        return False, "无效的可见性层级设置"
 
-    # super_admin / kb_admin 可以设置任意可见范围
+    # super_admin / kb_admin 可以设置任意可见性层级
     if getattr(user, 'is_super_admin', False) or getattr(user, 'is_kb_admin', False):
         return True, None
 
-    # 所有用户都可以设置 team 和 dept
-    if visible_scope in ('team', 'dept'):
+    # 所有用户都可以设置 TEAM_ONLY 和 DEPT_ONLY
+    if visibility_level in (VisibilityLevel.TEAM_ONLY, VisibilityLevel.DEPT_ONLY):
         return True, None
 
-    # public 需要审批（通过 access_application 流程），但创建时可以设置
+    # PUBLIC 需要审批（通过 PermissionApprovalTicket 流程），但创建时可以设置
     return True, None
+
+
+def _encode_ticket_reason(doc_id, action, user_reason=''):
+    """将文档访问申请的目标信息编码到 PermissionApprovalTicket.reason 字段
+
+    PermissionApprovalTicket 无 target_type/target_id 字段（它是 RBAC 角色审批工单），
+    文档访问申请复用该表，通过 reason 前缀编码文档目标。
+    格式: [doc:{doc_id}:{action}] {user_reason}
+    """
+    return f"[doc:{doc_id}:{action}] {user_reason or ''}"
+
+
+def _decode_ticket_reason(reason):
+    """从 PermissionApprovalTicket.reason 解析文档访问申请的目标信息
+
+    返回 (doc_id, action, user_reason)；无法解析时返回 (None, None, reason)
+    """
+    if not reason:
+        return None, None, ''
+    import re as _re
+    m = _re.match(r'^\[doc:(\d+):(\w+)\]\s*(.*)$', reason, _re.DOTALL)
+    if m:
+        return int(m.group(1)), m.group(2), m.group(3)
+    return None, None, reason
+
+
+def _extract_last_comment(approval_chain):
+    """从 PermissionApprovalTicket.approval_chain 提取最近一条审批意见
+
+    approval_chain 格式: [{step, approver_id, status, comment, approved_at}, ...]
+    用于在申请列表中展示审批人意见。
+    """
+    if not approval_chain or not isinstance(approval_chain, list):
+        return ''
+    # 从后往前找第一条有 comment 的记录
+    for step in reversed(approval_chain):
+        if isinstance(step, dict) and step.get('comment'):
+            return step['comment']
+    return ''
 
 
 ALLOWED_EXTENSIONS = {
@@ -393,18 +468,29 @@ class KnowledgeNodeViewSet(viewsets.ModelViewSet):
     # ── 团队组长权限辅助方法 ────────────
 
     def _is_team_leader(self, user):
-        """用户是否为团队组长"""
+        """用户是否为团队组长 —— 通过 Team.leader 反查（user.team 为单团队 FK）
+
+        判定依据：用户是否是某个活跃团队的 leader。
+        """
         if not user or not user.is_authenticated:
             return False
         try:
-            return user.user_roles.filter(role__code='team_leader').exists()
+            from apps.users.models import Team
+            return Team.objects.filter(leader=user, is_deleted=False).exists()
         except Exception:
             return False
 
     def _get_team_leader_paths(self, user):
-        """获取团队组长管理的团队节点 path 列表"""
+        """获取团队组长管理的团队节点 path 列表
+
+        user.team 为单团队 FK，组长可能管理多个团队（通过 Team.leader 反查）。
+        通过 ref_id=team.id 定位 Level 3 团队节点，取其 path 用于子树匹配。
+        """
         try:
-            team_ids = list(user.user_teams.values_list('team_id', flat=True))
+            from apps.users.models import Team
+            team_ids = list(Team.objects.filter(
+                leader=user, is_deleted=False
+            ).values_list('id', flat=True))
         except Exception:
             team_ids = []
         if not team_ids:
@@ -594,26 +680,32 @@ class DocumentViewSet(viewsets.ModelViewSet):
     queryset = Document.objects.order_by("-created_at")
     serializer_class = DocumentSerializer
     permission_classes = [IsAuthenticated]
-    filterset_fields = ["node", "status", "file_type", "visible_scope", "root_type", "owner", "is_deleted", "dept_node_id"]
+    # 支持按 visibility_level / dept_id / team_id 过滤
+    filterset_fields = ["node", "status", "file_type", "visibility_level",
+                        "root_type", "owner", "is_deleted", "dept_id", "team_id"]
     search_fields = ["title", "file_name", "owner__username", "owner__real_name"]
 
     def get_queryset(self):
-        qs = super().get_queryset().select_related("owner", "node")
+        # restored_by 用于序列化器 restored_by_name，一并 select_related 避免列表页 N+1
+        qs = super().get_queryset().select_related("owner", "node", "restored_by")
         user = self.request.user
         include_deleted = self.request.query_params.get("include_deleted") == "true"
-        
+
         if not include_deleted:
             qs = qs.filter(is_deleted=False)
-        
+
+        # 部门筛选：Document.dept_id 直接存储部门组织 ID（非节点 ID），无需再查节点
         dept_id = self.request.query_params.get("dept_id")
         if dept_id:
-            from apps.knowledge.models import KnowledgeNode
-            dept_node = KnowledgeNode.objects.filter(
-                ref_id=dept_id, node_level=2
-            ).first()
-            if dept_node:
-                qs = qs.filter(dept_node_id=dept_node.id)
-        
+            qs = qs.filter(dept_id=dept_id)
+
+        # 可见性筛选：前端传 visible_scope 或 visibility（team/dept/public），归一化为 visibility_level
+        vis_raw = self.request.query_params.get("visible_scope") or self.request.query_params.get("visibility")
+        if vis_raw:
+            vis_level = _normalize_visibility_level(vis_raw)
+            if vis_level:
+                qs = qs.filter(visibility_level=vis_level)
+
         if self.request.query_params.get("discover"):
             # 发现模式：返回全部文档用于浏览与申请权限，
             # 但绝密(secret_level=4)文档的条目名仅 owner 和管理员可见
@@ -624,9 +716,11 @@ class DocumentViewSet(viewsets.ModelViewSet):
             return qs
         if getattr(user, 'is_super_admin', False) or getattr(user, 'is_kb_admin', False):
             return qs
+        # 非管理员：仅看自己上传的 + 全局公开文档（visibility_level=PUBLIC）
+        # 跨团队/跨部门的文档需通过 ResourceShare 共享才能可见，由检索层 access.py 过滤
         qs = qs.filter(
             models.Q(owner=user) |
-            models.Q(visible_scope='public')
+            models.Q(visibility_level=VisibilityLevel.PUBLIC)
         )
         return qs
 
@@ -686,42 +780,58 @@ class DocumentViewSet(viewsets.ModelViewSet):
         old_obj = self.get_object()
         access = self._access(old_obj)
 
-        # 检查是否在修改可见范围
-        new_visible_scope = serializer.validated_data.get('visible_scope', old_obj.visible_scope)
-        is_changing_visibility = new_visible_scope != old_obj.visible_scope
+        # 检查是否在修改可见性层级（visibility_level 控制可见范围）
+        new_visibility_level = serializer.validated_data.get(
+            'visibility_level', old_obj.visibility_level
+        )
+        is_changing_visibility = new_visibility_level != old_obj.visibility_level
 
         if is_changing_visibility:
             user = self.request.user
 
-            # 验证可见范围是否合法
-            is_valid, error_msg = _validate_visibility_scope(user, new_visible_scope)
+            # 验证可见性层级是否合法
+            is_valid, error_msg = _validate_visibility_level(user, new_visibility_level)
             if not is_valid:
                 raise PermissionDenied(error_msg)
 
-            # 可见范围扩大（team→dept / team→public / dept→public）需要双层审批
-            scope_order = {'team': 0, 'dept': 1, 'public': 2}
-            if scope_order.get(new_visible_scope, 0) > scope_order.get(old_obj.visible_scope, 0):
-                # 创建 AccessApplication 审批记录，标记需要双层审批
-                AccessApplication.objects.create(
+            # 可见性扩大（TEAM_ONLY→DEPT_ONLY / TEAM_ONLY→PUBLIC / DEPT_ONLY→PUBLIC）需要双层审批
+            # scope_order 值越大可见范围越广
+            scope_order = {
+                VisibilityLevel.TEAM_ONLY: 0,
+                VisibilityLevel.DEPT_ONLY: 1,
+                VisibilityLevel.PUBLIC: 2,
+            }
+            if scope_order.get(new_visibility_level, 0) > scope_order.get(old_obj.visibility_level, 0):
+                # 创建 PermissionApprovalTicket 审批工单
+                # 文档目标信息编码在 reason 字段前缀，approval_chain 记录双层审批步骤
+                import uuid as _uuid
+                ticket = PermissionApprovalTicket.objects.create(
+                    ticket_no=f'DOC-VIS-{_uuid.uuid4().hex[:12].upper()}',
                     applicant=user,
-                    target_type='doc',
-                    target_id=old_obj.id,
-                    action='visibility_change',
-                    new_visibility=new_visible_scope,
-                    reason=f"申请将文档可见范围从「{old_obj.get_visible_scope_display()}」"
-                           f"扩大为「{dict(Document.VISIBLE_SCOPE_CHOICES).get(new_visible_scope, new_visible_scope)}」",
-                    status='pending',
-                    need_double_approval=True,
+                    target_user=user,
+                    change_type=TicketChangeType.SCOPE_CHANGE,
+                    reason=_encode_ticket_reason(
+                        old_obj.id, 'visibility_change',
+                        f"申请将文档可见性从「{old_obj.get_visibility_level_display()}」"
+                        f"扩大为「{dict(VisibilityLevel.choices).get(new_visibility_level, new_visibility_level)}」"
+                    ),
+                    status=TicketStatus.PENDING,
+                    # 双层审批链：两位不同管理员先后审批
+                    approval_chain=[
+                        {'step': 0, 'approver_id': None, 'status': 'pending', 'comment': '', 'approved_at': None},
+                        {'step': 1, 'approver_id': None, 'status': 'pending', 'comment': '', 'approved_at': None},
+                    ],
+                    current_step=0,
                 )
                 raise PermissionDenied(
-                    "扩大可见范围需要双层审批，已自动提交审批申请，需两位管理员先后审批"
+                    "扩大可见性层级需要双层审批，已自动提交审批工单，需两位管理员先后审批"
                 )
         else:
             # 其他字段修改：需要写权限
             self._require_write(old_obj)
 
         old_data = {
-            'visible_scope': old_obj.visible_scope,
+            'visibility_level': old_obj.visibility_level,
             'allow_download': old_obj.allow_download,
             'allow_share': old_obj.allow_share,
             'title': old_obj.title,
@@ -729,7 +839,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
         }
         new_obj = serializer.save()
         new_data = {
-            'visible_scope': new_obj.visible_scope,
+            'visibility_level': new_obj.visibility_level,
             'allow_download': new_obj.allow_download,
             'allow_share': new_obj.allow_share,
             'title': new_obj.title,
@@ -947,7 +1057,11 @@ class DocumentViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     def request_access(self, request, pk=None):
         """POST /documents/{id}/request_access/  {action, reason?}
-        注意：申请者通常尚无读取权限，故不走 get_object 的 can_read 校验。"""
+        注意：申请者通常尚无读取权限，故不走 get_object 的 can_read 校验。
+
+        通过 PermissionApprovalTicket 管理审批工单：
+        文档目标信息编码在 reason 前缀 [doc:{doc_id}:{action}]。
+        """
         doc = Document.objects.filter(id=pk, is_deleted=False).first()
         if not doc:
             raise Http404("文档不存在")
@@ -955,30 +1069,40 @@ class DocumentViewSet(viewsets.ModelViewSet):
         if action not in ("read", "download"):
             raise ValidationError({"action": "无效的申请类型"})
 
-        # 已有相同 pending 申请则不重复创建
-        exists = AccessApplication.objects.filter(
-            applicant=request.user, target_type='doc', target_id=doc.id,
-            action=action, status="pending"
+        user_reason = (request.data.get("reason") or "")[:1000]
+        encoded_reason = _encode_ticket_reason(doc.id, action, user_reason)
+
+        # 已有相同 pending 申请则不重复创建（通过 reason 前缀匹配文档目标）
+        exists = PermissionApprovalTicket.objects.filter(
+            applicant=request.user,
+            change_type=TicketChangeType.GRANT,
+            reason=encoded_reason,
+            status=TicketStatus.PENDING,
         ).exists()
         if exists:
             return Response({"ok": False, "detail": "已存在待审批的相同申请"}, status=200)
 
-        app = AccessApplication.objects.create(
+        import uuid as _uuid
+        ticket = PermissionApprovalTicket.objects.create(
+            ticket_no=f'DOC-REQ-{_uuid.uuid4().hex[:12].upper()}',
             applicant=request.user,
-            target_type='doc',
-            target_id=doc.id,
-            action=action,
-            reason=(request.data.get("reason") or "")[:1000],
-            status="pending",
+            target_user=request.user,
+            change_type=TicketChangeType.GRANT,
+            reason=encoded_reason,
+            status=TicketStatus.PENDING,
+            approval_chain=[
+                {'step': 0, 'approver_id': None, 'status': 'pending', 'comment': '', 'approved_at': None},
+            ],
+            current_step=0,
         )
         logger.info(f"[AccessRequest] doc={doc.id} applicant={request.user.username} action={action}")
         return Response({
-            "id": app.id,
+            "id": ticket.id,
             "doc_id": doc.id,
-            "action": app.action,
-            "reason": app.reason,
-            "status": app.status,
-            "created_at": app.created_at,
+            "action": action,
+            "reason": user_reason,
+            "status": ticket.status,
+            "created_at": ticket.created_at,
         }, status=201)
 
     # ------------------------------------------------------------------
@@ -986,41 +1110,62 @@ class DocumentViewSet(viewsets.ModelViewSet):
     # ------------------------------------------------------------------
     @action(detail=True, methods=["get"])
     def access_grants(self, request, pk=None):
-        """GET /documents/{id}/access_grants/  查看该文档的所有授权"""
+        """GET /documents/{id}/access_grants/  查看该文档的所有授权
+
+        统一查询 ResourceShare（共享白名单）+ ResourceBlockList（黑名单）：
+        - allow_users: ResourceShare(share_scope_type=USER)
+        - cross_teams: ResourceShare(share_scope_type=TEAM)
+        - deny_users: ResourceBlockList（仅个人）
+        """
         doc = self.get_object()
         self._require_write(doc)
 
         result = {
-            'allow_users': [],      # 个人白名单
-            'cross_teams': [],      # 跨团队授权
+            'allow_users': [],      # 个人共享白名单
+            'cross_teams': [],      # 跨团队共享
             'deny_users': [],       # 黑名单
-            'visible_scope': doc.visible_scope,
+            'visibility_level': doc.visibility_level,
         }
 
-        # 1. DocAllowUser（个人白名单）
-        for au in DocAllowUser.objects.filter(doc_id=doc.id):
-            result['allow_users'].append({
-                'id': au.id,
-                'uid': au.uid,
-                'expire_time': au.expire_time,
-                'create_time': au.create_time,
-            })
+        # 1. ResourceShare（共享白名单：个人 + 团队）
+        shares = ResourceShare.objects.filter(
+            resource_type=ResourceType.DOCUMENT,
+            resource_id=doc.id,
+        ).select_related('granted_by')
+        for share in shares:
+            if share.share_scope_type == ShareScopeType.USER:
+                result['allow_users'].append({
+                    'id': share.id,
+                    'uid': share.share_scope_id,
+                    'access_level': share.access_level,
+                    'status': share.status,
+                    'expire_time': share.expires_at,
+                    'create_time': share.granted_at,
+                })
+            elif share.share_scope_type == ShareScopeType.TEAM:
+                # 查团队 code 用于展示
+                from apps.users.models import Team
+                team_code = Team.objects.filter(id=share.share_scope_id).values_list('code', flat=True).first()
+                result['cross_teams'].append({
+                    'id': share.id,
+                    'team_id': share.share_scope_id,
+                    'team_code': team_code or '',
+                    'access_level': share.access_level,
+                    'status': share.status,
+                    'expire_time': share.expires_at,
+                    'create_time': share.granted_at,
+                })
 
-        # 2. DocCrossTeam（跨团队授权）
-        for ct in DocCrossTeam.objects.filter(doc_id=doc.id):
-            result['cross_teams'].append({
-                'id': ct.id,
-                'team_code': ct.team_code,
-                'expire_time': ct.expire_time,
-                'create_time': ct.create_time,
-            })
-
-        # 3. DocDenyUser（黑名单）
-        for du in DocDenyUser.objects.filter(doc_id=doc.id):
+        # 2. ResourceBlockList（黑名单，仅个人）
+        for block in ResourceBlockList.objects.filter(
+            resource_type=ResourceType.DOCUMENT, resource_id=doc.id
+        ).select_related('blocked_user'):
             result['deny_users'].append({
-                'id': du.id,
-                'uid': du.uid,
-                'create_time': du.create_time,
+                'id': block.id,
+                'uid': block.blocked_user_id,
+                'reason': block.reason,
+                'status': block.status,
+                'create_time': block.blocked_at,
             })
 
         return Response(result)
@@ -1028,8 +1173,12 @@ class DocumentViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="grant_access")
     def grant_access(self, request, pk=None):
         """POST /documents/{id}/grant_access/  {grant_type, team_code/uid}  创建跨团队/个人授权
-        grant_type: cross_team / allow_user
-        缩小可见范围时，为指定团队创建跨团队授权"""
+
+        通过 ResourceShare 管理跨团队/个人授权：
+        - cross_team: ResourceShare(share_scope_type=TEAM, share_scope_id=team_id)
+        - allow_user: ResourceShare(share_scope_type=USER, share_scope_id=user_id)
+        授予后设置 doc.has_resource_share=True 加速检索过滤。
+        """
         doc = self.get_object()
         self._require_write(doc)
         grant_type = request.data.get("grant_type")
@@ -1040,19 +1189,32 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 team_code = request.data.get("team_code", "").strip()
                 if not team_code:
                     raise ValidationError({"team_code": "team_code 不能为空"})
-                grant, created = DocCrossTeam.objects.get_or_create(
-                    doc_id=doc.id,
-                    team_code=team_code,
-                    defaults={"create_by": request.user.id},
+                # 通过 team_code 查 team_id
+                from apps.users.models import Team
+                team = Team.objects.filter(code=team_code, is_deleted=False).first()
+                if not team:
+                    raise ValidationError({"team_code": f"团队 {team_code} 不存在"})
+                # ResourceShare 唯一约束：(resource_type, resource_id, share_scope_type, share_scope_id)
+                # 撤销后重新授予会产生新记录，此处用 get_or_create 避免重复
+                share, created = ResourceShare.objects.get_or_create(
+                    resource_type=ResourceType.DOCUMENT,
+                    resource_id=doc.id,
+                    share_scope_type=ShareScopeType.TEAM,
+                    share_scope_id=team.id,
+                    defaults={
+                        'access_level': AccessLevel.READ,
+                        'granted_by': request.user,
+                        'status': ShareStatus.ACTIVE,
+                    },
                 )
-                if created:
-                    doc.has_cross_team = True
-                    doc.save(update_fields=["has_cross_team"])
+                if created and not doc.has_resource_share:
+                    doc.has_resource_share = True
+                    doc.save(update_fields=["has_resource_share"])
                 _log_operation(request, 'doc_share', document=doc,
                                detail={'grant_type': 'cross_team', 'team_code': team_code,
-                                       'created': created})
+                                       'team_id': team.id, 'created': created})
                 return Response({
-                    "id": grant.id,
+                    "id": share.id,
                     "grant_type": "cross_team",
                     "team_code": team_code,
                     "created": created,
@@ -1061,16 +1223,25 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 uid = request.data.get("uid")
                 if not uid:
                     raise ValidationError({"uid": "uid 不能为空"})
-                grant, created = DocAllowUser.objects.get_or_create(
-                    doc_id=doc.id,
-                    uid=uid,
-                    defaults={"create_by": request.user.id},
+                share, created = ResourceShare.objects.get_or_create(
+                    resource_type=ResourceType.DOCUMENT,
+                    resource_id=doc.id,
+                    share_scope_type=ShareScopeType.USER,
+                    share_scope_id=uid,
+                    defaults={
+                        'access_level': AccessLevel.READ,
+                        'granted_by': request.user,
+                        'status': ShareStatus.ACTIVE,
+                    },
                 )
+                if created and not doc.has_resource_share:
+                    doc.has_resource_share = True
+                    doc.save(update_fields=["has_resource_share"])
                 _log_operation(request, 'doc_share', document=doc,
                                detail={'grant_type': 'allow_user', 'uid': uid,
                                        'created': created})
                 return Response({
-                    "id": grant.id,
+                    "id": share.id,
                     "grant_type": "allow_user",
                     "uid": uid,
                     "created": created,
@@ -1081,7 +1252,11 @@ class DocumentViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="revoke_grant")
     def revoke_grant(self, request, pk=None):
         """POST /documents/{id}/revoke_grant/  {grant_type, grant_id}
-        grant_type: allow_user / cross_team / deny_user"""
+
+        统一操作 ResourceShare / ResourceBlockList：
+        - allow_user / cross_team: ResourceShare.status=REVOKED（软撤销，保留历史审计）
+        - deny_user: ResourceBlockList.status=REVOKED
+        """
         doc = self.get_object()
         self._require_write(doc)
         grant_type = request.data.get("grant_type")
@@ -1089,25 +1264,41 @@ class DocumentViewSet(viewsets.ModelViewSet):
         if grant_type not in ("allow_user", "cross_team", "deny_user"):
             raise ValidationError({"grant_type": "无效的授权类型，可选: allow_user/cross_team/deny_user"})
         try:
-            if grant_type == "allow_user":
-                grant = DocAllowUser.objects.get(id=grant_id, doc_id=doc.id)
-            elif grant_type == "cross_team":
-                grant = DocCrossTeam.objects.get(id=grant_id, doc_id=doc.id)
+            if grant_type in ("allow_user", "cross_team"):
+                # 共享白名单撤销（ResourceShare）
+                grant = ResourceShare.objects.get(
+                    id=grant_id,
+                    resource_type=ResourceType.DOCUMENT,
+                    resource_id=doc.id,
+                )
+                grant.status = ShareStatus.REVOKED
+                grant.revoked_by = request.user
+                grant.revoked_at = timezone.now()
+                grant.save(update_fields=['status', 'revoked_by', 'revoked_at'])
+                revoked_detail = {
+                    'grant_type': grant_type,
+                    'grant_id': grant.id,
+                    'share_scope_type': grant.share_scope_type,
+                    'share_scope_id': grant.share_scope_id,
+                }
             else:
-                grant = DocDenyUser.objects.get(id=grant_id, doc_id=doc.id)
-        except (DocAllowUser.DoesNotExist, DocCrossTeam.DoesNotExist, DocDenyUser.DoesNotExist):
+                # 黑名单撤销（ResourceBlockList）
+                grant = ResourceBlockList.objects.get(
+                    id=grant_id,
+                    resource_type=ResourceType.DOCUMENT,
+                    resource_id=doc.id,
+                )
+                grant.status = ShareStatus.REVOKED
+                grant.revoked_by = request.user
+                grant.revoked_at = timezone.now()
+                grant.save(update_fields=['status', 'revoked_by', 'revoked_at'])
+                revoked_detail = {
+                    'grant_type': 'deny_user',
+                    'grant_id': grant.id,
+                    'blocked_user_id': grant.blocked_user_id,
+                }
+        except (ResourceShare.DoesNotExist, ResourceBlockList.DoesNotExist):
             raise Http404("授权记录不存在")
-        revoked_detail = {
-            'grant_type': grant_type,
-            'grant_id': grant.id,
-        }
-        if grant_type == "allow_user":
-            revoked_detail['uid'] = grant.uid
-        elif grant_type == "cross_team":
-            revoked_detail['team_code'] = grant.team_code
-        else:
-            revoked_detail['uid'] = grant.uid
-        grant.delete()
         _log_operation(request, 'doc_revoke', document=doc,
                        detail=revoked_detail)
         return Response({"ok": True, "grant_type": grant_type, "grant_id": grant_id})
@@ -1117,51 +1308,75 @@ class DocumentViewSet(viewsets.ModelViewSet):
     # ------------------------------------------------------------------
     @action(detail=False, methods=["get"], url_path="my_access_requests")
     def my_access_requests(self, request):
-        """GET /documents/my_access_requests/  我发起的访问申请"""
-        qs = AccessApplication.objects.filter(applicant=request.user).order_by("-created_at")[:100]
+        """GET /documents/my_access_requests/  我发起的访问申请
+
+        通过 PermissionApprovalTicket 管理审批工单：
+        文档目标信息从 reason 前缀 [doc:{id}:{action}] 解析。
+        """
+        qs = PermissionApprovalTicket.objects.filter(
+            applicant=request.user,
+            change_type=TicketChangeType.GRANT,
+        ).order_by("-created_at")[:100]
         data = []
-        for app in qs:
+        for ticket in qs:
+            doc_id, action, user_reason = _decode_ticket_reason(ticket.reason)
             data.append({
-                "id": app.id,
-                "target_type": app.target_type,
-                "target_id": app.target_id,
-                "action": app.action,
-                "reason": app.reason,
-                "status": app.status,
-                "reviewer_comment": app.reviewer_comment,
-                "created_at": app.created_at,
-                "updated_at": app.updated_at,
+                "id": ticket.id,
+                "target_type": 'doc' if doc_id else None,
+                "target_id": doc_id,
+                "action": action,
+                "reason": user_reason,
+                "status": ticket.status,
+                "reviewer_comment": _extract_last_comment(ticket.approval_chain),
+                "created_at": ticket.created_at,
+                "updated_at": ticket.updated_at,
             })
         return Response(data)
 
     @action(detail=False, methods=["get"], url_path="pending_access_requests")
     def pending_access_requests(self, request):
-        """GET /documents/pending_access_requests/  待我（所有者/管理员）审批的申请"""
+        """GET /documents/pending_access_requests/  待我（所有者/管理员）审批的申请
+
+        通过 PermissionApprovalTicket 管理审批工单。
+        管理员看全部待审批工单；非管理员仅看自己文档对应的工单。
+        """
         user = request.user
         is_manager = (getattr(user, 'is_super_admin', False)
                        or getattr(user, 'is_kb_admin', False))
-        qs = AccessApplication.objects.filter(status="pending").select_related("applicant")
-        # 管理员看全部；非管理员仅看自己文档的申请
+        qs = PermissionApprovalTicket.objects.filter(
+            status=TicketStatus.PENDING,
+            change_type=TicketChangeType.GRANT,
+        ).select_related("applicant")
+        # 管理员看全部；非管理员仅看自己文档的申请（通过 reason 前缀匹配 doc_id）
         if not is_manager:
             owned_doc_ids = list(
                 Document.objects.filter(owner=user, is_deleted=False).values_list('id', flat=True)
             )
-            qs = qs.filter(target_type='doc', target_id__in=owned_doc_ids)
+            if owned_doc_ids:
+                # 构造 reason 前缀匹配条件：[doc:{id}:...]
+                import django.db.models as dm
+                q = dm.Q()
+                for did in owned_doc_ids:
+                    q |= dm.Q(reason__startswith=f'[doc:{did}:')
+                qs = qs.filter(q)
+            else:
+                qs = qs.none()
         qs = qs.order_by("-created_at")[:200]
         data = []
-        for app in qs:
+        for ticket in qs:
+            doc_id, action, user_reason = _decode_ticket_reason(ticket.reason)
             item = {
-                "id": app.id,
-                "applicant_id": app.applicant_id,
-                "applicant_name": app.applicant.username,
-                "target_type": app.target_type,
-                "target_id": app.target_id,
-                "action": app.action,
-                "reason": app.reason,
-                "status": app.status,
-                "reviewer_comment": app.reviewer_comment,
-                "created_at": app.created_at,
-                "updated_at": app.updated_at,
+                "id": ticket.id,
+                "applicant_id": ticket.applicant_id,
+                "applicant_name": ticket.applicant.username if ticket.applicant else '',
+                "target_type": 'doc' if doc_id else None,
+                "target_id": doc_id,
+                "action": action,
+                "reason": user_reason,
+                "status": ticket.status,
+                "reviewer_comment": _extract_last_comment(ticket.approval_chain),
+                "created_at": ticket.created_at,
+                "updated_at": ticket.updated_at,
             }
             data.append(item)
         return Response(data)
@@ -1169,17 +1384,25 @@ class DocumentViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=["post"], url_path="approve_access_request")
     def approve_access_request(self, request):
         """POST /documents/approve_access_request/  {request_id, comment?}  批准并创建授权
-        
-        双层审批逻辑：need_double_approval=True 的申请需两位不同管理员先后审批
+
+        通过 PermissionApprovalTicket 管理审批工单：
+        - 双层审批通过 approval_chain（JSON 数组）记录每步审批人/意见/时间
+        - 终审通过后写入 ResourceShare（文档级个人共享）
+        - visibility_change 类型工单通过后修改 doc.visibility_level
         """
         req_id = request.data.get("request_id")
         try:
-            app = AccessApplication.objects.get(id=req_id, status="pending")
-        except AccessApplication.DoesNotExist:
+            ticket = PermissionApprovalTicket.objects.get(id=req_id, status=TicketStatus.PENDING)
+        except PermissionApprovalTicket.DoesNotExist:
             raise Http404("申请不存在或已处理")
+
+        # 从 reason 解析文档目标信息
+        doc_id, action, user_reason = _decode_ticket_reason(ticket.reason)
+
         # 仅所有者/管理员可审批
-        if app.target_type == 'doc' and app.target_id:
-            doc = Document.objects.filter(id=app.target_id, is_deleted=False).first()
+        doc = None
+        if doc_id:
+            doc = Document.objects.filter(id=doc_id, is_deleted=False).first()
             a = resolve_doc_access(request.user, doc) if doc else None
             if not a or not (a["is_owner"] or a["is_manager"]):
                 raise PermissionDenied("无权审批此申请")
@@ -1191,77 +1414,118 @@ class DocumentViewSet(viewsets.ModelViewSet):
         reviewer = request.user
         comment = (request.data.get("comment") or "")[:1000]
 
-        # 双层审批：需要两位不同管理员先后审批
-        if app.need_double_approval and app.first_reviewed_by_id is None:
-            # 一审：记录审批人，保持 pending
-            app.first_reviewed_by = reviewer
-            app.first_reviewed_at = timezone.now()
-            app.reviewer_comment = comment
-            app.save(update_fields=["first_reviewed_by", "first_reviewed_at", "reviewer_comment"])
-            logger.info(f"[AccessRequest] first-approved id={app.id} by={reviewer.username} (pending second review)")
-            return Response({
-                "id": app.id,
-                "status": "pending",
-                "message": "一审已通过，等待第二位管理员审批",
-            })
+        # 双层审批逻辑：approval_chain 有多个 step 时需逐步审批
+        chain = list(ticket.approval_chain or [])
+        need_double = len(chain) > 1
 
-        if app.need_double_approval and app.first_reviewed_by_id is not None:
-            # 二审：不能与一审为同一人
-            if app.first_reviewed_by_id == reviewer.id:
-                raise PermissionDenied("双层审批不能由同一管理员完成，请另一位管理员审批")
-            # 二审通过，最终生效
-            app.status = "approved"
-            app.reviewed_by = reviewer
-            app.reviewed_at = timezone.now()
-            # 追加二审意见
-            if comment:
-                app.reviewer_comment = (app.reviewer_comment + "\n[二审] " + comment)[:2000]
-            app.save(update_fields=["status", "reviewed_by", "reviewed_at", "reviewer_comment"])
+        if need_double:
+            current_step = ticket.current_step or 0
+            step_info = chain[current_step] if current_step < len(chain) else {}
+            # 一审：不能与已审步骤为同一人（二审校验）
+            for prev in chain[:current_step]:
+                if prev.get('approver_id') == reviewer.id:
+                    raise PermissionDenied("双层审批不能由同一管理员完成，请另一位管理员审批")
+            # 记录当前步骤审批结果
+            step_info['approver_id'] = reviewer.id
+            step_info['status'] = 'approved'
+            step_info['comment'] = comment
+            step_info['approved_at'] = timezone.now().isoformat()
+            chain[current_step] = step_info
+
+            if current_step + 1 < len(chain):
+                # 还有后续步骤，保持 pending
+                ticket.approval_chain = chain
+                ticket.current_step = current_step + 1
+                ticket.save(update_fields=["approval_chain", "current_step"])
+                logger.info(f"[AccessRequest] step {current_step} approved id={ticket.id} by={reviewer.username} (pending next step)")
+                return Response({
+                    "id": ticket.id,
+                    "status": TicketStatus.PENDING,
+                    "message": f"第 {current_step + 1} 审已通过，等待后续审批",
+                })
+            # 所有步骤完成，最终通过
+            ticket.approval_chain = chain
+            ticket.status = TicketStatus.APPROVED
+            ticket.approved_at = timezone.now()
+            ticket.save(update_fields=["approval_chain", "status", "approved_at"])
         else:
             # 普通单层审批
-            app.status = "approved"
-            app.reviewer_comment = comment
-            app.reviewed_by = reviewer
-            app.reviewed_at = timezone.now()
-            app.save(update_fields=["status", "reviewer_comment", "reviewed_by", "reviewed_at"])
+            if chain:
+                chain[0]['approver_id'] = reviewer.id
+                chain[0]['status'] = 'approved'
+                chain[0]['comment'] = comment
+                chain[0]['approved_at'] = timezone.now().isoformat()
+            ticket.approval_chain = chain
+            ticket.status = TicketStatus.APPROVED
+            ticket.approved_at = timezone.now()
+            ticket.save(update_fields=["approval_chain", "status", "approved_at"])
 
-        # 创建授权：根据 action 类型处理
-        if app.action == 'visibility_change':
-            if doc:
-                doc.visible_scope = app.new_visibility
-                doc.save(update_fields=['visible_scope', 'updated_at'])
-                _log_operation(request, 'doc_visibility_change', document=doc,
-                               detail={'application_id': app.id, 'applicant': app.applicant.username,
-                                       'new_visible_scope': app.new_visibility})
-        elif app.target_type == 'doc' and app.target_id:
-            DocAllowUser.objects.get_or_create(
-                doc_id=app.target_id,
-                uid=app.applicant_id,
-                defaults={'create_by': request.user.id},
+        # 审批通过后执行授权写入
+        if action == 'visibility_change' and doc:
+            # visibility_change 工单：修改文档可见性层级
+            # 从 user_reason 中解析目标 visibility_level（创建工单时编码在 reason 文本中）
+            # 兜底使用 PUBLIC（扩大审批通常目标就是全局公开）
+            new_level = VisibilityLevel.PUBLIC
+            for level in VisibilityLevel.values:
+                if level in (user_reason or ''):
+                    new_level = level
+                    break
+            doc.visibility_level = new_level
+            doc.save(update_fields=['visibility_level', 'updated_at'])
+            _log_operation(request, 'doc_visibility_change', document=doc,
+                           detail={'ticket_id': ticket.id, 'applicant': ticket.applicant.username,
+                                   'new_visibility_level': new_level})
+        elif doc_id and doc:
+            # 文档访问申请：创建 ResourceShare 个人级共享
+            ResourceShare.objects.get_or_create(
+                resource_type=ResourceType.DOCUMENT,
+                resource_id=doc_id,
+                share_scope_type=ShareScopeType.USER,
+                share_scope_id=ticket.applicant_id,
+                defaults={
+                    'access_level': AccessLevel.READ,
+                    'granted_by': reviewer,
+                    'status': ShareStatus.ACTIVE,
+                },
             )
+            if not doc.has_resource_share:
+                doc.has_resource_share = True
+                doc.save(update_fields=['has_resource_share'])
             _log_operation(request, 'doc_grant', document=doc,
-                           detail={'application_id': app.id, 'applicant': app.applicant.username,
-                                   'action': app.action, 'type': 'allow_user'})
-        logger.info(f"[AccessRequest] approved id={app.id} applicant={app.applicant.username} target={app.target_type}:{app.target_id}")
+                           detail={'ticket_id': ticket.id, 'applicant': ticket.applicant.username,
+                                   'action': action, 'type': 'allow_user'})
+
+        # 标记工单已执行
+        ticket.status = TicketStatus.EXECUTED
+        ticket.executed_at = timezone.now()
+        ticket.save(update_fields=['status', 'executed_at'])
+
+        logger.info(f"[AccessRequest] approved id={ticket.id} applicant={ticket.applicant.username} doc={doc_id}")
         return Response({
-            "id": app.id,
-            "status": app.status,
-            "applicant_id": app.applicant_id,
-            "target_type": app.target_type,
-            "target_id": app.target_id,
-            "action": app.action,
+            "id": ticket.id,
+            "status": ticket.status,
+            "applicant_id": ticket.applicant_id,
+            "target_type": 'doc' if doc_id else None,
+            "target_id": doc_id,
+            "action": action,
         })
 
     @action(detail=False, methods=["post"], url_path="reject_access_request")
     def reject_access_request(self, request):
-        """POST /documents/reject_access_request/  {request_id, comment?}  驳回"""
+        """POST /documents/reject_access_request/  {request_id, comment?}  驳回
+
+        通过 PermissionApprovalTicket 管理审批工单。
+        驳回时在 approval_chain 当前步骤记录驳回意见，工单状态置为 REJECTED。
+        """
         req_id = request.data.get("request_id")
         try:
-            app = AccessApplication.objects.get(id=req_id, status="pending")
-        except AccessApplication.DoesNotExist:
+            ticket = PermissionApprovalTicket.objects.get(id=req_id, status=TicketStatus.PENDING)
+        except PermissionApprovalTicket.DoesNotExist:
             raise Http404("申请不存在或已处理")
-        if app.target_type == 'doc' and app.target_id:
-            doc = Document.objects.filter(id=app.target_id, is_deleted=False).first()
+        doc_id, action, user_reason = _decode_ticket_reason(ticket.reason)
+        doc = None
+        if doc_id:
+            doc = Document.objects.filter(id=doc_id, is_deleted=False).first()
             a = resolve_doc_access(request.user, doc) if doc else None
             if not a or not (a["is_owner"] or a["is_manager"]):
                 raise PermissionDenied("无权审批此申请")
@@ -1269,27 +1533,39 @@ class DocumentViewSet(viewsets.ModelViewSet):
             if not (getattr(request.user, 'is_super_admin', False)
                     or getattr(request.user, 'is_kb_admin', False)):
                 raise PermissionDenied("只有管理员可以审批此类申请")
-        app.status = "rejected"
-        app.reviewer_comment = (request.data.get("comment") or "")[:1000]
-        app.reviewed_by = request.user
-        app.reviewed_at = timezone.now()
-        app.save(update_fields=["status", "reviewer_comment", "reviewed_by", "reviewed_at"])
-        _log_operation(request, 'doc_grant_reject',
-                       detail={'application_id': app.id, 'applicant': app.applicant.username,
-                               'action': app.action, 'target_type': app.target_type, 'target_id': app.target_id})
+
+        comment = (request.data.get("comment") or "")[:1000]
+        # 在 approval_chain 当前步骤记录驳回
+        chain = list(ticket.approval_chain or [])
+        current_step = ticket.current_step or 0
+        if current_step < len(chain):
+            chain[current_step]['approver_id'] = request.user.id
+            chain[current_step]['status'] = 'rejected'
+            chain[current_step]['comment'] = comment
+            chain[current_step]['approved_at'] = timezone.now().isoformat()
+
+        ticket.approval_chain = chain
+        ticket.status = TicketStatus.REJECTED
+        ticket.save(update_fields=["approval_chain", "status"])
+        _log_operation(request, 'doc_grant_reject', document=doc,
+                       detail={'ticket_id': ticket.id, 'applicant': ticket.applicant.username,
+                               'action': action, 'target_id': doc_id})
         return Response({
-            "id": app.id,
-            "status": app.status,
+            "id": ticket.id,
+            "status": ticket.status,
         })
 
 
 class DocumentUploadView(APIView):
     """
     POST /api/v1/knowledge/documents/upload/
-    multipart/form-data: file, node_id, [title], [visible_scope], [force_upload]
+    multipart/form-data: file, node_id, [title], [visibility_level], [force_upload]
     - sha256 去重
     - 存到 MEDIA_ROOT/documents/{uuid}_{name} 或 OSS
     - 触发 Celery 异步解析
+
+    visibility_level: TEAM_ONLY / DEPT_ONLY / PUBLIC
+    （兼容旧版 visible_scope: team / dept / public）
     """
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser, JSONParser]
@@ -1380,18 +1656,22 @@ class DocumentUploadView(APIView):
         if f.size > MAX_FILE_SIZE:
             return Response({"detail": f"文件大小超过限制（最大 {MAX_FILE_SIZE//(1024*1024)} MB）"}, status=400)
 
-        visible_scope = request.data.get("visible_scope") or 'team'
-        if visible_scope not in ('team', 'dept', 'public'):
-            return Response({"detail": "visible_scope 必须为 team/dept/public"}, status=400)
+        # 可见性层级：兼容新版 visibility_level（TEAM_ONLY/DEPT_ONLY/PUBLIC）
+        # 和旧版 visible_scope（team/dept/public），统一归一化为 visibility_level
+        raw_visibility = request.data.get("visibility_level") or request.data.get("visible_scope")
+        visibility_level = _normalize_visibility_level(raw_visibility)
+        if visibility_level is None:
+            return Response({
+                "detail": "visibility_level 必须为 TEAM_ONLY/DEPT_ONLY/PUBLIC"
+                          "（或旧版 visible_scope: team/dept/public）"
+            }, status=400)
 
         # 上传时选择是否允许下载/分享（默认只读：仅预览/对话检索）
         allow_download = request.data.get("allow_download") in ("true", "True", "1", True)
         allow_share = request.data.get("allow_share") in ("true", "True", "1", True)
 
-        # 验证用户是否有权限设置指定的可见范围
-        is_valid, error_msg = _validate_visibility_scope(
-            request.user, visible_scope
-        )
+        # 验证用户是否有权限设置指定的可见性层级
+        is_valid, error_msg = _validate_visibility_level(request.user, visibility_level)
         if not is_valid:
             return Response({"detail": error_msg}, status=403)
 
@@ -1445,12 +1725,11 @@ class DocumentUploadView(APIView):
                     exist.is_deleted = True
                     exist.delete_time = timezone.now()
                     exist.save(update_fields=["is_deleted", "delete_time", "updated_at"])
-                
-                kb_node_id = node_id
-                dept_node_id = None
-                team_node_id = None
-                category_node_id = node_id
 
+                # 从节点祖先链推导归属 dept_id/team_id（组织 ID，非节点 ID）
+                # Level 2 节点 ref_id = dept.id，Level 3 节点 ref_id = team.id
+                dept_id = None
+                team_id = None
                 if node.node_level >= 2:
                     ancestors = []
                     current = node
@@ -1459,14 +1738,18 @@ class DocumentUploadView(APIView):
                         current = current.parent
                     ancestors.reverse()
                     for n in ancestors:
-                        if n.node_level == 1:
-                            kb_node_id = n.id
-                        elif n.node_level == 2:
-                            dept_node_id = n.id
-                        elif n.node_level == 3:
-                            team_node_id = n.id
-                        elif n.node_level >= 4:
-                            category_node_id = n.id
+                        if n.node_level == 2 and n.ref_id:
+                            dept_id = n.ref_id
+                        elif n.node_level == 3 and n.ref_id:
+                            team_id = n.ref_id
+
+                # 归属约束：team_id 或 dept_id 至少一个非空
+                # 若节点祖先链未推导出 dept_id，回退到上传者的主部门
+                if not dept_id:
+                    dept_id = getattr(request.user, 'department_id', None)
+                # 若未推导出 team_id，回退到上传者的所属团队
+                if not team_id:
+                    team_id = getattr(request.user, 'team_id', None)
 
                 doc = Document.objects.create(
                     node=node,
@@ -1478,38 +1761,46 @@ class DocumentUploadView(APIView):
                     file_path=file_path,
                     mime_type=(f.content_type or "")[:64],
                     owner=request.user,
-                    owner_team_id=getattr(request.user, 'team_id', None),
-                    kb_node_id=kb_node_id,
-                    dept_node_id=dept_node_id,
-                    team_node_id=team_node_id,
-                    category_node_id=category_node_id,
-                    version_tag=version_tag,
-                    visible_scope=visible_scope,
+                    # node(FK) + dept_id + team_id 二选一非空
+                    dept_id=dept_id,
+                    team_id=team_id,
+                    # visibility_level 控制可见范围
+                    visibility_level=visibility_level,
                     allow_download=allow_download,
                     allow_share=allow_share,
                     root_type=node.root_type,
                     status="pending",
                     version=version,
+                    version_tag=version_tag,
                 )
 
+                # visibility_teams：为指定团队创建跨团队共享
                 if visibility_teams:
                     from apps.users.models import Team
-                    team_codes = list(Team.objects.filter(
+                    team_ids_to_share = list(Team.objects.filter(
                         id__in=visibility_teams, is_deleted=False
-                    ).values_list('code', flat=True))
-                    for team_code in team_codes:
-                        DocCrossTeam.objects.get_or_create(
-                            doc_id=doc.id,
-                            team_code=team_code,
-                            defaults={"create_by": request.user.id},
+                    ).values_list('id', flat=True))
+                    for share_team_id in team_ids_to_share:
+                        ResourceShare.objects.get_or_create(
+                            resource_type=ResourceType.DOCUMENT,
+                            resource_id=doc.id,
+                            share_scope_type=ShareScopeType.TEAM,
+                            share_scope_id=share_team_id,
+                            defaults={
+                                'access_level': AccessLevel.READ,
+                                'granted_by': request.user,
+                                'status': ShareStatus.ACTIVE,
+                            },
                         )
-                    doc.has_cross_team = True
-                    doc.save(update_fields=["has_cross_team"])
+                    # has_resource_share 标记是否存在资源共享
+                    doc.has_resource_share = True
+                    doc.save(update_fields=["has_resource_share"])
 
                 _log_operation(request, 'doc_upload', document=doc, node=node,
                                detail={'file_name': f.name, 'file_size': total, 'file_hash': file_hash,
-                                       'visible_scope': visible_scope, 'version_tag': version_tag,
-                                       'visibility_teams': visibility_teams, 'visibility_depts': visibility_depts})
+                                       'visibility_level': visibility_level, 'version_tag': version_tag,
+                                       'visibility_teams': visibility_teams, 'visibility_depts': visibility_depts,
+                                       'dept_id': dept_id, 'team_id': team_id})
         except Exception as e:
             if file_path:
                 try:
@@ -1603,10 +1894,6 @@ class DocumentChunksView(APIView):
             "total": len(chunk_list),
             "chunks": DocumentChunkSerializer(chunk_list, many=True).data,
         })
-
-    def _has_permission(self, user, doc):
-        # 保留旧方法签名以兼容外部调用，统一改用 resolve_doc_access
-        return resolve_doc_access(user, doc)["can_read"]
 
 
 class CeleryStatusView(APIView):

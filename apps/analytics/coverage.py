@@ -9,13 +9,12 @@
 5. 领域覆盖分析: 按部门/团队统计知识覆盖情况
 """
 import time
-import uuid
 from datetime import timedelta
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 
 from loguru import logger
 
-from django.db.models import Count, Q, Avg
+from django.db.models import Count, Q
 from django.utils import timezone
 
 
@@ -228,8 +227,11 @@ def analyze_domain_coverage(days: int = 30) -> Dict[str, Any]:
     """分析各部门/团队的知识覆盖情况
 
     由于所有文档的 root_type 都是 knowledge_base，仅按 root_type 分组无意义。
-    改为按 部门(dept_node) → 团队(team_node) 层级拆分，展示各组织的：
+    改为按 部门(dept) → 团队(team) 层级拆分，展示各组织的：
     文档数、切片数、查询总数、查询命中率、文档占比。
+
+    Document 的 dept_id/team_id 直接引用 Department/Team 主键（非节点 ID），
+    因此名称查找改为从 Department/Team 表获取。
 
     Args:
         days: 查询命中率的统计周期
@@ -237,30 +239,28 @@ def analyze_domain_coverage(days: int = 30) -> Dict[str, Any]:
     Returns:
         领域覆盖数据（按部门分组，每组包含下属团队明细）
     """
-    from apps.knowledge.models import Document, DocumentChunk, KnowledgeNode
+    from apps.knowledge.models import Document
+    from apps.users.models import Department, Team
     from apps.chat.models import QaRecord
 
     since = timezone.now() - timedelta(days=days)
 
-    # 预加载部门/团队节点信息，用于名称查找
-    dept_nodes = {
-        n.id: n.name for n in KnowledgeNode.objects.filter(
-            node_level=2, is_deleted=False
-        )
+    # 预加载部门/团队信息，用于名称查找
+    # dept_id/team_id 直接引用 Department/Team 主键
+    dept_map_names = {
+        d.id: d.name for d in Department.objects.filter(is_deleted=False)
     }
-    team_nodes = {
-        n.id: n.name for n in KnowledgeNode.objects.filter(
-            node_level=3, is_deleted=False
-        )
+    team_map_names = {
+        t.id: t.name for t in Team.objects.filter(is_deleted=False)
     }
 
-    # 按 (dept_node_id, team_node_id) 统计文档和切片
-    # 注意: Count('id') 必须加 distinct=True，否则 Document 与 DocumentChunk 的 JOIN
+    # 按 (dept_id, team_id) 统计文档和切片
+    # Count('id') 必须加 distinct=True，否则 Document 与 DocumentChunk 的 JOIN
     # 会导致 doc_count 被切片数膨胀（例如每文档 5 个切片，doc_count 就会是实际的 5 倍）
     doc_chunk_stats = (
         Document.objects
         .filter(is_deleted=False, status='done')
-        .values('dept_node_id', 'team_node_id')
+        .values('dept_id', 'team_id')
         .annotate(
             doc_count=Count('id', distinct=True),
             chunk_count=Count('chunks', distinct=True),
@@ -292,18 +292,18 @@ def analyze_domain_coverage(days: int = 30) -> Dict[str, Any]:
     total_docs = 0
 
     for ds in doc_chunk_stats:
-        dept_id = ds['dept_node_id']
-        team_id = ds['team_node_id']
+        dept_id = ds['dept_id']
+        team_id = ds['team_id']
         doc_count = ds['doc_count']
         chunk_count = ds['chunk_count']
         total_docs += doc_count
 
-        dept_name = dept_nodes.get(dept_id, f'未知部门(#{dept_id})') if dept_id else '未分配部门'
-        team_name = team_nodes.get(team_id, f'未知团队(#{team_id})') if team_id else '未分配团队'
+        dept_name = dept_map_names.get(dept_id, f'未知部门(#{dept_id})') if dept_id else '未分配部门'
+        team_name = team_map_names.get(team_id, f'未知团队(#{team_id})') if team_id else '未分配团队'
 
         if dept_name not in dept_map:
             dept_map[dept_name] = {
-                'dept_node_id': dept_id,
+                'dept_id': dept_id,
                 'doc_count': 0,
                 'chunk_count': 0,
                 'teams': {},
@@ -313,7 +313,7 @@ def analyze_domain_coverage(days: int = 30) -> Dict[str, Any]:
 
         if team_name not in dept_map[dept_name]['teams']:
             dept_map[dept_name]['teams'][team_name] = {
-                'team_node_id': team_id,
+                'team_id': team_id,
                 'doc_count': 0,
                 'chunk_count': 0,
             }
@@ -327,7 +327,7 @@ def analyze_domain_coverage(days: int = 30) -> Dict[str, Any]:
         dept_coverage_rate = round(dept_doc_count / max(total_docs, 1), 4)
         domain_coverage.append({
             'name': dept_name,
-            'dept_node_id': dept_data['dept_node_id'],
+            'dept_id': dept_data['dept_id'],
             'doc_count': dept_doc_count,
             'chunk_count': dept_data['chunk_count'],
             '占比': dept_coverage_rate,

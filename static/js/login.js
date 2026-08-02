@@ -70,9 +70,8 @@ async function doLogin() {
 		toast(e.message, 'error');
 		btn.disabled = false;
 		btn.textContent = '登 录';
-		// 验证码错误时刷新验证码
-		if (e.message === '验证码错误') {
-			refreshCaptcha();
-		}
+		// 登录失败后验证码已失效，统一刷新并清空输入
+		refreshCaptcha();
+		$('#loginCaptcha').value = '';
 	}
 }

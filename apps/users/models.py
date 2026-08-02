@@ -320,6 +320,14 @@ class User(AbstractBaseUser):
         """是否有用户管理权限 —— 基于 permission_key 判定"""
         return self.is_super_admin or has_permission(self, 'user.manage_all')
 
+    @property
+    def is_compliance_admin(self):
+        """是否合规管理员 —— 审计视角角色，可查看全部工单（只读）"""
+        return self.is_super_admin or UserRoleRel.objects.filter(
+            user=self, role__role_key='compliance_admin',
+            status=GrantStatus.ACTIVE,
+        ).exists()
+
     # ------------------------------------------------------------------
     # Django auth 兼容方法
     # ------------------------------------------------------------------

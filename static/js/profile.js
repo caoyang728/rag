@@ -585,14 +585,20 @@ async function loadPermissionApplications() {
 	}
 }
 
-/* ---- 申请弹窗:角色选择 + scope + 审批链预览 ---- */
+/* ---- 申请弹窗:角色选择 + scope + 有效期 + 审批链预览 ---- */
 function openPermissionApplyModal() {
 	// 重置表单
 	document.getElementById('applyRoleKey').value = '';
-	document.getElementById('applyScopeId').value = '';
+	document.getElementById('applyScopeId').innerHTML = '<option value="">请选择</option>';
 	document.getElementById('applyReason').value = '';
+	// 默认不勾选长期,需要填写日期
+	document.getElementById('applyPermanent').checked = false;
+	document.getElementById('applyExpiresAt').value = '';
+	document.getElementById('applyExpiresAt').style.display = '';
 	document.getElementById('applyRoleDesc').style.display = 'none';
 	document.getElementById('applyScopeWrap').style.display = 'none';
+	document.getElementById('applyDeptId').style.display = 'none';
+	document.getElementById('applyDeptId').innerHTML = '<option value="">请选择部门</option>';
 	document.getElementById('applyChainPreview').textContent = '请先选择角色和范围';
 	// 加载可申请角色清单
 	loadAssignableRoles();
@@ -600,6 +606,14 @@ function openPermissionApplyModal() {
 	const mask = document.getElementById('mask');
 	if (modal) modal.classList.add('show');
 	if (mask) mask.classList.add('show');
+}
+
+// 切换"长期有效"勾选:勾选后隐藏日期框,取消勾选恢复显示
+function onApplyPermanentChange() {
+	const checked = document.getElementById('applyPermanent').checked;
+	const dateInput = document.getElementById('applyExpiresAt');
+	dateInput.style.display = checked ? 'none' : '';
+	if (checked) dateInput.value = '';
 }
 
 function closePermissionApplyModal() {
@@ -648,12 +662,14 @@ function onApplyRoleChange() {
 	const roleKey = document.getElementById('applyRoleKey').value;
 	const descEl = document.getElementById('applyRoleDesc');
 	const scopeWrap = document.getElementById('applyScopeWrap');
+	const deptSelect = document.getElementById('applyDeptId');
 	const scopeSelect = document.getElementById('applyScopeId');
 	const scopeHint = document.getElementById('applyScopeHint');
 
 	if (!roleKey) {
 		descEl.style.display = 'none';
 		scopeWrap.style.display = 'none';
+		deptSelect.style.display = 'none';
 		_refreshChainPreview();
 		return;
 	}
@@ -669,13 +685,78 @@ function onApplyRoleChange() {
 	// 动态加载 scope 选项
 	if (role.need_scope && role.scope_type_required) {
 		scopeWrap.style.display = '';
-		scopeHint.textContent = role.scope_type_required === 'TEAM' ? '选择目标团队' : '选择目标部门';
-		_loadScopeOptions(role.scope_type_required);
+		scopeSelect.innerHTML = '<option value="">请选择</option>';
+		if (role.scope_type_required === 'TEAM') {
+			// 团队角色:先选部门再选团队(级联),避免几百个团队平铺难找
+			deptSelect.style.display = '';
+			scopeHint.textContent = '先选择部门,再选择团队';
+			_loadDeptOptionsForCascade();
+		} else {
+			// 部门角色:直接选部门,隐藏级联部门框
+			deptSelect.style.display = 'none';
+			scopeHint.textContent = '选择目标部门';
+			_loadScopeOptions('DEPT');
+		}
 	} else {
 		scopeWrap.style.display = 'none';
+		deptSelect.style.display = 'none';
 		scopeSelect.value = '';
 	}
 
+	_refreshChainPreview();
+}
+
+// 加载部门列表(用于团队级联选择的第一级)
+async function _loadDeptOptionsForCascade() {
+	const select = document.getElementById('applyDeptId');
+	if (!select) return;
+	// 已加载过则不重复请求
+	if (select.dataset.loaded === '1' && select.options.length > 1) return;
+	select.innerHTML = '<option value="">加载中...</option>';
+	try {
+		const data = await api.getJson('/api/v1/auth/departments/');
+		const depts = data.results || data.rows || data || [];
+		const arr = Array.isArray(depts) ? depts : [];
+		select.innerHTML = '<option value="">请选择部门</option>' +
+			arr.map(d => `<option value="${d.id}">${escapeHtml(d.name)}</option>`).join('');
+		select.dataset.loaded = '1';
+	} catch (e) {
+		console.error('load dept for cascade failed:', e);
+		select.innerHTML = '<option value="">加载失败</option>';
+	}
+}
+
+// 部门变更:按部门加载团队列表(级联第二级)
+function onApplyDeptChange() {
+	const deptId = document.getElementById('applyDeptId').value;
+	const teamSelect = document.getElementById('applyScopeId');
+	if (!deptId) {
+		teamSelect.innerHTML = '<option value="">请先选择部门</option>';
+		_refreshChainPreview();
+		return;
+	}
+	_loadTeamOptionsByDept(deptId);
+}
+
+// 按部门 ID 加载团队列表
+async function _loadTeamOptionsByDept(deptId) {
+	const select = document.getElementById('applyScopeId');
+	if (!select) return;
+	select.innerHTML = '<option value="">加载中...</option>';
+	try {
+		const data = await api.getJson(`/api/v1/auth/teams/?department_id=${deptId}`);
+		const teams = data.results || data.rows || data || [];
+		const arr = Array.isArray(teams) ? teams : [];
+		if (arr.length === 0) {
+			select.innerHTML = '<option value="">该部门下暂无团队</option>';
+		} else {
+			select.innerHTML = '<option value="">请选择团队</option>' +
+				arr.map(t => `<option value="${t.id}">${escapeHtml(t.name)}</option>`).join('');
+		}
+	} catch (e) {
+		console.error('load teams by dept failed:', e);
+		select.innerHTML = '<option value="">加载失败</option>';
+	}
 	_refreshChainPreview();
 }
 
@@ -769,9 +850,21 @@ async function submitPermissionApplication() {
 	const roleKey = document.getElementById('applyRoleKey').value;
 	const scopeSelect = document.getElementById('applyScopeId');
 	const reason = document.getElementById('applyReason').value.trim();
+	const isPermanent = document.getElementById('applyPermanent').checked;
+	const expiresAt = document.getElementById('applyExpiresAt').value;
 
 	if (!roleKey) { toast('请选择申请角色', 'error'); return; }
 	if (!reason) { toast('请填写申请理由', 'error'); return; }
+	// 未勾选长期时必须填写有效期,且不能早于今天
+	if (!isPermanent) {
+		if (!expiresAt) { toast('请填写有效期,或勾选"长期有效"', 'error'); return; }
+		const today = new Date();
+		today.setHours(0, 0, 0, 0);
+		if (new Date(expiresAt) < today) {
+			toast('有效期不能早于今天', 'error');
+			return;
+		}
+	}
 
 	const role = _assignableRolesCache.find(r => r.role_key === roleKey);
 	const payload = {
@@ -779,11 +872,15 @@ async function submitPermissionApplication() {
 		change_type: 'GRANT',  // 后端会自动检测同团队已有角色并转为 ROLE_CHANGE
 		reason: reason,
 	};
+	if (!isPermanent && expiresAt) {
+		// date input 返回 "YYYY-MM-DD",补到当天 23:59:59,避免当天 00:00 即过期
+		payload.expires_at = expiresAt + 'T23:59:59';
+	}
 
 	// 团队/部门角色需带 scope
 	if (role && role.need_scope && role.scope_type_required) {
 		const scopeId = scopeSelect.value;
-		if (!scopeId) {
+		if (!scopeId || isNaN(parseInt(scopeId))) {
 			toast('请选择' + (role.scope_type_required === 'TEAM' ? '团队' : '部门'), 'error');
 			return;
 		}

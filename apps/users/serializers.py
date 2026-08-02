@@ -147,9 +147,33 @@ class UserSerializer(serializers.ModelSerializer):
                 "role__id", "role__role_key", "role__name"
             )
         ]
+        codes = {r["code"] for r in rels}
+        # dept_manager 存储在 UserDeptScopeRel（部门管辖绑定表），补入角色列表
+        if "dept_manager" not in codes:
+            dept_rel = obj.dept_scope_rels.filter(
+                status="ACTIVE"
+            ).select_related("role").values("role__id", "role__role_key", "role__name").first()
+            if dept_rel:
+                rels.append({
+                    "id": dept_rel["role__id"],
+                    "code": dept_rel["role__role_key"],
+                    "name": dept_rel["role__name"],
+                })
+                codes.add("dept_manager")
+        # team_leader 存储在 UserTeamScopeRel（团队管辖绑定表），补入角色列表
+        if "team_leader" not in codes:
+            team_rel = obj.team_scope_rels.filter(
+                status="ACTIVE"
+            ).select_related("role").values("role__id", "role__role_key", "role__name").first()
+            if team_rel:
+                rels.append({
+                    "id": team_rel["role__id"],
+                    "code": team_rel["role__role_key"],
+                    "name": team_rel["role__name"],
+                })
+                codes.add("team_leader")
         # viewer 兜底展示：与 get_user_permissions 保持一致
         # 无 contributor + 无 super_admin → 补 viewer 作为人事归属的只读基础角色
-        codes = {r["code"] for r in rels}
         if "contributor" not in codes and "super_admin" not in codes and "viewer" not in codes:
             viewer = Role.objects.filter(role_key="viewer").values("id", "role_key", "name").first()
             if viewer:

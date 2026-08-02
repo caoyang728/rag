@@ -1,0 +1,120 @@
+/* ============================================================================
+ * admin.css —— 管理后台共享样式
+ *
+ * 供 admin-approvals / admin-docs 等管理后台页面共享：
+ * - 表格行 hover 态
+ * - 申请人/上传人信息卡片
+ * - 详情区块标题 + 网格
+ *
+ * 依赖 common.css 中的 CSS 变量（--primary / --bg / --border 等）。
+ * 页面专属样式在各自 admin-xxx.css 中维护，可覆盖此处的共享定义。
+ * ============================================================================ */
+
+/* 表格行 hover */
+.table-row-hover:hover {
+	background: var(--bg) !important
+}
+
+/* 申请人/上传人信息卡片 */
+.applicant-card {
+	display: flex;
+	align-items: center;
+	gap: 14px;
+	padding: 14px 16px;
+	background: linear-gradient(135deg, var(--primary-light), #f0f4ff);
+	border-radius: var(--radius-lg);
+	border: 1px solid var(--primary-lighter)
+}
+.applicant-avatar {
+	width: 44px;
+	height: 44px;
+	border-radius: 50%;
+	background: linear-gradient(135deg, var(--primary), var(--primary-hover));
+	color: #fff;
+	font-size: 18px;
+	font-weight: 600;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	flex-shrink: 0;
+	box-shadow: 0 2px 8px rgba(37, 99, 235, 0.25)
+}
+.applicant-info {
+	flex: 1;
+	min-width: 0
+}
+.applicant-name {
+	font-size: 15px;
+	font-weight: 600;
+	color: var(--text);
+	line-height: 1.4
+}
+.applicant-meta {
+	font-size: 12px;
+	color: var(--text-sub);
+	margin-top: 2px;
+	line-height: 1.4
+}
+.applicant-time {
+	font-size: 12px;
+	color: var(--text-sub);
+	text-align: right;
+	flex-shrink: 0;
+	white-space: nowrap
+}
+.applicant-time-label {
+	color: var(--text-placeholder);
+	font-size: 11px
+}
+
+/* 详情区块标题 + 网格 */
+.detail-section-title {
+	font-size: 13px;
+	font-weight: 600;
+	color: var(--text-sub);
+	margin: 20px 0 10px;
+	display: flex;
+	align-items: center;
+	gap: 6px
+}
+.detail-section-title::before {
+	content: "";
+	width: 3px;
+	height: 14px;
+	background: var(--primary);
+	border-radius: 2px
+}
+.detail-grid {
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+	gap: 16px
+}
+.detail-cell {
+	background: var(--bg);
+	border-radius: var(--radius);
+	padding: 10px 14px;
+	border: 1px solid var(--border);
+	transition: border-color 0.2s
+}
+.detail-cell:hover {
+	border-color: var(--border-strong)
+}
+.detail-cell-label {
+	font-size: 11px;
+	color: var(--text-sub);
+	font-weight: 500;
+	margin-bottom: 4px;
+	letter-spacing: 0.3px
+}
+.detail-cell-value {
+	font-size: 14px;
+	color: var(--text);
+	font-weight: 500;
+	line-height: 1.5;
+	word-break: break-all
+}
+.detail-cell-sub {
+	font-size: 12px;
+	color: var(--text-sub);
+	margin-top: 2px
+}

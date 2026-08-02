@@ -25,6 +25,9 @@ urlpatterns = [
     path("permissions/approvers/", views.PermissionApproversView.as_view()),
     path("permissions/applications/", views.AccessApplicationView.as_view()),
     path("permissions/applications/<int:pk>/withdraw/", views.AccessApplicationWithdrawView.as_view()),
+    # 可申请角色清单 + 审批链预览(申请前展示用)
+    path("permissions/assignable-roles/", views.AssignableRolesView.as_view()),
+    path("permissions/approval-chain-preview/", views.ApprovalChainPreviewView.as_view()),
     # 工单审批池：待我审批 / 我发起的工单
     path("permissions/pending-approvals/", views.PendingApprovalTicketsView.as_view()),
     path("permissions/my-tickets/", views.MyTicketsView.as_view()),

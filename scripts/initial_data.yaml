@@ -9,11 +9,16 @@
 # 其他用户由超级管理员登录后在系统中创建
 # ------------------------------
 users:
-  - username: admin
-    email: admin@example.com
+  - username: admin1
+    email: admin1@example.com
     real_name: 系统管理员
-    password: Admin@1234
-    # 初始化为超级管理员（系统级快路径，鉴权绕过 permission_key 判定）
+    password: Admin1@1234
+    role: super_admin
+
+  - username: admin2
+    email: admin2@example.com
+    real_name: 系统管理员
+    password: Admin2@1234
     role: super_admin
 
 # ------------------------------

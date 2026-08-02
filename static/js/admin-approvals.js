@@ -99,7 +99,9 @@ function _renderTicketRow(t) {
 	const changeTypeMap = {
 		'GRANT': '<span class="badge badge-success">授予</span>',
 		'REVOKE': '<span class="badge badge-warn">撤销</span>',
-		'UPDATE': '<span class="badge badge-info">变更</span>',
+		'ROLE_CHANGE': '<span class="badge badge-info">角色变更</span>',
+		'SCOPE_CHANGE': '<span class="badge badge-info">范围变更</span>',
+		'EXPIRE_EXTEND': '<span class="badge badge-info">延期</span>',
 	};
 	const ct = changeTypeMap[t.change_type] || t.change_type;
 	// 进度：第 N 步 / 共 M 步
@@ -184,8 +186,8 @@ function openTicketModal(t) {
 		</div>
 		<div class="two-col">
 			<div class="form-item">
-				<div class="form-label">目标角色</div>
-				<div class="form-value">${t.role_name ? `<span class="badge badge-info">${escapeHtml(t.role_name)}</span>` : '—'}</div>
+				<div class="form-label">${t.change_type === 'ROLE_CHANGE' ? '角色变更' : '目标角色'}</div>
+				<div class="form-value">${_renderRoleChange(t)}</div>
 			</div>
 			<div class="form-item">
 				<div class="form-label">权限范围</div>
@@ -216,6 +218,7 @@ function openTicketModal(t) {
 function _approverRoleLabel(r) {
 	return {
 		'TEAM_LEADER': '团队组长',
+		'DEPT_LEADER': '部门经理',
 		'DEPT_MANAGER': '部门经理',
 		'USER_ADMIN': '用户管理员',
 		'KB_ADMIN': '知识管理员',
@@ -227,8 +230,21 @@ function _changeTypeLabel(ct) {
 	return {
 		'GRANT': '<span class="badge badge-success">授予权限</span>',
 		'REVOKE': '<span class="badge badge-warn">撤销权限</span>',
-		'UPDATE': '<span class="badge badge-info">变更权限</span>',
+		'ROLE_CHANGE': '<span class="badge badge-info">角色变更</span>',
+		'SCOPE_CHANGE': '<span class="badge badge-info">范围变更</span>',
+		'EXPIRE_EXTEND': '<span class="badge badge-info">延期</span>',
 	}[ct] || ct;
+}
+
+// 渲染角色变更展示:ROLE_CHANGE 显示 旧角色 → 新角色;其他显示新角色
+function _renderRoleChange(t) {
+	if (!t.role_name && !t.previous_role_name) return '—';
+	if (t.change_type === 'ROLE_CHANGE' && t.previous_role_name) {
+		return `<span class="badge badge-warn">${escapeHtml(t.previous_role_name)}</span>` +
+			` <span class="text-sub">→</span> ` +
+			`<span class="badge badge-info">${escapeHtml(t.role_name || '—')}</span>`;
+	}
+	return t.role_name ? `<span class="badge badge-info">${escapeHtml(t.role_name)}</span>` : '—';
 }
 
 /* ---------- 审批通过 ---------- */

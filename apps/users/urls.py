@@ -28,5 +28,8 @@ urlpatterns = [
     # 工单审批池：待我审批 / 我发起的工单
     path("permissions/pending-approvals/", views.PendingApprovalTicketsView.as_view()),
     path("permissions/my-tickets/", views.MyTicketsView.as_view()),
+    # 审批操作：通过 / 驳回
+    path("permissions/tickets/<int:pk>/approve/", views.TicketApproveView.as_view()),
+    path("permissions/tickets/<int:pk>/reject/", views.TicketRejectView.as_view()),
     path("", include(router.urls)),
 ]

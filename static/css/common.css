@@ -1692,3 +1692,58 @@ ol {
 	align-items: center;
 	gap: 8px
 }
+
+/* ==================== 通用工具类 ==================== */
+/* 通用等宽字体（用于工单号等需要等宽显示的场景） */
+.mono {
+	font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace
+}
+/* 通用加粗文本 */
+.text-strong {
+	font-weight: 600
+}
+/* 通用隐藏类（用于 JS 控制显隐） */
+.hidden { display: none !important }
+
+/* 通用间距工具类（页面级布局微调） */
+.mt-8 { margin-top: 8px }
+.mt-12 { margin-top: 12px }
+.mt-16 { margin-top: 16px }
+.mt-20 { margin-top: 20px }
+
+/* ==================== 通用徽章样式 ==================== */
+.badge {
+	display: inline-block;
+	padding: 2px 8px;
+	border-radius: 10px;
+	font-size: 11px;
+	font-weight: 500;
+	white-space: nowrap;
+	line-height: 1.5
+}
+.badge-success { background: rgba(34,197,94,.12); color: #16a34a; }
+.badge-warn, .badge-warning { background: rgba(245,158,11,.12); color: #d97706; }
+.badge-danger { background: rgba(239,68,68,.12); color: #dc2626; }
+.badge-info { background: rgba(59,130,246,.12); color: #2563eb; }
+.badge-default { background: var(--hover); color: var(--text-sub); }
+/* 角标徽章（用于 tab / 按钮中的数量提示，如审批待办数） */
+.badge.badge-danger {
+	background: var(--danger);
+	color: #fff;
+	padding: 0 6px;
+	min-width: 18px;
+	height: 18px;
+	line-height: 18px;
+	text-align: center;
+	font-size: 10px;
+	border-radius: 9px;
+	margin-left: 4px;
+}
+
+/* 表单字段错误提示（使用 hidden 类控制显隐） */
+.field-error {
+	margin-top: 4px;
+	font-size: 12px;
+	color: var(--danger);
+	line-height: 1.4
+}

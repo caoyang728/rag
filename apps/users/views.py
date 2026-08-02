@@ -2011,14 +2011,29 @@ class PendingApprovalTicketsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        from apps.users.models import PermissionApprovalTicket, TicketStatus
+        from apps.users.models import (
+            PermissionApprovalTicket, TicketStatus,
+            Department, Team, ScopeType,
+        )
         from apps.users.ticket_service import _can_approve_for_role
 
         user = request.user
-        # 全量 PENDING 工单，在应用层过滤角色匹配（JSONField 不支持 ORM 查询 approver_role）
+        # 页面访问入口权限校验：仅超级管理员/用户管理员/部门经理/团队组长可查询
+        if not (user.is_super_admin
+                or has_permission(user, 'user.manage_all')
+                or has_permission(user, 'user.manage')
+                or has_permission(user, 'kb.manage_all')):
+            # 非上述角色但作为某团队/部门 leader 的也允许（leader 绑定在 Team/Department.leader_id 上）
+            is_leader = (
+                Team.objects.filter(leader_id=user.id, is_deleted=False).exists()
+                or Department.objects.filter(leader_id=user.id, is_deleted=False).exists()
+            )
+            if not is_leader:
+                raise PermissionDenied("无审批权限")
+
         pending_tickets = PermissionApprovalTicket.objects.filter(
             status=TicketStatus.PENDING,
-        ).select_related('applicant', 'target_user')
+        ).select_related('applicant', 'target_user', 'role')
 
         rows = []
         for ticket in pending_tickets:
@@ -2032,28 +2047,165 @@ class PendingApprovalTicketsView(APIView):
             if node.get('approver_id') and node['approver_id'] != user.id:
                 continue
 
-            # 角色匹配校验
-            if _can_approve_for_role(user, approver_role, ticket):
-                rows.append({
-                    'id': ticket.id,
-                    'ticket_no': ticket.ticket_no,
-                    'change_type': ticket.change_type,
-                    'applicant_name': ticket.applicant.real_name or ticket.applicant.username,
-                    'target_user_name': ticket.target_user.real_name or ticket.target_user.username,
-                    'role_name': ticket.role.name if ticket.role else '',
-                    'scope_type': ticket.scope_type,
-                    'scope_id': ticket.scope_id,
-                    'reason': ticket.reason,
-                    'approver_role': approver_role,
-                    'approver_id': node.get('approver_id'),
-                    'created_at': ticket.created_at.isoformat() if ticket.created_at else '',
-                    'current_step': ticket.current_step,
-                    'total_steps': len(chain),
-                })
+            if not _can_approve_for_role(user, approver_role, ticket):
+                continue
+
+            # 解析 scope 名称（部门/团队）
+            scope_name = ''
+            if ticket.scope_type == ScopeType.DEPT and ticket.scope_id:
+                dept = Department.objects.filter(id=ticket.scope_id, is_deleted=False).only('name').first()
+                scope_name = dept.name if dept else f'部门#{ticket.scope_id}'
+            elif ticket.scope_type == ScopeType.TEAM and ticket.scope_id:
+                team = Team.objects.filter(id=ticket.scope_id, is_deleted=False).only('name').first()
+                scope_name = team.name if team else f'团队#{ticket.scope_id}'
+            elif ticket.scope_type == ScopeType.GLOBAL:
+                scope_name = '全局'
+
+            rows.append({
+                'id': ticket.id,
+                'ticket_no': ticket.ticket_no,
+                'change_type': ticket.change_type,
+                'applicant_id': ticket.applicant_id,
+                'applicant_name': ticket.applicant.real_name or ticket.applicant.username,
+                'applicant_email': ticket.applicant.email or '',
+                'target_user_id': ticket.target_user_id,
+                'target_user_name': ticket.target_user.real_name or ticket.target_user.username,
+                'target_user_email': ticket.target_user.email or '',
+                'role_id': ticket.role_id,
+                'role_name': ticket.role.name if ticket.role else '',
+                'role_key': ticket.role.role_key if ticket.role else '',
+                'scope_type': ticket.scope_type,
+                'scope_id': ticket.scope_id,
+                'scope_name': scope_name,
+                'reason': ticket.reason,
+                'effective_from': ticket.effective_from.isoformat() if ticket.effective_from else '',
+                'expires_at': ticket.expires_at.isoformat() if ticket.expires_at else '',
+                'approver_role': approver_role,
+                'approver_id': node.get('approver_id'),
+                'created_at': ticket.created_at.isoformat() if ticket.created_at else '',
+                'current_step': ticket.current_step,
+                'total_steps': len(chain),
+                'approval_chain': [
+                    {
+                        'approver_role': n.get('approver_role'),
+                        'approver_id': n.get('approver_id'),
+                        'status': n.get('status'),
+                        'comment': n.get('comment', ''),
+                        'approved_at': n.get('approved_at', ''),
+                    } for n in chain
+                ],
+            })
 
         return Response({
             'rows': rows,
             'count': len(rows),
+        })
+
+
+class TicketApproveView(APIView):
+    """POST /api/v1/auth/permissions/tickets/<id>/approve/
+    审批通过工单（共享审批池模式：任一匹配 approver_role 的用户均可审批）
+
+    Body:
+    - comment: string，审批意见（可选）
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        from apps.users.models import PermissionApprovalTicket, TicketStatus
+        from apps.users.ticket_service import approve_ticket, _can_approve_for_role
+
+        try:
+            ticket = PermissionApprovalTicket.objects.select_for_update().get(pk=pk)
+        except PermissionApprovalTicket.DoesNotExist:
+            return Response({"detail": "工单不存在"}, status=404)
+
+        if ticket.status != TicketStatus.PENDING:
+            return Response({"detail": f"工单非待审批状态: {ticket.status}"}, status=400)
+
+        chain = ticket.approval_chain or []
+        if ticket.current_step >= len(chain):
+            return Response({"detail": "审批链已完结，无待审批节点"}, status=400)
+
+        node = chain[ticket.current_step]
+        approver_role = node['approver_role']
+
+        # 角色匹配校验 + 重复处理校验
+        if node.get('approver_id') and node['approver_id'] != request.user.id:
+            raise PermissionDenied("该工单已被其他管理员处理，不再属于您的待办")
+        if not _can_approve_for_role(request.user, approver_role, ticket):
+            raise PermissionDenied(f"您没有审批 {approver_role} 类型工单的权限")
+
+        comment = (request.data.get("comment") or "").strip()
+        ip = _client_ip(request)
+        ua = request.META.get("HTTP_USER_AGENT", "")[:256]
+
+        try:
+            ticket = approve_ticket(ticket, request.user, comment=comment, ip_address=ip, user_agent=ua)
+        except (ValueError, PermissionError) as e:
+            return Response({"detail": str(e)}, status=400)
+
+        logger.info(f"Ticket approved: id={pk}, ticket_no={ticket.ticket_no}, approver={request.user.username}")
+        return Response({
+            "ok": True,
+            "ticket_no": ticket.ticket_no,
+            "status": ticket.status,
+            "current_step": ticket.current_step,
+            "total_steps": len(ticket.approval_chain or []),
+        })
+
+
+class TicketRejectView(APIView):
+    """POST /api/v1/auth/permissions/tickets/<id>/reject/
+    驳回工单（拒绝必填理由）
+
+    Body:
+    - comment: string，驳回理由（必填）
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        from apps.users.models import PermissionApprovalTicket, TicketStatus
+        from apps.users.ticket_service import reject_ticket, _can_approve_for_role
+
+        comment = (request.data.get("comment") or "").strip()
+        if not comment:
+            return Response({"detail": "驳回理由不能为空"}, status=400)
+
+        try:
+            ticket = PermissionApprovalTicket.objects.select_for_update().get(pk=pk)
+        except PermissionApprovalTicket.DoesNotExist:
+            return Response({"detail": "工单不存在"}, status=404)
+
+        if ticket.status != TicketStatus.PENDING:
+            return Response({"detail": f"工单非待审批状态: {ticket.status}"}, status=400)
+
+        chain = ticket.approval_chain or []
+        # 当前节点审批人 或 super_admin 可驳回
+        can_reject = False
+        if ticket.current_step < len(chain):
+            node = chain[ticket.current_step]
+            if node.get('approver_id') and node['approver_id'] == request.user.id:
+                can_reject = True
+            elif _can_approve_for_role(request.user, node['approver_role'], ticket):
+                can_reject = True
+        if not can_reject and not request.user.is_super_admin:
+            raise PermissionDenied("无权驳回该工单")
+
+        ip = _client_ip(request)
+        ua = request.META.get("HTTP_USER_AGENT", "")[:256]
+
+        try:
+            ticket = reject_ticket(ticket, request.user, comment=comment, ip_address=ip, user_agent=ua)
+        except (ValueError, PermissionError) as e:
+            return Response({"detail": str(e)}, status=400)
+
+        logger.info(f"Ticket rejected: id={pk}, ticket_no={ticket.ticket_no}, rejector={request.user.username}")
+        return Response({
+            "ok": True,
+            "ticket_no": ticket.ticket_no,
+            "status": ticket.status,
+            "reject_comment": comment,
         })
 
 

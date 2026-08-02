@@ -2041,12 +2041,12 @@ class DocAuditPendingView(APIView):
 
     def get(self, request):
         user = request.user
-        # 访问入口权限校验（与权限审批页面共享可见性：仅管理角色可见）
+        # 访问入口权限校验：仅知识管理员 / 部门经理 / 团队组长 / 超管可访问
         from apps.users.models import Department, Team, has_permission
         if not (user.is_super_admin
                 or user.is_kb_admin
-                or has_permission(user, 'user.manage_all')
-                or has_permission(user, 'user.manage')):
+                or has_permission(user, 'kb.manage_all')
+                or has_permission(user, 'kb.manage')):
             is_leader = (
                 Team.objects.filter(leader_id=user.id, is_deleted=False).exists()
                 or Department.objects.filter(leader_id=user.id, is_deleted=False).exists()
@@ -2143,6 +2143,7 @@ class DocAuditApproveView(APIView):
     """
     permission_classes = [IsAuthenticated]
 
+    @transaction.atomic
     def post(self, request, pk):
         from apps.users.models import Department, Team, has_permission
 
@@ -2200,6 +2201,7 @@ class DocAuditRejectView(APIView):
     """
     permission_classes = [IsAuthenticated]
 
+    @transaction.atomic
     def post(self, request, pk):
         from apps.users.models import Department, Team
 

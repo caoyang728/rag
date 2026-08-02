@@ -82,7 +82,104 @@ function showMask(show) {
 function closeAllOverlays() {
 	$$('.modal').forEach(m => m.classList.remove('show'));
 	$$('.drawer').forEach(d => d.classList.remove('show'));
+	$$('.confirm-overlay').forEach(o => o.classList.remove('show'));
 	showMask(false);
+}
+
+/* ============ 二次确认弹窗(带模糊背景,层级高于普通弹窗) ============ */
+/**
+ * 显示二次确认弹窗
+ * 在普通弹窗之上叠加一层模糊背景 + 确认弹窗,用于通过/驳回等关键操作的二次确认。
+ *
+ * @param {Object} opts
+ *   - title: string                 弹窗标题
+ *   - bannerType: string           'success'|'danger'|'info'(默认 info)
+ *   - bannerIcon: string           横幅图标文字(如 '✓' '⚠')
+ *   - bannerText: string           横幅提示文字
+ *   - bodyHtml: string             自定义 body 内容(如备注 textarea)
+ *   - buttons: Array               底部按钮 [{text, type:'cancel'|'primary'|'danger', onClick: (ctx)=>void}]
+ *   - onShow: (ctx)=>void          弹窗显示后的回调(如聚焦输入框)
+ * @returns {Object} ctx            上下文 { el, close, setError }
+ *   - el: HTMLElement              弹窗根元素(可 querySelector 获取 body 内的输入框)
+ *   - close(): void                关闭弹窗
+ *   - setError(msg): void          在 body 底部显示错误提示
+ */
+function showConfirmDialog(opts) {
+	opts = opts || {};
+	// 懒初始化:首次调用时创建 overlay + dialog 骨架
+	let overlay = document.getElementById('confirmOverlay');
+	if (!overlay) {
+		overlay = document.createElement('div');
+		overlay.id = 'confirmOverlay';
+		overlay.className = 'confirm-overlay';
+		overlay.innerHTML =
+			'<div class="confirm-dialog">' +
+			'  <div class="modal-header">' +
+			'    <div class="modal-title" id="confirmDialogTitle"></div>' +
+			'    <button class="modal-close" id="confirmDialogClose">&times;</button>' +
+			'  </div>' +
+			'  <div class="modal-body" id="confirmDialogBody"></div>' +
+			'  <div class="modal-footer" id="confirmDialogFooter"></div>' +
+			'</div>';
+		document.body.appendChild(overlay);
+	}
+
+	const dialog = overlay.querySelector('.confirm-dialog');
+	const titleEl = overlay.querySelector('#confirmDialogTitle');
+	const bodyEl = overlay.querySelector('#confirmDialogBody');
+	const footerEl = overlay.querySelector('#confirmDialogFooter');
+	const closeBtn = overlay.querySelector('#confirmDialogClose');
+
+	// 填充标题
+	titleEl.textContent = opts.title || '确认操作';
+
+	// 填充 body:可选横幅 + 自定义内容 + 错误提示容器
+	let bodyHtml = '';
+	if (opts.bannerText) {
+		const bType = opts.bannerType || 'info';
+		const bIcon = opts.bannerIcon || (bType === 'success' ? '✓' : bType === 'danger' ? '⚠' : 'i');
+		bodyHtml += '<div class="confirm-banner confirm-banner-' + bType + '">' +
+			'<span class="confirm-banner-icon">' + bIcon + '</span>' +
+			'<span>' + opts.bannerText + '</span>' +
+			'</div>';
+	}
+	if (opts.bodyHtml) bodyHtml += opts.bodyHtml;
+	bodyHtml += '<div class="field-error hidden" id="confirmDialogErr"></div>';
+	bodyEl.innerHTML = bodyHtml;
+
+	// 填充底部按钮
+	footerEl.innerHTML = '';
+	const buttons = opts.buttons || [{ text: '确认', type: 'primary' }];
+	buttons.forEach(btn => {
+		const b = document.createElement('button');
+		b.textContent = btn.text;
+		if (btn.type === 'primary') b.className = 'btn-save';
+		else if (btn.type === 'danger') b.className = 'btn btn-reject';
+		else b.className = 'btn-cancel';
+		b.onclick = () => { if (typeof btn.onClick === 'function') btn.onClick(ctx); };
+		footerEl.appendChild(b);
+	});
+
+	// 上下文对象:供按钮回调操作弹窗
+	const ctx = {
+		el: dialog,
+		close() { overlay.classList.remove('show'); },
+		setError(msg) {
+			const errEl = bodyEl.querySelector('#confirmDialogErr');
+			if (errEl) {
+				errEl.textContent = msg;
+				errEl.classList.toggle('hidden', !msg);
+			}
+		}
+	};
+
+	// 关闭按钮 & 点击遮罩关闭
+	closeBtn.onclick = () => ctx.close();
+	overlay.onclick = (e) => { if (e.target === overlay) ctx.close(); };
+
+	overlay.classList.add('show');
+	if (typeof opts.onShow === 'function') opts.onShow(ctx);
+	return ctx;
 }
 
 /**
@@ -405,6 +502,7 @@ const PAGE_MAP = {
 	'admin-users': '/admin-users/',
 	'admin-nodes': '/admin-nodes/',
 	'admin-approvals': '/admin-approvals/',
+	'admin-docs': '/admin-docs/',
 	'admin-analytics': '/admin-analytics/',
 	'admin-eval': '/admin-eval/',
 	'admin-audit': '/admin-audit/',
@@ -573,6 +671,15 @@ function escapeHtml(s) {
 	if (s == null) return '';
 	return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
+function _errMsg(err, fallback) {
+	try {
+		if (typeof err === 'string') return err;
+		if (err?.detail) return err.detail;
+		if (err?.message) return err.message;
+		if (err?.error) return err.error;
+	} catch (_) {}
+	return fallback;
+}
 function formatDate(dt) {
 	if (!dt) return '-';
 	const d = new Date(dt);
@@ -678,13 +785,21 @@ function renderSidebar(active) {
 	// 拥有管理权限的角色可见全部管理后台项
 	// 包含：超级管理员 / 文档管理员 / 人员管理员 / 部门经理 / 团队组长
 	const isManagerRole = hasAnyRole('super_admin', 'kb_admin', 'user_admin', 'dept_manager', 'team_leader');
+	// 合规管理员：审计视角，仅可见"权限审批"（看全部工单，不参与审批）
+	const isComplianceOnly = hasAnyRole('compliance_admin') && !isManagerRole;
 
 	const adminItems = [];
 	// 用户与角色、反馈与报表、审计与安全：仅管理角色可见
 	if (isManagerRole) {
 		adminItems.push(
-			{ icon: '✅', name: '审批中心', page: 'admin-approvals', key: 'admin-approvals' },
+			{ icon: '✅', name: '权限审批', page: 'admin-approvals', key: 'admin-approvals' },
+			{ icon: '📄', name: '文档审核', page: 'admin-docs', key: 'admin-docs' },
 			{ icon: '👥', name: '用户与角色', page: 'admin-users', key: 'admin-users' },
+		);
+	} else if (isComplianceOnly) {
+		// 合规管理员仅可见"权限审批"（审计视角，查看全部工单）
+		adminItems.push(
+			{ icon: '✅', name: '权限审批', page: 'admin-approvals', key: 'admin-approvals' },
 		);
 	}
 	// 知识库：所有登录用户可浏览文档；节点增删改仅管理员可用（页面内控制）

@@ -1,101 +1,192 @@
 /* ============================================================================
- * admin-approvals.js —— 权限与文档审批页面
+ * admin-approvals.js —— 权限审批中心
  *
- * 页面访问权限（前后端双重校验）：
- * - 仅 super_admin / user_admin / dept_manager / team_leader 可见
- * - 普通用户直接跳回首页并提示无权限
+ * 四视角架构：
+ * 1. 待我审批：当前用户可处理的 PENDING 工单（共享审批池）
+ * 2. 我已审批：当前用户已处理过的工单（含通过/驳回记录）
+ * 3. 我发起的：当前用户作为申请人提交的工单（所有状态）
+ * 4. 全部工单：全局视角，仅 super_admin / compliance_admin 可见
  *
- * 功能模块：
- * 1. 权限审批工单：待我审批列表 → 查看详情 → 通过 / 拒绝（拒绝必填理由）
- * 2. 文档审核（双审）：待一审 / 待二审 文档 → 查看详情 → 通过 / 驳回（驳回必填理由）
+ * 页面访问权限：super_admin / user_admin / dept_manager / team_leader / kb_admin
  * ============================================================================ */
 
-// 当前选中的审批对象：{type: 'ticket'|'doc', data: {...}}
+// 当前视角：pending / processed / mine / all
+let _currentView = 'pending';
+// 当前列表数据缓存（供行点击回查用）
+let _currentRows = [];
+// 当前打开的审批对象（供通过/驳回按钮使用）
 let _currentApproval = null;
-let confirmCallback = null;
-let _currentTab = 'ticket';
+// 提交防重锁（防止审批通过/驳回重复提交）
+let _submitting = false;
 
 /* ============ 页面启动 ============ */
 document.addEventListener('DOMContentLoaded', () => {
-	// 1. 页面级权限校验：仅管理角色可进入
-	// （common.js 的 authGuard 已校验登录态，此处额外做角色权限拦截）
 	if (!_canAccessPage()) {
 		toast('您没有权限访问审批中心', 'error');
 		setTimeout(() => { window.location.href = '/chat/'; }, 800);
 		return;
 	}
-
-	// 2. 顶栏 / 侧栏 / 全局搜索 已由 common.js 的 DOMContentLoaded 注入，无需重复
-
-	// 3. 加载两个列表（并行）
-	refreshAll();
-
-	// 4. 全局 Enter 快捷键支持（驳回弹窗）
-	const rejectInput = document.getElementById('rejectComment');
-	if (rejectInput) {
-		rejectInput.addEventListener('keydown', (e) => {
-			if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') submitReject();
-		});
+	// 超管/合规管理员可见"全部工单"Tab
+	if (_canViewAll()) {
+		$('#tab-all').classList.remove('hidden');
+	}
+	// 合规管理员默认看"全部工单"（审计视角，不参与审批）
+	const isPureCompliance = hasAnyRole('compliance_admin')
+		&& !hasAnyRole('super_admin', 'user_admin', 'dept_manager', 'team_leader', 'kb_admin');
+	if (isPureCompliance) {
+		switchView('all');
+	} else {
+		loadPendingList();
 	}
 });
 
 /* ---------- 页面级权限判断 ---------- */
 function _canAccessPage() {
-	// 对齐需求：超级管理员、用户管理员、部门经理、团队组长可见
-	// kb_admin 同样拥有管理权限，也允许进入（知识管理员也需要审批文档）
-	return hasAnyRole('super_admin', 'user_admin', 'dept_manager', 'team_leader', 'kb_admin');
+	return hasAnyRole('super_admin', 'user_admin', 'dept_manager', 'team_leader', 'kb_admin', 'compliance_admin');
+}
+
+function _canViewAll() {
+	// 全部工单视角：仅超管/合规管理员
+	return hasAnyRole('super_admin', 'compliance_admin');
 }
 
 /* ============================================================================
- * 标签页切换与数据刷新
+ * 视角切换
  * ============================================================================ */
-function switchTab(tab) {
-	_currentTab = tab;
-	// 样式
+function switchView(view) {
+	_currentView = view;
+	// Tab 样式
 	document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('tab-active'));
-	$('#tab-' + tab).classList.add('tab-active');
-	// 列表显隐
-	$('#list-ticket').classList.toggle('hidden', tab !== 'ticket');
-	$('#list-doc').classList.toggle('hidden', tab !== 'doc');
+	$('#tab-' + view).classList.add('tab-active');
+	// 状态筛选下拉框：仅"全部工单"视角显示
+	$('#allStatusFilter').classList.toggle('hidden', view !== 'all');
+	// 时间列标题：我已审批=我的审批时间，其他=申请时间
+	const thTime = $('#th-time');
+	if (thTime) thTime.textContent = view === 'processed' ? '处理时间' : '申请时间';
+	// 加载对应列表
+	refreshCurrent();
 }
 
-function refreshAll() {
-	loadTicketList();
-	loadDocList();
+function refreshCurrent() {
+	if (_currentView === 'pending') loadPendingList();
+	else if (_currentView === 'processed') loadProcessedList();
+	else if (_currentView === 'mine') loadMineList();
+	else if (_currentView === 'all') loadAllList();
 }
 
 /* ============================================================================
- * 权限审批工单 —— 列表加载
+ * 待我审批 —— 共享审批池中的 PENDING 工单
  * ============================================================================ */
-function loadTicketList() {
+function loadPendingList() {
+	_currentView = 'pending';
 	const tbody = $('#ticketTable');
-	tbody.innerHTML = `<tr><td colspan="9" class="text-sub text-sm text-center" style="padding:30px">加载中...</td></tr>`;
+	tbody.innerHTML = _loadingRow(10);
 	api.getJson('/api/v1/auth/permissions/pending-approvals/')
 		.then(res => {
 			const rows = res?.rows || [];
-			_setBadge('ticket', rows.length);
-			if (!rows.length) {
-				tbody.innerHTML = `<tr><td colspan="9" class="text-sub text-sm text-center" style="padding:30px">暂无待审批工单</td></tr>`;
-				return;
-			}
-			tbody.innerHTML = rows.map(_renderTicketRow).join('');
-			// 绑定行点击
-			tbody.querySelectorAll('[data-ticket-id]').forEach(tr => {
-				tr.addEventListener('click', () => {
-					const id = +tr.getAttribute('data-ticket-id');
-					const data = rows.find(r => r.id === id);
-					if (data) openTicketModal(data);
-				});
-			});
+			_currentRows = rows;
+			_setBadge('pending', rows.length);
+			_renderTable(rows, 'pending');
 		})
 		.catch(err => {
-			toast('加载待审批工单失败', 'error');
+			_setBadge('pending', 0);
+			_renderTableError('加载待审批工单失败');
 			console.error(err);
-			tbody.innerHTML = `<tr><td colspan="9" class="text-sub text-sm text-center" style="padding:30px;color:var(--danger)">加载失败，请稍后重试</td></tr>`;
 		});
 }
 
-function _renderTicketRow(t) {
+/* ============================================================================
+ * 我已审批 —— 当前用户处理过的工单
+ * ============================================================================ */
+function loadProcessedList() {
+	const tbody = $('#ticketTable');
+	tbody.innerHTML = _loadingRow(10);
+	api.getJson('/api/v1/auth/permissions/processed-tickets/')
+		.then(res => {
+			const rows = res?.rows || [];
+			_currentRows = rows;
+			_renderTable(rows, 'processed');
+		})
+		.catch(err => {
+			_renderTableError('加载已审批工单失败');
+			console.error(err);
+		});
+}
+
+/* ============================================================================
+ * 我发起的 —— 当前用户作为申请人的工单
+ * ============================================================================ */
+function loadMineList() {
+	const tbody = $('#ticketTable');
+	tbody.innerHTML = _loadingRow(10);
+	api.getJson('/api/v1/auth/permissions/my-tickets/')
+		.then(res => {
+			const rows = res?.rows || [];
+			_currentRows = rows;
+			_renderTable(rows, 'mine');
+		})
+		.catch(err => {
+			_renderTableError('加载我的申请失败');
+			console.error(err);
+		});
+}
+
+/* ============================================================================
+ * 全部工单 —— 全局视角（仅超管/合规）
+ * ============================================================================ */
+function loadAllList() {
+	const tbody = $('#ticketTable');
+	tbody.innerHTML = _loadingRow(10);
+	const statusFilter = $('#allStatusFilter')?.value || '';
+	const url = '/api/v1/auth/permissions/all-tickets/' + (statusFilter ? `?status=${statusFilter}` : '');
+	api.getJson(url)
+		.then(res => {
+			const rows = res?.rows || [];
+			_currentRows = rows;
+			_renderTable(rows, 'all');
+		})
+		.catch(err => {
+			_renderTableError('加载工单失败');
+			console.error(err);
+		});
+}
+
+/* ============================================================================
+ * 表格渲染
+ * ============================================================================ */
+function _renderTable(rows, view) {
+	const tbody = $('#ticketTable');
+	if (!rows.length) {
+		const emptyText = {
+			'pending': '暂无待审批工单',
+			'processed': '暂无已审批记录',
+			'mine': '暂无申请记录',
+			'all': '暂无工单',
+		}[view] || '暂无数据';
+		tbody.innerHTML = `<tr><td colspan="10" class="text-sub text-sm text-center" style="padding:30px">${emptyText}</td></tr>`;
+		return;
+	}
+	tbody.innerHTML = rows.map(t => _renderTicketRow(t, view)).join('');
+	// 绑定行点击
+	tbody.querySelectorAll('[data-ticket-id]').forEach(tr => {
+		tr.addEventListener('click', () => {
+			const id = +tr.getAttribute('data-ticket-id');
+			const data = _currentRows.find(r => r.id === id);
+			if (data) openTicketModal(data, view);
+		});
+	});
+}
+
+function _renderTableError(msg) {
+	$('#ticketTable').innerHTML =
+		`<tr><td colspan="10" class="text-sub text-sm text-center" style="padding:30px;color:var(--danger)">${msg}，请稍后重试</td></tr>`;
+}
+
+function _loadingRow(colspan) {
+	return `<tr><td colspan="${colspan}" class="text-sub text-sm text-center" style="padding:30px">加载中...</td></tr>`;
+}
+
+function _renderTicketRow(t, view) {
 	const changeTypeMap = {
 		'GRANT': '<span class="badge badge-success">授予</span>',
 		'REVOKE': '<span class="badge badge-warn">撤销</span>',
@@ -104,114 +195,187 @@ function _renderTicketRow(t) {
 		'EXPIRE_EXTEND': '<span class="badge badge-info">延期</span>',
 	};
 	const ct = changeTypeMap[t.change_type] || t.change_type;
-	// 进度：第 N 步 / 共 M 步
 	const step = (t.current_step || 0) + 1;
 	const total = t.total_steps || 1;
-	// 目标权限描述：角色 + 范围
 	const scopeTxt = t.scope_name || (_scopeTypeLabel(t.scope_type) + (t.scope_id ? ` #${t.scope_id}` : ''));
 	const targetPerm = [
 		t.role_name ? `<strong>${t.role_name}</strong>` : '',
 		scopeTxt ? `<span class="text-sub text-sm">(${scopeTxt})</span>` : ''
 	].filter(Boolean).join(' ');
+
+	// 状态列：待我审批视角固定显示"待审批"，其他视角显示实际状态
+	const statusBadge = view === 'pending'
+		? '<span class="badge badge-warn">待审批</span>'
+		: _ticketStatusBadge(t.status);
+
+	// 时间列：待我审批=申请时间，我已审批=我的审批时间，我发起的=申请时间，全部=申请时间
+	const timeField = (view === 'processed' && t.my_approved_at) ? t.my_approved_at : t.created_at;
+
+	// 操作按钮：待我审批=处理，其他=查看（点击由行事件统一处理，避免 onclick 内联 XSS 风险）
+	const actionBtn = view === 'pending'
+		? `<button class="btn btn-sm btn-primary">处理</button>`
+		: `<button class="btn btn-sm btn-outline">查看</button>`;
+
+	// 申请人列：我发起的视角显示"我"，其他视角显示申请人
+	const applicantCell = view === 'mine'
+		? '<span class="text-sub">我</span>'
+		: `<div>${escapeHtml(t.applicant_name || '—')}</div>
+		   <div class="text-sub text-xs">${escapeHtml(t.applicant_email || '')}</div>`;
+
+	// 进度展示：待我审批显示"第N步"，其他显示审批状态
+	const progressCell = view === 'pending'
+		? `<span class="badge badge-info">第 ${step}/${total} 步</span>`
+		: `<span class="badge ${total > 0 && t.current_step >= total ? 'badge-success' : 'badge-info'}">${step}/${total}</span>`;
+
 	return `
-	<tr class="table-row-hover" data-ticket-id="${t.id}" style="cursor:pointer">
-		<td><span class="mono text-sm">${t.ticket_no}</span></td>
-		<td>${ct}</td>
-		<td>
-			<div>${escapeHtml(t.applicant_name)}</div>
-			<div class="text-sub text-xs">${escapeHtml(t.applicant_email || '')}</div>
-		</td>
-		<td>
-			<div>${escapeHtml(t.target_user_name)}</div>
-			<div class="text-sub text-xs">${escapeHtml(t.target_user_email || '')}</div>
-		</td>
-		<td>${targetPerm}</td>
-		<td class="text-sm">${escapeHtml(t.expires_at ? '至 ' + formatDate(t.expires_at) : '长期有效')}</td>
-		<td><span class="text-sm text-sub">${formatDate(t.created_at)}</span></td>
-		<td><span class="badge badge-info">第 ${step}/${total} 步</span></td>
-		<td>
-			<button class="btn btn-sm btn-primary" onclick="event.stopPropagation();openTicketModal(${JSON.stringify(t).replace(/"/g, '&quot;')})">处理</button>
-		</td>
-	</tr>`;
+<tr class="table-row-hover" data-ticket-id="${t.id}" style="cursor:pointer">
+	<td><span class="mono text-sm">${t.ticket_no}</span></td>
+	<td>${ct}</td>
+	<td>${applicantCell}</td>
+	<td>
+		<div>${escapeHtml(t.target_user_name || '—')}</div>
+		<div class="text-sub text-xs">${escapeHtml(t.target_user_email || '')}</div>
+	</td>
+	<td>${targetPerm || '—'}</td>
+	<td class="text-sm">${escapeHtml(scopeTxt) || '—'}</td>
+	<td>${statusBadge}</td>
+	<td><span class="text-sm text-sub">${formatDate(timeField)}</span></td>
+	<td>${progressCell}</td>
+	<td>${actionBtn}</td>
+</tr>`;
 }
 
 function _scopeTypeLabel(st) {
-	return { 'GLOBAL': '全局', 'DEPT': '部门', 'TEAM': '团队', 'NONE': '—' }[st] || st;
+	return { 'GLOBAL': '全局', 'DEPT': '部门', 'TEAM': '团队', 'NONE': '—' }[st] || st || '—';
+}
+
+function _ticketStatusBadge(s) {
+	const map = {
+		'PENDING': '<span class="badge badge-warn">待审批</span>',
+		'APPROVED': '<span class="badge badge-info">已通过</span>',
+		'EXECUTED': '<span class="badge badge-success">已执行</span>',
+		'REJECTED': '<span class="badge badge-danger">已驳回</span>',
+		'CANCELLED': '<span class="badge">已撤回</span>',
+	};
+	return map[s] || s;
 }
 
 /* ============================================================================
- * 权限审批工单 —— 详情弹窗 & 审批动作
+ * 详情弹窗
  * ============================================================================ */
-function openTicketModal(t) {
-	_currentApproval = { type: 'ticket', data: t };
-	$('#approvalModalTitle').textContent = '权限变更审批 - ' + t.ticket_no;
+function openTicketModal(t, view) {
+	_currentApproval = { type: 'ticket', data: t, view: view };
+	$('#approvalModalTitle').textContent = '权限变更审批 · ' + t.ticket_no;
+
+	// 审批链渲染
 	const chain = (t.approval_chain || []).map((n, i) => {
 		const cls = i < t.current_step ? 'step-done'
 			: i === t.current_step ? 'step-curr' : 'step-pending';
 		const statusLabel = i < t.current_step ? '已通过'
 			: i === t.current_step ? '待审批' : '待处理';
+		const statusCls = i < t.current_step ? 'done'
+			: i === t.current_step ? 'curr' : 'pending';
+		const approverLine = i < t.current_step
+			? (n.approver_name ? `<div class="chain-node-approver">审批人：${escapeHtml(n.approver_name)}</div>` : '')
+			: '';
 		return `
 		<li class="${cls}">
-			<div class="step-role">${_approverRoleLabel(n.approver_role)}</div>
-			<div class="step-status">${statusLabel}</div>
-			${n.comment ? `<div class="step-comment">${escapeHtml(n.comment)}</div>` : ''}
-			${n.approved_at ? `<div class="text-xs text-sub">${formatDate(n.approved_at)}</div>` : ''}
+			<div class="chain-node-role">${_approverRoleLabel(n.approver_role)}
+				<span class="chain-node-status ${statusCls}">${statusLabel}</span>
+			</div>
+			${approverLine}
+			${n.comment ? `<div class="chain-node-comment">${escapeHtml(n.comment)}</div>` : ''}
+			${n.approved_at ? `<div class="chain-node-time">${formatDate(n.approved_at)}</div>` : ''}
 		</li>`;
 	}).join('');
+
 	const scopeTxt = t.scope_name || (_scopeTypeLabel(t.scope_type) + (t.scope_id ? ` #${t.scope_id}` : ''));
+	const avatarChar = (t.applicant_name || '?').charAt(0).toUpperCase();
+	const isSelfApply = t.applicant_id && t.target_user_id && t.applicant_id === t.target_user_id;
+	const targetUserCell = isSelfApply
+		? `<div class="detail-cell-value">本人申请</div>`
+		: `<div class="detail-cell-value">${escapeHtml(t.target_user_name || '—')}</div>
+		   <div class="detail-cell-sub">${escapeHtml(t.target_user_email || '')}</div>`;
+
+	// "我已审批"视角追加展示当前用户的审批记录
+	const myApprovalHtml = (view === 'processed' && t.my_approver_role)
+		? `<div class="detail-section-title">我的审批记录</div>
+		   <div class="my-approval-box">
+			 <div class="detail-grid">
+				<div class="detail-cell">
+					<div class="detail-cell-label">审批角色</div>
+					<div class="detail-cell-value">${_approverRoleLabel(t.my_approver_role)}</div>
+				</div>
+				<div class="detail-cell">
+					<div class="detail-cell-label">处理时间</div>
+					<div class="detail-cell-value">${t.my_approved_at ? formatDate(t.my_approved_at) : '—'}</div>
+				</div>
+				<div class="detail-cell" style="grid-column:1/-1">
+					<div class="detail-cell-label">审批意见</div>
+					<div class="detail-cell-value">${escapeHtml(t.my_comment || '—')}</div>
+				</div>
+			 </div>
+		   </div>`
+		: '';
 
 	$('#approvalModalBody').innerHTML = `
-		<div class="two-col">
-			<div class="form-item">
-				<div class="form-label">申请人</div>
-				<div class="form-value"><strong>${escapeHtml(t.applicant_name)}</strong></div>
-				<div class="text-sub text-sm">${escapeHtml(t.applicant_email || '')}</div>
+		<div class="applicant-card">
+			<div class="applicant-avatar">${escapeHtml(avatarChar)}</div>
+			<div class="applicant-info">
+				<div class="applicant-name">${escapeHtml(t.applicant_name || '—')}</div>
+				<div class="applicant-meta">${escapeHtml(t.applicant_email || '')}</div>
 			</div>
-			<div class="form-item">
-				<div class="form-label">申请时间</div>
-				<div class="form-value text-sm">${formatDate(t.created_at)}</div>
-			</div>
-		</div>
-		<div class="form-section-title mt-16">变更内容</div>
-		<div class="two-col">
-			<div class="form-item">
-				<div class="form-label">变更类型</div>
-				<div class="form-value">${_changeTypeLabel(t.change_type)}</div>
-			</div>
-			<div class="form-item">
-				<div class="form-label">目标用户</div>
-				<div class="form-value"><strong>${escapeHtml(t.target_user_name)}</strong></div>
-				<div class="text-sub text-sm">${escapeHtml(t.target_user_email || '')}</div>
+			<div class="applicant-time">
+				<div class="applicant-time-label">申请时间</div>
+				${formatDate(t.created_at)}
 			</div>
 		</div>
-		<div class="two-col">
-			<div class="form-item">
-				<div class="form-label">${t.change_type === 'ROLE_CHANGE' ? '角色变更' : '目标角色'}</div>
-				<div class="form-value">${_renderRoleChange(t)}</div>
+
+		<div class="detail-section-title">变更内容</div>
+		<div class="detail-grid">
+			<div class="detail-cell">
+				<div class="detail-cell-label">变更类型</div>
+				<div class="detail-cell-value">${_changeTypeLabel(t.change_type)}</div>
 			</div>
-			<div class="form-item">
-				<div class="form-label">权限范围</div>
-				<div class="form-value">${escapeHtml(scopeTxt)}</div>
+			<div class="detail-cell">
+				<div class="detail-cell-label">目标用户</div>
+				${targetUserCell}
+			</div>
+			<div class="detail-cell">
+				<div class="detail-cell-label">${t.change_type === 'ROLE_CHANGE' ? '角色变更' : '目标角色'}</div>
+				<div class="detail-cell-value">${_renderRoleChange(t)}</div>
+			</div>
+			<div class="detail-cell">
+				<div class="detail-cell-label">权限范围</div>
+				<div class="detail-cell-value">${escapeHtml(scopeTxt) || '—'}</div>
+			</div>
+			<div class="detail-cell">
+				<div class="detail-cell-label">生效时间</div>
+				<div class="detail-cell-value">${t.effective_from ? formatDate(t.effective_from) : '立即生效'}</div>
+			</div>
+			<div class="detail-cell">
+				<div class="detail-cell-label">截至日期</div>
+				<div class="detail-cell-value">${t.expires_at ? formatDate(t.expires_at) : '长期有效'}</div>
 			</div>
 		</div>
-		<div class="two-col">
-			<div class="form-item">
-				<div class="form-label">生效时间</div>
-				<div class="form-value text-sm">${t.effective_from ? formatDate(t.effective_from) : '立即生效'}</div>
-			</div>
-			<div class="form-item">
-				<div class="form-label">截至日期</div>
-				<div class="form-value text-sm">${t.expires_at ? formatDate(t.expires_at) : '长期有效'}</div>
-			</div>
-		</div>
-		<div class="form-item mt-16">
-			<div class="form-label">申请理由</div>
-			<div class="form-value" style="background:var(--bg);padding:12px;border-radius:8px;line-height:1.6">${escapeHtml(t.reason) || '—'}</div>
-		</div>
-		<div class="form-section-title mt-20">审批链进度</div>
-		<ol class="timeline">${chain}</ol>
-		<div class="text-sub text-xs mt-8">当前审批人：${_approverRoleLabel(t.approver_role)}</div>
+
+		<div class="detail-section-title">申请理由</div>
+		<div class="reason-box">${escapeHtml(t.reason) || '—'}</div>
+
+		<div class="detail-section-title">审批链进度</div>
+		<ol class="chain-timeline">${chain}</ol>
+		${t.status === 'PENDING' ? `<div class="current-approver-bar">
+			<span>📋</span>
+			<span>当前待审批人：${_approverRoleLabel(t.approver_role || '')}</span>
+		</div>` : ''}
+		${myApprovalHtml}
 	`;
+
+	// 操作按钮显隐：仅"待我审批"视角显示通过/拒绝按钮，其他视角只显示关闭
+	const showActions = (view === 'pending' && t.status === 'PENDING');
+	$('#btnApproveOk').classList.toggle('hidden', !showActions);
+	$('#btnApproveReject').classList.toggle('hidden', !showActions);
+
 	showModal('approvalModal');
 }
 
@@ -223,7 +387,7 @@ function _approverRoleLabel(r) {
 		'USER_ADMIN': '用户管理员',
 		'KB_ADMIN': '知识管理员',
 		'SUPER_ADMIN': '超级管理员',
-	}[r] || r;
+	}[r] || r || '—';
 }
 
 function _changeTypeLabel(ct) {
@@ -233,10 +397,9 @@ function _changeTypeLabel(ct) {
 		'ROLE_CHANGE': '<span class="badge badge-info">角色变更</span>',
 		'SCOPE_CHANGE': '<span class="badge badge-info">范围变更</span>',
 		'EXPIRE_EXTEND': '<span class="badge badge-info">延期</span>',
-	}[ct] || ct;
+	}[ct] || ct || '—';
 }
 
-// 渲染角色变更展示:ROLE_CHANGE 显示 旧角色 → 新角色;其他显示新角色
 function _renderRoleChange(t) {
 	if (!t.role_name && !t.previous_role_name) return '—';
 	if (t.change_type === 'ROLE_CHANGE' && t.previous_role_name) {
@@ -247,102 +410,103 @@ function _renderRoleChange(t) {
 	return t.role_name ? `<span class="badge badge-info">${escapeHtml(t.role_name)}</span>` : '—';
 }
 
-/* ---------- 审批通过 ---------- */
+/* ============================================================================
+ * 审批动作（仅"待我审批"视角可用）
+ * ============================================================================ */
 function onApproveClick() {
-	if (!_currentApproval) return;
+	if (!_currentApproval || _currentApproval.view !== 'pending') return;
 	const a = _currentApproval;
-	$('#confirmTitle').textContent = '确认通过审批';
-	$('#confirmMessage').innerHTML = a.type === 'ticket'
-		? `确认通过工单 <strong>${a.data.ticket_no}</strong>？通过后将按审批链流转。`
-		: `确认通过文档 <strong>${escapeHtml(a.data.title)}</strong>？`;
-	$('#confirmCommentWrap').classList.remove('hidden');
-	$('#confirmComment').value = '';
-	$('#confirmOkBtn').className = 'btn-save';
-	$('#confirmOkBtn').textContent = '确认通过';
-	confirmCallback = () => {
-		const comment = ($('#confirmComment').value || '').trim();
-		if (a.type === 'ticket') _submitTicketApprove(a.data.id, comment);
-		else _submitDocApprove(a.data.id, comment);
-	};
-	showModal('confirmModal');
+	showConfirmDialog({
+		title: '确认通过审批',
+		bannerType: 'success',
+		bannerIcon: '✓',
+		bannerText: `确认通过工单 ${a.data.ticket_no}？通过后将按审批链流转。`,
+		bodyHtml: '<div class="form-item mt-12">' +
+			'<label class="form-label">审批意见<span class="form-hint-inline">（选填）</span></label>' +
+			'<textarea id="confirmDialogComment" class="input" rows="3" placeholder="可填写备注说明，记录审批意见..."></textarea>' +
+			'</div>',
+		buttons: [
+			{ text: '取消', type: 'cancel', onClick: ctx => ctx.close() },
+			{ text: '确认通过', type: 'primary', onClick: ctx => {
+				const comment = (ctx.el.querySelector('#confirmDialogComment')?.value || '').trim();
+				ctx.close();
+				_submitTicketApprove(a.data.id, comment);
+			}}
+		]
+	});
 }
 
-/**
- * 关闭 confirmModal，confirmed=true 时调用并清空 confirmCallback
- * @param {boolean} confirmed - true 表示用户点了确认
- */
-async function closeConfirmModal(confirmed) {
-	const cb = confirmCallback;
-	confirmCallback = null;
-	closeModal('confirmModal');
-	if (confirmed && typeof cb === 'function') {
-		try {
-			await cb();
-		} catch (e) {
-			toast('操作失败: ' + escapeHtml(e.message || String(e)), 'error');
-		}
-	}
-}
-
-/* ---------- 审批拒绝 ---------- */
 function onRejectClick() {
-	if (!_currentApproval) return;
-	$('#rejectComment').value = '';
-	$('#rejectCommentErr').classList.add('hidden');
-	$('#rejectCommentErr').textContent = '';
-	showModal('rejectModal');
+	if (!_currentApproval || _currentApproval.view !== 'pending') return;
+	const a = _currentApproval;
+	showConfirmDialog({
+		title: '驳回理由',
+		bannerType: 'danger',
+		bannerIcon: '⚠',
+		bannerText: `确认驳回工单 ${a.data.ticket_no}？驳回后工单将终止流转。`,
+		bodyHtml: '<div class="form-item mt-12">' +
+			'<label class="form-label">驳回理由<span class="required">*</span></label>' +
+			'<textarea id="confirmDialogComment" class="input" rows="4" placeholder="必填，请说明驳回原因，便于申请人了解问题..."></textarea>' +
+			'</div>',
+		buttons: [
+			{ text: '取消', type: 'cancel', onClick: ctx => ctx.close() },
+			{ text: '确认驳回', type: 'danger', onClick: ctx => {
+				const comment = (ctx.el.querySelector('#confirmDialogComment')?.value || '').trim();
+				if (!comment) { ctx.setError('驳回理由不能为空'); return; }
+				ctx.close();
+				_submitTicketReject(a.data.id, comment);
+			}}
+		],
+		onShow: ctx => {
+			const ta = ctx.el.querySelector('#confirmDialogComment');
+			if (ta) {
+				ta.focus();
+				ta.addEventListener('keydown', (e) => {
+					if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+						ctx.el.querySelector('.btn-reject')?.click();
+					}
+				});
+			}
+		}
+	});
 }
 
-function submitReject() {
-	const comment = ($('#rejectComment').value || '').trim();
-	const errEl = $('#rejectCommentErr');
-	if (!comment) {
-		errEl.textContent = '驳回理由不能为空';
-		errEl.classList.remove('hidden');
-		return;
-	}
-	if (!_currentApproval) return;
-	closeModal('rejectModal');
-	if (_currentApproval.type === 'ticket') {
-		_submitTicketReject(_currentApproval.data.id, comment);
-	} else {
-		_submitDocReject(_currentApproval.data.id, comment);
-	}
-}
-
-/* ---------- 提交：工单通过/驳回 ---------- */
 function _submitTicketApprove(id, comment) {
+	if (_submitting) return;
+	_submitting = true;
 	api.postJson(`/api/v1/auth/permissions/tickets/${id}/approve/`, { comment })
 		.then(res => {
 			if (res?.ok) {
 				toast(`工单已通过，状态：${_ticketStatusLabel(res.status)}`, 'success');
 				closeModal('approvalModal');
 				_currentApproval = null;
-				loadTicketList();
+				loadPendingList();
 			} else {
 				toast(res?.detail || '审批失败', 'error');
 			}
 	}).catch(err => {
 		toast(_errMsg(err, '审批失败'), 'error');
 		console.error(err);
-	});
+	}).finally(() => { _submitting = false; });
 }
 
 function _submitTicketReject(id, comment) {
+	if (_submitting) return;
+	_submitting = true;
 	api.postJson(`/api/v1/auth/permissions/tickets/${id}/reject/`, { comment })
 		.then(res => {
 			if (res?.ok) {
 				toast('工单已驳回', 'success');
 				closeModal('approvalModal');
 				_currentApproval = null;
-				loadTicketList();
+				loadPendingList();
 			} else {
 				toast(res?.detail || '驳回失败', 'error');
 			}
 	}).catch(err => {
 		toast(_errMsg(err, '驳回失败'), 'error');
 		console.error(err);
-	});
+	}).finally(() => { _submitting = false; });
 }
 
 function _ticketStatusLabel(s) {
@@ -352,207 +516,6 @@ function _ticketStatusLabel(s) {
 		'EXECUTED': '已执行',
 		'REJECTED': '已驳回',
 		'CANCELLED': '已撤回',
-	}[s] || s;
-}
-
-/* ============================================================================
- * 文档审核 —— 列表加载
- * ============================================================================ */
-function loadDocList() {
-	const tbody = $('#docTable');
-	tbody.innerHTML = `<tr><td colspan="8" class="text-sub text-sm text-center" style="padding:30px">加载中...</td></tr>`;
-	api.getJson('/api/v1/knowledge/documents/pending-audits/')
-		.then(res => {
-			const rows = res?.rows || [];
-			_setBadge('doc', rows.length);
-			if (!rows.length) {
-				tbody.innerHTML = `<tr><td colspan="8" class="text-sub text-sm text-center" style="padding:30px">暂无待审核文档</td></tr>`;
-				return;
-			}
-			tbody.innerHTML = rows.map(_renderDocRow).join('');
-			tbody.querySelectorAll('[data-doc-id]').forEach(tr => {
-				tr.addEventListener('click', () => {
-					const id = +tr.getAttribute('data-doc-id');
-					const data = rows.find(r => r.id === id);
-					if (data) openDocModal(data);
-				});
-			});
-		})
-		.catch(err => {
-			toast('加载待审核文档失败', 'error');
-			console.error(err);
-			tbody.innerHTML = `<tr><td colspan="8" class="text-sub text-sm text-center" style="padding:30px;color:var(--danger)">加载失败，请稍后重试</td></tr>`;
-		});
-}
-
-function _renderDocRow(d) {
-	const secLvMap = { 1: '公开', 2: '内部', 3: '秘密', 4: '绝密' };
-	const secBadge = { 1: '', 2: 'badge-info', 3: 'badge-warn', 4: 'badge-danger' }[d.secret_level] || '';
-	const auditBadge = d.audit_status === 'pending_team'
-		? '<span class="badge badge-warn">待一审</span>'
-		: '<span class="badge badge-info">待二审</span>';
-	const belong = [d.dept_name, d.team_name].filter(Boolean).join(' / ');
-	return `
-	<tr class="table-row-hover" data-doc-id="${d.id}" style="cursor:pointer">
-		<td>
-			<div class="flex items-center gap-8">
-				<span style="font-size:16px">${_iconForFileType(d.file_type)}</span>
-				<div>
-					<div class="text-strong">${escapeHtml(d.title)}</div>
-					<div class="text-sub text-xs">${escapeHtml(d.file_name || '')}</div>
-				</div>
-			</div>
-		</td>
-		<td class="text-sm">${escapeHtml(d.file_type || '—')}</td>
-		<td>${secLvMap[d.secret_level] ? `<span class="badge ${secBadge}">${secLvMap[d.secret_level]}</span>` : '—'}</td>
-		<td>
-			<div>${escapeHtml(d.owner_name)}</div>
-			<div class="text-sub text-xs">${escapeHtml(d.owner_email || '')}</div>
-		</td>
-		<td class="text-sm">${escapeHtml(belong || '—')}</td>
-		<td>
-			${auditBadge}
-			<div class="text-sub text-xs mt-4">${escapeHtml(d.audit_step || '')}</div>
-		</td>
-		<td class="text-sm text-sub">${formatDate(d.created_at)}</td>
-		<td>
-			<button class="btn btn-sm btn-primary" onclick="event.stopPropagation();openDocModal(${JSON.stringify(d).replace(/"/g, '&quot;')})">处理</button>
-		</td>
-	</tr>`;
-}
-
-function _iconForFileType(ft) {
-	const f = (ft || '').toLowerCase();
-	if (f === 'pdf') return '📄';
-	if (['doc', 'docx'].includes(f)) return '📝';
-	if (['xls', 'xlsx'].includes(f)) return '📊';
-	if (['ppt', 'pptx'].includes(f)) return '📽️';
-	if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'].includes(f)) return '🖼️';
-	if (['zip', 'rar', '7z', 'tar', 'gz'].includes(f)) return '🗜️';
-	if (['txt', 'md'].includes(f)) return '📃';
-	return '📁';
-}
-
-/* ============================================================================
- * 文档审核 —— 详情弹窗 & 审核动作
- * ============================================================================ */
-function openDocModal(d) {
-	_currentApproval = { type: 'doc', data: d };
-	$('#approvalModalTitle').textContent = '文档审核 - ' + (d.audit_status === 'pending_team' ? '团队组长一审' : '合规二审');
-	const visMap = { 1: '全局公开', 2: '部门内可见', 3: '团队内可见', 4: '私有' };
-	const secLvMap = { 1: '公开', 2: '内部', 3: '秘密', 4: '绝密' };
-	const belong = [d.dept_name, d.team_name].filter(Boolean).join(' / ');
-	const fileSizeTxt = d.file_size ? formatFileSize(d.file_size) : '—';
-
-	$('#approvalModalBody').innerHTML = `
-		<div class="two-col">
-			<div class="form-item">
-				<div class="form-label">文档标题</div>
-				<div class="form-value text-strong">${escapeHtml(d.title)}</div>
-				<div class="text-sub text-sm">${escapeHtml(d.file_name || '')}</div>
-			</div>
-			<div class="form-item">
-				<div class="form-label">当前阶段</div>
-				<div class="form-value">
-					${d.audit_status === 'pending_team'
-						? '<span class="badge badge-warn">待一审（团队组长）</span>'
-						: '<span class="badge badge-info">待二审（合规/部门经理）</span>'}
-				</div>
-			</div>
-		</div>
-		<div class="two-col">
-			<div class="form-item">
-				<div class="form-label">上传人</div>
-				<div class="form-value"><strong>${escapeHtml(d.owner_name)}</strong></div>
-				<div class="text-sub text-sm">${escapeHtml(d.owner_email || '')}</div>
-			</div>
-			<div class="form-item">
-				<div class="form-label">上传时间</div>
-				<div class="form-value text-sm">${formatDate(d.created_at)}</div>
-			</div>
-		</div>
-		<div class="two-col">
-			<div class="form-item">
-				<div class="form-label">文件类型</div>
-				<div class="form-value text-sm">${escapeHtml(d.file_type || '—')} · ${fileSizeTxt}</div>
-			</div>
-			<div class="form-item">
-				<div class="form-label">版本</div>
-				<div class="form-value text-sm">v${d.version || 1}${d.version_tag ? ' · ' + escapeHtml(d.version_tag) : ''}</div>
-			</div>
-		</div>
-		<div class="two-col">
-			<div class="form-item">
-				<div class="form-label">可见性</div>
-				<div class="form-value">${visMap[d.visibility_level] || '—'}</div>
-			</div>
-			<div class="form-item">
-				<div class="form-label">密级</div>
-				<div class="form-value">${secLvMap[d.secret_level] || '—'}</div>
-			</div>
-		</div>
-		<div class="form-item mt-16">
-			<div class="form-label">归属路径</div>
-			<div class="form-value text-sm">
-				${belong ? escapeHtml(belong) : '—'}
-				${d.node_name ? `<span class="text-sub">（节点：${escapeHtml(d.node_name)}）</span>` : ''}
-			</div>
-		</div>
-		<div class="flex mt-20">
-			<a class="btn btn-sm btn-outline" href="/admin-nodes/?doc_id=${d.uuid}" target="_blank" rel="noopener">
-				🔗 在知识库中查看
-			</a>
-		</div>
-	`;
-	showModal('approvalModal');
-}
-
-/* ---------- 提交：文档通过/驳回 ---------- */
-function _submitDocApprove(id, comment) {
-	api.postJson(`/api/v1/knowledge/documents/${id}/audit-approve/`, { comment })
-		.then(res => {
-			if (res?.ok) {
-				const nextLabel = res.audit_status === 'passed'
-					? '审核通过（已发布）'
-					: `一审通过，流转至：${_auditStatusLabel(res.audit_status)}`;
-				toast(nextLabel, 'success');
-				closeModal('approvalModal');
-				_currentApproval = null;
-				loadDocList();
-			} else {
-				toast(res?.detail || '审核失败', 'error');
-			}
-	}).catch(err => {
-		toast(_errMsg(err, '审核失败'), 'error');
-		console.error(err);
-	});
-}
-
-function _submitDocReject(id, comment) {
-	api.postJson(`/api/v1/knowledge/documents/${id}/audit-reject/`, { comment })
-		.then(res => {
-			if (res?.ok) {
-				toast('文档已驳回', 'success');
-				closeModal('approvalModal');
-				_currentApproval = null;
-				loadDocList();
-			} else {
-				toast(res?.detail || '驳回失败', 'error');
-			}
-	}).catch(err => {
-		toast(_errMsg(err, '驳回失败'), 'error');
-		console.error(err);
-	});
-}
-
-function _auditStatusLabel(s) {
-	return {
-		'pending_team': '待一审',
-		'pending_compliance': '待二审',
-		'passed': '已通过',
-		'rejected': '已驳回',
-		'archived': '已归档',
-		'deleted': '已删除',
 	}[s] || s;
 }
 
@@ -568,14 +531,4 @@ function _setBadge(type, count) {
 	} else {
 		el.classList.add('hidden');
 	}
-}
-
-function _errMsg(err, fallback) {
-	try {
-		if (typeof err === 'string') return err;
-		if (err?.detail) return err.detail;
-		if (err?.message) return err.message;
-		if (err?.error) return err.error;
-	} catch (_) {}
-	return fallback;
 }

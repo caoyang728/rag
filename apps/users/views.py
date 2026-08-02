@@ -1634,6 +1634,17 @@ class TeamViewSet(viewsets.ModelViewSet):
     serializer_class = TeamSerializer
     permission_classes = [IsAuthenticated]
 
+    def get_queryset(self):
+        # 支持 ?department_id=xxx 按部门过滤团队(用于申请权限时部门→团队级联选择)
+        qs = super().get_queryset()
+        dept_id = self.request.query_params.get("department_id")
+        if dept_id:
+            try:
+                qs = qs.filter(department_id=int(dept_id))
+            except (TypeError, ValueError):
+                pass
+        return qs
+
     def _check_can_manage_team(self, dept_id=None):
         """检查是否有团队管理权限（RBAC：user.manage_all 或 user.manage + DEPT scope）"""
         u = self.request.user
@@ -1954,6 +1965,31 @@ class PermissionApproversView(APIView):
         })
 
 
+def _serialize_chain_nodes(chain):
+    """序列化审批链节点 —— 批量解析 approver_id → approver_name, 供前端展示"谁批准的"
+
+    性能优化:收集所有 approver_id 后一次查询,避免 N+1。
+    """
+    from apps.users.models import User
+    ids = {n.get('approver_id') for n in chain if n.get('approver_id')}
+    user_map = {}
+    if ids:
+        user_map = {
+            u.id: (u.real_name or u.username)
+            for u in User.objects.filter(id__in=ids).only('id', 'real_name', 'username')
+        }
+    return [
+        {
+            'approver_role': n.get('approver_role'),
+            'approver_id': n.get('approver_id'),
+            'approver_name': user_map.get(n.get('approver_id'), ''),
+            'status': n.get('status'),
+            'comment': n.get('comment', ''),
+            'approved_at': n.get('approved_at', ''),
+        } for n in chain
+    ]
+
+
 class AccessApplicationView(APIView):
     """GET/POST /api/v1/auth/permissions/applications/
     GET: 当前用户的权限申请列表(对齐工单真实字段)
@@ -2041,15 +2077,7 @@ class AccessApplicationView(APIView):
                 'executed_at': t.executed_at.isoformat() if t.executed_at else '',
                 'current_step': t.current_step,
                 'total_steps': len(chain),
-                'approval_chain': [
-                    {
-                        'approver_role': n.get('approver_role'),
-                        'approver_id': n.get('approver_id'),
-                        'status': n.get('status'),
-                        'comment': n.get('comment', ''),
-                        'approved_at': n.get('approved_at', ''),
-                    } for n in chain
-                ],
+                'approval_chain': _serialize_chain_nodes(chain),
             })
         return Response({'rows': rows, 'count': len(rows)})
 
@@ -2187,8 +2215,9 @@ class PendingApprovalTicketsView(APIView):
         from apps.users.ticket_service import _can_approve_for_role
 
         user = request.user
-        # 页面访问入口权限校验：仅超级管理员/用户管理员/部门经理/团队组长可查询
+        # 页面访问入口权限校验：仅超级管理员/用户管理员/部门经理/团队组长/合规管理员可查询
         if not (user.is_super_admin
+                or user.is_compliance_admin
                 or has_permission(user, 'user.manage_all')
                 or has_permission(user, 'user.manage')
                 or has_permission(user, 'kb.manage_all')):
@@ -2257,15 +2286,7 @@ class PendingApprovalTicketsView(APIView):
                 'created_at': ticket.created_at.isoformat() if ticket.created_at else '',
                 'current_step': ticket.current_step,
                 'total_steps': len(chain),
-                'approval_chain': [
-                    {
-                        'approver_role': n.get('approver_role'),
-                        'approver_id': n.get('approver_id'),
-                        'status': n.get('status'),
-                        'comment': n.get('comment', ''),
-                        'approved_at': n.get('approved_at', ''),
-                    } for n in chain
-                ],
+                'approval_chain': _serialize_chain_nodes(chain),
             })
 
         return Response({
@@ -2288,7 +2309,7 @@ class TicketApproveView(APIView):
         from apps.users.ticket_service import approve_ticket, _can_approve_for_role
 
         try:
-            ticket = PermissionApprovalTicket.objects.select_for_update().get(pk=pk)
+            ticket = PermissionApprovalTicket.objects.get(pk=pk)
         except PermissionApprovalTicket.DoesNotExist:
             return Response({"detail": "工单不存在"}, status=404)
 
@@ -2345,7 +2366,7 @@ class TicketRejectView(APIView):
             return Response({"detail": "驳回理由不能为空"}, status=400)
 
         try:
-            ticket = PermissionApprovalTicket.objects.select_for_update().get(pk=pk)
+            ticket = PermissionApprovalTicket.objects.get(pk=pk)
         except PermissionApprovalTicket.DoesNotExist:
             return Response({"detail": "工单不存在"}, status=404)
 
@@ -2394,38 +2415,169 @@ class MyTicketsView(APIView):
 
         tickets = PermissionApprovalTicket.objects.filter(
             applicant=request.user,
-        ).select_related('target_user', 'role').order_by('-created_at')[:100]
+        ).select_related(
+            'applicant', 'target_user', 'role', 'previous_role',
+        ).order_by('-created_at')[:100]
 
         rows = []
         for t in tickets:
             chain = t.approval_chain or []
-            approver_name = ''
-            if t.status in ('APPROVED', 'EXECUTED', 'REJECTED') and chain:
-                # 取最后一个审批节点的 approver_id 对应的用户名
-                for node in reversed(chain):
-                    if node.get('approver_id'):
-                        from apps.users.models import User
-                        approver = User.objects.filter(id=node['approver_id']).first()
-                        if approver:
-                            approver_name = approver.real_name or approver.username
-                        break
+            data = _serialize_ticket_brief(t, chain)
+            rows.append(data)
 
-            rows.append({
-                'id': t.id,
-                'ticket_no': t.ticket_no,
-                'change_type': t.change_type,
-                'status': t.status,
-                'role_name': t.role.name if t.role else '',
-                'scope_type': t.scope_type,
-                'scope_id': t.scope_id,
-                'reason': t.reason,
-                'approver_name': approver_name,
-                'created_at': t.created_at.isoformat() if t.created_at else '',
-                'approved_at': t.approved_at.isoformat() if t.approved_at else '',
-                'executed_at': t.executed_at.isoformat() if t.executed_at else '',
-                'current_step': t.current_step,
-                'total_steps': len(chain),
-            })
+        return Response({
+            'rows': rows,
+            'count': len(rows),
+        })
+
+
+def _serialize_ticket_brief(ticket, chain=None, include_chain=True):
+    """序列化工单概要 —— 供「我已审批 / 全部工单」等列表视图复用
+
+    性能优化:caller 需预先 select_related('applicant','target_user','role','previous_role')。
+    scope_name 解析会触发额外查询(仅 DEPT/TEAM 且有 scope_id 时),可接受(列表量小)。
+    """
+    from apps.users.models import Department, Team, ScopeType
+
+    if chain is None:
+        chain = ticket.approval_chain or []
+
+    # 解析 scope 名称
+    scope_name = ''
+    if ticket.scope_type == ScopeType.DEPT and ticket.scope_id:
+        dept = Department.objects.filter(id=ticket.scope_id, is_deleted=False).only('name').first()
+        scope_name = dept.name if dept else f'部门#{ticket.scope_id}'
+    elif ticket.scope_type == ScopeType.TEAM and ticket.scope_id:
+        team = Team.objects.filter(id=ticket.scope_id, is_deleted=False).only('name').first()
+        scope_name = team.name if team else f'团队#{ticket.scope_id}'
+    elif ticket.scope_type == ScopeType.GLOBAL:
+        scope_name = '全局'
+
+    data = {
+        'id': ticket.id,
+        'ticket_no': ticket.ticket_no,
+        'change_type': ticket.change_type,
+        'status': ticket.status,
+        'applicant_id': ticket.applicant_id,
+        'applicant_name': ticket.applicant.real_name or ticket.applicant.username if ticket.applicant else '',
+        'applicant_email': ticket.applicant.email if ticket.applicant else '',
+        'target_user_id': ticket.target_user_id,
+        'target_user_name': ticket.target_user.real_name or ticket.target_user.username if ticket.target_user else '',
+        'target_user_email': ticket.target_user.email if ticket.target_user else '',
+        'role_id': ticket.role_id,
+        'role_name': ticket.role.name if ticket.role else '',
+        'role_key': ticket.role.role_key if ticket.role else '',
+        'previous_role_id': ticket.previous_role_id,
+        'previous_role_name': ticket.previous_role.name if ticket.previous_role else '',
+        'previous_role_key': ticket.previous_role.role_key if ticket.previous_role else '',
+        'scope_type': ticket.scope_type,
+        'scope_id': ticket.scope_id,
+        'scope_name': scope_name,
+        'reason': ticket.reason,
+        'effective_from': ticket.effective_from.isoformat() if ticket.effective_from else '',
+        'expires_at': ticket.expires_at.isoformat() if ticket.expires_at else '',
+        'created_at': ticket.created_at.isoformat() if ticket.created_at else '',
+        'approved_at': ticket.approved_at.isoformat() if ticket.approved_at else '',
+        'executed_at': ticket.executed_at.isoformat() if ticket.executed_at else '',
+        'current_step': ticket.current_step,
+        'total_steps': len(chain),
+    }
+    if include_chain:
+        data['approval_chain'] = _serialize_chain_nodes(chain)
+    return data
+
+
+class ProcessedTicketsView(APIView):
+    """GET /api/v1/auth/permissions/processed-tickets/
+    当前用户已处理过的工单列表(我已审批视角)
+
+    筛选逻辑:遍历非 PENDING 工单,检查 approval_chain 中是否存在 approver_id = 当前用户 的节点。
+    包含 APPROVED / EXECUTED / REJECTED / CANCELLED 状态(只要当前用户审过某个节点即纳入)。
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from apps.users.models import PermissionApprovalTicket, TicketStatus
+
+        user = request.user
+        # 与待审批列表共享入口权限:仅管理角色 / 合规管理员 / leader 可见
+        if not (user.is_super_admin
+                or user.is_compliance_admin
+                or has_permission(user, 'user.manage_all')
+                or has_permission(user, 'user.manage')
+                or has_permission(user, 'kb.manage_all')):
+            is_leader = (
+                Team.objects.filter(leader_id=user.id, is_deleted=False).exists()
+                or Department.objects.filter(leader_id=user.id, is_deleted=False).exists()
+            )
+            if not is_leader:
+                raise PermissionDenied("无审批权限")
+
+        # 排除待审批(PENDING)工单,只看已处理过的
+        tickets = PermissionApprovalTicket.objects.exclude(
+            status=TicketStatus.PENDING,
+        ).select_related(
+            'applicant', 'target_user', 'role', 'previous_role',
+        ).order_by('-created_at')[:200]
+
+        rows = []
+        for ticket in tickets:
+            chain = ticket.approval_chain or []
+            # 检查当前用户是否在审批链中处理过某个节点
+            my_node = None
+            for node in chain:
+                if node.get('approver_id') == user.id:
+                    my_node = node
+                    break
+            if not my_node:
+                continue
+
+            data = _serialize_ticket_brief(ticket, chain)
+            # 追加当前用户在该工单中的审批信息
+            data['my_approver_role'] = my_node.get('approver_role', '')
+            data['my_comment'] = my_node.get('comment', '')
+            data['my_approved_at'] = my_node.get('approved_at', '')
+            data['my_node_status'] = my_node.get('status', '')
+            rows.append(data)
+
+        return Response({
+            'rows': rows,
+            'count': len(rows),
+        })
+
+
+class AllTicketsView(APIView):
+    """GET /api/v1/auth/permissions/all-tickets/
+    全部工单列表(全局视角,仅 super_admin / compliance_admin 可访问)
+
+    查询参数:
+    - status: 按状态筛选(PENDING/APPROVED/EXECUTED/REJECTED/CANCELLED),不传则返回全部
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from apps.users.models import PermissionApprovalTicket, TicketStatus
+
+        user = request.user
+        # 仅超级管理员 / 合规管理员可查看全部工单(审计视角)
+        if not (user.is_super_admin or user.is_compliance_admin):
+            raise PermissionDenied("仅超级管理员/合规管理员可查看全部工单")
+
+        qs = PermissionApprovalTicket.objects.select_related(
+            'applicant', 'target_user', 'role', 'previous_role',
+        ).order_by('-created_at')
+
+        status_filter = request.query_params.get('status', '').strip().upper()
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+
+        qs = qs[:500]
+
+        rows = []
+        for ticket in qs:
+            chain = ticket.approval_chain or []
+            data = _serialize_ticket_brief(ticket, chain)
+            rows.append(data)
 
         return Response({
             'rows': rows,

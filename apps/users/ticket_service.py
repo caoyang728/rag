@@ -474,6 +474,9 @@ def _build_user_admin_then_super_chain() -> list:
     - 申请/撤销 部门经理/文档管理员/合规管理员(三个全局高权但非超管角色)
     - 节点1:任一用户管理员审(共享审批池)
     - 节点2:任一超管审(共享审批池,排除节点1审者 → 双人独立性)
+
+    部署规范:应先创建 user_admin,再申请 dept_manager 等部门级角色,
+    保证审批链节点1 有可用审批人,避免工单卡死。
     """
     return [
         _build_chain_node(ApproverRole.USER_ADMIN),
@@ -535,16 +538,19 @@ def build_approval_chain(applicant, target_user, change_type: str,
     role_key = role.role_key
     is_sa_role = role_key == 'super_admin'
 
-    # ── 分支 0:超管角色操作 → 强制双超管复核(申请/撤销/变更) ──
-    # 业务背景:超管角色的新增/撤销/变更需双人复核,避免单点授权风险
-    # 超管硬约束由 create_ticket 入口 _check_super_admin_quota 拦截,这里只构造链
-    if is_sa_role:
+    # ── 分支 0:超管 + 用户管理员角色操作 → 强制双超管复核 ──
+    # super_admin:超管角色的新增/撤销/变更需双人复核,避免单点授权风险
+    # user_admin:用户管理员是首个被创建的高权角色,不能由 user_admin 自审(先有鸡先有蛋),
+    #   必须由两个不同超管双审,确保超管可看到并审批首批 user_admin 申请
+    # 配额校验:两者都需 ≥2 个可用超管,由 create_ticket 入口 _check_super_admin_quota 拦截
+    if is_sa_role or role_key == 'user_admin':
         return _build_super_admin_chain_2step(applicant)
 
-    # ── 分支 1:全局高权角色(user_admin / kb_admin / compliance_admin) ──
+    # ── 分支 1:全局高权角色(kb_admin / compliance_admin) ──
     # 申请/撤销都走固定双审:USER_ADMIN → SUPER_ADMIN
-    # 业务背景:这三个角色都是超管拆出来的高权,需要"用户管理员先审 + 超管复核"双重把关
-    if role_key in ('user_admin', 'kb_admin', 'compliance_admin'):
+    # 业务背景:这两个角色由超管拆出,需"用户管理员先审 + 超管复核"双重把关
+    # 注:user_admin 已在分支 0 处理(走双超管链),不在此分支
+    if role_key in ('kb_admin', 'compliance_admin'):
         return _build_user_admin_then_super_chain()
 
     # ── 分支 2:组织角色(dept_manager / team_leader / contributor / viewer) ──
@@ -736,8 +742,9 @@ def create_ticket(applicant, target_user, change_type: str,
     if change_type in (TicketChangeType.GRANT, TicketChangeType.ROLE_CHANGE) and role:
         _check_sod_conflict(target_user, role)
 
-    # ── 入口校验 2:超管硬约束(super_admin 工单需要双超管审批,可用超管 <2 直接拒绝) ──
-    if role and role.role_key == 'super_admin':
+    # ── 入口校验 2:双超管硬约束(super_admin / user_admin 工单需双超管审批,可用超管 <2 直接拒绝) ──
+    # user_admin 走双超管链(与 super_admin 同),配额不足时工单会卡死,故入口拒绝
+    if role and role.role_key in ('super_admin', 'user_admin'):
         _check_super_admin_quota(applicant)
 
     # ── 入口校验 3:团队级互斥自动转 ROLE_CHANGE ──

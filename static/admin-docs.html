@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>文档审核 · 知库 Agent</title>
+	<link rel="stylesheet" href="/static/css/common.css">
+	<link rel="stylesheet" href="/static/css/admin.css">
+	<link rel="stylesheet" href="/static/css/admin-docs.css">
+</head>
+
+<body>
+	<div id="topnav-container"></div>
+	<div class="layout">
+		<div id="sidebar-container"></div>
+		<div class="main main-flex">
+			<div class="page-header">
+				<div class="flex items-baseline gap-10">
+					<div class="page-title">文档审核</div>
+					<div class="page-subtitle">文档双审流程处理（团队组长一审 / 合规二审）</div>
+				</div>
+			</div>
+
+			<div class="card flex flex-col overflow-hidden flex-1 min-h-0">
+				<!-- 列表顶部工具条 -->
+				<div class="flex items-center gap-8 mb-8 shrink-0 border-b" style="padding-bottom:12px;">
+					<div class="text-strong">待审核文档</div>
+					<div class="flex-1"></div>
+					<button class="btn btn-sm btn-outline" onclick="loadDocList()">刷新</button>
+				</div>
+
+				<!-- ===== 文档审核列表 ===== -->
+				<div class="flex flex-col flex-1 min-h-0">
+					<div class="card-scroll">
+						<table class="table">
+							<thead>
+								<tr>
+									<th>文档标题</th>
+									<th style="width:90px">类型</th>
+									<th style="width:90px">密级</th>
+									<th>上传人</th>
+									<th style="width:120px">归属</th>
+									<th style="width:120px">阶段</th>
+									<th style="width:160px">上传时间</th>
+									<th style="width:100px">操作</th>
+								</tr>
+							</thead>
+							<tbody id="docTable">
+								<tr>
+									<td colspan="8" class="text-sub text-sm text-center" style="padding:30px">加载中...</td>
+								</tr>
+							</tbody>
+						</table>
+					</div>
+				</div>
+			</div>
+		</div>
+	</div>
+
+	<!-- ===== 文档审核详情弹窗 ===== -->
+	<div id="docModal" class="modal" style="width:680px;max-width:90vw">
+		<div class="modal-header">
+			<div class="modal-title" id="docModalTitle">文档审核</div>
+			<button class="modal-close" onclick="closeModal('docModal')">&times;</button>
+		</div>
+		<div class="modal-body overflow-y-auto" style="max-height:70vh" id="docModalBody">
+		</div>
+		<div class="modal-footer">
+			<button class="btn-cancel" onclick="closeModal('docModal')">取消</button>
+			<button class="btn" id="btnDocReject" style="background:var(--danger)" onclick="onDocRejectClick()">
+				拒绝
+			</button>
+			<button class="btn-save" id="btnDocApprove" onclick="onDocApproveClick()">
+				通过
+			</button>
+		</div>
+	</div>
+
+	<div id="mask" class="mask"></div>
+	<div id="toast-wrap" class="toast-wrap"></div>
+	<script src="/static/js/common.js"></script>
+	<script src="/static/js/admin-docs.js"></script>
+</body>
+
+</html>

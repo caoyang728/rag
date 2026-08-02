@@ -1,14 +1,14 @@
 /* ============================================================================
- * admin-approvals.css —— 权限与文档审批中心专属样式
+ * admin-approvals.css —— 权限审批中心专属样式
  *
  * 仅用于 /admin-approvals/ 页面：
  * - tab 切换
- * - 表单两列布局 & 数值展示
+ * - 审批弹窗美化（#approvalModal）
  * - 审批链时间轴
- * - 表格行 hover 态
+ * - 我已审批记录卡片
  *
- * 通用工具类（.hidden / .badge / .field-error / .mono / .text-strong 等）
- * 仍在 common.css 中维护，此处不重复定义。
+ * 通用组件（.applicant-card / .detail-grid / .detail-cell / .table-row-hover 等）
+ * 由 common.css 维护，此处不重复定义。
  * ============================================================================ */
 
 /* ==================== tab 切换 ==================== */
@@ -45,83 +45,176 @@
 	border-radius: 2px
 }
 
-/* ==================== 表单两列布局 & 数值展示 ==================== */
-.two-col {
-	display: flex;
-	gap: 16px;
-	flex-wrap: wrap
+/* ==================== 审批弹窗美化 ==================== */
+
+/* 弹窗内容区增加内边距 */
+#approvalModal .modal-body {
+	padding: 20px 24px
 }
-.two-col > .form-item {
-	flex: 1 1 calc(50% - 8px);
-	min-width: 0
+#approvalModal {
+	border-radius: 12px
 }
-.form-value {
-	margin-top: 4px;
+
+/* 申请理由引用块 */
+.reason-box {
+	background: #fffbeb;
+	border-left: 3px solid var(--warning);
+	border-radius: 0 var(--radius) var(--radius) 0;
+	padding: 12px 16px;
 	font-size: 14px;
 	color: var(--text);
-	line-height: 1.6;
+	line-height: 1.7;
 	word-break: break-all
 }
 
-/* ==================== 审批链时间轴 ==================== */
-.timeline {
+/* 审批链时间轴(增强版) */
+.chain-timeline {
 	list-style: none;
 	margin: 0;
 	padding: 0;
-	border-left: 2px solid var(--border);
 	position: relative
 }
-.timeline > li {
-	position: relative;
-	padding: 0 0 16px 20px
-}
-.timeline > li:last-child {
-	padding-bottom: 0
-}
-.timeline > li::before {
+.chain-timeline::before {
 	content: "";
 	position: absolute;
-	left: -7px;
-	top: 4px;
-	width: 12px;
-	height: 12px;
-	border-radius: 50%;
+	left: 11px;
+	top: 12px;
+	bottom: 12px;
+	width: 2px;
 	background: var(--border);
-	border: 2px solid #fff
+	border-radius: 1px
 }
-.timeline > li.step-done::before {
-	background: var(--success)
+.chain-timeline > li {
+	position: relative;
+	padding: 0 0 18px 32px
 }
-.timeline > li.step-curr::before {
-	background: var(--primary);
-	box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15)
+.chain-timeline > li:last-child {
+	padding-bottom: 0
 }
-.timeline > li.step-pending::before {
+.chain-timeline > li::before {
+	content: "";
+	position: absolute;
+	left: 5px;
+	top: 4px;
+	width: 14px;
+	height: 14px;
+	border-radius: 50%;
 	background: #fff;
-	border-color: var(--border)
+	border: 2px solid var(--border);
+	z-index: 1;
+	transition: all 0.2s
 }
-.step-role {
+.chain-timeline > li.step-done::before {
+	background: var(--success);
+	border-color: var(--success)
+}
+.chain-timeline > li.step-done::after {
+	content: "✓";
+	position: absolute;
+	left: 8px;
+	top: 3px;
+	font-size: 10px;
+	color: #fff;
+	font-weight: 700;
+	z-index: 2
+}
+.chain-timeline > li.step-curr::before {
+	background: var(--primary);
+	border-color: var(--primary);
+	box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.12)
+}
+.chain-timeline > li.step-curr::after {
+	content: "";
+	position: absolute;
+	left: 9px;
+	top: 8px;
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: #fff;
+	z-index: 2
+}
+.chain-node-role {
 	font-size: 14px;
 	font-weight: 600;
-	color: var(--text);
-	margin-bottom: 2px
+	color: var(--text)
 }
-.step-status {
+.chain-node-status {
+	display: inline-block;
+	font-size: 11px;
+	padding: 2px 8px;
+	border-radius: 10px;
+	margin-left: 6px;
+	font-weight: 500
+}
+.chain-node-status.done {
+	background: #ecfdf5;
+	color: var(--success)
+}
+.chain-node-status.curr {
+	background: var(--primary-light);
+	color: var(--primary)
+}
+.chain-node-status.pending {
+	background: var(--bg);
+	color: var(--text-sub)
+}
+.chain-node-approver {
 	font-size: 12px;
-	color: var(--text-sub);
-	margin-bottom: 4px
+	color: var(--primary);
+	margin-top: 2px;
+	font-weight: 500
 }
-.step-comment {
+.chain-node-comment {
 	font-size: 13px;
 	color: var(--text);
 	background: var(--bg);
 	padding: 6px 10px;
-	border-radius: 6px;
+	border-radius: var(--radius);
 	line-height: 1.5;
+	margin-top: 6px
+}
+.chain-node-time {
+	font-size: 11px;
+	color: var(--text-placeholder);
 	margin-top: 4px
 }
 
-/* ==================== 表格行 hover 态（用于整行可点击） ==================== */
-.table-row-hover:hover {
-	background: var(--bg) !important
+/* ==================== 我已审批 —— 我的审批记录 ==================== */
+.my-approval-box {
+	background: var(--primary-light);
+	border-radius: var(--radius);
+	padding: 12px 14px;
+	border-left: 3px solid var(--primary)
 }
+
+/* 当前审批人提示条 */
+.current-approver-bar {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 8px 14px;
+	background: var(--primary-light);
+	border-radius: var(--radius);
+	font-size: 13px;
+	color: var(--primary);
+	margin-top: 16px;
+	font-weight: 500
+}
+
+/* 弹窗底部按钮优化 */
+#approvalModal .modal-footer {
+	padding: 0 24px;
+	gap: 10px
+}
+#btnApproveOk {
+	min-width: 80px
+}
+#btnApproveReject {
+	min-width: 80px;
+	color: #fff
+}
+#btnApproveReject:hover {
+	opacity: 0.9
+}
+

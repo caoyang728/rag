@@ -4,8 +4,9 @@
 <head>
 	<meta charset="UTF-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
-	<title>权限与文档审批 · 知库 Agent</title>
+	<title>权限审批 · 知库 Agent</title>
 	<link rel="stylesheet" href="/static/css/common.css">
+	<link rel="stylesheet" href="/static/css/admin.css">
 	<link rel="stylesheet" href="/static/css/admin-approvals.css">
 </head>
 
@@ -16,71 +17,62 @@
 		<div class="main main-flex">
 			<div class="page-header">
 				<div class="flex items-baseline gap-10">
-					<div class="page-title">权限与文档审批</div>
-					<div class="page-subtitle">权限变更工单与文档审核双审流程处理</div>
+					<div class="page-title">权限审批</div>
+					<div class="page-subtitle">权限变更工单审批处理</div>
 				</div>
 			</div>
 
 			<div class="card flex flex-col overflow-hidden flex-1 min-h-0">
-				<!-- 标签页切换 -->
+				<!-- 四视角切换 -->
 				<div class="flex items-center gap-8 mb-8 shrink-0 border-b" style="padding-bottom:12px;">
-					<button id="tab-ticket" class="tab-btn tab-active" onclick="switchTab('ticket')">
-						权限审批
-						<span id="badge-ticket" class="badge badge-danger hidden">0</span>
+					<button id="tab-pending" class="tab-btn tab-active" onclick="switchView('pending')">
+						待我审批
+						<span id="badge-pending" class="badge badge-danger hidden">0</span>
 					</button>
-					<button id="tab-doc" class="tab-btn" onclick="switchTab('doc')">
-						文档审批
-						<span id="badge-doc" class="badge badge-danger hidden">0</span>
+					<button id="tab-processed" class="tab-btn" onclick="switchView('processed')">
+						我已审批
+					</button>
+					<button id="tab-mine" class="tab-btn" onclick="switchView('mine')">
+						我发起的
+					</button>
+					<button id="tab-all" class="tab-btn hidden" onclick="switchView('all')">
+						全部工单
 					</button>
 					<div class="flex-1"></div>
-					<button class="btn btn-sm btn-outline" onclick="refreshAll()">刷新</button>
+					<!-- 全部工单视角的状态筛选 -->
+					<select id="allStatusFilter" class="input hidden" style="width:140px;font-size:13px"
+						onchange="loadAllList()">
+						<option value="">全部状态</option>
+						<option value="PENDING">待审批</option>
+						<option value="APPROVED">已通过</option>
+						<option value="EXECUTED">已执行</option>
+						<option value="REJECTED">已驳回</option>
+						<option value="CANCELLED">已撤回</option>
+					</select>
+					<button class="btn btn-sm btn-outline" onclick="refreshCurrent()">刷新</button>
 				</div>
 
-				<!-- ===== 权限审批列表 ===== -->
-				<div id="list-ticket" class="flex flex-col flex-1 min-h-0">
+				<!-- 工单列表（四视角共用） -->
+				<div class="flex flex-col flex-1 min-h-0">
 					<div class="card-scroll">
 						<table class="table">
 							<thead>
 								<tr>
 									<th style="width:80px">工单号</th>
 									<th style="width:90px">类型</th>
-									<th>申请人</th>
-									<th>目标用户</th>
+									<th id="th-applicant">申请人</th>
+									<th id="th-target">目标用户</th>
 									<th>目标权限</th>
 									<th style="width:120px">范围</th>
-									<th style="width:160px">申请时间</th>
-									<th style="width:140px">审批进度</th>
+									<th style="width:100px" id="th-status">状态</th>
+									<th style="width:160px" id="th-time">申请时间</th>
+									<th style="width:140px">进度</th>
 									<th style="width:100px">操作</th>
 								</tr>
 							</thead>
 							<tbody id="ticketTable">
 								<tr>
-									<td colspan="9" class="text-sub text-sm text-center" style="padding:30px">加载中...</td>
-								</tr>
-							</tbody>
-						</table>
-					</div>
-				</div>
-
-				<!-- ===== 文档审批列表 ===== -->
-				<div id="list-doc" class="flex flex-col flex-1 min-h-0 hidden">
-					<div class="card-scroll">
-						<table class="table">
-							<thead>
-								<tr>
-									<th>文档标题</th>
-									<th style="width:90px">类型</th>
-									<th style="width:90px">密级</th>
-									<th>上传人</th>
-									<th style="width:120px">归属</th>
-									<th style="width:120px">阶段</th>
-									<th style="width:160px">上传时间</th>
-									<th style="width:100px">操作</th>
-								</tr>
-							</thead>
-							<tbody id="docTable">
-								<tr>
-									<td colspan="8" class="text-sub text-sm text-center" style="padding:30px">加载中...</td>
+									<td colspan="10" class="text-sub text-sm text-center" style="padding:30px">加载中...</td>
 								</tr>
 							</tbody>
 						</table>
@@ -90,7 +82,7 @@
 		</div>
 	</div>
 
-	<!-- ===== 审批详情弹窗 ===== -->
+	<!-- 审批详情弹窗 -->
 	<div id="approvalModal" class="modal" style="width:680px;max-width:90vw">
 		<div class="modal-header">
 			<div class="modal-title" id="approvalModalTitle">审批详情</div>
@@ -98,55 +90,14 @@
 		</div>
 		<div class="modal-body overflow-y-auto" style="max-height:70vh" id="approvalModalBody">
 		</div>
-		<div class="modal-footer">
-			<button class="btn-cancel" onclick="closeModal('approvalModal')">取消</button>
+		<div class="modal-footer" id="approvalModalFooter">
+			<button class="btn-cancel" onclick="closeModal('approvalModal')">关闭</button>
 			<button class="btn" id="btnApproveReject" style="background:var(--danger)" onclick="onRejectClick()">
 				拒绝
 			</button>
 			<button class="btn-save" id="btnApproveOk" onclick="onApproveClick()">
 				通过
 			</button>
-		</div>
-	</div>
-
-	<!-- ===== 驳回理由二次确认弹窗 ===== -->
-	<div id="rejectModal" class="modal modal-sm" style="width:520px;max-width:90vw">
-		<div class="modal-header">
-			<div class="modal-title">驳回理由</div>
-			<button class="modal-close" onclick="closeModal('rejectModal')">&times;</button>
-		</div>
-		<div class="modal-body">
-			<div class="form-item">
-				<label class="form-label">
-					请填写驳回理由
-					<span class="required">*</span>
-				</label>
-				<textarea id="rejectComment" class="input" rows="4" placeholder="必填，说明驳回原因..."></textarea>
-				<div id="rejectCommentErr" class="field-error hidden"></div>
-			</div>
-		</div>
-		<div class="modal-footer">
-			<button class="btn-cancel" onclick="closeModal('rejectModal')">取消</button>
-			<button class="btn" style="background:var(--danger)" onclick="submitReject()">确认驳回</button>
-		</div>
-	</div>
-
-	<!-- 通用确认弹窗 -->
-	<div id="confirmModal" class="modal modal-sm">
-		<div class="modal-header">
-			<div class="modal-title" id="confirmTitle">确认操作</div>
-			<button class="modal-close" onclick="closeConfirmModal(false)">×</button>
-		</div>
-		<div class="modal-body">
-			<div id="confirmMessage" style="padding:12px 0;font-size:14px;line-height:1.6"></div>
-			<div class="form-item mt-12" id="confirmCommentWrap">
-				<label class="form-label">审批意见（可选）</label>
-				<textarea id="confirmComment" class="input" rows="2" placeholder="可填写备注说明..."></textarea>
-			</div>
-		</div>
-		<div class="modal-footer">
-			<button class="btn-cancel" onclick="closeConfirmModal(false)" id="confirmCancelBtn">取消</button>
-			<button class="btn-save" onclick="closeConfirmModal(true)" id="confirmOkBtn">确认</button>
 		</div>
 	</div>
 

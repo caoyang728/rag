@@ -1,0 +1,63 @@
+/* ============================================================================
+ * admin-docs.css —— 文档审核页面专属样式
+ *
+ * 仅用于 /admin-docs/ 页面：
+ * - 审核弹窗专属样式（#docModal）
+ * - 文档摘要预览区
+ *
+ * 通用组件（.badge / .table / .btn / .modal / .applicant-card / .detail-cell 等）
+ * 由 common.css 维护，此处不重复定义。
+ * ============================================================================ */
+
+/* ==================== 审核弹窗美化 ==================== */
+
+/* 弹窗内容区增加内边距 */
+#docModal .modal-body {
+	padding: 20px 24px
+}
+#docModal {
+	border-radius: 12px
+}
+
+/* 文档摘要预览区（本期仅展示元信息 + 占位提示） */
+.doc-summary-box {
+	background: var(--bg);
+	border: 1px dashed var(--border-strong);
+	border-radius: var(--radius-lg);
+	padding: 16px;
+	display: flex;
+	flex-direction: column;
+	gap: 10px
+}
+.doc-summary-meta {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-size: 14px;
+	color: var(--text);
+	flex-wrap: wrap
+}
+.doc-summary-tip {
+	font-size: 12px;
+	color: var(--text-placeholder);
+	background: var(--white);
+	border-radius: var(--radius);
+	padding: 8px 12px;
+	text-align: center
+}
+
+/* 弹窗底部按钮优化 */
+#docModal .modal-footer {
+	padding: 0 24px;
+	gap: 10px
+}
+#btnDocApprove {
+	min-width: 80px
+}
+#btnDocReject {
+	min-width: 80px;
+	color: #fff
+}
+#btnDocReject:hover {
+	opacity: 0.9
+}

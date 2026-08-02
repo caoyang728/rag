@@ -404,6 +404,7 @@ const PAGE_MAP = {
 	'upload': '/upload/',
 	'admin-users': '/admin-users/',
 	'admin-nodes': '/admin-nodes/',
+	'admin-approvals': '/admin-approvals/',
 	'admin-analytics': '/admin-analytics/',
 	'admin-eval': '/admin-eval/',
 	'admin-audit': '/admin-audit/',
@@ -577,6 +578,13 @@ function formatDate(dt) {
 	const d = new Date(dt);
 	return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0') + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
 }
+function formatFileSize(bytes) {
+	if (bytes == null || isNaN(bytes)) return '-';
+	if (bytes < 1024) return bytes + ' B';
+	if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+	if (bytes < 1024 * 1024 * 1024) return (bytes / 1024 / 1024).toFixed(1) + ' MB';
+	return (bytes / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+}
 function updatePwdStrength(v) {
 	const s = $('#pwdStrength'), h = $('#pwdHint');
 	if (!s || !h) return;
@@ -674,7 +682,10 @@ function renderSidebar(active) {
 	const adminItems = [];
 	// 用户与角色、反馈与报表、审计与安全：仅管理角色可见
 	if (isManagerRole) {
-		adminItems.push({ icon: '👥', name: '用户与角色', page: 'admin-users', key: 'admin-users' });
+		adminItems.push(
+			{ icon: '✅', name: '审批中心', page: 'admin-approvals', key: 'admin-approvals' },
+			{ icon: '👥', name: '用户与角色', page: 'admin-users', key: 'admin-users' },
+		);
 	}
 	// 知识库：所有登录用户可浏览文档；节点增删改仅管理员可用（页面内控制）
 	adminItems.push({ icon: '🗂️', name: '知识库', page: 'admin-nodes', key: 'admin-nodes' });

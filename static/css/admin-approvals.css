@@ -1,0 +1,127 @@
+/* ============================================================================
+ * admin-approvals.css —— 权限与文档审批中心专属样式
+ *
+ * 仅用于 /admin-approvals/ 页面：
+ * - tab 切换
+ * - 表单两列布局 & 数值展示
+ * - 审批链时间轴
+ * - 表格行 hover 态
+ *
+ * 通用工具类（.hidden / .badge / .field-error / .mono / .text-strong 等）
+ * 仍在 common.css 中维护，此处不重复定义。
+ * ============================================================================ */
+
+/* ==================== tab 切换 ==================== */
+.tab-btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 8px 16px;
+	border: none;
+	background: transparent;
+	color: var(--text-sub);
+	font-size: 14px;
+	font-weight: 500;
+	cursor: pointer;
+	border-radius: var(--radius-sm);
+	position: relative;
+	transition: all 0.2s
+}
+.tab-btn:hover {
+	background: var(--hover);
+	color: var(--text)
+}
+.tab-btn.tab-active {
+	color: var(--primary)
+}
+.tab-btn.tab-active::after {
+	content: "";
+	position: absolute;
+	bottom: -13px;
+	left: 0;
+	right: 0;
+	height: 2px;
+	background: var(--primary);
+	border-radius: 2px
+}
+
+/* ==================== 表单两列布局 & 数值展示 ==================== */
+.two-col {
+	display: flex;
+	gap: 16px;
+	flex-wrap: wrap
+}
+.two-col > .form-item {
+	flex: 1 1 calc(50% - 8px);
+	min-width: 0
+}
+.form-value {
+	margin-top: 4px;
+	font-size: 14px;
+	color: var(--text);
+	line-height: 1.6;
+	word-break: break-all
+}
+
+/* ==================== 审批链时间轴 ==================== */
+.timeline {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+	border-left: 2px solid var(--border);
+	position: relative
+}
+.timeline > li {
+	position: relative;
+	padding: 0 0 16px 20px
+}
+.timeline > li:last-child {
+	padding-bottom: 0
+}
+.timeline > li::before {
+	content: "";
+	position: absolute;
+	left: -7px;
+	top: 4px;
+	width: 12px;
+	height: 12px;
+	border-radius: 50%;
+	background: var(--border);
+	border: 2px solid #fff
+}
+.timeline > li.step-done::before {
+	background: var(--success)
+}
+.timeline > li.step-curr::before {
+	background: var(--primary);
+	box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15)
+}
+.timeline > li.step-pending::before {
+	background: #fff;
+	border-color: var(--border)
+}
+.step-role {
+	font-size: 14px;
+	font-weight: 600;
+	color: var(--text);
+	margin-bottom: 2px
+}
+.step-status {
+	font-size: 12px;
+	color: var(--text-sub);
+	margin-bottom: 4px
+}
+.step-comment {
+	font-size: 13px;
+	color: var(--text);
+	background: var(--bg);
+	padding: 6px 10px;
+	border-radius: 6px;
+	line-height: 1.5;
+	margin-top: 4px
+}
+
+/* ==================== 表格行 hover 态（用于整行可点击） ==================== */
+.table-row-hover:hover {
+	background: var(--bg) !important
+}

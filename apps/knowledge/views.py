@@ -2023,3 +2023,226 @@ class PendingDocsView(APIView):
             "retriggered": count,
             "failed": failed,
         })
+
+
+# ============================================================================
+# 文档审核（双审：团队组长一审 → 部门经理/合规二审）
+# ============================================================================
+
+class DocAuditPendingView(APIView):
+    """GET /api/v1/knowledge/documents/pending-audits/
+    获取待当前用户审核的文档列表
+
+    审核规则（对齐 Document.AUDIT_STATUS_CHOICES）：
+    - pending_team: 待团队组长一审 → 文档 team_id 对应当前用户为团队 leader
+    - pending_compliance: 待合规二审 → 部门 leader / kb_admin / super_admin
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        # 访问入口权限校验（与权限审批页面共享可见性：仅管理角色可见）
+        from apps.users.models import Department, Team, has_permission
+        if not (user.is_super_admin
+                or user.is_kb_admin
+                or has_permission(user, 'user.manage_all')
+                or has_permission(user, 'user.manage')):
+            is_leader = (
+                Team.objects.filter(leader_id=user.id, is_deleted=False).exists()
+                or Department.objects.filter(leader_id=user.id, is_deleted=False).exists()
+            )
+            if not is_leader:
+                raise PermissionDenied("无文档审核权限")
+
+        qs = Document.objects.filter(
+            is_deleted=False,
+            audit_status__in=['pending_team', 'pending_compliance'],
+        ).select_related('owner', 'node').order_by('-created_at')
+
+        # 按用户身份 + audit_status 过滤范围
+        rows = []
+        for doc in qs:
+            can_audit = False
+            audit_step = ''
+            if doc.audit_status == 'pending_team':
+                # 团队组长一审：文档 team_id 对应团队 leader
+                if doc.team_id and Team.objects.filter(
+                    id=doc.team_id, leader_id=user.id, is_deleted=False
+                ).exists():
+                    can_audit = True
+                    audit_step = '一审（团队组长）'
+                # 用户显式拥有 kb_admin / super_admin：也可以审（兜底，防止团队 leader 空缺）
+                elif user.is_super_admin or user.is_kb_admin:
+                    can_audit = True
+                    audit_step = '一审（管理员代审）'
+            elif doc.audit_status == 'pending_compliance':
+                # 二审：部门经理 / kb_admin / super_admin
+                if user.is_super_admin or user.is_kb_admin:
+                    can_audit = True
+                    audit_step = '二审（合规审核）'
+                elif doc.dept_id and Department.objects.filter(
+                    id=doc.dept_id, leader_id=user.id, is_deleted=False
+                ).exists():
+                    can_audit = True
+                    audit_step = '二审（部门经理）'
+            if not can_audit:
+                continue
+
+            # 解析节点路径（部门/团队）
+            dept_name = ''
+            team_name = ''
+            if doc.team_id:
+                t = Team.objects.filter(id=doc.team_id, is_deleted=False).only('name', 'department_id').first()
+                if t:
+                    team_name = t.name
+                    d = Department.objects.filter(id=t.department_id, is_deleted=False).only('name').first()
+                    if d:
+                        dept_name = d.name
+            elif doc.dept_id:
+                d = Department.objects.filter(id=doc.dept_id, is_deleted=False).only('name').first()
+                if d:
+                    dept_name = d.name
+
+            rows.append({
+                'id': doc.id,
+                'uuid': str(doc.uuid),
+                'title': doc.title,
+                'file_name': doc.file_name,
+                'file_type': doc.file_type,
+                'file_size': doc.file_size,
+                'visibility_level': doc.visibility_level,
+                'secret_level': doc.secret_level,
+                'audit_status': doc.audit_status,
+                'audit_step': audit_step,
+                'owner_id': doc.owner_id,
+                'owner_name': doc.owner.real_name or doc.owner.username if doc.owner else '',
+                'owner_email': doc.owner.email if doc.owner else '',
+                'node_id': doc.node_id,
+                'node_name': doc.node.name if doc.node else '',
+                'dept_name': dept_name,
+                'team_name': team_name,
+                'version': doc.version,
+                'version_tag': doc.version_tag or '',
+                'created_at': doc.created_at.isoformat() if doc.created_at else '',
+                'updated_at': doc.updated_at.isoformat() if doc.updated_at else '',
+            })
+
+        return Response({
+            'rows': rows,
+            'count': len(rows),
+        })
+
+
+class DocAuditApproveView(APIView):
+    """POST /api/v1/knowledge/documents/<id>/audit-approve/
+    审核通过文档
+
+    状态流转：
+    - pending_team → pending_compliance（一审通过，进入二审）
+    - pending_compliance → passed（二审通过，正式放行）
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        from apps.users.models import Department, Team, has_permission
+
+        comment = (request.data.get("comment") or "").strip()
+        try:
+            doc = Document.objects.select_for_update().get(pk=pk, is_deleted=False)
+        except Document.DoesNotExist:
+            return Response({"detail": "文档不存在"}, status=404)
+
+        user = request.user
+        # 权限 + 状态 校验
+        if doc.audit_status == 'pending_team':
+            can = False
+            if doc.team_id and Team.objects.filter(
+                id=doc.team_id, leader_id=user.id, is_deleted=False
+            ).exists():
+                can = True
+            elif user.is_super_admin or user.is_kb_admin:
+                can = True
+            if not can:
+                raise PermissionDenied("您不是该文档所属团队的组长，无权进行一审")
+            # 一审通过 → 进入二审
+            doc.audit_status = 'pending_compliance'
+        elif doc.audit_status == 'pending_compliance':
+            can = False
+            if user.is_super_admin or user.is_kb_admin:
+                can = True
+            elif doc.dept_id and Department.objects.filter(
+                id=doc.dept_id, leader_id=user.id, is_deleted=False
+            ).exists():
+                can = True
+            if not can:
+                raise PermissionDenied("您没有该文档的二审权限")
+            # 二审通过 → passed
+            doc.audit_status = 'passed'
+        else:
+            return Response({"detail": f"文档当前状态 {doc.audit_status} 不可审核"}, status=400)
+
+        doc.save(update_fields=['audit_status', 'updated_at'])
+        _log_operation(request, f'doc_audit_approve_{doc.audit_status}', document=doc,
+                       detail={'comment': comment, 'approver': user.username})
+        logger.info(f"Doc audit approved: id={pk}, status={doc.audit_status}, approver={user.username}")
+        return Response({
+            "ok": True,
+            "audit_status": doc.audit_status,
+            "title": doc.title,
+        })
+
+
+class DocAuditRejectView(APIView):
+    """POST /api/v1/knowledge/documents/<id>/audit-reject/
+    审核驳回文档（驳回理由必填）
+
+    状态流转：pending_team / pending_compliance → rejected
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        from apps.users.models import Department, Team
+
+        comment = (request.data.get("comment") or "").strip()
+        if not comment:
+            return Response({"detail": "驳回理由不能为空"}, status=400)
+
+        try:
+            doc = Document.objects.select_for_update().get(pk=pk, is_deleted=False)
+        except Document.DoesNotExist:
+            return Response({"detail": "文档不存在"}, status=404)
+
+        user = request.user
+        # 权限校验：与 approve 相同
+        if doc.audit_status not in ('pending_team', 'pending_compliance'):
+            return Response({"detail": f"文档当前状态 {doc.audit_status} 不可驳回"}, status=400)
+
+        can = False
+        if doc.audit_status == 'pending_team':
+            if doc.team_id and Team.objects.filter(
+                id=doc.team_id, leader_id=user.id, is_deleted=False
+            ).exists():
+                can = True
+            elif user.is_super_admin or user.is_kb_admin:
+                can = True
+        else:  # pending_compliance
+            if user.is_super_admin or user.is_kb_admin:
+                can = True
+            elif doc.dept_id and Department.objects.filter(
+                id=doc.dept_id, leader_id=user.id, is_deleted=False
+            ).exists():
+                can = True
+        if not can:
+            raise PermissionDenied("您没有该文档的审核权限")
+
+        doc.audit_status = 'rejected'
+        doc.save(update_fields=['audit_status', 'updated_at'])
+        _log_operation(request, 'doc_audit_reject', document=doc,
+                       detail={'comment': comment, 'rejector': user.username})
+        logger.info(f"Doc audit rejected: id={pk}, rejector={user.username}, reason={comment[:100]}")
+        return Response({
+            "ok": True,
+            "audit_status": doc.audit_status,
+            "title": doc.title,
+            "reject_comment": comment,
+        })

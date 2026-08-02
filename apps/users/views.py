@@ -1790,36 +1790,83 @@ class TeamViewSet(viewsets.ModelViewSet):
 # ============================================================================
 class MyPermissionsView(APIView):
     """GET /api/v1/auth/permissions/me/
-    返回当前用户拥有的权限（按模块分组）和角色列表。
+    返回当前用户拥有的权限(按模块分组)和角色列表。
+
+    返回字段:
+    - roles: 当前用户持有的活跃角色列表(含 scope 信息)
+    - permission_groups: 按 module 分组的权限点(含 label,从 Permission 表查询)
+    - is_super_admin: 是否超管(系统级快路径)
     """
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        from apps.users.models import Permission, ScopeType
         u = request.user
-        roles = [
-            {
+        # 角色列表:补充 scope 信息(团队/部门属地授权)
+        roles = []
+        for ur in u.user_role_rels.select_related("role").filter(status='ACTIVE').all():
+            roles.append({
                 "id": ur.role.id,
                 "code": ur.role.role_key,
                 "name": ur.role.name,
                 "is_builtin": ur.role.is_builtin,
-            }
-            for ur in u.user_role_rels.select_related("role").filter(status='ACTIVE').all()
-        ]
-        # get_user_permissions（返回 permission_key 集合）
+                "role_type": ur.role.role_type,
+                "data_scope": ur.role.data_scope,
+                "scope_type": ScopeType.NONE,  # 全局角色无 scope
+                "scope_id": None,
+                "scope_name": "",
+            })
+        # 团队属地角色(补 scope)
+        for tr in u.team_scope_rels.select_related("role", "team").filter(status='ACTIVE').all():
+            roles.append({
+                "id": tr.role.id,
+                "code": tr.role.role_key,
+                "name": tr.role.name,
+                "is_builtin": tr.role.is_builtin,
+                "role_type": tr.role.role_type,
+                "data_scope": tr.role.data_scope,
+                "scope_type": ScopeType.TEAM,
+                "scope_id": tr.team_id,
+                "scope_name": tr.team.name if tr.team else "",
+            })
+        # 部门属地角色(补 scope)
+        for dr in u.dept_scope_rels.select_related("role", "dept").filter(status='ACTIVE').all():
+            roles.append({
+                "id": dr.role.id,
+                "code": dr.role.role_key,
+                "name": dr.role.name,
+                "is_builtin": dr.role.is_builtin,
+                "role_type": dr.role.role_type,
+                "data_scope": dr.role.data_scope,
+                "scope_type": ScopeType.DEPT,
+                "scope_id": dr.dept_id,
+                "scope_name": dr.dept.name if dr.dept else "",
+            })
+
+        # get_user_permissions(返回 permission_key 集合)
         perm_set = get_user_permissions(u)
-        # 按模块分组，转换为前端友好的分组结构
-        # 新权限点格式为三段式 module.resource.action（如 kb.document.read）
+        # 批量查询权限点 label(从 Permission 表),避免 N+1
+        perm_map = {}
+        if perm_set:
+            perm_rows = Permission.objects.filter(permission_key__in=perm_set).values(
+                'permission_key', 'permission_name', 'module',
+            )
+            perm_map = {r['permission_key']: r for r in perm_rows}
+
+        # 按模块分组,转换为前端友好的分组结构
+        # 新权限点格式为三段式 module.resource.action(如 kb.document.read)
         groups = {}
         for key in perm_set:
             parts = key.split('.')
             module = parts[0] if parts else key
             action = parts[-1] if len(parts) > 1 else ""
+            perm_info = perm_map.get(key, {})
             if module not in groups:
                 groups[module] = []
             groups[module].append({
                 "code": key,
                 "action": action,
-                "label": key,
+                "label": perm_info.get('permission_name') or key,
             })
         return Response({
             "roles": roles,
@@ -1830,7 +1877,13 @@ class MyPermissionsView(APIView):
 
 class PermissionApproversView(APIView):
     """GET /api/v1/auth/permissions/approvers/?scope=team|department|all
-    返回当前用户可选择的审批人列表。
+    [已废弃] 返回当前用户可选择的审批人列表 —— 新架构由系统自动生成审批链,无需用户选审批人。
+
+    保留此接口仅为向后兼容旧前端,新前端请改用:
+    - GET /permissions/assignable-roles/  获取可申请角色
+    - GET /permissions/approval-chain-preview/  预览审批链
+
+    旧逻辑(已不推荐):
     - team: 团队 leader + 部门经理
     - department: 部门经理 + 知识库管理员
     - all: 部门经理 + 知识库管理员 + 超级管理员
@@ -1838,6 +1891,10 @@ class PermissionApproversView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        logger.warning(
+            f'[Deprecated] PermissionApproversView 被调用(user={request.user.username}),'
+            f'请迁移到 approval-chain-preview 接口'
+        )
         u = request.user
         scope = (request.query_params.get("scope") or "team").strip()
         approvers = []
@@ -1899,79 +1956,191 @@ class PermissionApproversView(APIView):
 
 class AccessApplicationView(APIView):
     """GET/POST /api/v1/auth/permissions/applications/
-    GET: 当前用户的访问申请列表
-    POST: 提交新的文档/团队/部门访问申请
+    GET: 当前用户的权限申请列表(对齐工单真实字段)
+    POST: 提交权限申请(对接 create_ticket 服务,支持 GRANT/REVOKE/ROLE_CHANGE)
 
-    使用 PermissionApprovalTicket 实现访问申请工单。
-    响应字段名保持不变（target_type/target_id/action 等）以兼容前端。
+    POST 字段(对齐 RBAC 权限架构):
+    - role_key:      申请的角色标识(如 viewer/contributor/team_leader/dept_manager 等)
+    - scope_type:    管辖范围 TEAM/DEPT/NONE(全局角色填 NONE)
+    - scope_id:      scope_type=TEAM 填 team_id;DEPT 填 dept_id;NONE 留空
+    - change_type:   GRANT(默认)/REVOKE/ROLE_CHANGE
+    - previous_role_id: 仅 ROLE_CHANGE 必填(同 scope 内角色变更,原子撤销旧角色+授予新角色)
+    - reason:        申请理由(必填)
+    - effective_from/expires_at: 可选,生效/失效时间
+
+    业务规则:
+    - 同团队内团队角色(viewer/contributor/team_leader)互斥,高等级覆盖低等级
+      → 申请同团队新角色时自动检测已有角色,转为 ROLE_CHANGE(原子覆盖)
+    - super_admin 不可自助申请(只能由现有超管发起双人复核工单)
+    - viewer 本团队自动授予,不进工单(由节点同步处理,不走本接口)
     """
     permission_classes = [IsAuthenticated]
 
+    # 团队级角色(同 scope 内互斥,高等级覆盖低等级)
+    TEAM_ROLE_KEYS = ('viewer', 'contributor', 'team_leader')
+    # 自助申请禁止的角色(只能由管理员发起工单)
+    SELF_APPLY_FORBIDDEN_KEYS = ('super_admin',)
+
     def get(self, request):
-        from apps.users.models import PermissionApprovalTicket
-        apps = PermissionApprovalTicket.objects.filter(applicant=request.user).order_by("-created_at")[:50]
+        """返回当前用户发起的工单列表,字段对齐 PermissionApprovalTicket 真实结构"""
+        from apps.users.models import (
+            PermissionApprovalTicket, ScopeType,
+            Department, Team, User,
+        )
+        tickets = PermissionApprovalTicket.objects.filter(
+            applicant=request.user,
+        ).select_related('target_user', 'role', 'previous_role').order_by('-created_at')[:100]
+
         rows = []
-        for a in apps:
-            # 从 approval_chain 提取审批意见（最后一个节点的 comment）
-            reviewer_comment = ""
-            if a.approval_chain:
-                last_step = a.approval_chain[-1] if isinstance(a.approval_chain, list) else {}
-                reviewer_comment = last_step.get("comment", "") if isinstance(last_step, dict) else ""
+        for t in tickets:
+            chain = t.approval_chain or []
+            # 解析 scope 名称(部门/团队),便于前端直接展示
+            scope_name = ''
+            if t.scope_type == ScopeType.DEPT and t.scope_id:
+                dept = Department.objects.filter(id=t.scope_id, is_deleted=False).only('name').first()
+                scope_name = dept.name if dept else f'部门#{t.scope_id}'
+            elif t.scope_type == ScopeType.TEAM and t.scope_id:
+                team = Team.objects.filter(id=t.scope_id, is_deleted=False).only('name').first()
+                scope_name = team.name if team else f'团队#{t.scope_id}'
+            elif t.scope_type in (ScopeType.GLOBAL, ScopeType.NONE):
+                scope_name = '全局'
+
+            # 提取审批人姓名(最后一个有 approver_id 的节点)
+            approver_name = ''
+            reviewer_comment = ''
+            if t.status in ('APPROVED', 'EXECUTED', 'REJECTED') and chain:
+                for node in reversed(chain):
+                    if node.get('approver_id'):
+                        approver = User.objects.filter(id=node['approver_id']).first()
+                        if approver:
+                            approver_name = approver.real_name or approver.username
+                        if node.get('comment'):
+                            reviewer_comment = node['comment']
+                        break
+
             rows.append({
-                "id": a.id,
-                "target_type": a.scope_type.lower() if a.scope_type else "",
-                "target_id": a.scope_id,
-                "action": a.change_type.lower() if a.change_type else "",
-                "reason": a.reason,
-                "status": a.status.lower() if a.status else "",
-                "reviewer_comment": reviewer_comment,
-                "created_at": a.created_at.isoformat() if a.created_at else "",
-                "reviewed_at": a.approved_at.isoformat() if a.approved_at else "",
+                'id': t.id,
+                'ticket_no': t.ticket_no,
+                'change_type': t.change_type,
+                'status': t.status,
+                'role_id': t.role_id,
+                'role_key': t.role.role_key if t.role else '',
+                'role_name': t.role.name if t.role else '',
+                'previous_role_key': t.previous_role.role_key if t.previous_role else '',
+                'previous_role_name': t.previous_role.name if t.previous_role else '',
+                'scope_type': t.scope_type,
+                'scope_id': t.scope_id,
+                'scope_name': scope_name,
+                'reason': t.reason,
+                'approver_name': approver_name,
+                'reviewer_comment': reviewer_comment,
+                'effective_from': t.effective_from.isoformat() if t.effective_from else '',
+                'expires_at': t.expires_at.isoformat() if t.expires_at else '',
+                'created_at': t.created_at.isoformat() if t.created_at else '',
+                'approved_at': t.approved_at.isoformat() if t.approved_at else '',
+                'executed_at': t.executed_at.isoformat() if t.executed_at else '',
+                'current_step': t.current_step,
+                'total_steps': len(chain),
+                'approval_chain': [
+                    {
+                        'approver_role': n.get('approver_role'),
+                        'approver_id': n.get('approver_id'),
+                        'status': n.get('status'),
+                        'comment': n.get('comment', ''),
+                        'approved_at': n.get('approved_at', ''),
+                    } for n in chain
+                ],
             })
-        return Response({"rows": rows, "count": len(rows)})
+        return Response({'rows': rows, 'count': len(rows)})
 
     def post(self, request):
-        import uuid
         from apps.users.models import (
-            PermissionApprovalTicket, ScopeType, TicketChangeType, TicketStatus,
+            Role, ScopeType, TicketChangeType, UserRoleRel,
+            UserTeamScopeRel, GrantStatus,
         )
-        target_type = (request.data.get("target_type") or "").strip()
-        target_id = request.data.get("target_id")
-        action = (request.data.get("action") or "read").strip()
-        reason = (request.data.get("reason") or "").strip()
+        from apps.users.ticket_service import create_ticket
 
-        if target_type not in ("doc", "team", "dept", "all"):
-            return Response({"detail": "target_type 取值应为 doc/team/dept/all"}, status=400)
-        if not target_id and target_type != "all":
-            return Response({"detail": "target_id 必填"}, status=400)
-        if action not in ("read", "download"):
-            return Response({"detail": "action 取值应为 read/download"}, status=400)
+        role_key = (request.data.get('role_key') or '').strip()
+        scope_type = (request.data.get('scope_type') or ScopeType.NONE).strip()
+        scope_id = request.data.get('scope_id')
+        change_type = (request.data.get('change_type') or TicketChangeType.GRANT).strip()
+        previous_role_id = request.data.get('previous_role_id')
+        reason = (request.data.get('reason') or '').strip()
+        effective_from = request.data.get('effective_from')
+        expires_at = request.data.get('expires_at')
+
+        # ── 字段校验 ──
+        if not role_key:
+            return Response({'detail': 'role_key 必填(角色标识)'}, status=400)
+        if scope_type not in (ScopeType.TEAM, ScopeType.DEPT, ScopeType.NONE, ScopeType.GLOBAL):
+            return Response({'detail': 'scope_type 取值应为 TEAM/DEPT/NONE'}, status=400)
+        if change_type not in (
+            TicketChangeType.GRANT, TicketChangeType.REVOKE, TicketChangeType.ROLE_CHANGE,
+        ):
+            return Response({'detail': 'change_type 取值应为 GRANT/REVOKE/ROLE_CHANGE'}, status=400)
         if not reason:
-            return Response({"detail": "请填写申请理由"}, status=400)
+            return Response({'detail': '请填写申请理由'}, status=400)
 
-        # 映射旧 target_type → 新 scope_type
-        scope_type_map = {
-            "doc": ScopeType.NONE, "team": ScopeType.TEAM,
-            "dept": ScopeType.DEPT, "all": ScopeType.GLOBAL,
-        }
-        # 生成唯一工单号
-        ticket_no = f"APP-{uuid.uuid4().hex[:12].upper()}"
-        app = PermissionApprovalTicket.objects.create(
-            ticket_no=ticket_no,
-            applicant=request.user,
-            target_user=request.user,  # 自助申请：被授权对象为申请人自身
-            change_type=TicketChangeType.GRANT,
-            scope_type=scope_type_map.get(target_type, ScopeType.NONE),
-            scope_id=target_id,
-            reason=reason,
-            status=TicketStatus.PENDING,
-        )
-        logger.info(f"PermissionApprovalTicket created: id={app.id}, applicant={request.user.username}, "
-                    f"target={target_type}:{target_id}, action={action}")
+        # scope_id 必填校验:TEAM/DEPT 必须指定具体组织
+        if scope_type in (ScopeType.TEAM, ScopeType.DEPT) and not scope_id:
+            return Response({'detail': f'scope_type={scope_type} 时 scope_id 必填'}, status=400)
+
+        # ── 角色校验 ──
+        role = Role.objects.filter(role_key=role_key, is_deleted=False).first()
+        if not role:
+            return Response({'detail': f'角色不存在: {role_key}'}, status=400)
+
+        # super_admin 不可自助申请(只能由现有超管发起双人复核工单)
+        if role_key in self.SELF_APPLY_FORBIDDEN_KEYS:
+            return Response({'detail': '超级管理员角色不可自助申请,请联系现有超管发起工单'}, status=403)
+
+        # ── ROLE_CHANGE previous_role 解析 ──
+        # 注:同团队角色互斥检测已下沉到 create_ticket 服务层,
+        # 此处仅处理前端显式提交的 ROLE_CHANGE 工单(带 previous_role_id)
+        previous_role = None
+        if change_type == TicketChangeType.ROLE_CHANGE:
+            if not previous_role_id:
+                return Response({'detail': 'ROLE_CHANGE 必须提供 previous_role_id'}, status=400)
+            previous_role = Role.objects.filter(id=previous_role_id, is_deleted=False).first()
+            if not previous_role:
+                return Response({'detail': 'previous_role_id 对应角色不存在'}, status=400)
+
+        # ── 调用工单服务创建审批工单 ──
+        # create_ticket 内部会自动检测同团队角色互斥并转为 ROLE_CHANGE
+        ip = _client_ip(request)
+        ua = request.META.get('HTTP_USER_AGENT', '')[:256]
+        try:
+            ticket = create_ticket(
+                applicant=request.user,
+                target_user=request.user,  # 自助申请:被授权对象为申请人自身
+                change_type=change_type,
+                role=role,
+                scope_type=scope_type,
+                scope_id=scope_id,
+                effective_from=effective_from,
+                expires_at=expires_at,
+                reason=reason,
+                ip_address=ip,
+                user_agent=ua,
+                previous_role=previous_role,
+            )
+        except ValueError as e:
+            # SoD 互斥冲突 / 超管硬约束 / 其他业务规则拦截
+            return Response({'detail': str(e)}, status=400)
+        except Exception as e:
+            logger.exception(f'[AccessApplication] 创建工单失败: {e}')
+            return Response({'detail': '创建工单失败,请稍后重试'}, status=500)
+
+        logger.info(f'[AccessApplication] 工单创建: id={ticket.id} no={ticket.ticket_no} '
+                    f'applicant={request.user.username} role={role_key} '
+                    f'change_type={change_type} status={ticket.status}')
+
         return Response({
-            "id": app.id,
-            "detail": "申请已提交，等待审批",
-            "status": "pending",
+            'id': ticket.id,
+            'ticket_no': ticket.ticket_no,
+            'change_type': ticket.change_type,
+            'status': ticket.status,
+            'detail': '申请已提交,等待审批' if ticket.status == 'PENDING' else '申请已直接生效',
         }, status=201)
 
 
@@ -2033,7 +2202,7 @@ class PendingApprovalTicketsView(APIView):
 
         pending_tickets = PermissionApprovalTicket.objects.filter(
             status=TicketStatus.PENDING,
-        ).select_related('applicant', 'target_user', 'role')
+        ).select_related('applicant', 'target_user', 'role', 'previous_role')
 
         rows = []
         for ticket in pending_tickets:
@@ -2074,6 +2243,9 @@ class PendingApprovalTicketsView(APIView):
                 'role_id': ticket.role_id,
                 'role_name': ticket.role.name if ticket.role else '',
                 'role_key': ticket.role.role_key if ticket.role else '',
+                'previous_role_id': ticket.previous_role_id,
+                'previous_role_name': ticket.previous_role.name if ticket.previous_role else '',
+                'previous_role_key': ticket.previous_role.role_key if ticket.previous_role else '',
                 'scope_type': ticket.scope_type,
                 'scope_id': ticket.scope_id,
                 'scope_name': scope_name,
@@ -2258,4 +2430,210 @@ class MyTicketsView(APIView):
         return Response({
             'rows': rows,
             'count': len(rows),
+        })
+
+
+class AssignableRolesView(APIView):
+    """GET /api/v1/auth/permissions/assignable-roles/
+    返回当前用户可申请的角色清单(按类别分组,含审批链提示)
+
+    业务规则:
+    - super_admin 不可自助申请(不返回)
+    - viewer/contributor/team_leader:团队级角色,需指定 team_id
+    - dept_manager:部门级角色,需指定 dept_id
+    - user_admin/kb_admin/compliance_admin:全局高权角色,无需 scope
+    - 返回每个角色的审批链概要(审批层级 + 审批人角色),供前端展示
+
+    查询参数:
+    - scope_type: 可选,筛选指定范围的角色(TEAM/DEPT/NONE)
+    """
+    permission_classes = [IsAuthenticated]
+
+    # 角色分类(前端按分类分组展示)
+    ROLE_CATEGORY_MAP = {
+        'viewer': {'category': 'team', 'category_label': '团队角色', 'rank': 1},
+        'contributor': {'category': 'team', 'category_label': '团队角色', 'rank': 2},
+        'team_leader': {'category': 'team', 'category_label': '团队角色', 'rank': 3},
+        'dept_manager': {'category': 'dept', 'category_label': '部门角色', 'rank': 10},
+        'kb_admin': {'category': 'global', 'category_label': '全局高权角色', 'rank': 20},
+        'compliance_admin': {'category': 'global', 'category_label': '全局高权角色', 'rank': 21},
+        'user_admin': {'category': 'global', 'category_label': '全局高权角色', 'rank': 22},
+        'super_admin': {'category': 'global', 'category_label': '全局高权角色', 'rank': 99},
+    }
+
+    # 审批链概要(前端展示用,不包含具体审批人)
+    APPROVAL_CHAIN_SUMMARY = {
+        'viewer': {'steps': ['目标团队组长'], 'desc': '目标团队组长单审(缺失降级)'},
+        'contributor': {'steps': ['本团队组长', '目标团队组长'], 'desc': '本团队组长 → 目标团队组长 双审(跨团队);本团队单审'},
+        'team_leader': {'steps': ['本部门经理', '目标部门经理'], 'desc': '本部门经理 → 目标部门经理 双审(跨部门);本部门单审'},
+        'dept_manager': {'steps': ['用户管理员', '超级管理员'], 'desc': '用户管理员 → 超管 双审'},
+        'kb_admin': {'steps': ['用户管理员', '超级管理员'], 'desc': '用户管理员 → 超管 双审'},
+        'compliance_admin': {'steps': ['用户管理员', '超级管理员'], 'desc': '用户管理员 → 超管 双审'},
+        'user_admin': {'steps': ['超级管理员', '超级管理员'], 'desc': '双超管复核(排除申请人,双人独立)'},
+        'super_admin': {'steps': ['超级管理员', '超级管理员'], 'desc': '双超管复核(排除申请人,双人独立)'},
+    }
+
+    def get(self, request):
+        from apps.users.models import Role, ScopeType
+
+        scope_filter = (request.query_params.get('scope_type') or '').strip()
+        # super_admin 不可自助申请,从返回清单中排除
+        roles = Role.objects.filter(is_deleted=False).exclude(role_key='super_admin').order_by('id')
+
+        rows = []
+        for r in roles:
+            meta = self.ROLE_CATEGORY_MAP.get(r.role_key)
+            if not meta:
+                # 未在分类表中登记的角色(如自定义角色)不返回
+                continue
+            # scope_type 筛选
+            if scope_filter:
+                category_scope_map = {
+                    'team': ScopeType.TEAM,
+                    'dept': ScopeType.DEPT,
+                    'global': ScopeType.NONE,
+                }
+                if category_scope_map.get(meta['category']) != scope_filter:
+                    continue
+
+            chain_info = self.APPROVAL_CHAIN_SUMMARY.get(r.role_key, {'steps': [], 'desc': ''})
+            # 需要绑定 scope 的角色类型
+            need_scope = r.role_type in ('TEAM_SCOPE', 'DEPT_SCOPE')
+            scope_type_required = ScopeType.TEAM if r.role_key in (
+                'viewer', 'contributor', 'team_leader',
+            ) else (ScopeType.DEPT if r.role_key == 'dept_manager' else ScopeType.NONE)
+
+            rows.append({
+                'id': r.id,
+                'role_key': r.role_key,
+                'name': r.name,
+                'description': r.description or '',
+                'role_type': r.role_type,
+                'data_scope': r.data_scope,
+                'category': meta['category'],
+                'category_label': meta['category_label'],
+                'rank': meta['rank'],
+                'need_scope': need_scope,
+                'scope_type_required': scope_type_required,
+                'approval_steps': chain_info['steps'],
+                'approval_desc': chain_info['desc'],
+                'is_builtin': r.is_builtin,
+            })
+
+        # 按 rank 排序(等级低的在前,便于前端按层级展示)
+        rows.sort(key=lambda x: x['rank'])
+
+        return Response({
+            'rows': rows,
+            'count': len(rows),
+        })
+
+
+class ApprovalChainPreviewView(APIView):
+    """GET /api/v1/auth/permissions/approval-chain-preview/
+    预览审批链 —— 根据角色 + scope 预生成审批链,供前端在提交前展示
+
+    查询参数:
+    - role_key:    申请的角色标识(必填)
+    - scope_type:  TEAM/DEPT/NONE(必填)
+    - scope_id:    scope_type=TEAM/DEPT 时必填
+    - change_type: GRANT(默认)/REVOKE/ROLE_CHANGE
+
+    返回审批链节点列表(含 approver_role 标签 + scope 解析),
+    不创建工单,仅用于前端预览展示。
+
+    业务背景:让用户在提交申请前明确知道审批流向,减少无效申请。
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from apps.users.models import Role, ScopeType, TicketChangeType, Department, Team
+        from apps.users.ticket_service import build_approval_chain, ApproverRole
+
+        role_key = (request.query_params.get('role_key') or '').strip()
+        scope_type = (request.query_params.get('scope_type') or ScopeType.NONE).strip()
+        scope_id = request.query_params.get('scope_id')
+        change_type = (request.query_params.get('change_type') or TicketChangeType.GRANT).strip()
+
+        if not role_key:
+            return Response({'detail': 'role_key 必填'}, status=400)
+        if scope_type not in (ScopeType.TEAM, ScopeType.DEPT, ScopeType.NONE, ScopeType.GLOBAL):
+            return Response({'detail': 'scope_type 取值应为 TEAM/DEPT/NONE'}, status=400)
+        if scope_type in (ScopeType.TEAM, ScopeType.DEPT) and not scope_id:
+            return Response({'detail': f'scope_type={scope_type} 时 scope_id 必填'}, status=400)
+
+        role = Role.objects.filter(role_key=role_key, is_deleted=False).first()
+        if not role:
+            return Response({'detail': f'角色不存在: {role_key}'}, status=400)
+
+        # scope_id 类型转换
+        try:
+            scope_id_int = int(scope_id) if scope_id else None
+        except (TypeError, ValueError):
+            return Response({'detail': 'scope_id 应为整数'}, status=400)
+
+        # 构造审批链(不创建工单,仅预览)
+        try:
+            chain = build_approval_chain(
+                applicant=request.user,
+                target_user=request.user,
+                change_type=change_type,
+                role=role,
+                scope_type=scope_type,
+                scope_id=scope_id_int,
+            )
+        except Exception as e:
+            logger.exception(f'[ChainPreview] 构造审批链失败: {e}')
+            return Response({'detail': '构造审批链失败,请检查参数'}, status=400)
+
+        # 解析每个节点的 scope 名称 + 审批人角色标签
+        approver_role_labels = {
+            ApproverRole.TEAM_LEADER: '团队组长',
+            ApproverRole.DEPT_LEADER: '部门经理',
+            ApproverRole.USER_ADMIN: '用户管理员',
+            ApproverRole.SUPER_ADMIN: '超级管理员',
+        }
+        nodes = []
+        for idx, node in enumerate(chain):
+            node_scope_name = ''
+            node_scope_type = node.get('approver_scope_type', ScopeType.NONE)
+            node_scope_id = node.get('approver_scope_id')
+            if node_scope_type == ScopeType.DEPT and node_scope_id:
+                dept = Department.objects.filter(id=node_scope_id, is_deleted=False).only('name').first()
+                node_scope_name = dept.name if dept else f'部门#{node_scope_id}'
+            elif node_scope_type == ScopeType.TEAM and node_scope_id:
+                team = Team.objects.filter(id=node_scope_id, is_deleted=False).only('name').first()
+                node_scope_name = team.name if team else f'团队#{node_scope_id}'
+
+            nodes.append({
+                'step': idx + 1,
+                'approver_role': node.get('approver_role'),
+                'approver_role_label': approver_role_labels.get(node.get('approver_role'), node.get('approver_role')),
+                'approver_scope_type': node_scope_type,
+                'approver_scope_id': node_scope_id,
+                'approver_scope_name': node_scope_name,
+                'status': node.get('status', 'PENDING'),
+            })
+
+        # 解析申请目标 scope 名称
+        target_scope_name = ''
+        if scope_type == ScopeType.DEPT and scope_id_int:
+            dept = Department.objects.filter(id=scope_id_int, is_deleted=False).only('name').first()
+            target_scope_name = dept.name if dept else f'部门#{scope_id_int}'
+        elif scope_type == ScopeType.TEAM and scope_id_int:
+            team = Team.objects.filter(id=scope_id_int, is_deleted=False).only('name').first()
+            target_scope_name = team.name if team else f'团队#{scope_id_int}'
+        elif scope_type in (ScopeType.GLOBAL, ScopeType.NONE):
+            target_scope_name = '全局'
+
+        return Response({
+            'role_key': role_key,
+            'role_name': role.name,
+            'change_type': change_type,
+            'scope_type': scope_type,
+            'scope_id': scope_id_int,
+            'scope_name': target_scope_name,
+            'chain': nodes,
+            'total_steps': len(nodes),
+            'is_direct_execute': len(nodes) == 0,
         })

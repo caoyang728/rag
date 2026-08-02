@@ -67,6 +67,7 @@ class TicketChangeType(models.TextChoices):
     REVOKE = 'REVOKE', _('撤销')
     SCOPE_CHANGE = 'SCOPE_CHANGE', _('范围变更')
     EXPIRE_EXTEND = 'EXPIRE_EXTEND', _('延期')
+    ROLE_CHANGE = 'ROLE_CHANGE', _('角色变更（同 scope 内升级/降级/平移，原子撤销旧角色+授予新角色）')
 
 
 class ScopeType(models.TextChoices):
@@ -478,7 +479,15 @@ class UserDeptScopeRel(models.Model):
 
     class Meta:
         db_table = 'user_role_dept_scope_rel'
-        unique_together = [('user', 'role', 'dept')]
+        # 部门级互斥 DB 兜底:同一用户在同一部门只能有一条 ACTIVE 授权记录
+        # 历史撤销记录(REVOKED/EXPIRED)不受约束,保留审计轨迹
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'dept'],
+                condition=models.Q(status='ACTIVE'),
+                name='unique_user_dept_active',
+            ),
+        ]
         indexes = [
             models.Index(fields=['user', 'status']),
             models.Index(fields=['dept', 'status']),
@@ -509,7 +518,16 @@ class UserTeamScopeRel(models.Model):
 
     class Meta:
         db_table = 'user_role_team_scope_rel'
-        unique_together = [('user', 'role', 'team')]
+        # 团队级互斥 DB 兜底:同一用户在同一团队只能有一条 ACTIVE 授权记录
+        # 保证 viewer/contributor/team_leader 在同团队内互斥(高等级覆盖低等级)
+        # 历史撤销记录(REVOKED/EXPIRED)不受约束,保留审计轨迹
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'team'],
+                condition=models.Q(status='ACTIVE'),
+                name='unique_user_team_active',
+            ),
+        ]
         indexes = [
             models.Index(fields=['user', 'status']),
             models.Index(fields=['team', 'status']),
@@ -539,9 +557,13 @@ class PermissionApprovalTicket(models.Model):
                                     related_name='targeted_tickets',
                                     help_text=_('被授权/被撤销对象'))
     change_type = models.CharField(max_length=16, choices=TicketChangeType.choices,
-                                   help_text=_('GRANT/REVOKE/SCOPE_CHANGE/EXPIRE_EXTEND'))
+                                   help_text=_('GRANT/REVOKE/SCOPE_CHANGE/EXPIRE_EXTEND/ROLE_CHANGE'))
     role = models.ForeignKey(Role, on_delete=models.PROTECT, null=True, blank=True,
-                             related_name='tickets', help_text=_('涉及角色'))
+                             related_name='tickets', help_text=_('涉及角色（GRANT 为新角色，ROLE_CHANGE 为新角色，previous_role 为旧角色）'))
+    # 仅 ROLE_CHANGE 工单使用：记录变更前的旧角色，便于执行时撤销 + 审计回溯
+    previous_role = models.ForeignKey(Role, on_delete=models.SET_NULL, null=True, blank=True,
+                                      related_name='+',
+                                      help_text=_('角色变更工单的旧角色（仅 ROLE_CHANGE，撤销目标'))
     scope_type = models.CharField(max_length=16, choices=ScopeType.choices,
                                   default=ScopeType.NONE,
                                   help_text=_('GLOBAL/DEPT/TEAM/NONE'))
@@ -579,6 +601,48 @@ class PermissionApprovalTicket(models.Model):
 
     def __str__(self):
         return f'Ticket<{self.ticket_no}>{self.change_type}:{self.status}'
+
+
+# ============================================================================
+# 角色互斥规则（SoD 职责分离）
+# ============================================================================
+
+class RoleConflictRule(models.Model):
+    """角色互斥规则 —— SoD（Separation of Duties）约束
+
+    任一用户不能同时持有 role_a 和 role_b（双向，存储时仅记一条，查询时双向匹配）。
+    工单创建时校验：若 target_user 已持有其中一方，申请另一方则拒绝创建工单。
+
+    初始规则（4 高权全局角色两两互斥，共 6 条）：
+    - user_admin × kb_admin
+    - user_admin × compliance_admin
+    - user_admin × super_admin
+    - kb_admin × compliance_admin
+    - kb_admin × super_admin
+    - compliance_admin × super_admin
+
+    业务背景：4 个全局高权角色都是超管拆出来的"权力分立"，
+    任一用户最多只能持有其中 1 个，避免单点失控（如用户管理员 + 超管 = 自我提权）。
+    """
+    role_a = models.ForeignKey(Role, on_delete=models.CASCADE, related_name='+',
+                               help_text=_('互斥角色 A'))
+    role_b = models.ForeignKey(Role, on_delete=models.CASCADE, related_name='+',
+                               help_text=_('互斥角色 B'))
+    reason = models.CharField(max_length=128, blank=True, default='',
+                              help_text=_('互斥原因（可选，便于审计回溯）'))
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'role_conflict_rule'
+        verbose_name = _('角色互斥规则')
+        unique_together = [('role_a', 'role_b')]
+        indexes = [
+            models.Index(fields=['role_a']),
+            models.Index(fields=['role_b']),
+        ]
+
+    def __str__(self):
+        return f'{self.role_a_id}×{self.role_b_id}'
 
 
 # ============================================================================

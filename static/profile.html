@@ -45,24 +45,24 @@
     </div>
     <div class="modal-body">
       <div class="form-item">
-        <label class="form-label">权限编码 <span class="required">*</span></label>
-        <input type="text" class="input" id="applyPermCode" placeholder="如 knowledge:upload:team">
-        <div class="form-hint">格式：{module}:{action}:{scope}，例如 knowledge:upload:team / knowledge:read:department</div>
+        <label class="form-label">申请角色 <span class="required">*</span></label>
+        <select class="select" id="applyRoleKey" onchange="onApplyRoleChange()">
+          <option value="">请选择角色</option>
+        </select>
+        <div id="applyRoleDesc" class="form-hint" style="display:none"></div>
+      </div>
+      <div class="form-item" id="applyScopeWrap" style="display:none">
+        <label class="form-label">申请范围 <span class="required">*</span></label>
+        <select class="select" id="applyScopeId" onchange="onApplyScopeChange()">
+          <option value="">请选择</option>
+        </select>
+        <div id="applyScopeHint" class="form-hint"></div>
       </div>
       <div class="form-item">
-        <label class="form-label">申请范围</label>
-        <select class="select" id="applyScope" onchange="loadApprovers(this.value)">
-          <option value="team">团队级（团队负责人 / 部门经理）</option>
-          <option value="department">部门级（部门经理 / 知识库管理员）</option>
-          <option value="all">全平台（知识库管理员 / 超级管理员）</option>
-        </select>
-      </div>
-      <div class="form-item">
-        <label class="form-label">审批人 <span class="required">*</span></label>
-        <select class="select" id="applyApprover">
-          <option value="">请选择审批人</option>
-        </select>
-        <div id="approverHint" class="form-hint">请先选择申请范围</div>
+        <label class="form-label">审批链预览</label>
+        <div id="applyChainPreview">
+          请先选择角色和范围
+        </div>
       </div>
       <div class="form-item">
         <label class="form-label">申请理由 <span class="required">*</span></label>
@@ -169,10 +169,7 @@
     </div>
     <div
       style="padding:12px 14px;background:var(--primary-light);border-radius:var(--radius);margin-bottom:16px;font-size:13px;line-height:1.7">
-      💡 <b>权限说明</b><br>
-      • 当前你拥有的权限由所分配的角色决定（RBAC）<br>
-      • 如需更高或额外权限，请提交申请并选择对应的审批人<br>
-      • 团队级 → 团队负责人 / 部门经理；部门级 → 部门经理 / 知识库管理员；全平台 → 知识库管理员 / 超级管理员
+      💡 <b>权限说明</b>:权限由角色 + 数据范围决定,申请时系统自动匹配审批链。同团队角色升级会覆盖旧角色;全局高权角色(用户管理员/文档管理员/合规管理员/超级管理员)4 选 1 互斥。
     </div>
     <div class="card-title" style="font-size:14px;margin-bottom:8px">已分配角色</div>
     <div id="myRolesList" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:20px">
@@ -248,10 +245,10 @@
   <template id="tmpl-perm-request">
     <div style="padding:10px 12px;border:1px solid var(--border);border-radius:var(--radius);background:var(--white)">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
-        <div class="perm-app-code" style="font-weight:500;font-size:13px"></div>
+        <div class="perm-app-role" style="font-weight:500;font-size:13px"></div>
         <span class="perm-app-status tag tag-sm"></span>
       </div>
-      <div class="perm-app-scope text-sub text-sm" style="margin-bottom:4px"></div>
+      <div class="perm-app-meta text-sub text-sm" style="margin-bottom:4px"></div>
       <div class="perm-app-reason text-sub text-sm"></div>
       <div class="perm-app-comment text-sub text-sm" style="margin-top:4px;color:var(--primary);display:none"></div>
       <div class="perm-app-actions" style="margin-top:6px;display:none"></div>

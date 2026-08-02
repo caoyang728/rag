@@ -5,9 +5,12 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 async function initProfilePage() {
-	await loadProfile();
-	await loadMemoryData();
-	await loadSubscriptionData();
+	// 三个接口互不依赖,并行加载减少首屏等待
+	await Promise.all([
+		loadProfile(),
+		loadMemoryData(),
+		loadSubscriptionData(),
+	]);
 	setProfileMenu(STATE.currentProfileMenu || 'basic');
 }
 
@@ -21,7 +24,9 @@ async function loadProfile() {
 				name: data.real_name || data.username || '用户',
 				email: data.email || '',
 				dept: data.department_name || '',
-				team: '',
+				deptId: data.department_id || null,
+				team: data.team ? data.team.name : '',
+				teamId: data.team ? data.team.id : null,
 				role: (data.roles && data.roles.length > 0) ? (data.roles[0].name || '用户') : '用户',
 				avatar: (data.real_name || data.username || '?').charAt(0),
 				phone: data.phone || '',
@@ -223,6 +228,13 @@ async function saveProfile() {
 		});
 		STATE.user.name = data.real_name || name;
 		STATE.user.phone = data.phone || phone;
+		// 同步更新页面显示的名字和头像(避免改名后仍显示旧值)
+		const nameEl = $('#pf-name');
+		if (nameEl) nameEl.textContent = STATE.user.name;
+		const avatarEl = $('#pf-avatar');
+		if (avatarEl) avatarEl.textContent = STATE.user.name.charAt(0);
+		const nameInput = $('#profileName');
+		if (nameInput) nameInput.value = STATE.user.name;
 		toast('保存成功', 'success');
 	} catch (e) {
 		toast(e.message || '保存失败', 'error');
@@ -240,10 +252,9 @@ async function saveMemory() {
 		const payload = {
 			domain_tags: tags,
 			frequent_topics: searchTypes,
+			// 无论是否为空都提交,确保用户能清空输出偏好(否则 PATCH 不带该字段,后端保留旧值)
+			output_preference: outputPref,
 		};
-		if (outputPref) {
-			payload.output_preference = outputPref;
-		}
 		await api.patchJson('/api/v1/memory/user-memory/', payload);
 		STATE.memoryTags = tags;
 		STATE.memorySearchTypes = searchTypes;
@@ -266,6 +277,7 @@ async function clearAllMemory() {
 		STATE.memoryTags = [];
 		STATE.memorySearchTypes = [];
 		STATE.memoryPreferences = {};
+		STATE.memoryProfileText = '';
 		toast('已清空', 'success');
 		setProfileMenu('memory');
 	} catch (e) {
@@ -303,6 +315,9 @@ function addMemoryTag() {
 	if (!tag) { toast('标签不能为空', 'error'); return; }
 	const wrap = document.getElementById('memoryTagsWrap');
 	if (!wrap) return;
+	// 去重检查:避免添加重复标签
+	const existing = getCurrentMemoryTags();
+	if (existing.includes(tag)) { toast('该标签已存在', 'error'); return; }
 	const btn = wrap.querySelector('button');
 	const span = document.createElement('span');
 	span.className = 'tag tag-primary tag-closable';
@@ -325,6 +340,9 @@ function addMemorySearchType() {
 	if (!type) { toast('检索类型不能为空', 'error'); return; }
 	const wrap = document.getElementById('memorySearchTypesWrap');
 	if (!wrap) return;
+	// 去重检查:避免添加重复检索类型
+	const existing = getCurrentMemorySearchTypes();
+	if (existing.includes(type)) { toast('该检索类型已存在', 'error'); return; }
 	const btn = wrap.querySelector('button');
 	const span = document.createElement('span');
 	span.className = 'tag tag-info tag-closable';
@@ -358,39 +376,12 @@ async function saveSubscriptions() {
 		toast('订阅偏好已更新', 'success');
 	} catch (e) {
 		toast(e.message || '保存失败', 'error');
-	}
-}
-
-/* ============ 密码强度 ============ */
-function updatePwdStrength(v) {
-	const el = $('#pwdStrength');
-	const hint = $('#pwdHint');
-	if (!el || !hint) return;
-
-	el.className = 'password-strength';
-	let score = 0;
-	if (v.length >= 8) score++;
-	if (/[a-z]/.test(v)) score++;
-	if (/[A-Z]/.test(v)) score++;
-	if (/\d/.test(v)) score++;
-	if (/[!@#$%^&*(),.?":{}|<>]/.test(v)) score++;
-
-	if (score <= 2) {
-		el.classList.add('weak');
-		hint.textContent = '密码强度：弱';
-		hint.style.color = 'var(--danger)';
-	} else if (score <= 3) {
-		el.classList.add('medium');
-		hint.textContent = '密码强度：中';
-		hint.style.color = 'var(--warning)';
-	} else if (score >= 4) {
-		el.classList.add('strong');
-		hint.textContent = '密码强度：强';
-		hint.style.color = 'var(--success)';
+		console.error('save subscriptions failed:', e);
 	}
 }
 
 /* ============ 修改密码 ============ */
+/* 注:updatePwdStrength 复用 common.js 中的全局实现,此处不重复定义 */
 async function changePassword() {
 	const oldPwd = $('#oldPwd')?.value;
 	const newPwd = $('#newPwd')?.value;
@@ -406,8 +397,23 @@ async function changePassword() {
 		return;
 	}
 
+	// 新密码不能与旧密码相同(与 profile.html 密码安全要求一致)
+	if (newPwd === oldPwd) {
+		toast('新密码不能与旧密码相同', 'error');
+		return;
+	}
+
 	if (newPwd.length < 8) {
 		toast('新密码至少需要8位', 'error');
+		return;
+	}
+	if (newPwd.length > 32) {
+		toast('新密码最多32位', 'error');
+		return;
+	}
+	// 前端密码规则校验(与 profile.html 密码安全要求一致):必须包含大小写字母和数字
+	if (!/[A-Z]/.test(newPwd) || !/[a-z]/.test(newPwd) || !/\d/.test(newPwd)) {
+		toast('密码必须包含大写字母、小写字母和数字', 'error');
 		return;
 	}
 
@@ -418,8 +424,10 @@ async function changePassword() {
 		});
 		toast('密码修改成功，请重新登录', 'success');
 		setTimeout(() => {
+			// 清除全部登录态(与 doLogout 对齐,避免残留过期的 rag_user)
 			localStorage.removeItem('rag_access');
 			localStorage.removeItem('rag_refresh');
+			localStorage.removeItem('rag_user');
 			window.location.href = '/login/';
 		}, 1500);
 	} catch (e) {
@@ -429,21 +437,30 @@ async function changePassword() {
 }
 
 /* ============ 我的权限 / 权限申请 ============ */
+// 模块标签(权限点分组展示用)
 const MODULE_LABELS = {
-	knowledge: '知识库',
-	user: '用户管理',
-	audit: '审计',
-	system: '系统',
-	chat: '对话',
+	kb: '知识库', user: '用户管理', audit: '审计', system: '系统',
+	chat: '对话', org: '组织架构', compliance: '合规',
 };
-const SCOPE_LABELS = { all: '全平台', department: '部门', team: '团队', personal: '个人' };
-const APP_STATUS_LABELS = {
-	pending: '待审批', approved: '已批准', rejected: '已驳回', withdrawn: '已撤回'
+// 工单状态标签(对齐 PermissionApprovalTicket.TicketStatus)
+const TICKET_STATUS_LABELS = {
+	PENDING: '待审批', APPROVED: '已通过', REJECTED: '已驳回',
+	CANCELLED: '已撤回', EXECUTED: '已执行',
 };
-const APP_STATUS_COLORS = {
-	pending: 'tag-warning', approved: 'tag-success',
-	rejected: 'tag-danger', withdrawn: ''
+const TICKET_STATUS_COLORS = {
+	PENDING: 'tag-warning', APPROVED: 'tag-success', REJECTED: 'tag-danger',
+	CANCELLED: '', EXECUTED: 'tag-info',
 };
+// 变更类型标签(对齐 TicketChangeType)
+const CHANGE_TYPE_LABELS = {
+	GRANT: '授权', REVOKE: '撤销', ROLE_CHANGE: '角色变更',
+	SCOPE_CHANGE: '范围变更', EXPIRE_EXTEND: '延期',
+};
+// scope 类型标签(对齐 ScopeType)
+const SCOPE_TYPE_LABELS = { TEAM: '团队', DEPT: '部门', GLOBAL: '全局', NONE: '全局' };
+
+// 可申请角色清单缓存(打开弹窗时加载,选择角色时读取审批链概要)
+let _assignableRolesCache = [];
 
 async function loadMyPermissions() {
 	const rolesBox = document.getElementById('myRolesList');
@@ -451,30 +468,30 @@ async function loadMyPermissions() {
 	try {
 		const data = await api.getJson('/api/v1/auth/permissions/me/');
 
-		// 渲染角色
+		// 渲染角色(含 scope 信息:团队/部门属地授权带 scope_name)
 		if (rolesBox) {
-			// 超级管理员展示"超级管理员"标签
-		const isSuperAdminUser = data.is_super_admin ||
-			(data.roles || []).some(r => r.code === 'super_admin');
+			const isSuperAdminUser = data.is_super_admin ||
+				(data.roles || []).some(r => r.code === 'super_admin');
+			const roles = data.roles || [];
 			if (isSuperAdminUser) {
 				rolesBox.innerHTML = '<span class="tag tag-danger">👑 超级管理员</span>' +
-					(data.roles || []).map(r => `<span class="tag tag-primary">${escapeHtml(r.name)}</span>`).join('');
-			} else if ((data.roles || []).length === 0) {
+					roles.filter(r => r.code !== 'super_admin').map(r =>
+						_renderRoleTag(r)
+					).join('');
+			} else if (roles.length === 0) {
 				rolesBox.innerHTML = '<span class="text-sub text-sm">暂无角色</span>';
 			} else {
-				rolesBox.innerHTML = data.roles.map(r =>
-					`<span class="tag ${r.is_builtin ? 'tag-info' : 'tag-primary'}">${escapeHtml(r.name)}</span>`
-				).join('');
+				rolesBox.innerHTML = roles.map(r => _renderRoleTag(r)).join('');
 			}
 		}
 
-		// 渲染权限分组
+		// 渲染权限分组(使用后端返回的 label)
 		if (permsBox) {
 			const groups = data.permission_groups || {};
 			const keys = Object.keys(groups);
 			permsBox.innerHTML = '';
 			if (keys.length === 0) {
-				permsBox.innerHTML = '<span class="text-sub text-sm">暂无显式权限（仅继承默认 read 权限）</span>';
+				permsBox.innerHTML = '<span class="text-sub text-sm">暂无显式权限(仅继承默认 read 权限)</span>';
 			} else {
 				const cardTmpl = document.getElementById('tmpl-perm-module');
 				keys.forEach(mod => {
@@ -483,10 +500,10 @@ async function loadMyPermissions() {
 					const clone = cardTmpl.content.cloneNode(true);
 					clone.querySelector('.perm-mod-title').textContent = label + ' 模块';
 					clone.querySelector('.perm-mod-tags').innerHTML = items.map(it =>
-					'<span class="tag tag-sm" style="background:var(--primary-light);color:var(--primary)">' +
-					escapeHtml(it.action) + ' · ' + (it.scopes || []).map(s => escapeHtml(SCOPE_LABELS[s] || s)).join(',') +
-					'</span>'
-				).join('');
+						'<span class="tag tag-sm" style="background:var(--primary-light);color:var(--primary)" title="' + escapeHtml(it.code) + '">' +
+						escapeHtml(it.label || it.action || it.code) +
+						'</span>'
+					).join('');
 					permsBox.appendChild(clone);
 				});
 			}
@@ -496,6 +513,15 @@ async function loadMyPermissions() {
 		if (rolesBox) rolesBox.innerHTML = '<span class="text-sub text-sm" style="color:var(--danger)">加载失败</span>';
 		if (permsBox) permsBox.innerHTML = '<span class="text-sub text-sm" style="color:var(--danger)">加载失败</span>';
 	}
+}
+
+// 渲染角色标签(带 scope 信息:团队/部门角色显示所属组织)
+function _renderRoleTag(r) {
+	const cls = r.is_builtin ? 'tag-info' : 'tag-primary';
+	let scopeTxt = '';
+	if (r.scope_type === 'TEAM' && r.scope_name) scopeTxt = ` @ ${escapeHtml(r.scope_name)}`;
+	else if (r.scope_type === 'DEPT' && r.scope_name) scopeTxt = ` @ ${escapeHtml(r.scope_name)}`;
+	return `<span class="tag ${cls}">${escapeHtml(r.name)}${scopeTxt}</span>`;
 }
 
 async function loadPermissionApplications() {
@@ -513,24 +539,39 @@ async function loadPermissionApplications() {
 		rows.forEach(a => {
 			const clone = cardTmpl.content.cloneNode(true);
 
-			clone.querySelector('.perm-app-code').innerHTML = '<code style="background:var(--hover);padding:1px 5px;border-radius:3px;font-size:12px">' + escapeHtml(a.permission_code || '—') + '</code>';
+			// 角色名 + 变更类型徽章
+			const roleTxt = a.previous_role_name
+				? `${escapeHtml(a.previous_role_name)} → ${escapeHtml(a.role_name || '—')}`
+				: escapeHtml(a.role_name || '—');
+			const changeBadge = `<span class="tag tag-sm" style="background:var(--hover);color:var(--text-sub)">${CHANGE_TYPE_LABELS[a.change_type] || a.change_type}</span>`;
+			clone.querySelector('.perm-app-role').innerHTML = roleTxt + ' ' + changeBadge;
 
+			// 状态标签
 			const statusEl = clone.querySelector('.perm-app-status');
-			statusEl.textContent = APP_STATUS_LABELS[a.status] || a.status;
-			const statusCls = APP_STATUS_COLORS[a.status] || '';
+			statusEl.textContent = TICKET_STATUS_LABELS[a.status] || a.status;
+			const statusCls = TICKET_STATUS_COLORS[a.status] || '';
 			if (statusCls) statusEl.classList.add(statusCls);
 
-			clone.querySelector('.perm-app-scope').textContent = '范围：' + (SCOPE_LABELS[a.applied_scope] || a.applied_scope) + ' · 审批人：' + escapeHtml(a.approver_name) + ' · ' + formatDate(a.created_at);
+			// 元信息:scope + 审批进度 + 审批人 + 时间
+			// 全局角色后端返回 scope_name='全局',与 scope 标签重复,此处去重
+			const scopeLabel = SCOPE_TYPE_LABELS[a.scope_type] || '';
+			const scopeTxt = (a.scope_name && a.scope_name !== scopeLabel)
+				? `${scopeLabel} · ${escapeHtml(a.scope_name)}`
+				: scopeLabel;
+			const stepTxt = a.total_steps > 0 ? ` · 进度 ${a.current_step + 1}/${a.total_steps}` : '';
+			const approverTxt = a.approver_name ? ` · 审批人 ${escapeHtml(a.approver_name)}` : '';
+			clone.querySelector('.perm-app-meta').textContent = `${scopeTxt}${stepTxt}${approverTxt} · ${formatDate(a.created_at)}`;
 
-			clone.querySelector('.perm-app-reason').textContent = '理由：' + (a.reason || '—');
+			clone.querySelector('.perm-app-reason').textContent = '理由:' + (a.reason || '—');
 
 			if (a.reviewer_comment) {
 				const commentEl = clone.querySelector('.perm-app-comment');
-				commentEl.textContent = '审批意见：' + escapeHtml(a.reviewer_comment);
+				commentEl.textContent = '审批意见:' + escapeHtml(a.reviewer_comment);
 				commentEl.style.display = '';
 			}
 
-			if (a.status === 'pending') {
+			// 待审批状态可撤回
+			if (a.status === 'PENDING') {
 				const actionsEl = clone.querySelector('.perm-app-actions');
 				actionsEl.innerHTML = '<button class="btn btn-sm" style="color:var(--danger)" onclick="withdrawApplication(' + a.id + ')">撤回申请</button>';
 				actionsEl.style.display = '';
@@ -544,18 +585,21 @@ async function loadPermissionApplications() {
 	}
 }
 
+/* ---- 申请弹窗:角色选择 + scope + 审批链预览 ---- */
 function openPermissionApplyModal() {
-	document.getElementById('applyPermCode').value = '';
-	document.getElementById('applyScope').value = 'team';
+	// 重置表单
+	document.getElementById('applyRoleKey').value = '';
+	document.getElementById('applyScopeId').value = '';
 	document.getElementById('applyReason').value = '';
-	document.getElementById('applyApprover').innerHTML = '<option value="">请选择审批人</option>';
-	document.getElementById('approverHint').textContent = '请先选择申请范围';
+	document.getElementById('applyRoleDesc').style.display = 'none';
+	document.getElementById('applyScopeWrap').style.display = 'none';
+	document.getElementById('applyChainPreview').textContent = '请先选择角色和范围';
+	// 加载可申请角色清单
+	loadAssignableRoles();
 	const modal = document.getElementById('modal-permission-apply');
 	const mask = document.getElementById('mask');
 	if (modal) modal.classList.add('show');
 	if (mask) mask.classList.add('show');
-	// 默认加载 team 范围的审批人
-	loadApprovers('team');
 }
 
 function closePermissionApplyModal() {
@@ -565,49 +609,198 @@ function closePermissionApplyModal() {
 	if (mask) mask.classList.remove('show');
 }
 
-async function loadApprovers(scope) {
-	const select = document.getElementById('applyApprover');
-	const hint = document.getElementById('approverHint');
+// 加载可申请角色清单(从 assignable-roles 接口)
+async function loadAssignableRoles() {
+	const select = document.getElementById('applyRoleKey');
 	if (!select) return;
 	select.innerHTML = '<option value="">加载中...</option>';
 	try {
-		const data = await api.getJson(`/api/v1/auth/permissions/approvers/?scope=${scope}`);
-		const approvers = data.approvers || [];
-		if (approvers.length === 0) {
-			select.innerHTML = '<option value="">无可选审批人</option>';
-			if (hint) hint.textContent = '当前范围暂无可选审批人，请联系管理员';
+		const data = await api.getJson('/api/v1/auth/permissions/assignable-roles/');
+		_assignableRolesCache = data.rows || [];
+		if (_assignableRolesCache.length === 0) {
+			select.innerHTML = '<option value="">暂无可申请角色</option>';
 			return;
 		}
-		select.innerHTML = '<option value="">请选择审批人</option>' +
-			approvers.map(a => `<option value="${a.id}">${escapeHtml(a.real_name)}（${escapeHtml(a.role_label)}）</option>`).join('');
-		if (hint) hint.textContent = `共 ${approvers.length} 位可选审批人`;
+		// 按 category 分组生成 optgroup(category_label 为空时归入"其他")
+		const groups = {};
+		_assignableRolesCache.forEach(r => {
+			const label = r.category_label || '其他';
+			if (!groups[label]) groups[label] = [];
+			groups[label].push(r);
+		});
+		let html = '<option value="">请选择角色</option>';
+		Object.entries(groups).forEach(([label, items]) => {
+			html += `<optgroup label="${escapeHtml(label)}">`;
+			items.forEach(r => {
+				html += `<option value="${escapeHtml(r.role_key)}" data-need-scope="${r.need_scope}" data-scope-type="${r.scope_type_required}">${escapeHtml(r.name)}</option>`;
+			});
+			html += '</optgroup>';
+		});
+		select.innerHTML = html;
 	} catch (e) {
-		console.error('load approvers failed:', e);
+		console.error('load assignable roles failed:', e);
 		select.innerHTML = '<option value="">加载失败</option>';
-		if (hint) hint.textContent = '加载失败，请重试';
+	}
+}
+
+// 角色选择变更:展示角色说明 + 动态加载 scope 选项 + 刷新审批链预览
+function onApplyRoleChange() {
+	const roleKey = document.getElementById('applyRoleKey').value;
+	const descEl = document.getElementById('applyRoleDesc');
+	const scopeWrap = document.getElementById('applyScopeWrap');
+	const scopeSelect = document.getElementById('applyScopeId');
+	const scopeHint = document.getElementById('applyScopeHint');
+
+	if (!roleKey) {
+		descEl.style.display = 'none';
+		scopeWrap.style.display = 'none';
+		_refreshChainPreview();
+		return;
+	}
+
+	const role = _assignableRolesCache.find(r => r.role_key === roleKey);
+	if (!role) return;
+
+	// 展示角色说明 + 审批链概要
+	descEl.innerHTML = escapeHtml(role.description || role.name) +
+		`<br>审批流:${escapeHtml(role.approval_desc || '—')}`;
+	descEl.style.display = '';
+
+	// 动态加载 scope 选项
+	if (role.need_scope && role.scope_type_required) {
+		scopeWrap.style.display = '';
+		scopeHint.textContent = role.scope_type_required === 'TEAM' ? '选择目标团队' : '选择目标部门';
+		_loadScopeOptions(role.scope_type_required);
+	} else {
+		scopeWrap.style.display = 'none';
+		scopeSelect.value = '';
+	}
+
+	_refreshChainPreview();
+}
+
+// 加载 scope 选项(团队/部门列表)
+async function _loadScopeOptions(scopeType) {
+	const select = document.getElementById('applyScopeId');
+	if (!select) return;
+	select.innerHTML = '<option value="">加载中...</option>';
+	try {
+		if (scopeType === 'TEAM') {
+			const data = await api.getJson('/api/v1/auth/teams/');
+			const teams = data.results || data.rows || data || [];
+			const arr = Array.isArray(teams) ? teams : [];
+			select.innerHTML = '<option value="">请选择团队</option>' +
+				arr.map(t => `<option value="${t.id}">${escapeHtml(t.name)}</option>`).join('');
+		} else if (scopeType === 'DEPT') {
+			const data = await api.getJson('/api/v1/auth/departments/');
+			const depts = data.results || data.rows || data || [];
+			const arr = Array.isArray(depts) ? depts : [];
+			select.innerHTML = '<option value="">请选择部门</option>' +
+				arr.map(d => `<option value="${d.id}">${escapeHtml(d.name)}</option>`).join('');
+		}
+	} catch (e) {
+		console.error('load scope options failed:', e);
+		select.innerHTML = '<option value="">加载失败</option>';
+	}
+}
+
+// scope 选择变更:刷新审批链预览
+function onApplyScopeChange() {
+	_refreshChainPreview();
+}
+
+// 审批链预览请求序号(防止快速切换时旧请求覆盖新结果)
+let _chainPreviewSeq = 0;
+
+// 刷新审批链预览(选择角色 + scope 后调用)
+async function _refreshChainPreview() {
+	const roleKey = document.getElementById('applyRoleKey').value;
+	const scopeSelect = document.getElementById('applyScopeId');
+	const previewEl = document.getElementById('applyChainPreview');
+
+	if (!roleKey) {
+		previewEl.textContent = '请先选择角色和范围';
+		return;
+	}
+
+	const role = _assignableRolesCache.find(r => r.role_key === roleKey);
+	let scopeType = 'NONE';
+	let scopeId = '';
+	if (role && role.need_scope && role.scope_type_required) {
+		scopeType = role.scope_type_required;
+		scopeId = scopeSelect.value;
+		if (!scopeId) {
+			previewEl.textContent = '请选择' + (scopeType === 'TEAM' ? '团队' : '部门') + '后查看审批链';
+			return;
+		}
+	}
+
+	// 自增序号:仅最新一次请求的结果会渲染,避免快速切换时旧响应覆盖新结果
+	const seq = ++_chainPreviewSeq;
+	previewEl.textContent = '加载审批链...';
+	try {
+		const params = new URLSearchParams({ role_key: roleKey, scope_type: scopeType });
+		if (scopeId) params.set('scope_id', scopeId);
+		const data = await api.getJson('/api/v1/auth/permissions/approval-chain-preview/?' + params.toString());
+		if (seq !== _chainPreviewSeq) return;  // 已被新请求取代,丢弃本次结果
+		if (data.is_direct_execute) {
+			previewEl.innerHTML = '<span style="color:var(--success)">✓ 无需审批,提交后直接生效</span>';
+			return;
+		}
+		const chain = data.chain || [];
+		if (chain.length === 0) {
+			previewEl.textContent = '无法构造审批链,请联系管理员';
+			return;
+		}
+		// 渲染审批链步骤
+		const stepsHtml = chain.map((n, i) => {
+			const scopeTxt = n.approver_scope_name ? `(${escapeHtml(n.approver_scope_name)})` : '';
+			return `<div>${i + 1}. ${escapeHtml(n.approver_role_label)}${scopeTxt}</div>`;
+		}).join('');
+		previewEl.innerHTML = `<div style="color:var(--text)">共 ${chain.length} 步审批:</div>${stepsHtml}`;
+	} catch (e) {
+		if (seq !== _chainPreviewSeq) return;  // 已被新请求取代,静默丢弃
+		console.error('load chain preview failed:', e);
+		previewEl.textContent = '审批链加载失败';
 	}
 }
 
 async function submitPermissionApplication() {
-	const permCode = document.getElementById('applyPermCode').value.trim();
-	const scope = document.getElementById('applyScope').value;
-	const approverId = document.getElementById('applyApprover').value;
+	const roleKey = document.getElementById('applyRoleKey').value;
+	const scopeSelect = document.getElementById('applyScopeId');
 	const reason = document.getElementById('applyReason').value.trim();
 
-	if (!permCode) { toast('请填写权限编码', 'error'); return; }
-	if (!approverId) { toast('请选择审批人', 'error'); return; }
+	if (!roleKey) { toast('请选择申请角色', 'error'); return; }
 	if (!reason) { toast('请填写申请理由', 'error'); return; }
 
+	const role = _assignableRolesCache.find(r => r.role_key === roleKey);
+	const payload = {
+		role_key: roleKey,
+		change_type: 'GRANT',  // 后端会自动检测同团队已有角色并转为 ROLE_CHANGE
+		reason: reason,
+	};
+
+	// 团队/部门角色需带 scope
+	if (role && role.need_scope && role.scope_type_required) {
+		const scopeId = scopeSelect.value;
+		if (!scopeId) {
+			toast('请选择' + (role.scope_type_required === 'TEAM' ? '团队' : '部门'), 'error');
+			return;
+		}
+		payload.scope_type = role.scope_type_required;
+		payload.scope_id = parseInt(scopeId);
+	} else {
+		// 全局角色无 scope
+		payload.scope_type = 'NONE';
+	}
+
 	try {
-		await api.postJson('/api/v1/auth/permissions/applications/', {
-			permission_code: permCode,
-			applied_scope: scope,
-			approver_id: parseInt(approverId),
-			reason: reason
-		});
-		toast('申请已提交，等待审批', 'success');
+		const res = await api.postJson('/api/v1/auth/permissions/applications/', payload);
+		toast(res.detail || '申请已提交', 'success');
 		closePermissionApplyModal();
 		loadPermissionApplications();
+		// 刷新权限展示(可能直接生效)
+		loadMyPermissions();
 	} catch (e) {
 		console.error('submit application failed:', e);
 		toast(e.message || '提交失败', 'error');
@@ -615,12 +808,13 @@ async function submitPermissionApplication() {
 }
 
 async function withdrawApplication(id) {
-	if (!confirm('确定撤回此申请？')) return;
+	if (!confirm('确定撤回此申请?')) return;
 	try {
 		await api.postJson(`/api/v1/auth/permissions/applications/${id}/withdraw/`, {});
 		toast('已撤回', 'success');
 		loadPermissionApplications();
 	} catch (e) {
 		toast(e.message || '撤回失败', 'error');
+		console.error('withdraw application failed:', e);
 	}
 }

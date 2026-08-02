@@ -86,53 +86,20 @@
 }
 .chain-timeline > li {
 	position: relative;
-	padding: 0 0 18px 32px
+	padding: 0 0 18px 30px
 }
 .chain-timeline > li:last-child {
 	padding-bottom: 0
 }
-.chain-timeline > li::before {
-	content: "";
+/* 内联 SVG 图标：18×18，所有状态一致 */
+.chain-node-icon {
 	position: absolute;
-	left: 5px;
-	top: 4px;
-	width: 14px;
-	height: 14px;
-	border-radius: 50%;
-	background: #fff;
-	border: 2px solid var(--border);
-	z-index: 1;
-	transition: all 0.2s
-}
-.chain-timeline > li.step-done::before {
-	background: var(--success);
-	border-color: var(--success)
-}
-.chain-timeline > li.step-done::after {
-	content: "✓";
-	position: absolute;
-	left: 8px;
-	top: 3px;
-	font-size: 10px;
-	color: #fff;
-	font-weight: 700;
-	z-index: 2
-}
-.chain-timeline > li.step-curr::before {
-	background: var(--primary);
-	border-color: var(--primary);
-	box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.12)
-}
-.chain-timeline > li.step-curr::after {
-	content: "";
-	position: absolute;
-	left: 9px;
-	top: 8px;
-	width: 6px;
-	height: 6px;
-	border-radius: 50%;
-	background: #fff;
-	z-index: 2
+	left: 3px;
+	top: 2px;
+	width: 18px;
+	height: 18px;
+	z-index: 3;
+	display: block
 }
 .chain-node-role {
 	font-size: 14px;
@@ -158,6 +125,10 @@
 .chain-node-status.pending {
 	background: var(--bg);
 	color: var(--text-sub)
+}
+.chain-node-status.rejected {
+	background: #fef2f2;
+	color: var(--danger)
 }
 .chain-node-approver {
 	font-size: 12px;

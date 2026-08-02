@@ -260,6 +260,12 @@ function _ticketStatusBadge(s) {
 	return map[s] || s;
 }
 
+/* 审批链节点 SVG 图标（18×18，viewBox="0 0 18 18"） */
+const CHAIN_ICON_APPROVED = '<svg class="chain-node-icon" viewBox="0 0 18 18"><circle cx="9" cy="9" r="8" fill="#22c55e" stroke="#22c55e" stroke-width="2"/><path d="M5 9.5l3 3L13 6" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const CHAIN_ICON_REJECTED = '<svg class="chain-node-icon" viewBox="0 0 18 18"><circle cx="9" cy="9" r="8" fill="#ef4444" stroke="#ef4444" stroke-width="2"/><path d="M5.5 5.5l7 7M12.5 5.5l-7 7" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/></svg>';
+const CHAIN_ICON_CURR = '<svg class="chain-node-icon" viewBox="0 0 18 18"><circle cx="9" cy="9" r="8" fill="#2563eb" stroke="#2563eb" stroke-width="2"/><circle cx="9" cy="9" r="3.5" fill="#fff"/></svg>';
+const CHAIN_ICON_PENDING = '<svg class="chain-node-icon" viewBox="0 0 18 18"><circle cx="9" cy="9" r="8" fill="#fff" stroke="#cbd5e1" stroke-width="2"/></svg>';
+
 /* ============================================================================
  * 详情弹窗
  * ============================================================================ */
@@ -269,17 +275,32 @@ function openTicketModal(t, view) {
 
 	// 审批链渲染
 	const chain = (t.approval_chain || []).map((n, i) => {
-		const cls = i < t.current_step ? 'step-done'
+		// 优先用节点自身 status 判定状态：驳回节点停在 current_step 但 status=REJECTED，
+		// 不能仅凭位置判定为"待审批"，否则已驳回的步骤会错误显示为待审批
+		const ns = n.status || '';
+		const isRejected = ns === 'REJECTED';
+		const isApproved = ns === 'APPROVED' || i < t.current_step;
+		const cls = isRejected ? 'step-rejected'
+			: isApproved ? 'step-done'
 			: i === t.current_step ? 'step-curr' : 'step-pending';
-		const statusLabel = i < t.current_step ? '已通过'
+		const statusLabel = isRejected ? '已驳回'
+			: isApproved ? '已通过'
 			: i === t.current_step ? '待审批' : '待处理';
-		const statusCls = i < t.current_step ? 'done'
+		const statusCls = isRejected ? 'rejected'
+			: isApproved ? 'done'
 			: i === t.current_step ? 'curr' : 'pending';
-		const approverLine = i < t.current_step
+		// 已通过/已驳回节点都回填了 approver_id，均展示审批人
+		const approverLine = (isApproved || isRejected)
 			? (n.approver_name ? `<div class="chain-node-approver">审批人：${escapeHtml(n.approver_name)}</div>` : '')
 			: '';
+		// 内联 SVG 图标：所有状态统一 18×18
+		const iconSvg = isApproved ? CHAIN_ICON_APPROVED
+			: isRejected ? CHAIN_ICON_REJECTED
+			: i === t.current_step ? CHAIN_ICON_CURR
+			: CHAIN_ICON_PENDING;
 		return `
 		<li class="${cls}">
+			${iconSvg}
 			<div class="chain-node-role">${_approverRoleLabel(n.approver_role)}
 				<span class="chain-node-status ${statusCls}">${statusLabel}</span>
 			</div>

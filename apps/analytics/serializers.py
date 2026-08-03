@@ -9,7 +9,7 @@ from rest_framework import serializers
 
 from apps.analytics.models import (
     GoldenDataset, GoldenQuestion,
-    DocumentQualityReport,
+    DocumentQualityReport, LowScoreAnalysis,
 )
 
 
@@ -83,3 +83,60 @@ class DocumentQualityReportSerializer(serializers.ModelSerializer):
 
     def get_evaluated_at(self, obj):
         return obj.evaluated_at.isoformat() if obj.evaluated_at else ''
+
+
+class LowScoreAnalysisSerializer(serializers.ModelSerializer):
+    """低分归因分析序列化器
+
+    用于归因列表 / 详情接口。
+    - question / answer: 取自关联 QaRecord,View 中已 select_related,避免 N+1
+    - root_type / qa_created_at: 同上,便于前端展示不额外查 QaRecord
+    - category_label / layer_label / method_label: choices 的中文展示名,
+      用 SerializerMethodField 走 get_*_display(),避免前端维护映射表
+    """
+    question = serializers.SerializerMethodField()
+    answer = serializers.SerializerMethodField()
+    root_type = serializers.SerializerMethodField()
+    qa_created_at = serializers.SerializerMethodField()
+    category_label = serializers.SerializerMethodField()
+    layer_label = serializers.SerializerMethodField()
+    method_label = serializers.SerializerMethodField()
+    status_label = serializers.SerializerMethodField()
+
+    class Meta:
+        model = LowScoreAnalysis
+        fields = [
+            'id', 'qa_record_id', 'question', 'answer', 'root_type', 'qa_created_at',
+            'avg_score', 'threshold',
+            'root_cause_category', 'category_label',
+            'root_cause_detail', 'affected_layer', 'layer_label',
+            'low_dimensions', 'diagnosis', 'suggestions',
+            'analysis_method', 'method_label', 'analysis_model',
+            'analysis_tokens_used', 'analysis_cost', 'analysis_latency_ms',
+            'status', 'status_label', 'error_message', 'created_at', 'updated_at',
+        ]
+
+    def get_question(self, obj):
+        # 截断 80 字,完整内容由详情接口提供
+        return (obj.qa_record.question or '')[:80] if obj.qa_record else ''
+
+    def get_answer(self, obj):
+        return (obj.qa_record.answer or '')[:120] if obj.qa_record else ''
+
+    def get_root_type(self, obj):
+        return obj.qa_record.root_type if obj.qa_record else ''
+
+    def get_qa_created_at(self, obj):
+        return obj.qa_record.created_at.isoformat() if obj.qa_record else ''
+
+    def get_category_label(self, obj):
+        return obj.get_root_cause_category_display()
+
+    def get_layer_label(self, obj):
+        return obj.get_affected_layer_display()
+
+    def get_method_label(self, obj):
+        return obj.get_analysis_method_display()
+
+    def get_status_label(self, obj):
+        return obj.get_status_display()

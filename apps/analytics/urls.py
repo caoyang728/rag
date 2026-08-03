@@ -69,4 +69,16 @@ urlpatterns = [
     path("coverage/reports/<int:report_id>/", views.CoverageReportDetailView.as_view()),
     path("coverage/reports/<int:report_id>/export/", views.CoverageReportExportView.as_view()),
     path("feedback-loop/", views.FeedbackLoopView.as_view()),
+
+    # ========================================================================
+    # RAG 质量评估 - 低分对话归因分析
+    # ========================================================================
+    # 列表(支持 days/category/layer/status/root_type/limit 筛选)
+    path("low-score-analysis/", views.LowScoreAnalysisListView.as_view()),
+    # 单条详情(按 qa_record_id 查询,返回完整对话 + 归因结论 + 建议)
+    path("low-score-analysis/detail/", views.LowScoreAnalysisDetailView.as_view()),
+    # 手动触发归因(POST,异步执行,前端轮询 detail 查结果)
+    path("low-score-analysis/run/", views.RunLowScoreAnalysisView.as_view()),
+    # 归因分类统计(前端归因分布图用,一次 GROUP BY 拿全)
+    path("low-score-analysis/stats/", views.LowScoreAnalysisStatsView.as_view()),
 ]

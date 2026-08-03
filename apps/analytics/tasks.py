@@ -435,7 +435,125 @@ def run_multi_dimension_evaluation(batch_size: int = None):
 
 
 # ============================================================================
-# 11. 周期性离线检索评估（每周）
+# 11. 低分对话归因分析(评估落库后异步触发)
+# ============================================================================
+
+@shared_task(name='analytics.run_low_score_analysis', queue='analytics')
+def run_low_score_analysis(
+    qa_id: int,
+    threshold: float = None,
+    skip_budget_check: bool = False,
+):
+    """对单条 QA 执行低分归因分析 → 落 LowScoreAnalysis
+
+    触发场景:
+    1. evaluate_sampled_qa 评估完成后,若 QA 均分 < threshold 自动派发
+    2. 管理员在看板手动触发(跳过预算检查)
+
+    流程:
+    1. 取该 QA 的 12 维评分,计算均分
+    2. 均分 >= threshold 或无低分维度 → 不归因(避免无意义分析)
+    3. 调 analyze_low_score_qa 执行规则归因 + 分层建议生成
+    4. update_or_create 落库(同 QA 重新归因覆盖旧记录)
+
+    成本控制:
+    - LLM 建议仅对关键低分触发(详见 low_score_analyzer._should_trigger_llm)
+    - 手动触发场景 skip_budget_check=True,不阻塞用户主动分析
+    - 自动触发场景由 evaluate_sampled_qa 调用方控制(评估已过日预算检查,归因复用同一预算)
+
+    Args:
+        qa_id: QaRecord.id
+        threshold: 低分阈值;None 用默认 0.5
+        skip_budget_check: True 跳过日预算检查(手动触发场景)
+
+    Returns:
+        {'ok': bool, 'reason': str, 'category': str}
+    """
+    from decimal import Decimal
+    from apps.analytics.models import QaRecord, MultiDimensionScore, LowScoreAnalysis
+    from apps.analytics.low_score_analyzer import (
+        analyze_low_score_qa, DEFAULT_THRESHOLD,
+    )
+    from rag_project.config import AnalyticsConfig
+
+    if not AnalyticsConfig.eval_enabled():
+        return {'ok': True, 'skipped': True, 'reason': 'disabled'}
+
+    threshold_val = threshold if threshold is not None else DEFAULT_THRESHOLD
+
+    try:
+        qa = QaRecord.objects.get(id=qa_id)
+    except QaRecord.DoesNotExist:
+        logger.warning(f'[LowScoreAnalysis] QA 不存在 qa_id={qa_id}')
+        return {'ok': False, 'reason': 'qa_not_found'}
+
+    # 取 12 维评分(一次查询,后续归因复用)
+    scores = list(
+        MultiDimensionScore.objects
+        .filter(qa_record_id=qa_id)
+        .values('dimension', 'score', 'reason')
+    )
+    if not scores:
+        return {'ok': False, 'reason': 'no_scores'}
+
+    avg_score = sum(float(s.get('score') or 0) for s in scores) / len(scores)
+    # 均分达标则不归因(避免无意义分析 + 节省成本)
+    if avg_score >= threshold_val:
+        return {'ok': True, 'skipped': True, 'reason': 'score_above_threshold',
+                'avg_score': round(avg_score, 4)}
+
+    try:
+        result = analyze_low_score_qa(
+            qa_record_id=qa_id,
+            scores=scores,
+            threshold=threshold_val,
+        )
+        # update_or_create:同 QA 重新归因覆盖旧记录,保留最新结论
+        LowScoreAnalysis.objects.update_or_create(
+            qa_record_id=qa_id,
+            defaults={
+                'avg_score': result['avg_score'],
+                'threshold': threshold_val,
+                'root_cause_category': result['category'],
+                'root_cause_detail': result['detail'],
+                'affected_layer': result['affected_layer'],
+                'low_dimensions': result['low_dimensions'],
+                'diagnosis': result['diagnosis'],
+                'suggestions': result['suggestions'],
+                'analysis_method': result['method'],
+                'analysis_model': result['model'],
+                'analysis_tokens_used': result['tokens'],
+                'analysis_cost': Decimal(str(result['cost'])),
+                'analysis_latency_ms': result['latency_ms'],
+                'status': 'completed',
+                'error_message': '',
+            },
+        )
+        logger.info(
+            f'[LowScoreAnalysis] qa_id={qa_id} category={result["category"]} '
+            f'method={result["method"]} avg={result["avg_score"]}'
+        )
+        return {
+            'ok': True, 'category': result['category'],
+            'method': result['method'], 'avg_score': result['avg_score'],
+        }
+    except Exception as e:
+        logger.exception(f'[LowScoreAnalysis] 归因失败 qa_id={qa_id}: {e}')
+        # 失败也落一条 failed 记录,前端能看到失败状态
+        LowScoreAnalysis.objects.update_or_create(
+            qa_record_id=qa_id,
+            defaults={
+                'avg_score': avg_score,
+                'threshold': threshold_val,
+                'status': 'failed',
+                'error_message': str(e)[:500],
+            },
+        )
+        return {'ok': False, 'reason': f'analysis_failed: {e}'}
+
+
+# ============================================================================
+# 12. 周期性离线检索评估（每周）
 # ============================================================================
 
 @shared_task(name='analytics.periodic_retrieval_evaluation', queue='analytics')

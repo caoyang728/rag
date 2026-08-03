@@ -316,6 +316,16 @@ def evaluate_sampled_qa(
         logger.info(
             f'[ProdEval] 评估完成 qa_id={qa_id}, 成功维度={evaluated}/{len(results)}',
         )
+
+        # 评估成功后自动派发低分归因分析(异步,不阻塞评估返回)
+        # 惰性导入避免 production_eval ↔ tasks 循环依赖(tasks 顶部已导入本模块)
+        # 归因任务内部会判断均分是否 < threshold,达标才真正分析
+        try:
+            from apps.analytics.tasks import run_low_score_analysis
+            run_low_score_analysis.delay(qa_id)
+        except Exception as e:
+            logger.warning(f'[ProdEval] 派发低分归因失败(忽略): {e}')
+
         return {
             'ok': True,
             'evaluated': evaluated,

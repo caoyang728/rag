@@ -57,6 +57,15 @@ function checkEvalCache(qaId) {
 }
 
 /* ============ 通用 ============ */
+
+// 组织架构筛选使用 common.js 的 OrgFilter 公共组件,3 个 Tab 各自初始化一对级联下拉。
+// 页面初始化时并行发起(不阻塞 Tab 切换),数据就绪后自动填充下拉并绑定 change 事件。
+function initOrgFilters() {
+	OrgFilter.init('evalDept', 'evalTeam', () => loadDashboard());
+	OrgFilter.init('docDept',  'docTeam',  () => loadDocQuality());
+	OrgFilter.init('attrDept', 'attrTeam', () => loadAttribution());
+}
+
 function switchEvalTab(name) {
 	$$('#evalTabs .tab-item').forEach(el => el.classList.toggle('active', el.getAttribute('data-tab') === name));
 	$$('.eval-scroll .tab-panel').forEach(p => {
@@ -80,6 +89,7 @@ function loadTabData(name) {
 		case 'doc': loadDocQuality(); break;
 		case 'coverage': loadCoverage(); break;
 		case 'feedback': break;
+		case 'attribution': loadAttribution(); break;
 	}
 }
 
@@ -418,8 +428,13 @@ function loadAnswerScores() {
 
 async function loadDashboard() {
 	const days = $('#evalDays') ? $('#evalDays').value : 7;
-	const rootType = $('#evalRootType') ? $('#evalRootType').value : '';
-	const qs = `?days=${days}${rootType ? '&root_type=' + encodeURIComponent(rootType) : ''}`;
+	const deptId = OrgFilter.getDeptId('evalDept');
+	const teamId = OrgFilter.getTeamId('evalTeam');
+	const params = new URLSearchParams();
+	params.set('days', days);
+	if (deptId) params.set('dept_id', deptId);
+	if (teamId) params.set('team_id', teamId);
+	const qs = '?' + params.toString();
 
 	// 并行加载 overview + low-score 两个接口(trend 接口当前 UI 未使用,避免无效请求)
 	try {
@@ -430,7 +445,8 @@ async function loadDashboard() {
 		renderOverview(overview);
 		// 传入 total_evaluated 以区分"无评估数据"和"有评估但无低分"两种空状态
 		renderLowScoreTable(lowScore.rows || [], overview.total_evaluated);
-		$('#evalSummary').textContent = `窗口 ${overview.days} 天 · 知识库 ${overview.root_type} · 阈值 ${overview.threshold}`;
+		const scopeText = OrgFilter.describeScope(overview.dept_id ?? deptId, overview.team_id ?? teamId);
+		$('#evalSummary').textContent = `窗口 ${overview.days} 天 · 范围 ${scopeText} · 阈值 ${overview.threshold}`;
 	} catch (e) {
 		toast('看板加载失败: ' + (e.message || e), 'error');
 	}
@@ -848,19 +864,23 @@ async function pollManualEvalResult(qaId, evalBatchId, token) {
 /* ============ 文档质量 ============ */
 async function loadDocQuality() {
 	try {
+		const deptId = OrgFilter.getDeptId('docDept');
+		const teamId = OrgFilter.getTeamId('docTeam');
+		const params = new URLSearchParams();
+		if (deptId) params.set('dept_id', deptId);
+		if (teamId) params.set('team_id', teamId);
+		const qs = params.toString() ? '?' + params.toString() : '';
 		// 并行请求两个接口，减少等待时间
-		const rootTypeSel = $('#docRootType');
-		const rootType = rootTypeSel ? rootTypeSel.value : '';
-		const params = rootType ? `?root_type=${encodeURIComponent(rootType)}` : '';
 		const [data, summary] = await Promise.all([
-			api.getJson(`/api/v1/analytics/doc-quality/reports/${params}`),
-			api.getJson(`/api/v1/analytics/doc-quality/${params}`),
+			api.getJson(`/api/v1/analytics/doc-quality/reports/${qs}`),
+			api.getJson(`/api/v1/analytics/doc-quality/${qs}`),
 		]);
 		const total = summary.total_docs || 0;
 		const avgScore = summary.avg_score || 0;
 		const dist = summary.score_distribution || {};
+		const scopeText = OrgFilter.describeScope(data.dept_id ?? deptId, data.team_id ?? teamId);
 
-		$('#docSummary').textContent = `共 ${total} 个文档，平均质量分 ${avgScore}`;
+		$('#docSummary').textContent = `范围：${scopeText} · 共 ${total} 个文档，平均质量分 ${avgScore}`;
 		$('#docTotal').textContent = total;
 		$('#docAvgScore').textContent = avgScore;
 		$('#docExcellent').textContent = dist.excellent || 0;
@@ -1195,6 +1215,302 @@ async function markFeedbackResolved(id) {
 	}
 }
 
+/* ============ 低分归因分析 ============ */
+
+// 归因分类 → 中文标签(与后端 LowScoreAnalysis.CATEGORY_CHOICES 对齐)
+const ATTR_CATEGORY_LABEL = {
+	retrieval_recall: '检索召回不足',
+	retrieval_rank: '检索排序失效',
+	content_gap: '知识盲区',
+	content_quality: '内容质量差',
+	generation_hallucination: '生成幻觉',
+	generation_offtopic: '生成跑题',
+	generation_incomplete: '生成不完整',
+	generation_format: '生成表达差',
+	safety: '安全问题',
+	question_side: '问题侧',
+	unknown: '无法归因',
+};
+// 影响层级 → 中文标签(与后端 LowScoreAnalysis.LAYER_CHOICES 对齐)
+const ATTR_LAYER_LABEL = {
+	retrieval: '检索层',
+	content: '内容层',
+	generation: '生成层',
+	safety: '安全层',
+	system: '系统层',
+	question: '问题侧',
+	unknown: '未知',
+};
+
+// 加载低分归因列表 + 统计(切换 Tab / 筛选 / 刷新时调用)
+// 并行请求列表与统计两个接口,减少串行等待
+async function loadAttribution() {
+	const days = $('#attrDays') ? $('#attrDays').value : '7';
+	const category = $('#attrCategory') ? $('#attrCategory').value : '';
+	const layer = $('#attrLayer') ? $('#attrLayer').value : '';
+	const status = $('#attrStatus') ? $('#attrStatus').value : '';
+	const deptId = OrgFilter.getDeptId('attrDept');
+	const teamId = OrgFilter.getTeamId('attrTeam');
+
+	// 列表查询参数
+	const listParams = new URLSearchParams();
+	listParams.set('days', days);
+	listParams.set('limit', '100');
+	if (category) listParams.set('category', category);
+	if (layer) listParams.set('layer', layer);
+	if (status) listParams.set('status', status);
+	if (deptId) listParams.set('dept_id', deptId);
+	if (teamId) listParams.set('team_id', teamId);
+
+	// 统计查询参数(不需要 category/layer/status 过滤,stats 接口返回全分类聚合)
+	const statsParams = new URLSearchParams();
+	statsParams.set('days', days);
+	if (deptId) statsParams.set('dept_id', deptId);
+	if (teamId) statsParams.set('team_id', teamId);
+
+	try {
+		const [listData, statsData] = await Promise.all([
+			api.getJson(`/api/v1/analytics/low-score-analysis/?${listParams.toString()}`),
+			api.getJson(`/api/v1/analytics/low-score-analysis/stats/?${statsParams.toString()}`),
+		]);
+		renderAttrStats(statsData);
+		renderAttrList(listData);
+		// summary 行(如有)显示组织范围
+		const scopeEl = $('#attrSummary');
+		if (scopeEl) {
+			const scopeText = OrgFilter.describeScope(
+				statsData.dept_id ?? deptId,
+				statsData.team_id ?? teamId,
+			);
+			scopeEl.textContent = `范围 ${scopeText} · 窗口 ${statsData.days || days} 天`;
+		}
+	} catch (e) {
+		toast('加载归因数据失败: ' + (e.message || e), 'error');
+		$('#attrTableBody').innerHTML = `<tr><td colspan="11" class="text-center text-sub">加载失败</td></tr>`;
+	}
+}
+
+// 渲染归因统计 KPI + 分类分布
+function renderAttrStats(data) {
+	const total = data.total || 0;
+	const byLayer = data.by_layer || [];
+	const byMethod = data.by_method || { rule: 0, llm: 0, hybrid: 0 };
+
+	// KPI 卡片:总数 + 各层级 + 各方法
+	$('#attrKpiTotal').textContent = total;
+	const layerCount = (layer) => byLayer.find(l => l.layer === layer)?.count || 0;
+	$('#attrKpiRetrieval').textContent = layerCount('retrieval');
+	$('#attrKpiContent').textContent = layerCount('content');
+	$('#attrKpiGeneration').textContent = layerCount('generation');
+	$('#attrKpiRule').textContent = byMethod.rule || 0;
+	$('#attrKpiLlm').textContent = (byMethod.llm || 0) + (byMethod.hybrid || 0);
+
+	// 归因分类分布:横向条形图(纯 CSS bar,无需图表库)
+	const byCategory = data.by_category || [];
+	const distEl = $('#attrCategoryDist');
+	if (!byCategory.length) {
+		distEl.innerHTML = '<div class="text-sub">暂无归因数据</div>';
+		return;
+	}
+	const maxCount = Math.max(...byCategory.map(c => c.count), 1);
+	distEl.innerHTML = byCategory.map(c => {
+		const label = ATTR_CATEGORY_LABEL[c.category] || c.category;
+		const widthPct = (c.count / maxCount * 100).toFixed(1);
+		const avgPct = (c.avg_score * 100).toFixed(1);
+		return `<div class="attr-bar-row">
+			<div class="attr-bar-label">${escapeHtml(label)}</div>
+			<div class="attr-bar-track">
+				<div class="attr-bar-fill" style="width:${widthPct}%"></div>
+			</div>
+			<div class="attr-bar-count">${c.count}</div>
+			<div class="attr-bar-avg">均分 ${avgPct}%</div>
+		</div>`;
+	}).join('');
+}
+
+// 渲染归因列表表格
+function renderAttrList(data) {
+	const rows = data.rows || [];
+	const days = data.days || 7;
+	$('#attrSummary').textContent = `共 ${rows.length} 条(最近 ${days} 天)`;
+
+	const tbody = $('#attrTableBody');
+	if (!rows.length) {
+		tbody.innerHTML = `<tr><td colspan="11">
+			<div class="empty-state">
+				<div class="empty-state-icon">🧪</div>
+				<div>暂无归因数据(低分 QA 评估完成后会自动归因)</div>
+			</div>
+		</td></tr>`;
+		return;
+	}
+
+	tbody.innerHTML = rows.map(r => {
+		const catLabel = r.category_label || ATTR_CATEGORY_LABEL[r.root_cause_category] || r.root_cause_category;
+		const layerLabel = r.layer_label || ATTR_LAYER_LABEL[r.affected_layer] || r.affected_layer;
+		const methodLabel = r.method_label || r.analysis_method;
+		const statusLabel = r.status_label || r.status;
+		const statusClass = r.status === 'completed' ? 'tag-success' : (r.status === 'failed' ? 'tag-danger' : 'tag-warning');
+		const methodClass = r.analysis_method === 'rule' ? 'tag' : 'tag tag-info';
+		return `<tr>
+			<td>${r.qa_record_id}</td>
+			<td title="${escapeHtml(r.question || '')}">${escapeHtml((r.question || '').substring(0, 40))}${(r.question || '').length > 40 ? '...' : ''}</td>
+			<td title="${escapeHtml(r.answer || '')}">${escapeHtml((r.answer || '').substring(0, 50))}${(r.answer || '').length > 50 ? '...' : ''}</td>
+			<td>${scorePill(r.avg_score, fmtPct)}</td>
+			<td><span class="tag">${escapeHtml(catLabel)}</span></td>
+			<td>${escapeHtml(layerLabel)}</td>
+			<td><span class="${methodClass}">${escapeHtml(methodLabel)}</span></td>
+			<td>${escapeHtml(r.root_type || '-')}</td>
+			<td><span class="${statusClass}">${escapeHtml(statusLabel)}</span></td>
+			<td class="text-sm text-sub">${formatDate(r.created_at)}</td>
+			<td>
+				<button class="btn btn-sm" onclick="showAttrDetail(${r.qa_record_id})">详情</button>
+				<button class="btn btn-sm btn-primary" onclick="rerunAttr(${r.qa_record_id})">重跑</button>
+			</td>
+		</tr>`;
+	}).join('');
+}
+
+// 手动触发单条 QA 归因(异步,派发后立即返回,前端不阻塞轮询)
+// 归因任务通常 2~10s 完成(规则归因秒级,LLM 归因取决于模型响应),
+// 这里不做轮询,只提示用户稍后刷新,避免复杂的状态机
+async function runManualAttribution() {
+	const qaId = $('#attrManualQaId').value.trim();
+	if (!qaId) { toast('请输入 QA 记录 ID', 'error'); return; }
+
+	const btn = $('#btnRunManualAttr');
+	if (btn) { btn.disabled = true; }
+	toast('归因已派发,规则归因秒级完成,LLM 归因约 10~30s,请稍后刷新查看', 'info');
+
+	try {
+		const resp = await api.postJson('/api/v1/analytics/low-score-analysis/run/', {
+			qa_record_id: parseInt(qaId),
+		});
+		if (!resp || !resp.queued) {
+			throw new Error(resp?.detail || '派发归因失败');
+		}
+		toast('归因已派发,3 秒后自动刷新列表', 'success');
+		// 3 秒后自动刷新(规则归因通常已完成,LLM 归因可能仍在跑)
+		setTimeout(() => loadAttribution(), 3000);
+	} catch (e) {
+		toast('归因失败: ' + (e.message || e), 'error');
+	} finally {
+		if (btn) { btn.disabled = false; }
+	}
+}
+
+// 列表"重跑"按钮:复用 run 接口
+async function rerunAttr(qaId) {
+	toast('正在重新归因...', 'info');
+	try {
+		const resp = await api.postJson('/api/v1/analytics/low-score-analysis/run/', {
+			qa_record_id: qaId,
+		});
+		if (!resp || !resp.queued) {
+			throw new Error(resp?.detail || '派发归因失败');
+		}
+		toast('归因已派发,3 秒后自动刷新', 'success');
+		setTimeout(() => loadAttribution(), 3000);
+	} catch (e) {
+		toast('归因失败: ' + (e.message || e), 'error');
+	}
+}
+
+// 显示归因详情弹窗(完整对话 + 归因结论 + 低分维度 + 优化建议)
+async function showAttrDetail(qaId) {
+	$('#attrDetailTitle').textContent = `#${qaId}`;
+	$('#attrDetailBody').innerHTML = '<div class="text-sub">加载中...</div>';
+	document.getElementById('attrDetailDialog').style.display = 'flex';
+
+	try {
+		const data = await api.getJson(`/api/v1/analytics/low-score-analysis/detail/?qa_record_id=${qaId}`);
+
+		const catLabel = data.category_label || ATTR_CATEGORY_LABEL[data.root_cause_category] || data.root_cause_category;
+		const layerLabel = data.layer_label || ATTR_LAYER_LABEL[data.affected_layer] || data.affected_layer;
+		const methodLabel = data.method_label || data.analysis_method;
+		const statusLabel = data.status_label || data.status;
+
+		let html = `
+			<div class="mb-16">
+				<div class="flex justify-between items-baseline mb-8">
+					<strong>对话内容</strong>
+					<span class="text-sm text-sub">均分 ${scorePill(data.avg_score, fmtPct)} · 阈值 ${fmtPct(data.threshold)} · 知识库 ${escapeHtml(data.root_type || '-')}</span>
+				</div>
+				<div class="mb-8"><strong class="text-sub">问题:</strong> ${escapeHtml(data.full_question || data.question || '')}</div>
+				<div><strong class="text-sub">回答:</strong> ${escapeHtml(data.full_answer || data.answer || '')}</div>
+			</div>
+		`;
+
+		// 归因结论
+		html += `<div class="attr-section mb-16">
+			<div class="attr-section-title">归因结论</div>
+			<div class="attr-conclusion">
+				<div class="attr-meta-row">
+					<span class="attr-meta-label">根因分类:</span>
+					<span class="tag tag-danger">${escapeHtml(catLabel)}</span>
+					<span class="attr-meta-label">影响层级:</span>
+					<span class="tag">${escapeHtml(layerLabel)}</span>
+					<span class="attr-meta-label">方法:</span>
+					<span class="tag tag-info">${escapeHtml(methodLabel)}</span>
+					<span class="attr-meta-label">状态:</span>
+					<span class="tag">${escapeHtml(statusLabel)}</span>
+				</div>
+				<div class="attr-detail-text">${escapeHtml(data.root_cause_detail || '(无详细说明)')}</div>
+				${data.diagnosis ? `<div class="attr-diagnosis">💡 ${escapeHtml(data.diagnosis)}</div>` : ''}
+				${data.error_message ? `<div class="attr-error">⚠️ ${escapeHtml(data.error_message)}</div>` : ''}
+			</div>
+		</div>`;
+
+		// 低分维度明细
+		const lowDims = data.low_dimensions || [];
+		if (lowDims.length) {
+			html += `<div class="attr-section mb-16">
+				<div class="attr-section-title">低分维度明细(均分 < 阈值)</div>
+				${lowDims.map(d => {
+					const dimLabel = DIM_LABEL[d.dimension] || d.dimension;
+					return `<div class="attr-dim-row">
+						<div class="flex justify-between items-baseline">
+							<span>${escapeHtml(dimLabel)}</span>
+							<span>${scorePill(d.score, fmtPct)}</span>
+						</div>
+						${d.reason ? `<div class="text-sm text-sub" style="margin-top:4px">${escapeHtml(d.reason)}</div>` : ''}
+					</div>`;
+				}).join('')}
+			</div>`;
+		}
+
+		// 优化建议
+		const suggestions = data.suggestions || [];
+		if (suggestions.length) {
+			html += `<div class="attr-section">
+				<div class="attr-section-title">优化建议</div>
+				${suggestions.map(s => {
+					const typeLabel = s.type === 'short_term' ? '短期' : (s.type === 'long_term' ? '长期' : s.type);
+					const typeClass = s.type === 'short_term' ? 'tag tag-warning' : 'tag tag-info';
+					return `<div class="attr-suggestion-row">
+						<span class="${typeClass}">${escapeHtml(typeLabel)}</span>
+						<span class="attr-suggestion-text">${escapeHtml(s.action || '')}</span>
+					</div>`;
+				}).join('')}
+			</div>`;
+		}
+
+		// LLM 调用元信息(仅 hybrid/llm 方法展示,体现成本可追溯)
+		if (data.analysis_method !== 'rule' && (data.analysis_tokens_used || data.analysis_latency_ms)) {
+			html += `<div class="text-sm text-sub mt-16">
+				LLM: ${escapeHtml(data.analysis_model || '-')} ·
+				Token ${data.analysis_tokens_used || 0} ·
+				耗时 ${data.analysis_latency_ms || 0}ms ·
+				${formatDate(data.created_at)}
+			</div>`;
+		}
+
+		$('#attrDetailBody').innerHTML = html;
+	} catch (e) {
+		$('#attrDetailBody').innerHTML = `<div class="text-sub">加载失败: ${escapeHtml(e.message || String(e))}</div>`;
+	}
+}
+
 /* ============ 工具函数 ============ */
 function fmtPct(v) {
 	if (v === null || v === undefined || isNaN(v)) return '--';
@@ -1203,5 +1519,7 @@ function fmtPct(v) {
 
 /* ============ 初始化 ============ */
 document.addEventListener('DOMContentLoaded', () => {
+	// 初始化 3 个 Tab 的组织架构级联下拉(内部异步加载数据,不阻塞 Tab 切换)
+	initOrgFilters();
 	switchEvalTab('golden');
 });

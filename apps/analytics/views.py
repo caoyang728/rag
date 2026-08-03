@@ -22,6 +22,63 @@ from apps.chat.models import QaRecord, QaFeedback
 from apps.users.permissions import CanViewAnalytics
 
 
+# ============================================================================
+# 组织筛选工具函数
+# ============================================================================
+
+def _parse_org_scope(request):
+    """从 request.query_params 解析 dept_id/team_id,返回 (dept_id, team_id)。
+
+    team_id 有值时 dept_id 自动忽略(团队天然属于某部门,过滤更精确);
+    dept_id 有值时用 user__department_id=dept_id 过滤(包含部门所有团队成员);
+    两者都为空返回 (None, None),调用方跳过组织过滤。
+    """
+    dept_id = request.query_params.get('dept_id', '').strip() or None
+    team_id = request.query_params.get('team_id', '').strip() or None
+    if dept_id:
+        try:
+            dept_id = int(dept_id)
+        except (ValueError, TypeError):
+            dept_id = None
+    if team_id:
+        try:
+            team_id = int(team_id)
+        except (ValueError, TypeError):
+            team_id = None
+    return dept_id, team_id
+
+
+def _apply_org_filter_on_qa(qs, dept_id, team_id, qa_prefix=''):
+    """对以 QaRecord 为 JOIN 起点的 QuerySet 应用组织筛选(按提问用户归属)。
+
+    qa_prefix: 当 QS 是 JOIN 后的表时(如 MultiDimensionScore),传入 qa 关联前缀
+    (如 'qa_record__'),最终生成 qa_record__user__department_id。空串表示 qs 就是 QaRecord。
+    前缀必须以 '__' 结尾(或为空串),否则会拼出错误的 ORM lookup 路径。
+    """
+    # 统一规范化前缀:非空时确保以 '__' 结尾,再拼接 'user__'
+    base = (qa_prefix + '__') if (qa_prefix and not qa_prefix.endswith('__')) else qa_prefix
+    base += 'user__'
+    # team 有值时直接按团队过滤,更精确,无需再按部门过滤
+    if team_id:
+        return qs.filter(**{f'{base}team_id': team_id})
+    if dept_id:
+        return qs.filter(**{f'{base}department_id': dept_id})
+    return qs
+
+
+def _apply_org_filter_on_doc(qs, dept_id, team_id, doc_prefix=''):
+    """对以 Document 为 JOIN 起点的 QuerySet 应用组织筛选(按文档 dept_id/team_id 归属)。
+
+    doc_prefix: JOIN 前缀(如 'document__'),空串表示 qs 本身就是 Document。
+    """
+    # team 有值时直接按团队过滤(团队归属文档或冗余 dept_id 已对齐的团队文档)
+    if team_id:
+        return qs.filter(**{f'{doc_prefix}team_id': team_id})
+    if dept_id:
+        # 部门级:直接归属部门(dept_id=X,team_id 空)或其下属团队的文档(dept_id 冗余对齐)
+        return qs.filter(**{f'{doc_prefix}dept_id': dept_id})
+    return qs
+
 
 class KeywordWeightListView(APIView):
     """GET /api/v1/analytics/keywords/?root_type=&top=20
@@ -1087,7 +1144,7 @@ class RetrievalReportListView(APIView):
 # ============================================================================
 
 class DocumentQualityReportView(APIView):
-    """GET /api/v1/analytics/doc-quality/ - 文档质量汇总"""
+    """GET /api/v1/analytics/doc-quality/?start_date=&end_date=&dept_id=&team_id= - 文档质量汇总"""
     permission_classes = [IsAuthenticated, CanViewAnalytics]
     required_perm = 'analytics.system.read'
 
@@ -1096,6 +1153,7 @@ class DocumentQualityReportView(APIView):
         start_date = request.query_params.get('start_date')
         end_date = request.query_params.get('end_date')
         root_type = request.query_params.get('root_type')
+        dept_id, team_id = _parse_org_scope(request)
         if start_date:
             try:
                 datetime.fromisoformat(start_date)
@@ -1106,7 +1164,14 @@ class DocumentQualityReportView(APIView):
                 datetime.fromisoformat(end_date)
             except ValueError:
                 return Response({'detail': 'end_date 格式应为 YYYY-MM-DD'}, status=400)
-        return Response(get_document_quality_summary(start_date, end_date, root_type))
+        return Response({
+            **get_document_quality_summary(
+                start_date, end_date, root_type,
+                dept_id=dept_id, team_id=team_id,
+            ),
+            'dept_id': dept_id,
+            'team_id': team_id,
+        })
 
 
 class RunDocQualityEvalView(APIView):
@@ -1134,7 +1199,7 @@ class RunDocQualityEvalView(APIView):
 
 
 class DocumentQualityReportListView(APIView):
-    """GET /api/v1/analytics/doc-quality/reports/"""
+    """GET /api/v1/analytics/doc-quality/reports/?dept_id=&team_id="""
     permission_classes = [IsAuthenticated, CanViewAnalytics]
     required_perm = 'analytics.system.read'
 
@@ -1143,10 +1208,12 @@ class DocumentQualityReportListView(APIView):
         from apps.analytics.serializers import DocumentQualityReportSerializer
         root_type = request.query_params.get('root_type')
         min_score = request.query_params.get('min_score')
+        dept_id, team_id = _parse_org_scope(request)
 
         qs = DocumentQualityReport.objects.select_related('document').order_by('-created_at')
         if root_type:
             qs = qs.filter(document__root_type=root_type)
+        qs = _apply_org_filter_on_doc(qs, dept_id, team_id, doc_prefix='document__')
         if min_score:
             try:
                 qs = qs.filter(quality_score__gte=float(min_score))
@@ -1155,7 +1222,7 @@ class DocumentQualityReportListView(APIView):
 
         total = qs.count()
         rows = DocumentQualityReportSerializer(qs[:50], many=True).data
-        return Response({'total': total, 'rows': rows})
+        return Response({'total': total, 'rows': rows, 'dept_id': dept_id, 'team_id': team_id})
 
 
 # ============================================================================
@@ -1545,7 +1612,7 @@ def _parse_dashboard_days(request) -> int:
 
 
 class EvalDashboardOverviewView(APIView):
-    """GET /api/v1/analytics/eval-dashboard/overview/?days=7&root_type=
+    """GET /api/v1/analytics/eval-dashboard/overview/?days=7&root_type=&dept_id=&team_id=
 
     看板顶部 KPI:
     - total_evaluated: 评估过的 QA 数(distinct qa_record_id)
@@ -1553,6 +1620,7 @@ class EvalDashboardOverviewView(APIView):
     - low_score_count: 平均分 < threshold 的 QA 数
     - safety_alert_count: toxicity<0.5 或 bias<0.5 的 QA 数(安全告警)
     - dimension_groups: 4 大类均分 + 各维度均分(雷达图用)
+    组织筛选(dept_id/team_id):按提问用户的部门/团队归属过滤,team 有值时忽略 dept。
     """
     permission_classes = [IsAuthenticated, CanViewAnalytics]
     required_perm = 'analytics.system.read'
@@ -1561,16 +1629,21 @@ class EvalDashboardOverviewView(APIView):
         from apps.analytics.models import MultiDimensionScore
         days = _parse_dashboard_days(request)
         root_type = request.query_params.get('root_type', '').strip()
+        dept_id, team_id = _parse_org_scope(request)
         threshold = 0.5
 
         since = timezone.now() - timedelta(days=days)
 
-        # 基础 queryset(按时间 + 可选 root_type 过滤)
+        # 基础 queryset(按时间 + 可选 root_type + 组织筛选)
         scores_qs = MultiDimensionScore.objects.filter(created_at__gte=since)
         qa_qs = QaRecord.objects.filter(created_at__gte=since, is_success=True).exclude(answer_type='refused')
         if root_type:
             scores_qs = scores_qs.filter(qa_record__root_type=root_type)
             qa_qs = qa_qs.filter(root_type=root_type)
+        # 组织筛选(按 QaRecord.user 归属 JOIN):
+        # scores_qs JOIN 通过 qa_record__ 关联 QaRecord,qa_qs 直接是 QaRecord
+        scores_qs = _apply_org_filter_on_qa(scores_qs, dept_id, team_id, qa_prefix='qa_record__')
+        qa_qs = _apply_org_filter_on_qa(qa_qs, dept_id, team_id)
 
         # 1. 评估量(去重 qa_record_id)
         total_evaluated = scores_qs.values('qa_record_id').distinct().count()
@@ -1648,6 +1721,8 @@ class EvalDashboardOverviewView(APIView):
         )
         if root_type:
             prev_scores_qs = prev_scores_qs.filter(qa_record__root_type=root_type)
+        # 环比同样按组织过滤,避免口径不一致
+        prev_scores_qs = _apply_org_filter_on_qa(prev_scores_qs, dept_id, team_id, qa_prefix='qa_record__')
         prev_dim_agg = prev_scores_qs.values('dimension').annotate(
             prev_avg=models.Avg('score'),
         )
@@ -1682,6 +1757,8 @@ class EvalDashboardOverviewView(APIView):
         return Response({
             'days': days,
             'root_type': root_type or 'all',
+            'dept_id': dept_id,
+            'team_id': team_id,
             'total_evaluated': total_evaluated,
             'total_qa': total_qa,
             'coverage_rate': round(total_evaluated / total_qa, 4) if total_qa else 0,
@@ -1695,11 +1772,12 @@ class EvalDashboardOverviewView(APIView):
 
 
 class EvalDashboardTrendView(APIView):
-    """GET /api/v1/analytics/eval-dashboard/trend/?days=7&root_type=&dimension=
+    """GET /api/v1/analytics/eval-dashboard/trend/?days=7&root_type=&dimension=&dept_id=&team_id=
 
     看板趋势线:按天聚合各维度均分。
     - dimension 为空:返回 12 维全部趋势(前端可切换显示)
     - dimension 指定:只返回该维度趋势
+    组织筛选(dept_id/team_id):按提问用户归属过滤。
     """
     permission_classes = [IsAuthenticated, CanViewAnalytics]
     required_perm = 'analytics.system.read'
@@ -1709,11 +1787,13 @@ class EvalDashboardTrendView(APIView):
         days = _parse_dashboard_days(request)
         root_type = request.query_params.get('root_type', '').strip()
         dimension = request.query_params.get('dimension', '').strip()
+        dept_id, team_id = _parse_org_scope(request)
 
         since = timezone.now() - timedelta(days=days)
         qs = MultiDimensionScore.objects.filter(created_at__gte=since)
         if root_type:
             qs = qs.filter(qa_record__root_type=root_type)
+        qs = _apply_org_filter_on_qa(qs, dept_id, team_id, qa_prefix='qa_record__')
         if dimension:
             qs = qs.filter(dimension=dimension)
 
@@ -1742,6 +1822,8 @@ class EvalDashboardTrendView(APIView):
         return Response({
             'days': days,
             'root_type': root_type or 'all',
+            'dept_id': dept_id,
+            'team_id': team_id,
             'dimension': dimension or 'all',
             'dates': dates_set,
             'series': [
@@ -1752,11 +1834,12 @@ class EvalDashboardTrendView(APIView):
 
 
 class EvalDashboardLowScoreView(APIView):
-    """GET /api/v1/analytics/eval-dashboard/low-score-qa/?days=7&limit=20&threshold=0.5&root_type=
+    """GET /api/v1/analytics/eval-dashboard/low-score-qa/?days=7&limit=20&threshold=0.5&root_type=&dept_id=&team_id=
 
     低分对话 Top N(按 QA 均分升序)。
     返回每个 QA 的:question/answer 摘要 + 均分 + 最低维度 + 最低分 + root_type + 时间。
     前端点击展开调 qa-detail 看完整明细。
+    组织筛选(dept_id/team_id):按提问用户归属过滤。
     """
     permission_classes = [IsAuthenticated, CanViewAnalytics]
     required_perm = 'analytics.system.read'
@@ -1765,6 +1848,7 @@ class EvalDashboardLowScoreView(APIView):
         from apps.analytics.models import MultiDimensionScore
         days = _parse_dashboard_days(request)
         root_type = request.query_params.get('root_type', '').strip()
+        dept_id, team_id = _parse_org_scope(request)
         try:
             limit = int(request.query_params.get('limit', 20))
         except (ValueError, TypeError):
@@ -1779,6 +1863,7 @@ class EvalDashboardLowScoreView(APIView):
         qs = MultiDimensionScore.objects.filter(created_at__gte=since)
         if root_type:
             qs = qs.filter(qa_record__root_type=root_type)
+        qs = _apply_org_filter_on_qa(qs, dept_id, team_id, qa_prefix='qa_record__')
 
         # 每个 QA 的均分 + 最低分维度(子查询取 min)
         qa_agg = qs.values('qa_record_id').annotate(
@@ -1787,7 +1872,8 @@ class EvalDashboardLowScoreView(APIView):
         ).filter(avg_score__lt=threshold).order_by('avg_score')[:limit]
 
         if not qa_agg:
-            return Response({'total': 0, 'threshold': threshold, 'rows': []})
+            return Response({'total': 0, 'threshold': threshold, 'rows': [],
+                             'dept_id': dept_id, 'team_id': team_id})
 
         # 批量取 QaRecord 详情(避免 N+1)
         qa_ids = [r['qa_record_id'] for r in qa_agg]
@@ -1826,7 +1912,8 @@ class EvalDashboardLowScoreView(APIView):
                 'created_at': q.created_at.isoformat(),
             })
 
-        return Response({'total': len(rows), 'threshold': threshold, 'rows': rows})
+        return Response({'total': len(rows), 'threshold': threshold, 'rows': rows,
+                         'dept_id': dept_id, 'team_id': team_id})
 
 
 class EvalDashboardQaDetailView(APIView):
@@ -1893,4 +1980,217 @@ class EvalDashboardQaDetailView(APIView):
                 for s in scores
             ],
             'avg_score': round(avg_score, 4),
+        })
+
+
+# ============================================================================
+# 低分归因分析 Views
+# ============================================================================
+
+class LowScoreAnalysisListView(APIView):
+    """GET /api/v1/analytics/low-score-analysis/?days=7&category=&layer=&status=&root_type=&dept_id=&team_id=&limit=50
+
+    低分归因列表:
+    - 支持时间窗口、归因分类、影响层级、状态、组织归属筛选
+    - select_related('qa_record') 避免 N+1(serializer 取 question/answer/root_type)
+    - 默认按创建时间倒序,limit 上限 200 防止过大响应
+    """
+    permission_classes = [IsAuthenticated, CanViewAnalytics]
+    required_perm = 'analytics.system.read'
+
+    def get(self, request):
+        from apps.analytics.models import LowScoreAnalysis
+        from apps.analytics.serializers import LowScoreAnalysisSerializer
+
+        # 时间窗口
+        try:
+            days = int(request.query_params.get('days', 7))
+        except (ValueError, TypeError):
+            return Response({'detail': 'days 必须为整数'}, status=400)
+        days = max(1, min(days, 90))
+        since = timezone.now() - timedelta(days=days)
+
+        try:
+            limit = int(request.query_params.get('limit', 50))
+        except (ValueError, TypeError):
+            return Response({'detail': 'limit 必须为整数'}, status=400)
+        limit = max(1, min(limit, 200))
+
+        category = request.query_params.get('category', '').strip()
+        layer = request.query_params.get('layer', '').strip()
+        status = request.query_params.get('status', '').strip()
+        root_type = request.query_params.get('root_type', '').strip()
+        dept_id, team_id = _parse_org_scope(request)
+
+        qs = LowScoreAnalysis.objects.select_related('qa_record').filter(created_at__gte=since)
+        if category:
+            qs = qs.filter(root_cause_category=category)
+        if layer:
+            qs = qs.filter(affected_layer=layer)
+        if status:
+            qs = qs.filter(status=status)
+        if root_type:
+            qs = qs.filter(qa_record__root_type=root_type)
+        # 组织筛选:按 QaRecord.user 的归属 JOIN,LowScoreAnalysis 与 qa_record__user 关联
+        qs = _apply_org_filter_on_qa(qs, dept_id, team_id, qa_prefix='qa_record__')
+
+        qs = qs.order_by('-created_at')[:limit]
+        rows = LowScoreAnalysisSerializer(qs, many=True).data
+        return Response({'rows': rows, 'count': len(rows), 'days': days,
+                         'dept_id': dept_id, 'team_id': team_id})
+
+
+class LowScoreAnalysisDetailView(APIView):
+    """GET /api/v1/analytics/low-score-analysis/?qa_record_id=123
+
+    单条 QA 的归因详情(前端点击列表行展开用)。
+    返回完整 question/answer + 归因结论 + 建议 + 低分维度 reason。
+    """
+    permission_classes = [IsAuthenticated, CanViewAnalytics]
+    required_perm = 'analytics.system.read'
+
+    def get(self, request):
+        from apps.analytics.models import LowScoreAnalysis
+        from apps.analytics.serializers import LowScoreAnalysisSerializer
+
+        qa_id = request.query_params.get('qa_record_id')
+        if not qa_id:
+            return Response({'detail': 'qa_record_id 必填'}, status=400)
+        try:
+            qa_id = int(qa_id)
+        except (ValueError, TypeError):
+            return Response({'detail': 'qa_record_id 必须为整数'}, status=400)
+
+        try:
+            analysis = LowScoreAnalysis.objects.select_related('qa_record').get(qa_record_id=qa_id)
+        except LowScoreAnalysis.DoesNotExist:
+            return Response({'detail': '该 QA 暂无归因分析,请先触发评估与归因'}, status=404)
+
+        data = LowScoreAnalysisSerializer(analysis).data
+        # 详情接口补充完整对话内容(列表已截断)
+        data['full_question'] = analysis.qa_record.question if analysis.qa_record else ''
+        data['full_answer'] = analysis.qa_record.answer if analysis.qa_record else ''
+        return Response(data)
+
+
+class RunLowScoreAnalysisView(APIView):
+    """POST /api/v1/analytics/low-score-analysis/run/ - 手动触发单条 QA 归因
+
+    场景:运营在看板发现某低分 QA,手动触发归因(跳过日预算,用户主动操作不计入生产配额)。
+    异步执行:POST 立即返回,前端轮询 detail 接口查结果。
+    若该 QA 尚未评估(无 MultiDimensionScore),返回 400 提示先评估。
+    """
+    permission_classes = [IsAuthenticated, CanViewAnalytics]
+    required_perm = 'analytics.system.write'
+
+    def post(self, request):
+        from apps.analytics.tasks import run_low_score_analysis
+        from apps.analytics.models import MultiDimensionScore
+
+        qa_id = request.data.get('qa_record_id')
+        if not qa_id:
+            return Response({'detail': 'qa_record_id 必填'}, status=400)
+        try:
+            qa_id = int(qa_id)
+        except (ValueError, TypeError):
+            return Response({'detail': 'qa_record_id 必须为整数'}, status=400)
+
+        # 预检:无评估分数的 QA 无法归因,提前返回避免无意义排队
+        has_scores = MultiDimensionScore.objects.filter(qa_record_id=qa_id).exists()
+        if not has_scores:
+            return Response({'detail': '该 QA 尚未评估,请先在「回答质量」执行 12 维评估'}, status=400)
+
+        try:
+            qa = QaRecord.objects.get(id=qa_id)
+        except QaRecord.DoesNotExist:
+            return Response({'detail': 'QA 记录不存在'}, status=404)
+
+        threshold = request.data.get('threshold')
+        if threshold is not None:
+            try:
+                threshold = float(threshold)
+            except (TypeError, ValueError):
+                return Response({'detail': 'threshold 必须为数字'}, status=400)
+
+        # 派发异步归因任务(手动触发跳过日预算)
+        run_low_score_analysis.delay(qa_id, threshold=threshold, skip_budget_check=True)
+        logger.info(f'[LowScoreAnalysis] 手动触发归因 qa_id={qa_id} user={request.user.username}')
+
+        return Response({
+            'ok': True,
+            'queued': True,
+            'qa_id': qa_id,
+            'message': '归因已派发,请通过 qa_record_id 轮询结果',
+        })
+
+
+class LowScoreAnalysisStatsView(APIView):
+    """GET /api/v1/analytics/low-score-analysis/stats/?days=7&root_type=&dept_id=&team_id=
+
+    归因分类统计(前端归因分布图用):
+    - by_category: [{category, count, avg_score}]
+    - by_layer: [{layer, count}]
+    - by_method: {rule: n, llm: n, hybrid: n}
+    - total: 总归因数
+    一次 GROUP BY 查询拿全,避免逐类 COUNT
+    """
+    permission_classes = [IsAuthenticated, CanViewAnalytics]
+    required_perm = 'analytics.system.read'
+
+    def get(self, request):
+        from apps.analytics.models import LowScoreAnalysis
+
+        try:
+            days = int(request.query_params.get('days', 7))
+        except (ValueError, TypeError):
+            days = 7
+        days = max(1, min(days, 90))
+        root_type = request.query_params.get('root_type', '').strip()
+        dept_id, team_id = _parse_org_scope(request)
+
+        since = timezone.now() - timedelta(days=days)
+        qs = LowScoreAnalysis.objects.filter(created_at__gte=since, status='completed')
+        if root_type:
+            qs = qs.filter(qa_record__root_type=root_type)
+        qs = _apply_org_filter_on_qa(qs, dept_id, team_id, qa_prefix='qa_record__')
+
+        # 按分类聚合:count + avg_score(一次 GROUP BY)
+        cat_agg = qs.values('root_cause_category').annotate(
+            count=models.Count('id'),
+            avg_score=models.Avg('avg_score'),
+        ).order_by('-count')
+        by_category = [
+            {
+                'category': r['root_cause_category'],
+                'count': r['count'],
+                'avg_score': round(float(r['avg_score'] or 0), 4),
+            }
+            for r in cat_agg
+        ]
+
+        # 按层级聚合
+        layer_agg = qs.values('affected_layer').annotate(
+            count=models.Count('id'),
+        ).order_by('-count')
+        by_layer = [{'layer': r['affected_layer'], 'count': r['count']} for r in layer_agg]
+
+        # 按方法聚合
+        method_agg = qs.values('analysis_method').annotate(count=models.Count('id'))
+        by_method = {r['analysis_method']: r['count'] for r in method_agg}
+
+        total = sum(r['count'] for r in by_category)
+
+        return Response({
+            'days': days,
+            'root_type': root_type or 'all',
+            'dept_id': dept_id,
+            'team_id': team_id,
+            'total': total,
+            'by_category': by_category,
+            'by_layer': by_layer,
+            'by_method': {
+                'rule': by_method.get('rule', 0),
+                'llm': by_method.get('llm', 0),
+                'hybrid': by_method.get('hybrid', 0),
+            },
         })

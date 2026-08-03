@@ -1,13 +1,12 @@
 """
 analytics app - 关键词权重 & 准确率日报 & 性能监控 & RAG 质量评估 Model
-对齐数据库设计 E3/E4 + 系统监控域（SystemMetricsReport/OrgUsageReport/QueueDepthLog/AnswerQualityReport）
+对齐数据库设计 E3/E4 + 系统监控域（SystemMetricsReport/OrgUsageReport/QueueDepthLog）
 KeywordWeight 支持基于历史准确率的动态关键词加权
 SystemMetricsReport: P50/P95/P99、缓存命中率、LLM 错误率等系统级日报
 OrgUsageReport: 部门/团队维度的对话次数、Token 消耗、费用统计
 QueueDepthLog: Celery 队列深度定时快照（每 5 分钟），用于 Dashboard 展示历史趋势
-AnswerQualityReport: 回答忠实度评估报告（异步 LLM 评估）
 GoldenDataset/GoldenQuestion/GoldenRelevantDoc/GoldenReferenceAnswer: 离线评估黄金测试集
-MultiDimensionScore: 多维度回答质量评估（Faithfulness/Relevance/Completeness/Correctness/Harmlessness/ContextRecall）
+MultiDimensionScore: 多维度回答质量评估（DeepEval 12 维 + 历史兼容维度）
 DocumentQualityReport: 文档入库质量报告（解析/切分/向量化质量量化）
 RetrievalQualityReport: 检索质量报告（Recall@K/MRR/NDCG + 各阶段增益分析）
 CoverageReport: 知识库覆盖率报告（热门问题覆盖、知识空白检测）
@@ -222,56 +221,6 @@ class QueueDepthLog(models.Model):
         unique_together = [('queue_name', 'minute_bucket')]
 
 
-class AnswerQualityReport(models.Model):
-    """回答忠实度评估报告（Celery Beat 异步评估，使用便宜模型）
-
-    - 仅评估 is_hit_cache=False 且 is_success=True 的 QaRecord
-      （缓存命中答案在首次生成时已评估，避免重复消耗 Token）
-    - 使用便宜模型（deepseek-chat）批量评估，每小时最多 N 条（.env 可配置），
-      同时控制每日成本上限，防止意外高额消费
-    - status 字段跟踪评估状态，失败时可重试
-    """
-
-    STATUS_CHOICES = [
-        ('pending', '待评估'),
-        ('completed', '已完成'),
-        ('failed', '失败（可重试）'),
-    ]
-
-    id = models.BigAutoField(primary_key=True)
-    qa_record = models.OneToOneField(QaRecord, on_delete=models.CASCADE,
-                                     db_column='qa_record_id',
-                                     related_name='quality_report')
-
-    # --- 评估结果 ---
-    faithfulness_score = models.FloatField(default=0.0,
-                                            help_text='忠实度 0-1（分数越高表示回答越忠实于原文）')
-    faithfulness_reason = models.TextField(default='',
-                                            help_text='评估理由（中文，便于运营直接阅读）')
-
-    # --- 评估元数据 ---
-    eval_model = models.CharField(max_length=64, help_text='使用的评估模型')
-    eval_tokens_used = models.IntegerField(default=0)
-    eval_cost = models.DecimalField(max_digits=8, decimal_places=6, default=0,
-                                     help_text='本次评估消耗费用（元）')
-    eval_latency_ms = models.IntegerField(default=0)
-
-    # --- 状态机 ---
-    status = models.CharField(max_length=16, default='pending', choices=STATUS_CHOICES)
-    error_message = models.TextField(default='', blank=True)
-    retry_count = models.IntegerField(default=0, help_text='失败重试次数')
-
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        db_table = 'analytics_answer_quality_report'
-        indexes = [
-            models.Index(fields=['-created_at'], name='idx_aqr_time'),
-            models.Index(fields=['status', '-created_at'], name='idx_aqr_status_time'),
-            models.Index(fields=['faithfulness_score'], name='idx_aqr_score'),
-        ]
-
-
 # ============================================================================
 # 黄金测试集（离线评估用）
 # ============================================================================
@@ -392,23 +341,39 @@ class GoldenReferenceAnswer(models.Model):
 # ============================================================================
 
 class MultiDimensionScore(models.Model):
-    """多维度回答质量评估 - 对 QaRecord 进行 6 维度评估
+    """多维度回答质量评估 - 对 QaRecord 进行多维度评估
 
-    评估维度:
-    - faithfulness: 忠实度（回答是否基于 context，无幻觉）
-    - relevance: 相关性（回答是否切中问题要害）
-    - completeness: 完整性（回答是否覆盖了 context 中的关键点）
-    - correctness: 正确性（回答是否存在事实错误）
-    - harmlessness: 无害性（回答是否安全合规）
-    - context_recall: 上下文召回率（context 是否包含回答所需信息）
+    评估维度分四大类(共 12 维,生产评估用 DeepEval,部署前离线评估用 Ragas):
+    - 检索质量(1维): context_relevancy 上下文相关性
+    - 答案质量(6维): faithfulness 忠实度 / hallucination 幻觉 /
+                    answer_relevancy 相关性 / completeness 完整性 /
+                    conciseness 简洁性 / clarity 清晰度
+    - 安全性(2维): toxicity 毒性 / bias 偏见
+    - 业务体验(3维): professionalism 专业性 / helpfulness 有用性 /
+                    actionability 可操作性
+
+    历史维度(自研引擎/早期版本,保留兼容):
+    - relevance/correctness/harmlessness/context_recall: 自研引擎使用的旧维度名
     """
     DIMENSION_CHOICES = [
+        # DeepEval 生产评估 12 维
         ('faithfulness', '忠实度'),
-        ('relevance', '相关性'),
+        ('answer_relevancy', '相关性'),
+        ('context_relevancy', '上下文相关性'),
+        ('hallucination', '幻觉'),
+        ('toxicity', '毒性'),
+        ('bias', '偏见'),
         ('completeness', '完整性'),
-        ('correctness', '正确性'),
-        ('harmlessness', '无害性'),
-        ('context_recall', '上下文召回率'),
+        ('conciseness', '简洁性'),
+        ('clarity', '清晰度'),
+        ('professionalism', '专业性'),
+        ('helpfulness', '有用性'),
+        ('actionability', '可操作性'),
+        # 自研引擎历史维度(兼容)
+        ('relevance', '相关性(自研)'),
+        ('correctness', '正确性(自研)'),
+        ('harmlessness', '无害性(自研)'),
+        ('context_recall', '上下文召回率(自研)'),
     ]
     STATUS_CHOICES = [
         ('pending', '待评估'),

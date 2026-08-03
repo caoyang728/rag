@@ -46,8 +46,9 @@ def evaluate_document_quality(document_id: int) -> 'DocumentQualityReport':
     except Document.DoesNotExist:
         raise ValueError(f'Document {document_id} not found')
 
-    chunks = DocumentChunk.objects.filter(document=doc)
-    chunk_count = chunks.count()
+    # 一次性加载所有 chunk,避免 count() + 迭代 + table 子查询三次往返
+    chunk_list = list(DocumentChunk.objects.filter(document=doc))
+    chunk_count = len(chunk_list)
 
     if chunk_count == 0:
         # 无切片，解析可能失败
@@ -75,16 +76,15 @@ def evaluate_document_quality(document_id: int) -> 'DocumentQualityReport':
         return report
 
     # --- 解析质量 ---
-    chunk_contents = [c.content or '' for c in chunks]
+    chunk_contents = [c.content or '' for c in chunk_list]
     text_chars = sum(len(c) for c in chunk_contents)
 
     # 估算预期字符数（基于文件大小的粗略估算）
     expected_chars = _estimate_expected_chars(doc.file_path)
     text_extraction_rate = min(1.0, text_chars / max(expected_chars, 1))
 
-    # 表格保留率
-    table_chunks = chunks.filter(chunk_type='table')
-    table_chunk_count = table_chunks.count()
+    # 表格切片数(从已加载的 chunk_list 统计,避免额外查询)
+    table_chunk_count = sum(1 for c in chunk_list if c.chunk_type == 'table')
 
     # --- 切分质量 ---
     chunk_sizes = [len(c) for c in chunk_contents]
@@ -352,16 +352,32 @@ def get_document_quality_summary(
         else:
             distribution['poor'] += 1
 
-    # 常见问题统计
-    issue_counts = {}
+    # 常见问题统计:按 type 聚合计数,同时保留每类问题的最高严重级别
+    # level(error/warning) 映射为前端 severity(high/mid/low),供图标着色
+    issue_map = {}
     for report in qs.values_list('quality_issues', flat=True):
         if report:
             for issue in report:
                 issue_type = issue.get('type', 'unknown')
-                issue_counts[issue_type] = issue_counts.get(issue_type, 0) + 1
+                level = issue.get('level', 'warning')
+                if issue_type not in issue_map:
+                    issue_map[issue_type] = {'count': 0, 'level': level}
+                issue_map[issue_type]['count'] += 1
+                # error 优先级高于 warning
+                if level == 'error' and issue_map[issue_type]['level'] != 'error':
+                    issue_map[issue_type]['level'] = 'error'
 
+    # level → severity 映射,与前端 sevClass 期望值一致
+    level_to_severity = {'error': 'high', 'warning': 'mid'}
     common_issues = sorted(
-        [{'type': k, 'count': v} for k, v in issue_counts.items()],
+        [
+            {
+                'type': k,
+                'count': v['count'],
+                'severity': level_to_severity.get(v['level'], 'low'),
+            }
+            for k, v in issue_map.items()
+        ],
         key=lambda x: x['count'],
         reverse=True,
     )[:10]

@@ -22,7 +22,6 @@ urlpatterns = [
     path("org-usage/", views.OrgUsageReportView.as_view()),
     path("queue-depth/", views.QueueDepthView.as_view()),
     path("realtime/", views.RealtimeSnapshotView.as_view()),
-    path("quality-reports/", views.QualityReportView.as_view()),
 
     # ========================================================================
     # RAG 质量评估 - 黄金测试集管理
@@ -52,6 +51,14 @@ urlpatterns = [
     # ========================================================================
     path("multi-dim-scores/", views.MultiDimensionScoreView.as_view()),
     path("multi-dim-eval/", views.RunMultiDimEvalView.as_view()),
+
+    # ========================================================================
+    # RAG 质量评估 - 评估看板(DeepEval 12 维生产评估结果展示)
+    # ========================================================================
+    path("eval-dashboard/overview/", views.EvalDashboardOverviewView.as_view()),
+    path("eval-dashboard/trend/", views.EvalDashboardTrendView.as_view()),
+    path("eval-dashboard/low-score-qa/", views.EvalDashboardLowScoreView.as_view()),
+    path("eval-dashboard/qa-detail/", views.EvalDashboardQaDetailView.as_view()),
 
     # ========================================================================
     # RAG 质量评估 - 覆盖率 & 反馈闭环

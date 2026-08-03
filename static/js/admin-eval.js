@@ -277,6 +277,13 @@ async function loadRetrievalReports() {
 	}
 }
 
+/** 0-1 分值映射为 KPI 数值的语义色类(CSS 定义于 .kpi-value.val-good/mid/poor) */
+function kpiValueClass(score) {
+	if (score >= 0.8) return 'val-good';
+	if (score >= 0.6) return 'val-mid';
+	return 'val-poor';
+}
+
 /** 设置 KPI 值并根据分数着色 */
 function setKpiValue(elId, value, formatter) {
 	const el = $('#' + elId);
@@ -285,7 +292,7 @@ function setKpiValue(elId, value, formatter) {
 	el.textContent = formatted;
 	el.classList.remove('val-good', 'val-mid', 'val-poor');
 	if (typeof value === 'number') {
-		el.classList.add(scorePillClass(value));
+		el.classList.add(kpiValueClass(value));
 	}
 }
 
@@ -344,87 +351,390 @@ function drawGainChart(report) {
 	svg.innerHTML = html;
 }
 
-/* ============ 回答质量 ============ */
+/* ============ 回答质量(评估看板) ============ */
+// 维度中文名 + 4 大类分组(与后端 _DIMENSION_GROUPS 保持一致)
+const DIM_LABEL = {
+	faithfulness: '忠实度', hallucination: '幻觉', answer_relevancy: '回答相关性',
+	context_relevancy: '检索相关性', toxicity: '毒性', bias: '偏见',
+	completeness: '完整性', conciseness: '简洁性', clarity: '清晰度',
+	professionalism: '专业性', helpfulness: '有用性', actionability: '可操作性',
+};
+const DIM_GROUPS = {
+	retrieval: { label: '检索质量', dims: ['context_relevancy'] },
+	quality: { label: '答案质量', dims: ['faithfulness', 'hallucination', 'answer_relevancy', 'completeness', 'conciseness', 'clarity'] },
+	safety: { label: '安全性', dims: ['toxicity', 'bias'] },
+	business: { label: '业务体验', dims: ['professionalism', 'helpfulness', 'actionability'] },
+};
+// 所有 12 维按分组顺序展开(雷达图用)
+const ALL_DIMS_ORDERED = Object.values(DIM_GROUPS).flatMap(g => g.dims);
+
 function loadAnswerScores() {
-	loadDatasetOptions('#answerDatasetSel');
-	loadMultiDimScores();
+	loadDashboard();
 }
 
-async function loadMultiDimScores() {
+async function loadDashboard() {
+	const days = $('#evalDays') ? $('#evalDays').value : 7;
+	const rootType = $('#evalRootType') ? $('#evalRootType').value : '';
+	const qs = `?days=${days}${rootType ? '&root_type=' + encodeURIComponent(rootType) : ''}`;
+
+	// 并行加载 overview + low-score 两个接口(trend 接口当前 UI 未使用,避免无效请求)
 	try {
-		const data = await api.getJson('/api/v1/analytics/multi-dim-scores/?start_date=' + getDaysAgoDate(7));
-		const summary = data.dimension_summary || {};
-		const rows = data.rows || [];
-
-		// KPI（带语义着色）
-		// 6 个维度统一通过 helper 取值，避免重复的三元表达式
-		const dimAvg = (dim) => summary[dim] ? summary[dim].avg_score : null;
-		setKpiValue('dimFaithfulness', dimAvg('faithfulness'), fmtPct);
-		setKpiValue('dimRelevance', dimAvg('relevance'), fmtPct);
-		setKpiValue('dimCompleteness', dimAvg('completeness'), fmtPct);
-		setKpiValue('dimCorrectness', dimAvg('correctness'), fmtPct);
-		setKpiValue('dimHarmlessness', dimAvg('harmlessness'), fmtPct);
-		setKpiValue('dimContextRecall', dimAvg('context_recall'), fmtPct);
-
-		const tbody = $('#multiDimBody');
-		if (!rows.length) {
-			tbody.innerHTML = `
-				<tr>
-					<td colspan="8">
-						<div class="empty-state">
-							<div class="empty-state-icon">💬</div>
-							<div>暂无评估数据，可执行离线评估或手动触发</div>
-						</div>
-					</td>
-				</tr>`;
-			return;
-		}
-		tbody.innerHTML = rows.slice(0, 50).map(r => `
-			<tr>
-				<td>${r.id}</td>
-				<td>${r.qa_record_id}</td>
-				<td><span class="tag">${dimLabel(r.dimension)}</span></td>
-				<td>${scorePill(r.score, fmtPct)}</td>
-				<td title="${escapeHtml(r.reason || '')}">${escapeHtml((r.reason || '').substring(0, 30))}</td>
-				<td>${escapeHtml(r.eval_model)}</td>
-				<td>¥${(r.eval_cost || 0).toFixed(4)}</td>
-				<td>${formatDate(r.created_at)}</td>
-			</tr>
-		`).join('');
+		const [overview, lowScore] = await Promise.all([
+			api.getJson('/api/v1/analytics/eval-dashboard/overview/' + qs),
+			api.getJson('/api/v1/analytics/eval-dashboard/low-score-qa/' + qs + '&limit=20'),
+		]);
+		renderOverview(overview);
+		// 传入 total_evaluated 以区分"无评估数据"和"有评估但无低分"两种空状态
+		renderLowScoreTable(lowScore.rows || [], overview.total_evaluated);
+		$('#evalSummary').textContent = `窗口 ${overview.days} 天 · 知识库 ${overview.root_type} · 阈值 ${overview.threshold}`;
 	} catch (e) {
-		toast('加载失败', 'error');
+		toast('看板加载失败: ' + (e.message || e), 'error');
 	}
 }
 
-function dimLabel(d) {
-	return {
-		faithfulness: '忠实度', relevance: '相关性', completeness: '完整性',
-		correctness: '正确性', harmlessness: '无害性', context_recall: '上下文召回率'
-	}[d] || d;
+function renderOverview(data) {
+	// KPI 卡片
+	$('#kpiEvaluated').textContent = data.total_evaluated || 0;
+	$('#kpiCoverage').textContent = `覆盖率 ${fmtPct(data.coverage_rate)} · 总对话 ${data.total_qa || 0}`;
+	$('#kpiLowScore').textContent = data.low_score_count || 0;
+	$('#kpiLowRate').textContent = `占比 ${fmtPct(data.low_score_rate)}`;
+	$('#kpiSafetyAlert').textContent = data.safety_alert_count || 0;
+
+	// dimension_groups 为空对象时(后端无评估数据),整体均分显示 -- ,不渲染雷达图/sparkline
+	const groups = data.dimension_groups || {};
+	const hasData = Object.values(groups).some(g => g.dimensions && g.dimensions.length > 0);
+	if (!hasData) {
+		$('#kpiOverallAvg').textContent = '--';
+		$('#evalDimSparklines').innerHTML = `<div class="empty-state"><div class="empty-state-icon">📊</div>暂无评估数据</div>`;
+		$('#evalRadar').innerHTML = `<text x="170" y="170" text-anchor="middle" fill="#9ca3af" font-size="13">暂无评估数据</text>`;
+		return;
+	}
+
+	// 整体均分 = 4 大类均分的平均
+	const groupAvgs = Object.values(groups).map(g => g.avg_score).filter(v => v > 0);
+	const overallAvg = groupAvgs.length ? groupAvgs.reduce((s, v) => s + v, 0) / groupAvgs.length : 0;
+	$('#kpiOverallAvg').textContent = fmtPct(overallAvg);
+
+	// 每行维度 + sparkline + 环比
+	renderDimSparklines(groups);
+
+	// 雷达图
+	renderRadarChart(groups);
 }
 
-async function runAnswerEval() {
-	const dsId = $('#answerDatasetSel').value;
-	if (!dsId) { toast('请选择测试集', 'error'); return; }
-	toast('正在执行回答质量评估，可能需要几分钟...', 'info');
+function renderDimSparklines(groups) {
+	// 把 12 维按分组展开成一行一维度的表,每行含:维度名 | 均分 | 环比 | sparkline(7天)
+	const el = $('#evalDimSparklines');
+	if (!el) return;
+
+	// 收集每个维度的趋势数据,用于后续动态生成 sparkline
+	const sparkData = {};
+
+	// 按 DIM_GROUPS 顺序展开所有维度
+	const rows = [];
+	for (const [groupKey, g] of Object.entries(DIM_GROUPS)) {
+		const gd = groups[groupKey] || { dimensions: [] };
+		for (const dimName of g.dims) {
+			const info = gd.dimensions.find(x => x.name === dimName);
+			if (!info) continue;
+			const avg = info.avg || 0;
+			const trend = info.trend_7d || [];
+			const mom = info.mom_change;
+
+			// 环比箭头
+			let momHtml = '';
+			if (mom !== null && mom !== undefined) {
+				const pct = (mom * 100).toFixed(1) + '%';
+				if (mom > 0) momHtml = `<span class="mom-up">↑ ${pct}</span>`;
+				else if (mom < 0) momHtml = `<span class="mom-down">↓ ${pct}</span>`;
+				else momHtml = `<span class="mom-flat">— 0.0%</span>`;
+			} else {
+				momHtml = `<span class="text-sub text-sm">环比 —</span>`;
+			}
+
+			// 保存趋势数据,用占位符替代 sparkline,等 DOM 渲染后再测量宽度生成
+			const sparkId = `spark-${dimName}`;
+			sparkData[sparkId] = trend;
+
+			rows.push({
+				groupLabel: g.label,
+				groupKey: groupKey,
+				dimName,
+				label: DIM_LABEL[dimName] || dimName,
+				avg,
+				count: info.count || 0,
+				momHtml,
+				sparkId,
+			});
+		}
+	}
+
+	// 如果没有数据,显示空状态
+	if (!rows.length) {
+		el.innerHTML = `<div class="empty-state"><div class="empty-state-icon">📊</div>暂无评估数据</div>`;
+		return;
+	}
+
+	// 按分组渲染:每组一个小标题 + 组内维度行
+	// 先按 groupKey 分组,保持 DIM_GROUPS 顺序
+	const grouped = {};
+	for (const r of rows) {
+		if (!grouped[r.groupKey]) grouped[r.groupKey] = { label: r.groupLabel, rows: [] };
+		grouped[r.groupKey].rows.push(r);
+	}
+
+	const html = Object.keys(DIM_GROUPS).map(gk => {
+		const g = grouped[gk];
+		if (!g) return '';
+		return `<div class="dim-group mb-12">
+			<div class="dim-group-title">${g.label}</div>
+			<div class="dim-table">
+				<div class="dim-row dim-row-head">
+					<span class="dim-col-name">维度</span>
+					<span class="dim-col-avg">均分</span>
+					<span class="dim-col-mom">环比</span>
+					<span class="dim-col-spark">7日趋势</span>
+					<span class="dim-col-cnt">样本</span>
+				</div>
+				${g.rows.map(r => `
+					<div class="dim-row">
+						<span class="dim-col-name">${r.label}</span>
+						<span class="dim-col-avg">${scorePill(r.avg, fmtPct)}</span>
+						<span class="dim-col-mom">${r.momHtml}</span>
+						<span class="dim-col-spark" id="${r.sparkId}">
+							<span class="sparkline-placeholder" style="display:block;height:32px"></span>
+						</span>
+						<span class="dim-col-cnt text-sub text-sm">${r.count}</span>
+					</div>
+				`).join('')}
+			</div>
+		</div>`;
+	}).join('');
+
+	el.innerHTML = html;
+
+	// DOM 渲染完成后,测量每个 sparkline 容器宽度,用实际宽度生成 sparkline SVG
+	requestAnimationFrame(() => {
+		for (const [sparkId, trend] of Object.entries(sparkData)) {
+			const container = document.getElementById(sparkId);
+			if (!container) continue;
+			// 获取容器实际宽度,用于生成等比缩放的 SVG
+			const rect = container.getBoundingClientRect();
+			const width = Math.round(rect.width);
+			container.innerHTML = buildSparkline(trend, width);
+		}
+	});
+}
+
+/** 生成带均值虚线的 sparkline SVG
+ *  - width: 实际容器宽度(像素), 用于计算 viewBox 实现等比缩放
+ *  - 均值虚线: 7 日均值位置的水平虚线
+ *  - 折线统一蓝色
+ */
+function buildSparkline(values, width) {
+	if (!values.length) {
+		const w = width || 140;
+		return `<svg width="100%" height="32" viewBox="0 0 ${w} 32" class="sparkline" preserveAspectRatio="xMidYMid meet"><line x1="0" y1="16" x2="${w}" y2="16" stroke="#e5e7eb" stroke-width="1"/></svg>`;
+	}
+	const H = 32, pad = 2;
+	const containerW = width || 140;
+	// viewBox 宽度 = 容器宽度, 保证 preserveAspectRatio="xMidYMid meet" 时等比缩放
+	const W = Math.max(containerW, 80);
+	const valid = values.filter(v => v > 0);
+	const max = valid.length ? Math.max(...valid) : 1;
+	const min = valid.length ? Math.min(...valid) : 0;
+	const range = max - min || 1;
+	const stepX = values.length > 1 ? (W - 2 * pad) / (values.length - 1) : 0;
+
+	// 计算 7 日均值(仅基于有效值)
+	const avg = valid.length ? valid.reduce((a, b) => a + b, 0) / valid.length : 0;
+	const avgY = H - pad - ((avg - min) / range) * (H - 2 * pad);
+
+	// 计算每个点的坐标
+	let pts = [];
+	values.forEach((v, i) => {
+		const x = pad + i * stepX;
+		const y = H - pad - ((v - min) / range) * (H - 2 * pad);
+		pts.push({ x, y, v });
+	});
+
+	// 单点情况: 只画一个圆点 + 均值虚线
+	if (pts.length < 2) {
+		return `<svg width="100%" height="32" viewBox="0 0 ${W} ${H}" class="sparkline" preserveAspectRatio="xMidYMid meet">
+			<line x1="${pad}" y1="${avgY.toFixed(1)}" x2="${W - pad}" y2="${avgY.toFixed(1)}" stroke="#94a3b8" stroke-width="0.8" stroke-dasharray="3,2" opacity="0.6"/>
+			<circle cx="${pts[0].x.toFixed(1)}" cy="${pts[0].y.toFixed(1)}" r="1.8" fill="#3b82f6"/>
+		</svg>`;
+	}
+
+	// 折线点坐标
+	const polyline = pts.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
+	const areaPath = `M${pts[0].x.toFixed(1)},${H - pad} L${polyline.split(' ').join(' L')} L${pts[pts.length - 1].x.toFixed(1)},${H - pad} Z`;
+
+	// 填充区域(淡蓝)
+	const areaFill = `<path d="${areaPath}" fill="rgba(59,130,246,0.08)" stroke="none"/>`;
+
+	// 均值虚线
+	const avgLine = `<line x1="${pad}" y1="${avgY.toFixed(1)}" x2="${W - pad}" y2="${avgY.toFixed(1)}" stroke="#94a3b8" stroke-width="0.8" stroke-dasharray="3,2" opacity="0.6"/>`;
+
+	// 统一蓝色折线
+	const line = `<polyline points="${polyline}" fill="none" stroke="#3b82f6" stroke-width="1.2" stroke-linejoin="miter" stroke-linecap="butt"/>`;
+
+	// 终点圆点
+	const lastPt = pts[pts.length - 1];
+	const lastCircle = `<circle cx="${lastPt.x.toFixed(1)}" cy="${lastPt.y.toFixed(1)}" r="1.8" fill="#3b82f6"/>`;
+
+	return `<svg width="100%" height="32" viewBox="0 0 ${W} ${H}" class="sparkline" preserveAspectRatio="xMidYMid meet">
+		${areaFill}
+		${avgLine}
+		${line}
+		${lastCircle}
+	</svg>`;
+}
+
+function renderRadarChart(groups) {
+	const svg = $('#evalRadar');
+	if (!svg) return;
+	const cx = 170, cy = 170, R = 130;
+	const dims = ALL_DIMS_ORDERED;
+	const n = dims.length;
+	const values = dims.map(d => {
+		// 找该维度在哪个组
+		for (const g of Object.values(groups)) {
+			const found = g.dimensions.find(x => x.name === d);
+			if (found) return found.avg;
+		}
+		return 0;
+	});
+
+	// 背景网格(4 圈)
+	let bg = '';
+	for (let r = 1; r <= 4; r++) {
+		const rr = R * r / 4;
+		const pts = dims.map((_, i) => {
+			const angle = -Math.PI / 2 + i * 2 * Math.PI / n;
+			return `${cx + rr * Math.cos(angle)},${cy + rr * Math.sin(angle)}`;
+		}).join(' ');
+		bg += `<polygon points="${pts}" fill="none" stroke="#e5e7eb" stroke-width="1"/>`;
+	}
+	// 轴线
+	let axes = '';
+	dims.forEach((d, i) => {
+		const angle = -Math.PI / 2 + i * 2 * Math.PI / n;
+		axes += `<line x1="${cx}" y1="${cy}" x2="${cx + R * Math.cos(angle)}" y2="${cy + R * Math.sin(angle)}" stroke="#e5e7eb" stroke-width="1"/>`;
+		// 标签
+		const lx = cx + (R + 18) * Math.cos(angle);
+		const ly = cy + (R + 18) * Math.sin(angle);
+		axes += `<text x="${lx}" y="${ly}" text-anchor="middle" dominant-baseline="middle" font-size="10" fill="#6b7280">${DIM_LABEL[d] || d}</text>`;
+	});
+	// 数据多边形
+	const dataPts = values.map((v, i) => {
+		const angle = -Math.PI / 2 + i * 2 * Math.PI / n;
+		const rr = R * Math.max(0, Math.min(1, v));
+		return `${cx + rr * Math.cos(angle)},${cy + rr * Math.sin(angle)}`;
+	}).join(' ');
+	const dataPoly = `<polygon points="${dataPts}" fill="rgba(59,130,246,0.2)" stroke="#3b82f6" stroke-width="2"/>`;
+	// 数据点
+	let dots = '';
+	values.forEach((v, i) => {
+		const angle = -Math.PI / 2 + i * 2 * Math.PI / n;
+		const rr = R * Math.max(0, Math.min(1, v));
+		dots += `<circle cx="${cx + rr * Math.cos(angle)}" cy="${cy + rr * Math.sin(angle)}" r="3" fill="#3b82f6"/>`;
+	});
+	svg.innerHTML = bg + axes + dataPoly + dots;
+}
+
+function renderLowScoreTable(rows, totalEvaluated) {
+	const tbody = $('#lowScoreBody');
+	if (!rows.length) {
+		// 区分两种空状态: 无评估数据 vs 有评估但无低分对话
+		const isEmpty = !totalEvaluated;
+		tbody.innerHTML = `<tr><td colspan="9">
+			<div class="empty-state">
+				<div class="empty-state-icon">${isEmpty ? '📊' : '✅'}</div>
+				<div>${isEmpty ? '暂无评估数据' : '无低分对话,质量良好'}</div>
+			</div>
+		</td></tr>`;
+		return;
+	}
+	tbody.innerHTML = rows.map(r => `
+		<tr>
+			<td>${r.qa_record_id}</td>
+			<td title="${escapeHtml(r.question)}">${escapeHtml(r.question.substring(0, 30))}</td>
+			<td title="${escapeHtml(r.answer)}">${escapeHtml(r.answer.substring(0, 40))}</td>
+			<td>${scorePill(r.avg_score, fmtPct)}</td>
+			<td><span class="tag">${escapeHtml(DIM_LABEL[r.min_dimension] || r.min_dimension)}</span></td>
+			<td>${scorePill(r.min_score, fmtPct)}</td>
+			<td>${escapeHtml(r.root_type)}</td>
+			<td>${formatDate(r.created_at)}</td>
+			<td><button class="btn btn-sm" onclick="showQaDetail(${r.qa_record_id})">查看明细</button></td>
+		</tr>
+	`).join('');
+}
+
+async function showQaDetail(qaId) {
+	$('#qaDetailTitle').textContent = `QA #${qaId}`;
+	$('#qaDetailBody').innerHTML = '<div class="text-sub">加载中...</div>';
+	document.getElementById('qaDetailDialog').style.display = 'flex';
 	try {
-		const result = await api.postJson('/api/v1/analytics/eval/answer/', { dataset_id: parseInt(dsId), max_questions: 20 });
-		toast(`评估完成: ${result.evaluated_count} 条`, 'success');
-		loadMultiDimScores();
+		const data = await api.getJson('/api/v1/analytics/eval-dashboard/qa-detail/?qa_record_id=' + qaId);
+		const qa = data.qa;
+		const scores = data.scores || [];
+
+		// 对话区
+		let html = `
+			<div class="mb-16">
+				<div class="flex justify-between items-baseline mb-8">
+					<strong>对话内容</strong>
+					<span class="text-sm text-sub">均分 ${scorePill(data.avg_score, fmtPct)} · 用户 ${escapeHtml(qa.user)} · 知识库 ${escapeHtml(qa.root_type)}</span>
+				</div>
+				<div class="mb-8"><strong class="text-sub">问题:</strong> ${escapeHtml(qa.question)}</div>
+				<div><strong class="text-sub">回答:</strong> ${escapeHtml(qa.answer)}</div>
+			</div>
+			<div class="mb-16 text-sm text-sub">
+				耗时 ${qa.latency_total_ms}ms · Token ${qa.tokens_total} · 命中切片 ${qa.retrieval_hits.length} 个 · ${formatDate(qa.created_at)}
+			</div>
+		`;
+
+		// 12 维明细(按 4 大类分组)
+		html += '<div><strong>12 维评估明细</strong></div>';
+		Object.entries(DIM_GROUPS).forEach(([key, g]) => {
+			const groupScores = scores.filter(s => g.dims.includes(s.dimension));
+			if (!groupScores.length) return;
+			html += `<div class="mb-16">
+				<div class="flex justify-between items-baseline mb-8">
+					<strong>${g.label}</strong>
+				</div>`;
+			groupScores.forEach(s => {
+				html += `<div style="padding:8px 0;border-bottom:1px solid #f3f4f6">
+					<div class="flex justify-between items-baseline">
+						<span>${escapeHtml(DIM_LABEL[s.dimension] || s.dimension)}</span>
+						<span>${scorePill(s.score, fmtPct)} <span class="text-sub text-sm">${s.eval_latency_ms}ms</span></span>
+					</div>
+					<div class="text-sm text-sub" style="margin-top:4px">${escapeHtml(s.reason || '(无理由)')}</div>
+				</div>`;
+			});
+			html += '</div>';
+		});
+
+		$('#qaDetailBody').innerHTML = html;
 	} catch (e) {
-		toast('评估失败: ' + e.message, 'error');
+		$('#qaDetailBody').innerHTML = `<div class="text-sub">加载失败: ${escapeHtml(e.message || String(e))}</div>`;
 	}
 }
 
 async function runManualEval() {
 	const qaId = $('#manualQaId').value.trim();
 	if (!qaId) { toast('请输入 QA 记录 ID', 'error'); return; }
+	toast('正在评估,可能需要 10~30 秒...', 'info');
 	try {
 		const result = await api.postJson('/api/v1/analytics/multi-dim-eval/', { qa_record_id: parseInt(qaId) });
-		toast(`评估完成: ${result.results.length} 个维度`, 'success');
-		loadMultiDimScores();
+		toast(`评估完成: ${result.evaluated} 个维度`, 'success');
+		// 评估完后直接打开明细弹窗
+		showQaDetail(parseInt(qaId));
+		// 刷新看板
+		loadDashboard();
 	} catch (e) {
-		toast('评估失败: ' + e.message, 'error');
+		toast('评估失败: ' + (e.message || e), 'error');
 	}
 }
 
@@ -461,7 +771,7 @@ async function loadDocQuality() {
 			? commonIssues.map(i => `
 				<div class="issue-item">
 					<span class="issue-icon ${sevClass(i.severity)}">${(i.type || '?')[0]}</span>
-					<div class="issue-content">${escapeHtml(i.type || i.issue_type || '未知问题')}</div>
+					<div class="issue-content">${escapeHtml(i.type || '未知问题')}</div>
 					<span class="issue-count">${i.count || 0} 次</span>
 				</div>`).join('')
 			: '<div class="empty-state"><div class="empty-state-icon">✨</div><div>暂无常见问题</div></div>';
@@ -782,16 +1092,6 @@ async function markFeedbackResolved(id) {
 function fmtPct(v) {
 	if (v === null || v === undefined || isNaN(v)) return '--';
 	return (Number(v) * 100).toFixed(1) + '%';
-}
-
-function getDaysAgoDate(days) {
-	const d = new Date();
-	d.setDate(d.getDate() - days);
-	// 用本地时间格式化，避免 toISOString() 转 UTC 导致日期偏差
-	const y = d.getFullYear();
-	const m = String(d.getMonth() + 1).padStart(2, '0');
-	const day = String(d.getDate()).padStart(2, '0');
-	return `${y}-${m}-${day}`;
 }
 
 /* ============ 初始化 ============ */

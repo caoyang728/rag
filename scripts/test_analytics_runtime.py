@@ -31,11 +31,11 @@ from apps.users.models import (
 from apps.chat.models import QaRecord, QaFeedback
 from apps.memory.models import Session
 from apps.analytics.models import (
-    SystemMetricsReport, OrgUsageReport, QueueDepthLog, AnswerQualityReport,
+    SystemMetricsReport, OrgUsageReport, QueueDepthLog,
     KeywordWeight,
 )
 from apps.analytics.utils import (
-    parse_faithfulness_result, calculate_percentile,
+    calculate_percentile,
     build_latency_histogram, aggregate_system_metrics,
     aggregate_org_usage, get_queue_depth_history,
 )
@@ -76,8 +76,6 @@ check('OrgUsageReport 模型存在',
       OrgUsageReport._meta.db_table == 'analytics_org_usage_report')
 check('QueueDepthLog 模型存在',
       QueueDepthLog._meta.db_table == 'analytics_queue_depth_log')
-check('AnswerQualityReport 模型存在',
-      AnswerQualityReport._meta.db_table == 'analytics_answer_quality_report')
 
 # 检查 QueueDepthLog 唯一约束
 ut = QueueDepthLog._meta.unique_together
@@ -90,15 +88,6 @@ ut2 = OrgUsageReport._meta.unique_together
 check('OrgUsageReport unique_together 含 team_id',
       any('team_id' in u for u in ut2),
       f'  当前: {ut2}')
-
-# 检查 AnswerQualityReport 状态机
-aqr_statuses = [c[0] for c in AnswerQualityReport._meta.get_field('status').choices]
-check('AnswerQualityReport 状态机完整',
-      'pending' in aqr_statuses and 'completed' in aqr_statuses and 'failed' in aqr_statuses,
-      f'  状态: {aqr_statuses}')
-
-check('AnswerQualityReport retry_count 字段存在',
-      'retry_count' in [f.name for f in AnswerQualityReport._meta.get_fields()])
 
 # 检查 KeywordWeight 权重字段
 kw_field = KeywordWeight._meta.get_field('weight_score')
@@ -146,27 +135,6 @@ check('build_latency_histogram 空列表返回 {}',
       build_latency_histogram([]) == {})
 check('build_latency_histogram 分桶',
       len(build_latency_histogram([50, 150, 250, 350, 450])) >= 3)
-
-# parse_faithfulness_result
-score, reason = parse_faithfulness_result('{"score": 0.85, "reason": "测试通过"}')
-check('parse_faithfulness_result 正常解析',
-      abs(score - 0.85) < 0.001 and reason == '测试通过')
-
-score2, reason2 = parse_faithfulness_result('无法解析的文本')
-check('parse_faithfulness_result 异常容错',
-      score2 == 0.0 and '解析失败' in reason2)
-
-score3, _ = parse_faithfulness_result('{"score": 1.5, "reason": ""}')
-check('parse_faithfulness_result 分数上限钳位',
-      score3 == 1.0)
-
-score4, _ = parse_faithfulness_result('{"score": -0.5, "reason": ""}')
-check('parse_faithfulness_result 分数下限钳位',
-      score4 == 0.0)
-
-score5, reason5 = parse_faithfulness_result('```json\n{"score": 0.7, "reason": "markdown"}\n```')
-check('parse_faithfulness_result markdown 去除',
-      abs(score5 - 0.7) < 0.001 and reason5 == 'markdown')
 
 # aggregate_system_metrics 使用 report_date 参数
 result = aggregate_system_metrics(report_date=None)
@@ -305,13 +273,6 @@ check('org-usage department_id=abc 返回 400',
       resp_bad_dept.status_code == 400,
       f'  实际: {resp_bad_dept.status_code}')
 
-# QualityReport 日期校验
-resp_bad_qr = client.get('/api/v1/analytics/quality-reports/?start_date=invalid',
-                          HTTP_AUTHORIZATION=f'Bearer {token_r}')
-check('quality-reports start_date=invalid 返回 400',
-      resp_bad_qr.status_code == 400,
-      f'  实际: {resp_bad_qr.status_code}')
-
 section('6. Redis 健康检查')
 
 try:
@@ -376,15 +337,6 @@ check('bad-feedbacks 返回 200', resp_bf.status_code == 200, f'  实际: {resp_
 if resp_bf.status_code == 200:
     bf_data = resp_bf.json()
     check('bad-feedbacks 含 rows 字段', 'rows' in bf_data)
-
-# Quality Reports 接口
-resp_qr = client.get('/api/v1/analytics/quality-reports/',
-                      HTTP_AUTHORIZATION=f'Bearer {token_r}')
-check('quality-reports 返回 200', resp_qr.status_code == 200, f'  实际: {resp_qr.status_code}')
-if resp_qr.status_code == 200:
-    qr_data = resp_qr.json()
-    check('quality-reports 含 rows 字段', 'rows' in qr_data)
-    check('quality-reports 含 summary 字段', 'summary' in qr_data)
 
 # Keywords 接口
 resp_kw = client.get('/api/v1/analytics/keywords/',

@@ -11,9 +11,6 @@ let currentTab = 'overview';
 let qaPage = 1;
 let qaPageSize = 20;
 let qaTotal = 0;
-let qualityPage = 1;
-let qualityPageSize = 20;
-let qualityTotal = 0;
 
 /* 日报趋势图的指标显示开关和缓存数据，勾选 checkbox 时更新开关并重渲染 */
 let dailyTrendData = [];
@@ -54,7 +51,6 @@ function switchTab(name) {
 		case 'queue': loadQueueDepth(); break;
 		case 'org': loadOrgUsage(); break;
 		case 'qa': loadQaRecords(); break;
-		case 'quality': loadQualityReports(); break;
 		case 'daily': loadDailyReport(); break;
 		case 'tools':
 			loadKeywords('keywordsTableBody2');
@@ -75,7 +71,6 @@ function reloadCurrentTab() {
 		case 'queue': loadQueueDepth(); break;
 		case 'org': loadOrgUsage(); break;
 		case 'qa': qaPage = 1; loadQaRecords(); break;
-		case 'quality': qualityPage = 1; loadQualityReports(); break;
 		case 'daily': loadDailyReport(); break;
 		case 'tools':
 			loadKeywords('keywordsTableBody2');
@@ -1059,7 +1054,7 @@ function renderPagination(container, current, totalPages, onClick) {
 		? `<span class="page-btn page-btn-ellipsis" disabled>…</span>`
 		: `<button class="page-btn ${p === current ? 'active' : ''}" data-page="${p}">${p}</button>`).join('')}
     <button class="page-btn" data-page="${current + 1}" ${current >= totalPages ? 'disabled' : ''}>下一页</button>
-    <span class="ml-8">第 ${current} / ${totalPages} 页，共 ${qaTotal || qualityTotal} 条</span>`;
+    <span class="ml-8">第 ${current} / ${totalPages} 页，共 ${qaTotal || 0} 条</span>`;
 
 	// 给所有带 data-page 的按钮绑定事件
 	container.querySelectorAll('button[data-page]').forEach(btn => {
@@ -1100,82 +1095,6 @@ async function showQaDetail(id) {
       </div>`;
 	} catch (err) {
 		box.innerHTML = `<div class="error-block">加载失败：${escapeHtml(err.message || '')}</div>`;
-	}
-}
-
-/* ---- Tab 7: 忠实度评估报告 ---- */
-async function loadQualityReports() {
-	const box = $('#qualityBody');
-	const pbox = $('#qualityPagination');
-	try {
-		const status = $('#qualityStatus')?.value;
-		const params = [];
-		if (status) params.push('status=' + encodeURIComponent(status));
-		params.push('page=' + qualityPage);
-		params.push('page_size=' + qualityPageSize);
-		const data = await api.getJson('/api/v1/analytics/quality-reports/?' + params.join('&'));
-
-		qualityTotal = data.total || 0;
-		const rows = data.rows || [];
-		const summary = data.summary || {};
-
-		const statusBadge = s => {
-		const m = {
-			pending: ['tag-warning', '待评估'],
-			running: ['tag-primary', '评估中'],
-			completed: ['tag-success', '已完成'],
-			failed: ['tag-danger', '失败'],
-			cancelled: ['', '已取消'],
-		};
-		const [c, t] = m[s] || ['', s || '-'];
-		return `<span class="tag ${c}">${escapeHtml(t)}</span>`;
-		};
-
-		const tableHtml = rows.length === 0
-			? '<tr><td colspan="9" class="empty">暂无评估记录（评估任务每小时运行一次，或等待定时任务触发）</td></tr>'
-			: rows.map(r => {
-				const score = r.faithfulness_score;
-				/* 分数颜色按阈值切换：≥0.8 好 / ≥0.5 中 / <0.5 差 */
-				const scoreCls = score >= 0.8 ? 'score-good' : score >= 0.5 ? 'score-mid' : 'score-bad';
-				const scoreText = r.status === 'completed'
-					? `<b class="${scoreCls}">${score.toFixed(2)}</b> / 1.00`
-					: '<span class="tag">-</span>';
-				return `<tr>
-            <td>${r.id}</td>
-            <td>${r.qa_record_id}</td>
-            <td>${statusBadge(r.status)}</td>
-            <td>${scoreText}</td>
-            <td class="td-reason">${escapeHtml((r.faithfulness_reason || '').slice(0, 80))}${(r.faithfulness_reason || '').length > 80 ? '…' : ''}</td>
-            <td>${escapeHtml(r.eval_model || '-')}</td>
-            <td>${(r.eval_tokens_used || 0).toLocaleString()}</td>
-            <td>¥ ${(r.eval_cost || 0).toFixed(4)}</td>
-            <td>${formatDate(r.created_at)}</td>
-          </tr>`;
-			}).join('');
-
-		box.innerHTML = `
-      <div class="kpi-grid grid-cols-3">
-        <div class="kpi-card"><div class="kpi-label">已完成评估数</div><div class="kpi-value">${(summary.total_evaluated || 0).toLocaleString()}</div></div>
-        <div class="kpi-card"><div class="kpi-label">平均忠实度</div><div class="kpi-value">${(summary.avg_faithfulness_score || 0).toFixed(3)}</div></div>
-        <div class="kpi-card"><div class="kpi-label">评估总条数</div><div class="kpi-value">${qualityTotal.toLocaleString()}</div></div>
-      </div>
-      <div class="card mt-16">
-        <div class="card-title">🎯 评估列表</div>
-        <table class="table table-bordered">
-          <thead><tr>
-            <th>ID</th><th>QA ID</th><th>状态</th><th>忠实度分数</th><th>评估说明</th>
-            <th>评估模型</th><th>Token 数</th><th>评估费用</th><th>创建时间</th>
-          </tr></thead>
-          <tbody>${tableHtml}</tbody>
-        </table>
-      </div>`;
-
-		const totalPages = Math.max(1, Math.ceil(qualityTotal / qualityPageSize));
-		renderPagination(pbox, qualityPage, totalPages, (p) => { qualityPage = p; loadQualityReports(); });
-	} catch (e) {
-		box.innerHTML = `<div class="card card-error">加载质量报告失败：${escapeHtml(e.message || '')}</div>`;
-		toast('加载质量报告失败', 'error');
-		console.error('load quality reports failed:', e);
 	}
 }
 

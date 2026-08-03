@@ -1,22 +1,21 @@
 """
-Analytics Celery Tasks - 系统指标 & 组织报表 & 队列监控 & 忠实度评估 & RAG 质量评估
+Analytics Celery Tasks - 系统指标 & 组织报表 & 队列监控 & RAG 质量评估
 
 定时任务列表：
-1. aggregate_daily_report: 每日 01:10 聚合准确率日报（已存在，补齐实现）
+1. aggregate_daily_report: 已拆分为独立 Beat 任务，此函数仅保留兼容
 2. compute_system_metrics_daily: 每日 02:00 聚合前一天系统指标（P50/P95/P99 等）
 3. compute_org_usage_daily: 每日 02:10 聚合前一天组织使用数据
 4. update_queue_depth_snapshot: 每 5 分钟更新队列深度快照（PG 历史 + Redis 实时）
 5. flush_realtime_metrics_task: 每 5 分钟刷新实时指标时间戳
-6. run_faithfulness_evaluation: 每小时批量评估回答忠实度
-7. batch_evaluate_document_quality: 每日 03:00 批量评估文档质量
-8. generate_coverage_report_daily: 每日 03:30 生成知识库覆盖率报告
-9. run_multi_dimension_evaluation: 每 2 小时批量执行多维度回答质量评估
-10. periodic_retrieval_evaluation: 每周一次执行离线检索评估（黄金测试集）
+6. batch_evaluate_document_quality: 每日 03:00 批量评估文档质量
+7. generate_coverage_report_daily: 每日 03:30 生成知识库覆盖率报告
+8. run_multi_dimension_evaluation: 每 2 小时批量执行 DeepEval 12 维评估
+9. periodic_retrieval_evaluation: 每周一次执行离线检索评估（黄金测试集）
 
 - 使用 @shared_task 装饰器，支持独立 Worker 部署
 - 队列命名：analytics（专用队列，避免与业务任务混跑）
 - 每个任务都有 try/except + 日志，失败不影响其他任务
-- 忠实度评估任务有成本控制（.env 可配置），防止高额消费
+- 评估任务有成本控制（.env 可配置），防止高额消费
 """
 from datetime import timedelta
 from decimal import Decimal
@@ -75,9 +74,7 @@ def compute_org_usage_daily():
     """聚合前一天的组织使用数据 → OrgUsageReport
 
     - 同时生成部门级汇总和团队级明细
-    - 使用 bulk_create + bulk_update 替代逐条 update_or_create
-      原实现每条记录一次 UPDATE/INSERT，50 部门 × 5 团队 = 250 次查询
-      优化后仅 3 次查询（1 次读 + 1 次 bulk_update + 1 次 bulk_create）
+    - 使用 bulk_create + bulk_update 替代逐条 update_or_create,减少查询次数
     - 唯一标识 (report_date, department_id, team_id)，用 sentinel -1 表示部门级
     """
     from apps.analytics.models import OrgUsageReport
@@ -122,7 +119,7 @@ def compute_org_usage_daily():
                 # 不存在 → 新建
                 create_list.append(OrgUsageReport(**data))
 
-        # --- 批量写入（2 次查询 vs 原来的 N 次）---
+        # --- 批量写入 ---
         created_count = 0
         updated_count = 0
         if update_list:
@@ -192,251 +189,7 @@ def flush_realtime_metrics_task():
 
 
 # ============================================================================
-# 5. 忠实度评估（每小时）
-# ============================================================================
-
-@shared_task(name='analytics.run_faithfulness', queue='analytics')
-def run_faithfulness_evaluation():
-    """每小时批量评估回答忠实度
-
-    说明：
-    - 仅评估 is_hit_cache=False 且 is_success=True 的 QaRecord
-    - 使用便宜模型（deepseek-chat），批量大小 .env 可配置
-    - 多层成本控制：batch_size（单次量）、daily_limit（日量）、cost_limit（日费）
-    - 评估结果写入 AnswerQualityReport，供 Dashboard 展示
-    - 使用 Redis 分布式锁防止并发执行导致成本失控
-
-    成本控制逻辑：
-    1. 先获取分布式锁，确保同一时间只有一个评估任务在运行
-    2. 检查当日已评估数量，若达到 daily_limit 则跳过
-    3. 检查当日已消耗费用，若达到 cost_limit 则跳过
-    4. 按优先级（时间倒序）取 batch_size 条记录进行评估
-    """
-    from apps.analytics.models import AnswerQualityReport
-    from apps.chat.models import QaRecord
-    from apps.analytics.utils import build_faithfulness_prompt, parse_faithfulness_result
-    from apps.llm.factory import get_llm
-
-    # --- 分布式锁：防止多个 Worker 并发执行导致成本超限 ---
-    lock_key = 'analytics:faithfulness:lock'
-    try:
-        from apps.analytics.realtime import _get_redis_safe
-        r = _get_redis_safe()
-        # SET NX + EX 原子获取锁，30 分钟自动过期
-        acquired = r.set(lock_key, '1', nx=True, ex=1800)
-        if not acquired:
-            logger.info('[Faithfulness] Another evaluation is in progress, skipping')
-            return {'ok': True, 'skipped': True, 'reason': 'lock_busy'}
-    except Exception as e:
-        logger.warning(f'[Faithfulness] Failed to acquire lock: {e}, proceeding without lock')
-        r = None
-
-    try:
-        if not AnalyticsConfig.faithfulness_enabled():
-            logger.debug('[Faithfulness] Disabled, skipping')
-            return {'ok': True, 'skipped': True}
-
-        batch_size = AnalyticsConfig.faithfulness_batch_size()
-        daily_limit = AnalyticsConfig.faithfulness_daily_limit()
-        cost_limit = AnalyticsConfig.faithfulness_cost_limit()
-        model = AnalyticsConfig.faithfulness_model()
-
-        today = timezone.now().date()
-
-        # --- 检查当日评估量上限 ---
-        today_evaluated = AnswerQualityReport.objects.filter(
-            created_at__date=today,
-            status='completed',
-        ).count()
-        if today_evaluated >= daily_limit:
-            logger.info(f'[Faithfulness] Daily limit reached: {today_evaluated}/{daily_limit}')
-            return {'ok': True, 'reason': 'daily_limit_reached', 'evaluated': today_evaluated}
-
-        remaining_quota = daily_limit - today_evaluated
-
-        # --- 检查当日成本上限 ---
-        # 因为 F() 表达式不需要全局引入，但此处 aggregate 需要 models.Sum
-        from django.db import models as django_models
-        today_cost = AnswerQualityReport.objects.filter(
-            created_at__date=today,
-            status='completed',
-        ).aggregate(
-            total_cost=django_models.Sum('eval_cost')
-        )['total_cost'] or Decimal('0')
-
-        if float(today_cost) >= cost_limit:
-            logger.info(f'[Faithfulness] Cost limit reached: {today_cost}/{cost_limit}')
-            return {'ok': True, 'reason': 'cost_limit_reached', 'cost': float(today_cost)}
-
-        # --- 计算剩余预算可评估的条数 ---
-        # 估算单次评估成本：约 0.002 元 / 500 tokens
-        estimated_cost_per_eval = Decimal('0.002')
-        remaining_cost_budget = Decimal(str(cost_limit)) - today_cost
-        max_by_cost = int(remaining_cost_budget / estimated_cost_per_eval) if estimated_cost_per_eval > 0 else batch_size
-
-        effective_batch = min(batch_size, remaining_quota, max_by_cost)
-        if effective_batch <= 0:
-            return {'ok': True, 'reason': 'no_quota', 'remaining_quota': remaining_quota}
-
-        # --- 获取待评估记录 ---
-        # 使用 ~Exists (反连接) 代替 exclude(id__in=子查询)，
-        # PostgreSQL 将其优化为 Hash Anti-Join，比 NOT IN 子查询性能更稳定
-        # 尤其是当已评估记录量大（数万条）时，IN 列表会导致 SQL 膨胀
-        seven_days_ago = today - timedelta(days=7)
-
-        # 构建子查询：查找已在 AnswerQualityReport 中的 qa_record_id
-        from django.db.models import Exists, OuterRef
-        evaluated_subquery = AnswerQualityReport.objects.filter(
-            qa_record_id=OuterRef('pk'),
-            status__in=['completed', 'pending'],
-            created_at__date__gte=seven_days_ago,
-        )
-
-        candidates = (QaRecord.objects
-                      .filter(is_hit_cache=False, is_success=True,
-                              created_at__date__gte=seven_days_ago)
-                      .annotate(has_report=Exists(evaluated_subquery))
-                      .filter(has_report=False)
-                      .order_by('-created_at')[:effective_batch])
-
-        if not candidates:
-            return {'ok': True, 'reason': 'no_candidates'}
-
-        # --- 初始化 LLM ---
-        try:
-            # provider 硬编码 deepseek 在此处是安全的，
-            # 因为忠实度评估仅需基础模型能力，deepseek-chat 已在 AnalyticsConfig 配置
-            llm = get_llm(provider='deepseek', model=model)
-        except Exception:
-            logger.exception('[Faithfulness] Failed to initialize LLM')
-            return {'ok': False, 'error': 'llm_init_failed'}
-
-        evaluated_count = 0
-        failed_count = 0
-
-        for qa in candidates:
-            try:
-                # 构建检索上下文时获取实际 chunk 文本内容
-                # 而非仅用 chunk_id，否则 LLM 无法评估回答的忠实度
-                context_parts = []
-                # 检查 retrieval_scores（含 chunk_id+score 的字典列表），
-                # 而非 retrieval_hits（仅 chunk_id 字符串列表），保持数据源一致性
-                if qa.retrieval_scores:
-                    from apps.knowledge.models import DocumentChunk
-                    chunk_ids = [
-                        hit.get('chunk_id', '')
-                        for hit in (qa.retrieval_scores or [])[:5]
-                        if hit.get('chunk_id')
-                    ]
-                    if chunk_ids:
-                        # 批量查询 chunk 内容，避免 N+1
-                        chunks = DocumentChunk.objects.filter(id__in=chunk_ids)
-                        chunk_map = {c.id: c for c in chunks}
-                        for cid in chunk_ids:
-                            chunk = chunk_map.get(cid)
-                            if chunk and chunk.content:
-                                snippet = chunk.content[:300]
-                                section = chunk.section_path or ''
-                                context_parts.append(
-                                    f'[来源: {section}]\n{snippet}'
-                                )
-                context = '\n\n'.join(context_parts) if context_parts else '（无检索片段）'
-
-                prompt = build_faithfulness_prompt(qa.question, context, qa.answer)
-
-                # 构造 messages 列表，system + user 组合
-                # 使用单条 user 消息传递完整 prompt，简化评估逻辑
-                messages = [
-                    {'role': 'system', 'content': '你是一名严谨的回答忠实度评估专家。'},
-                    {'role': 'user', 'content': prompt},
-                ]
-
-                # 调用 LLM
-                t0 = timezone.now()
-                response = llm.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    max_tokens=200,
-                    temperature=0.1,
-                )
-                eval_latency_ms = int((timezone.now() - t0).total_seconds() * 1000)
-
-                llm_output = response.choices[0].message.content
-                score, reason = parse_faithfulness_result(llm_output)
-
-                eval_tokens = response.usage.total_tokens if response.usage else 0
-                eval_cost = Decimal(str(eval_tokens)) * Decimal('0.000002')  # 约 2 元/1M tokens
-
-                # 使用 update_or_create 而非 objects.create
-                # 因为 qa_record 是 OneToOneField，create 会在已存在记录时抛 IntegrityError
-                # update_or_create 在首次评估时创建，重试时更新，安全且幂等
-                report_data = {
-                    'qa_record': qa,
-                    'faithfulness_score': score,
-                    'faithfulness_reason': reason,
-                    'eval_model': model,
-                    'eval_tokens_used': eval_tokens,
-                    'eval_cost': eval_cost,
-                    'eval_latency_ms': eval_latency_ms,
-                    'status': 'completed',
-                }
-                AnswerQualityReport.objects.update_or_create(
-                    qa_record=qa,
-                    defaults=report_data,
-                )
-                evaluated_count += 1
-
-            except Exception as e:
-                logger.warning(f'[Faithfulness] Failed to evaluate QA#{qa.id}: {e}')
-                # 失败记录：先 update_or_create（幂等）→ 再原子 F() 递增 retry_count
-                # 关键：defaults 中不动 retry_count（更新时保留原值，新建用 DB default=0），
-                # 然后统一做一次 F() +1，保证每次失败都 +1，不会被覆盖成 1 卡死
-                try:
-                    from django.db.models import F
-                    fail_defaults = {
-                        'status': 'failed',
-                        'error_message': str(e)[:500],
-                    }
-                    # 新建时 DB default retry_count=0（从模型 default），更新时不动 DB 原值
-                    AnswerQualityReport.objects.update_or_create(
-                        qa_record=qa,
-                        defaults=fail_defaults,
-                    )
-                    # 原子递增：新建的 0→1，已有 N→N+1
-                    AnswerQualityReport.objects.filter(
-                        qa_record=qa
-                    ).update(retry_count=F('retry_count') + 1)
-                except Exception:
-                    logger.exception(f'[Faithfulness] Failed to save failure record for QA#{qa.id}')
-                failed_count += 1
-
-        logger.info(
-            f'[Faithfulness] Done: evaluated={evaluated_count}, failed={failed_count}, '
-            f'today_total={today_evaluated + evaluated_count}'
-        )
-        result = {
-            'ok': True,
-            'evaluated': evaluated_count,
-            'failed': failed_count,
-            'today_total': today_evaluated + evaluated_count,
-        }
-        return result
-
-    except Exception:
-        logger.exception('[Faithfulness] Unexpected error during evaluation')
-        return {'ok': False, 'error': 'unexpected_error'}
-    finally:
-        # 释放分布式锁，确保下次调度可以获取
-        # 锁有 TTL（30 分钟），即使进程崩溃也会自动过期
-        try:
-            if r is not None:
-                r.delete(lock_key)
-        except Exception:
-            pass
-
-
-# ============================================================================
-# 6. 每日报表聚合入口（仅保留兼容，实际聚合由独立 Beat 任务执行）
+# 5. 每日报表聚合入口（仅保留兼容，实际聚合由独立 Beat 任务执行）
 # ============================================================================
 
 @shared_task(name='analytics.aggregate_daily_report', queue='analytics')
@@ -464,42 +217,31 @@ def cleanup_old_data():
 
     保留策略：
     - QueueDepthLog：保留 90 天（每 5 分钟 4 条 = 每天 1152 条，90 天约 10 万条）
-    - AnswerQualityReport：保留 180 天
     - SystemMetricsReport：永久保留（每日 1 条，数据量极小）
     - OrgUsageReport：保留 365 天（超出后汇总为年度统计，按需扩展）
     - Realtime Redis keys：TTL 自动过期（REALTIME_RETENTION_DAYS）
-
-    仅删除已完成/失败的记录，pending 状态的保留以便重试
     """
-    from apps.analytics.models import QueueDepthLog, AnswerQualityReport, OrgUsageReport
+    from apps.analytics.models import QueueDepthLog, OrgUsageReport
 
     now = timezone.now()
     qd_retention = now - timedelta(days=90)
-    aqr_retention = now - timedelta(days=180)
     our_retention = now - timedelta(days=365)
 
     deleted_qd, _ = QueueDepthLog.objects.filter(
         created_at__lt=qd_retention
     ).delete()
 
-    deleted_aqr, _ = AnswerQualityReport.objects.filter(
-        created_at__lt=aqr_retention,
-        status__in=['completed', 'failed'],
-    ).delete()
-
-    # OrgUsageReport 过期清理：保留最近 365 天
     deleted_our, _ = OrgUsageReport.objects.filter(
         report_date__lt=our_retention.date()
     ).delete()
 
     logger.info(
         f'[Cleanup] Deleted: QueueDepthLog={deleted_qd}, '
-        f'AnswerQualityReport={deleted_aqr}, OrgUsageReport={deleted_our}'
+        f'OrgUsageReport={deleted_our}'
     )
     return {
         'ok': True,
         'queue_depth_logs_deleted': deleted_qd,
-        'quality_reports_deleted': deleted_aqr,
         'org_usage_reports_deleted': deleted_our,
     }
 
@@ -564,20 +306,31 @@ def generate_coverage_report_daily(days: int = 7):
 def run_multi_dimension_evaluation(batch_size: int = 20):
     """每 2 小时批量执行多维度回答质量评估
 
-    选取最近未评估的 QA 记录，执行 6 维度评估：
-    Faithfulness / Relevance / Completeness / Correctness / Harmlessness / ContextRecall
+    选取最近未评估的 QA 记录,用 DeepEval 12 维指标评估;
+    与 production_eval.evaluate_sampled_qa 互补(即时采样代表性样本,批量回扫提升覆盖度),
+    共用同一引擎与 MultiDimensionScore 表(update_or_create 幂等)。
 
-    有成本控制，单日上限通过 .env 配置。
+    成本控制:复用 production_eval 的 _check_daily_budget,日限/成本限自动拦截。
     """
     from apps.analytics.models import QaRecord, MultiDimensionScore
-    from apps.analytics.evaluation_engine import evaluate_all_dimensions, build_context_from_qa_record
+    from apps.analytics.deepeval_metrics import evaluate_with_deepeval
+    from apps.analytics.production_eval import _build_context_list, _check_daily_budget, _get_redis
     from rag_project.config import AnalyticsConfig
 
     # 成本检查
-    if not AnalyticsConfig.faithfulness_enabled():
+    if not AnalyticsConfig.eval_enabled():
         return {'ok': True, 'skipped': True, 'reason': 'disabled'}
 
-    # 获取待评估的 QA 记录（最近 24 小时内未评估过的）
+    # 日预算检查(批量回扫前一次性检查,避免逐条检查的开销)
+    try:
+        r = _get_redis()
+        passed, reason = _check_daily_budget(r)
+        if not passed:
+            return {'ok': True, 'skipped': True, 'reason': reason}
+    except Exception as e:
+        logger.warning('[MultiDimEval] 日预算检查异常,继续评估: %s', e)
+
+    # 获取待评估的 QA 记录(最近 24 小时内未评估过的)
     since = timezone.now() - timedelta(hours=24)
     evaluated_qa_ids = MultiDimensionScore.objects.filter(
         created_at__gte=since
@@ -586,26 +339,41 @@ def run_multi_dimension_evaluation(batch_size: int = 20):
     pending_qa = QaRecord.objects.filter(
         created_at__gte=since,
         is_success=True,
-        answer_type='answer',
-    ).exclude(id__in=evaluated_qa_ids).order_by('-created_at')[:batch_size]
+    ).exclude(id__in=evaluated_qa_ids).exclude(
+        answer_type='refused',
+    ).order_by('-created_at')[:batch_size]
 
     if not pending_qa.exists():
         return {'ok': True, 'evaluated': 0}
 
+    eval_model = AnalyticsConfig.eval_model()
     count = 0
     for qa in pending_qa:
         try:
-            context = build_context_from_qa_record(qa)
-            if not context:
+            contexts = _build_context_list(qa)
+            if not contexts:
                 continue
 
-            evaluate_all_dimensions(
+            results = evaluate_with_deepeval(
                 question=qa.question,
                 answer=qa.answer,
-                context=context,
-                dimensions=['faithfulness', 'relevance', 'completeness', 'harmlessness'],
-                qa_record_id=qa.id,
+                contexts=contexts,
+                model=eval_model,
             )
+            eval_batch_id = f'batch_{timezone.now().strftime("%Y%m%d%H%M%S")}_{qa.id}'
+            for res in results:
+                MultiDimensionScore.objects.update_or_create(
+                    qa_record_id=qa.id,
+                    dimension=res['dimension'],
+                    defaults={
+                        'score': res['score'],
+                        'reason': res['reason'],
+                        'eval_model': f'deepeval-{eval_model}',
+                        'eval_latency_ms': res.get('latency_ms', 0),
+                        'eval_batch_id': eval_batch_id,
+                        'status': 'completed',
+                    },
+                )
             count += 1
         except Exception:
             logger.warning(f'[MultiDimEval] Failed for QA {qa.id}')

@@ -51,24 +51,27 @@ def analyze_hot_query_coverage(days: int = 7) -> Dict[str, Any]:
     covered = 0
     uncovered_queries = []
 
+    # 一次性查出窗口内至少有一条命中记录的问题集合，避免对每个热门查询单独发查询(N+1)
+    # retrieval_hits 为 ArrayField(default=list)，空数组即无命中，用 exclude(retrieval_hits=[]) 过滤
+    hot_questions = [hq['question'] for hq in hot_queries]
+    questions_with_hits = set(
+        QaRecord.objects
+        .filter(
+            question__in=hot_questions,
+            created_at__date__gte=since.date(),
+            is_hit_cache=False,
+        )
+        .exclude(retrieval_hits=[])
+        .values_list('question', flat=True)
+        .distinct()
+    )
+
     for hq in hot_queries:
         question = hq['question']
         count = hq['query_count']
         total += 1
 
-        # 检查是否有至少一个命中
-        qa_records = QaRecord.objects.filter(
-            question=question,
-            created_at__date__gte=since.date(),
-            is_hit_cache=False,
-        )
-        has_hits = False
-        for qa in qa_records:
-            if qa.retrieval_hits and len(qa.retrieval_hits) > 0:
-                has_hits = True
-                break
-
-        if has_hits:
+        if question in questions_with_hits:
             covered += 1
         else:
             uncovered_queries.append({
@@ -267,17 +270,8 @@ def analyze_domain_coverage(days: int = 30) -> Dict[str, Any]:
         )
     )
 
-    # 按 QA 记录的命中情况统计（通过 retrieval_hits 关联的 document 计算部门/团队覆盖）
-    # QaRecord 自身不含 dept/team 字段，但可以通过关联文档推断。
-    # 简化方案：直接统计各部门文档被命中的次数
-    query_stats = (
-        QaRecord.objects
-        .filter(created_at__date__gte=since.date(), is_hit_cache=False)
-        .exclude(retrieval_hits=[])
-        .values('root_type')
-        .annotate(total_queries=Count('id'))
-    )
-    # 如果 QaRecord 没有按 dept 过滤的字段，退化为全局命中率
+    # 按 QA 记录的命中情况统计全局命中率
+    # QaRecord 不含 dept/team 字段，无法按部门拆分命中率，因此各部门共享全局值
     total_queries_global = QaRecord.objects.filter(
         created_at__date__gte=since.date(), is_hit_cache=False
     ).count()
@@ -369,8 +363,7 @@ def auto_link_feedback_to_chunks(days: int = 7) -> Dict[str, Any]:
     Returns:
         反馈闭环处理结果
     """
-    from apps.chat.models import QaFeedback, QaRecord
-    from apps.analytics.models import CoverageReport
+    from apps.chat.models import QaFeedback
 
     since = timezone.now() - timedelta(days=days)
 
@@ -386,8 +379,10 @@ def auto_link_feedback_to_chunks(days: int = 7) -> Dict[str, Any]:
 
     linked_count = 0
     issue_chunks = []
+    total_bad = 0
 
     for fb in bad_feedbacks:
+        total_bad += 1
         qa = fb.qa_record
         if not qa:
             continue
@@ -416,7 +411,7 @@ def auto_link_feedback_to_chunks(days: int = 7) -> Dict[str, Any]:
 
     return {
         'period_days': days,
-        'total_bad_feedbacks': bad_feedbacks.count(),
+        'total_bad_feedbacks': total_bad,
         'linked_count': linked_count,
         'issue_chunks': issue_chunks[:50],
     }

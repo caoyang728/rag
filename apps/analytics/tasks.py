@@ -9,7 +9,7 @@ Analytics Celery Tasks - 系统指标 & 组织报表 & 队列监控 & RAG 质量
 5. flush_realtime_metrics_task: 每 5 分钟刷新实时指标时间戳
 6. batch_evaluate_document_quality: 每日 03:00 批量评估文档质量
 7. generate_coverage_report_daily: 每日 03:30 生成知识库覆盖率报告
-8. run_multi_dimension_evaluation: 每 2 小时批量执行 DeepEval 12 维评估
+8. run_multi_dimension_evaluation: 每 2 小时批量回扫未评估对话(混合时间窗+随机)
 9. periodic_retrieval_evaluation: 每周一次执行离线检索评估（黄金测试集）
 
 - 使用 @shared_task 装饰器，支持独立 Worker 部署
@@ -19,12 +19,18 @@ Analytics Celery Tasks - 系统指标 & 组织报表 & 队列监控 & RAG 质量
 """
 from datetime import timedelta
 from decimal import Decimal
+import random
 
 from celery import shared_task
 from django.utils import timezone
 from loguru import logger
 
 from rag_project.config import AnalyticsConfig
+
+# 显式导入 production_eval 中的 Celery 任务,确保 autodiscover_tasks 能注册
+# 原因:Celery 默认只扫描 tasks.py,@shared_task 装饰的任务若定义在其他模块
+# (如 production_eval.py),worker 启动时无法发现,导致 .delay() 派发的任务永远 PENDING
+from apps.analytics.production_eval import evaluate_sampled_qa  # noqa: F401
 
 
 # ============================================================================
@@ -303,12 +309,17 @@ def generate_coverage_report_daily(days: int = 7):
 # ============================================================================
 
 @shared_task(name='analytics.run_multi_dimension_evaluation', queue='analytics')
-def run_multi_dimension_evaluation(batch_size: int = 20):
+def run_multi_dimension_evaluation(batch_size: int = None):
     """每 2 小时批量执行多维度回答质量评估
 
-    选取最近未评估的 QA 记录,用 DeepEval 12 维指标评估;
-    与 production_eval.evaluate_sampled_qa 互补(即时采样代表性样本,批量回扫提升覆盖度),
+    选取未评估的 QA 记录,用 DeepEval 12 维指标评估;
+    与 production_eval.evaluate_sampled_qa 互补(保底+采样负责即时路径,批量负责回扫未覆盖项),
     共用同一引擎与 MultiDimensionScore 表(update_or_create 幂等)。
+
+    选取策略(混合时间窗 + 随机):
+    1. 优先取最近 2h 窗口内未评估的(最相关,刚发生还没被采到)
+    2. 不足 batch_size 时扩展到当天更早时段(保证用满预算,覆盖更广)
+    3. 随机选取(Python 层 random.sample,避免 DB ORDER BY RANDOM() 性能问题)
 
     成本控制:复用 production_eval 的 _check_daily_budget,日限/成本限自动拦截。
     """
@@ -328,24 +339,56 @@ def run_multi_dimension_evaluation(batch_size: int = 20):
         if not passed:
             return {'ok': True, 'skipped': True, 'reason': reason}
     except Exception as e:
-        logger.warning('[MultiDimEval] 日预算检查异常,继续评估: %s', e)
+        logger.warning(f'[MultiDimEval] 日预算检查异常,继续评估: {e}')
 
-    # 获取待评估的 QA 记录(最近 24 小时内未评估过的)
-    since = timezone.now() - timedelta(hours=24)
-    evaluated_qa_ids = MultiDimensionScore.objects.filter(
-        created_at__gte=since
-    ).values_list('qa_record_id', flat=True)
+    # batch_size 默认从配置读取(支持 env 覆盖)
+    if batch_size is None:
+        batch_size = AnalyticsConfig.production_eval_batch_size()
 
-    pending_qa = QaRecord.objects.filter(
-        created_at__gte=since,
-        is_success=True,
-    ).exclude(id__in=evaluated_qa_ids).exclude(
-        answer_type='refused',
-    ).order_by('-created_at')[:batch_size]
+    now = timezone.now()
+    two_hours_ago = now - timedelta(hours=2)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
-    if not pending_qa.exists():
+    # 已评估的 QA ID:最近 24h 内有评估记录的(避免短时间内重复评估)
+    since_24h = now - timedelta(hours=24)
+    evaluated_qa_ids = set(
+        MultiDimensionScore.objects.filter(
+            created_at__gte=since_24h
+        ).values_list('qa_record_id', flat=True)
+    )
+
+    # 窗口1:最近 2h 未评估的 QA ID(最相关,刚发生还没被保底/采样覆盖)
+    window1_ids = list(
+        QaRecord.objects.filter(
+            created_at__gte=two_hours_ago,
+            is_success=True,
+        ).exclude(id__in=evaluated_qa_ids).exclude(
+            answer_type='refused',
+        ).values_list('id', flat=True)
+    )
+    selected_ids = random.sample(window1_ids, min(len(window1_ids), batch_size))
+
+    # 窗口2:当天但 2h 之前未评估的,补足剩余名额(与窗口1时间不重叠)
+    remaining = batch_size - len(selected_ids)
+    if remaining > 0:
+        window2_ids = list(
+            QaRecord.objects.filter(
+                created_at__gte=today_start,
+                created_at__lt=two_hours_ago,
+                is_success=True,
+            ).exclude(id__in=evaluated_qa_ids).exclude(
+                answer_type='refused',
+            ).values_list('id', flat=True)
+        )
+        selected_ids.extend(
+            random.sample(window2_ids, min(len(window2_ids), remaining))
+        )
+
+    if not selected_ids:
+        logger.info('[MultiDimEval] 无待评估 QA 记录')
         return {'ok': True, 'evaluated': 0}
 
+    pending_qa = QaRecord.objects.filter(id__in=selected_ids)
     eval_model = AnalyticsConfig.eval_model()
     count = 0
     for qa in pending_qa:
@@ -361,6 +404,10 @@ def run_multi_dimension_evaluation(batch_size: int = 20):
                 model=eval_model,
             )
             eval_batch_id = f'batch_{timezone.now().strftime("%Y%m%d%H%M%S")}_{qa.id}'
+            # 显式写入 created_at=now():与 production_eval 保持一致,
+            # auto_now_add 在 UPDATE 分支不生效,需手动覆盖使重新评估的时间
+            # 反映到 created_at,避免看板时间窗口过滤丢掉重评记录
+            now = timezone.now()
             for res in results:
                 MultiDimensionScore.objects.update_or_create(
                     qa_record_id=qa.id,
@@ -372,6 +419,7 @@ def run_multi_dimension_evaluation(batch_size: int = 20):
                         'eval_latency_ms': res.get('latency_ms', 0),
                         'eval_batch_id': eval_batch_id,
                         'status': 'completed',
+                        'created_at': now,
                     },
                 )
             count += 1
@@ -379,7 +427,10 @@ def run_multi_dimension_evaluation(batch_size: int = 20):
             logger.warning(f'[MultiDimEval] Failed for QA {qa.id}')
             continue
 
-    logger.info(f'[MultiDimEval] Evaluated {count} QA records')
+    logger.info(
+        f'[MultiDimEval] Evaluated {count}/{len(selected_ids)} QA records '
+        f'(window1_2h={len(window1_ids)}, window2_today={remaining > 0})'
+    )
     return {'ok': True, 'evaluated': count}
 
 

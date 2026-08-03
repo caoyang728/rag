@@ -12,6 +12,50 @@
 
 let datasetsCache = [];
 
+// 手动评估相关的模块级状态
+// evalToken: 每次派发评估时递增,用于取消旧轮询(用户切换 QA ID 时)
+let evalToken = 0;
+// localStorage key:缓存最近评估过的 QA ID,避免重复消耗 LLM 配额
+const EVAL_CACHE_KEY = 'rag_manual_eval_ids';
+// 缓存有效期(ms):5 分钟内同一 QA ID 重复评估会 toast 提醒
+const EVAL_CACHE_TTL = 5 * 60 * 1000;
+
+/** 读取本地缓存的已评估 QA ID 列表(自动清理过期) */
+function loadEvalCache() {
+	try {
+		const raw = localStorage.getItem(EVAL_CACHE_KEY);
+		if (!raw) return {};
+		const map = JSON.parse(raw);
+		const now = Date.now();
+		// 清理过期条目并写回
+		const cleaned = {};
+		for (const [id, ts] of Object.entries(map)) {
+			if (now - ts < EVAL_CACHE_TTL) cleaned[id] = ts;
+		}
+		if (Object.keys(cleaned).length !== Object.keys(map).length) {
+			localStorage.setItem(EVAL_CACHE_KEY, JSON.stringify(cleaned));
+		}
+		return cleaned;
+	} catch {
+		return {};
+	}
+}
+
+/** 将 QA ID 写入本地缓存(评估成功后调用) */
+function saveEvalCache(qaId) {
+	try {
+		const map = loadEvalCache();
+		map[String(qaId)] = Date.now();
+		localStorage.setItem(EVAL_CACHE_KEY, JSON.stringify(map));
+	} catch { /* 忽略 localStorage 写入失败(如隐私模式) */ }
+}
+
+/** 检查 QA ID 是否在缓存中,返回 true 表示近期已评估过 */
+function checkEvalCache(qaId) {
+	const map = loadEvalCache();
+	return String(qaId) in map;
+}
+
 /* ============ 通用 ============ */
 function switchEvalTab(name) {
 	$$('#evalTabs .tab-item').forEach(el => el.classList.toggle('active', el.getAttribute('data-tab') === name));
@@ -725,17 +769,80 @@ async function showQaDetail(qaId) {
 async function runManualEval() {
 	const qaId = $('#manualQaId').value.trim();
 	if (!qaId) { toast('请输入 QA 记录 ID', 'error'); return; }
-	toast('正在评估,可能需要 10~30 秒...', 'info');
+
+	// localStorage 缓存检查:5 分钟内同一 QA ID 已评估过则 toast 提醒
+	// 不阻止用户,因为可能需要重新评估(如模型升级/内容变更)
+	if (checkEvalCache(qaId)) {
+		toast(`QA ID ${qaId} 近期已评估过,将覆盖之前的结果`, 'info');
+	}
+
+	// 递增 token,使旧轮询(如存在)在下一次迭代时自动取消
+	const myToken = ++evalToken;
+
+	// 禁用按钮防止重复点击;用户修改 QA ID 时通过 input 事件自动恢复
+	const btn = $('#btnRunManualEval');
+	if (btn) { btn.disabled = true; }
+	toast('评估已派发,正在后台执行(约 2~3 分钟),请勿重复点击...', 'info');
+
 	try {
-		const result = await api.postJson('/api/v1/analytics/multi-dim-eval/', { qa_record_id: parseInt(qaId) });
-		toast(`评估完成: ${result.evaluated} 个维度`, 'success');
-		// 评估完后直接打开明细弹窗
+		// POST 立即返回 eval_batch_id,实际评估在 Celery 异步执行
+		const resp = await api.postJson('/api/v1/analytics/multi-dim-eval/', { qa_record_id: parseInt(qaId) });
+		if (!resp || !resp.queued || !resp.eval_batch_id) {
+			throw new Error(resp?.detail || '派发评估失败');
+		}
+		const evalBatchId = resp.eval_batch_id;
+		// 轮询 qa-detail 接口,检查本次 batch_id 的评估结果是否落库
+		// 12 维评估串行耗时 90~180s+,超时设 5 分钟兜底
+		// 传入 myToken,若用户中途切换 QA ID,旧轮询会被自动取消
+		await pollManualEvalResult(parseInt(qaId), evalBatchId, myToken);
+		// 评估成功后写入 localStorage 缓存,避免短期重复评估
+		saveEvalCache(qaId);
+		toast('评估完成,已弹出明细', 'success');
 		showQaDetail(parseInt(qaId));
-		// 刷新看板
 		loadDashboard();
 	} catch (e) {
+		// 若 token 已被更新(用户切换了 QA ID),说明是被主动取消,不算错误
+		if (myToken !== evalToken) return;
 		toast('评估失败: ' + (e.message || e), 'error');
+	} finally {
+		// 只有当前 token 仍有效时才恢复按钮(否则是新评估已接管)
+		if (myToken === evalToken && btn) { btn.disabled = false; }
 	}
+}
+
+// 轮询单条 QA 评估结果,直到本次 batch_id 的维度数达标或超时
+// 评估维度数由后端 PRODUCTION_EVAL_METRIC_GROUPS 控制(默认 12),用 8 作为最低门槛
+// 避免配置变更后前端硬编码 12 导致永远等不到
+// token:用于取消旧轮询——当用户切换 QA ID 时,evalToken 递增,旧 token 失效
+async function pollManualEvalResult(qaId, evalBatchId, token) {
+	const POLL_INTERVAL_MS = 3000;   // 每 3 秒轮询一次
+	const MAX_WAIT_MS = 5 * 60 * 1000; // 最长等待 5 分钟
+	const MIN_DIMS_THRESHOLD = 8;     // 至少 8 维落库才算完成(兼容分组配置)
+	const startedAt = Date.now();
+
+	while (Date.now() - startedAt < MAX_WAIT_MS) {
+		// 若 token 已被更新(用户切换了 QA ID),取消本次轮询
+		if (token !== evalToken) {
+			throw new Error('cancelled');
+		}
+		await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
+		// 睡眠后再次检查 token,避免在取消后仍发请求
+		if (token !== evalToken) {
+			throw new Error('cancelled');
+		}
+		try {
+			const data = await api.getJson(`/api/v1/analytics/eval-dashboard/qa-detail/?qa_record_id=${qaId}`);
+			// 只统计本次 batch_id 的维度,避免被旧评估结果误判为完成
+			const currentBatchScores = (data.scores || []).filter(s => s.eval_batch_id === evalBatchId);
+			if (currentBatchScores.length >= MIN_DIMS_THRESHOLD) {
+				return; // 评估完成
+			}
+		} catch (e) {
+			// 轮询单次失败不中断,继续重试(可能是网络抖动)
+			console.warn('[manualEval] 轮询失败,将继续重试:', e);
+		}
+	}
+	throw new Error('评估超时(5 分钟内未完成),请稍后刷新查看结果');
 }
 
 /* ============ 文档质量 ============ */

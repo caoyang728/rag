@@ -1217,16 +1217,17 @@ class RunMultiDimEvalView(APIView):
 
     用于看板中"手动评估指定 QA"场景:运营发现某条对话异常,手动触发评估。
     实际启用维度由 PRODUCTION_EVAL_METRIC_GROUPS 控制(默认 12 维)。
+
+    异步执行:POST 立即派发 Celery 任务并返回 eval_batch_id,前端通过轮询
+    qa-detail 接口检查该 batch_id 的评估结果是否落库。
+    改为异步的原因:12 维 LLM 评估串行耗时 90~180s+,同步 HTTP 请求易被
+    网关/浏览器超时断开,且会阻塞 Django dev server 其他请求。
     """
     permission_classes = [IsAuthenticated, CanViewAnalytics]
     required_perm = 'analytics.system.write'
 
     def post(self, request):
-        from decimal import Decimal
-        from apps.analytics.models import QaRecord, MultiDimensionScore
-        from apps.analytics.deepeval_metrics import evaluate_with_deepeval
-        from apps.analytics.production_eval import _build_context_list
-        from rag_project.config import AnalyticsConfig
+        from apps.analytics.production_eval import evaluate_sampled_qa
 
         qa_id = request.data.get('qa_record_id')
         if not qa_id:
@@ -1241,42 +1242,29 @@ class RunMultiDimEvalView(APIView):
         except QaRecord.DoesNotExist:
             return Response({'detail': 'QA记录不存在'}, status=404)
 
+        # 预检:无检索上下文的 QA 无法评估,提前返回避免无意义排队
+        from apps.analytics.production_eval import _build_context_list
         contexts = _build_context_list(qa)
         if not contexts:
             return Response({'detail': '该 QA 无检索上下文,无法评估'}, status=400)
 
-        eval_model = AnalyticsConfig.eval_model()
-        try:
-            results = evaluate_with_deepeval(
-                question=qa.question,
-                answer=qa.answer,
-                contexts=contexts,
-                model=eval_model,
-            )
-        except Exception as e:
-            logger.exception('Manual DeepEval failed')
-            return Response({'detail': f'评估失败: {e}'}, status=500)
-
-        # 落库(与 production_eval / run_multi_dimension_evaluation 同口径)
+        # 预生成 eval_batch_id 作为本次评估的唯一标识
+        # 前端通过该 id 在 qa-detail 接口轮询本次评估落库的维度数
         eval_batch_id = f'manual_{timezone.now().strftime("%Y%m%d%H%M%S")}_{qa_id}'
-        for res in results:
-            MultiDimensionScore.objects.update_or_create(
-                qa_record_id=qa_id,
-                dimension=res['dimension'],
-                defaults={
-                    'score': res['score'],
-                    'reason': res['reason'],
-                    'eval_model': f'deepeval-{eval_model}',
-                    'eval_latency_ms': res.get('latency_ms', 0),
-                    'eval_batch_id': eval_batch_id,
-                    'status': 'completed',
-                },
-            )
+
+        # 派发 Celery 任务:手动评估场景跳过日预算检查(不计入生产配额)
+        evaluate_sampled_qa.delay(
+            qa_id,
+            skip_budget_check=True,
+            eval_batch_id=eval_batch_id,
+        )
 
         return Response({
             'ok': True,
-            'evaluated': len(results),
-            'results': results,
+            'queued': True,
+            'qa_id': qa_id,
+            'eval_batch_id': eval_batch_id,
+            'message': '评估已派发,请通过 eval_batch_id 轮询结果',
         })
 
 

@@ -285,6 +285,36 @@ class AnalyticsConfig:
         return int(os.getenv('PRODUCTION_EVAL_RATE_PER_MIN', '10'))
 
     @staticmethod
+    def production_eval_hourly_guarantee() -> int:
+        """每小时保底评估条数（默认 10）
+
+        每小时前 N 条对话直接评估(不经采样率),保证低流量初期也有即时质量信号。
+        Redis 小时计数器 analytics:eval_guarantee_hourly:{YYYYMMDDHH} 控制,
+        超过 N 后降级为采样率兜底。与 daily_guarantee 组合:日保底达上限后,
+        即使小时未满也不再保底。
+        """
+        return int(os.getenv('PRODUCTION_EVAL_HOURLY_GUARANTEE', '10'))
+
+    @staticmethod
+    def production_eval_daily_guarantee() -> int:
+        """每日保底评估上限（默认 50）
+
+        保底评估的日总量上限,防止高流量下保底成本失控。
+        达到上限后,剩余对话全部走采样率兜底。与日预算上限(eval_daily_limit)
+        互不冲突:保底上限是软目标,日预算是硬护栏。
+        """
+        return int(os.getenv('PRODUCTION_EVAL_DAILY_GUARANTEE', '50'))
+
+    @staticmethod
+    def production_eval_batch_size() -> int:
+        """2h 批量回扫每次评估条数（默认 10）
+
+        run_multi_dimension_evaluation 每 2 小时执行一次,从未评估的 QA 中
+        随机取 X 条评估。混合时间窗:优先取最近 2h,不足时扩展到当天。
+        """
+        return int(os.getenv('PRODUCTION_EVAL_BATCH_SIZE', '10'))
+
+    @staticmethod
     def production_eval_metric_groups() -> list:
         """生产评估启用的指标组（默认 all 全部 12 维）
 

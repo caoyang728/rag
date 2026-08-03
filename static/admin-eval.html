@@ -145,8 +145,8 @@
 								<div class="text-sub text-sm" id="evalSummary" style="white-space:nowrap;flex-shrink:0;margin-left:8px"></div>
 							</div>
 							<div class="flex gap-4 items-center" style="flex-shrink:0">
-								<input type="number" id="manualQaId" placeholder="QA ID" class="input" style="width:100px">
-								<button class="btn btn-primary" onclick="runManualEval()">🔍 手动评估</button>
+								<input type="number" id="manualQaId" placeholder="QA ID" class="input" style="width:100px" oninput="document.getElementById('btnRunManualEval').disabled=false" onchange="document.getElementById('btnRunManualEval').disabled=false">
+								<button id="btnRunManualEval" class="btn btn-primary" onclick="runManualEval()">🔍 手动评估</button>
 							</div>
 						</div>
 					</div>

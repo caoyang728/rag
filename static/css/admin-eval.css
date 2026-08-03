@@ -779,3 +779,130 @@ svg {
 	.tabs { overflow-x: auto; flex-wrap: nowrap; }
 	.tab-item { padding: 8px 12px; font-size: 13px; }
 }
+
+/* ===== 低分归因分析 ===== */
+
+/* 归因分类分布:横向条形图(纯 CSS,无需图表库) */
+.attr-bar-row {
+	display: grid;
+	grid-template-columns: 120px 1fr 50px 90px;
+	align-items: center;
+	gap: 12px;
+	padding: 8px 0;
+	border-bottom: 1px solid var(--border);
+}
+.attr-bar-row:last-child { border-bottom: none; }
+.attr-bar-label {
+	font-size: 13px;
+	color: var(--text);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.attr-bar-track {
+	height: 10px;
+	background: var(--hover);
+	border-radius: 5px;
+	overflow: hidden;
+}
+/* 条形填充:渐变色突出占比,宽度由 JS 按比例设置 */
+.attr-bar-fill {
+	height: 100%;
+	background: linear-gradient(90deg, #6366f1, #8b5cf6);
+	border-radius: 5px;
+	transition: width .3s ease;
+}
+.attr-bar-count {
+	font-size: 13px;
+	font-weight: 600;
+	color: var(--text);
+	text-align: right;
+}
+.attr-bar-avg {
+	font-size: 12px;
+	color: var(--text-sub);
+	text-align: right;
+}
+
+/* 归因详情弹窗分区 */
+.attr-section {
+	padding: 12px 0;
+	border-top: 1px solid var(--border);
+}
+.attr-section:first-child { border-top: none; }
+.attr-section-title {
+	font-size: 14px;
+	font-weight: 600;
+	color: var(--text);
+	margin-bottom: 10px;
+}
+
+/* 归因结论区:元信息标签 + 详细描述 + LLM 诊断 */
+.attr-conclusion {
+	background: var(--hover);
+	border-radius: var(--radius-sm);
+	padding: 12px;
+}
+.attr-meta-row {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 8px;
+	margin-bottom: 10px;
+	font-size: 13px;
+}
+.attr-meta-label {
+	color: var(--text-sub);
+	font-size: 12px;
+}
+.attr-detail-text {
+	font-size: 13px;
+	line-height: 1.6;
+	color: var(--text);
+	padding: 8px 0;
+}
+/* LLM 一句话诊断:蓝色背景突出 */
+.attr-diagnosis {
+	margin-top: 8px;
+	padding: 8px 12px;
+	background: #e0f2fe;
+	border-left: 3px solid #0ea5e9;
+	border-radius: 4px;
+	font-size: 13px;
+	color: #0c4a6e;
+	line-height: 1.5;
+}
+/* 失败错误信息:红色背景 */
+.attr-error {
+	margin-top: 8px;
+	padding: 8px 12px;
+	background: #fee2e2;
+	border-left: 3px solid #ef4444;
+	border-radius: 4px;
+	font-size: 13px;
+	color: #991b1b;
+	line-height: 1.5;
+}
+
+/* 低分维度明细行 */
+.attr-dim-row {
+	padding: 8px 0;
+	border-bottom: 1px solid var(--border);
+}
+.attr-dim-row:last-child { border-bottom: none; }
+
+/* 优化建议行:短期/长期标签 + 建议文本 */
+.attr-suggestion-row {
+	display: flex;
+	align-items: flex-start;
+	gap: 8px;
+	padding: 8px 0;
+	border-bottom: 1px solid var(--border);
+}
+.attr-suggestion-row:last-child { border-bottom: none; }
+.attr-suggestion-text {
+	flex: 1;
+	font-size: 13px;
+	line-height: 1.5;
+	color: var(--text);
+}

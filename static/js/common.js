@@ -282,6 +282,147 @@ function updatePwdStrength(v) {
 }
 /* 用户菜单/登出/通知/角色判断/侧栏渲染已迁至 layout.js */
 
+/* ============ 组织架构筛选公共组件 ============ */
+/* 部门/团队级联下拉,多页面复用(admin-eval / admin-users / admin-nodes 等)。
+ * 用法:
+ *   HTML:  <select id="xxxDept"></select>
+ *          <select id="xxxTeam" onchange="loadXxx()"></select>
+ *   JS:    await OrgFilter.init('xxxDept', 'xxxTeam', () => loadXxx());
+ *          // 取值: OrgFilter.getDeptId('xxxDept'), OrgFilter.getTeamId('xxxTeam')
+ *          // 描述: OrgFilter.describeScope(deptId, teamId)  → "技术部 / 前端组"
+ *          // 注意: 部门下拉的 change 事件由 init() 内部绑定,HTML 无需写 onchange。
+ *          //       团队下拉的 change 仍由 HTML onchange 触发(调各页面自己的 load 函数)。
+ */
+const OrgFilter = (function () {
+	// 全局缓存:所有页面共享同一份数据,只拉取一次
+	// depts: [{id,name,sort_order,...}], teams: [{id,name,department_id,...}]
+	// deptMap/teamMap: {id: obj}, teamsByDept: {dept_id: [team...]}
+	let cache = { loaded: false, depts: [], teams: [], deptMap: {}, teamMap: {}, teamsByDept: {} };
+	// Promise 缓存:并发 init() 时复用同一个加载 Promise,避免重复发请求
+	let loadPromise = null;
+
+	/** 从后端拉取部门+团队列表(只执行一次,后续调用直接返回缓存)。
+	 *  部门 API: /api/v1/auth/departments/?page_size=100
+	 *  团队 API: /api/v1/auth/teams/?page_size=100
+	 *  失败时标记 loaded 避免重复报错,下拉保持"全部"默认项。
+	 */
+	async function load() {
+		if (cache.loaded) return;
+		if (loadPromise) return loadPromise; // 复用加载中的 Promise,去重并发
+		loadPromise = (async () => {
+			try {
+				const [deptResp, teamResp] = await Promise.all([
+					api.getJson('/api/v1/auth/departments/?page_size=100'),
+					api.getJson('/api/v1/auth/teams/?page_size=100'),
+				]);
+				// 兼容 DRF 分页 {results:[...]} 和裸数组两种返回格式
+				const depts = Array.isArray(deptResp) ? deptResp : (deptResp.results || []);
+				const teams = Array.isArray(teamResp) ? teamResp : (teamResp.results || []);
+				cache.depts = depts.sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0) || String(a.name).localeCompare(String(b.name)));
+				cache.teams = teams.sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0) || String(a.name).localeCompare(String(b.name)));
+				cache.deptMap = Object.fromEntries(cache.depts.map(d => [d.id, d]));
+				cache.teamMap = Object.fromEntries(cache.teams.map(t => [t.id, t]));
+				// 按部门分组团队,department_id 为 null 的归入 "__orphan__"
+				cache.teamsByDept = {};
+				for (const t of cache.teams) {
+					const key = t.department_id ?? '__orphan__';
+					(cache.teamsByDept[key] ||= []).push(t);
+				}
+			} catch (e) {
+				console.warn('[OrgFilter] 加载组织架构失败,将降级为"全部":', e);
+			} finally {
+				cache.loaded = true;
+				loadPromise = null; // 本轮加载结束,下次若需重试需手动清缓存
+			}
+		})();
+		return loadPromise;
+	}
+
+	/** 填充单个部门下拉的 option 列表(数据就绪后调用)。
+	 *  固定首项 "全部部门"(value=""),后续按 sort_order + name 排序。
+	 */
+	function _fillDeptSelect(selEl) {
+		if (!selEl) return;
+		const opts = ['<option value="">全部部门</option>',
+			...cache.depts.map(d => `<option value="${d.id}">${escapeHtml(d.name)}</option>`),
+		].join('');
+		selEl.innerHTML = opts;
+	}
+
+	/** 根据选中的 deptId 刷新团队下拉。
+	 *  deptId 为空 → 只保留"全部团队"(无法选具体团队,与"全部部门"对应)。
+	 *  deptId 有值 → "全部团队" + 该部门下所有团队。
+	 *  刷新后尽量保持原选中值,若不在新列表中则回退到""。
+	 */
+	function _fillTeamSelect(selEl, deptId) {
+		if (!selEl) return;
+		const prev = selEl.value;
+		let opts = ['<option value="">全部团队</option>'];
+		if (deptId) {
+			const teams = cache.teamsByDept[Number(deptId)] || [];
+			opts.push(...teams.map(t => `<option value="${t.id}">${escapeHtml(t.name)}</option>`));
+		}
+		selEl.innerHTML = opts.join('');
+		selEl.value = prev && Array.from(selEl.options).some(o => o.value === prev) ? prev : '';
+	}
+
+	/** 初始化一对部门/团队级联下拉(可多次调用,每对独立管理)。
+	 * @param {string} deptSelId  部门 <select> 的 DOM ID
+	 * @param {string} teamSelId  团队 <select> 的 DOM ID
+	 * @param {function} [onTeamChange]  团队下拉变更时的回调(通常触发数据加载)
+	 * @returns {Promise<void>}
+	 * 部门下拉变更时会自动刷新团队下拉并调用 onTeamChange。
+	 */
+	async function init(deptSelId, teamSelId, onTeamChange) {
+		await load();
+		const deptEl = document.getElementById(deptSelId);
+		const teamEl = document.getElementById(teamSelId);
+		if (!deptEl || !teamEl) return;
+
+		// 填充部门下拉,绑定 change 事件(刷新团队 + 触发回调)
+		_fillDeptSelect(deptEl);
+		deptEl.onchange = () => {
+			_fillTeamSelect(teamEl, deptEl.value);
+			if (onTeamChange) onTeamChange();
+		};
+		// 初始填充团队下拉(默认"全部部门" → 只有"全部团队")
+		_fillTeamSelect(teamEl, deptEl.value);
+	}
+
+	/** 获取部门下拉当前选中值(空字符串表示"全部") */
+	function getDeptId(deptSelId) {
+		const el = document.getElementById(deptSelId);
+		return el ? el.value : '';
+	}
+
+	/** 获取团队下拉当前选中值(空字符串表示"全部") */
+	function getTeamId(teamSelId) {
+		const el = document.getElementById(teamSelId);
+		return el ? el.value : '';
+	}
+
+	/** 将 dept_id / team_id 转为人类可读的范围描述。
+	 *  teamId 优先: "部门名 / 团队名"
+	 *  仅 deptId:  "部门名"
+	 *  都为空:     "全部"
+	 */
+	function describeScope(deptId, teamId) {
+		const tId = Number(teamId);
+		const dId = Number(deptId);
+		if (teamId && cache.teamMap && cache.teamMap[tId]) {
+			const t = cache.teamMap[tId];
+			const d = cache.deptMap[t.department_id];
+			return `${d ? escapeHtml(d.name) + ' / ' : ''}${escapeHtml(t.name)}`;
+		}
+		if (deptId && cache.deptMap[dId]) {
+			return escapeHtml(cache.deptMap[dId].name);
+		}
+		return '全部';
+	}
+
+	return { init, load, getDeptId, getTeamId, describeScope };
+})();
+
 /* ============ Auth 守卫 ============ */
 function authGuard() {
 	const token = localStorage.getItem('rag_access');

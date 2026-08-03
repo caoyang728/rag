@@ -32,6 +32,7 @@
 					<div class="tab-item" data-tab="doc" onclick="switchEvalTab('doc')">📄 文档质量</div>
 					<div class="tab-item" data-tab="coverage" onclick="switchEvalTab('coverage')">📊 覆盖率</div>
 					<div class="tab-item" data-tab="feedback" onclick="switchEvalTab('feedback')">🔄 反馈闭环</div>
+					<div class="tab-item" data-tab="attribution" onclick="switchEvalTab('attribution')">🧪 低分归因</div>
 				</div>
 			</div>
 
@@ -80,7 +81,7 @@
 									<option value="">选择测试集</option>
 								</select>
 								<button class="btn btn-primary" onclick="runRetrievalEval()">🚀 执行检索评估</button>
-								<span class="text-sm text-sub">建议部署前执行，用于量化版本对比</span>
+								<span class="text-sm text-sub" style="white-space:nowrap;flex-shrink:0">建议部署前执行，用于量化版本对比</span>
 							</div>
 						</div>
 					</div>
@@ -134,12 +135,11 @@
 									<option value="30">最近 30 天</option>
 									<option value="90">最近 90 天</option>
 								</select>
-								<select class="select" id="evalRootType" onchange="loadDashboard()" style="width:130px;flex-shrink:0">
-									<option value="">全部知识库</option>
-									<option value="company_doc">公司文档</option>
-									<option value="dept_doc">部门文档</option>
-									<option value="team_doc">团队文档</option>
-									<option value="knowledge_base">知识库</option>
+								<select class="select" id="evalDept" style="width:160px;flex-shrink:0">
+									<option value="">全部部门</option>
+								</select>
+								<select class="select" id="evalTeam" onchange="loadDashboard()" style="width:160px;flex-shrink:0">
+									<option value="">全部团队</option>
 								</select>
 								<button class="btn" onclick="loadDashboard()" style="flex-shrink:0">🔄 刷新</button>
 								<div class="text-sub text-sm" id="evalSummary" style="white-space:nowrap;flex-shrink:0;margin-left:8px"></div>
@@ -217,13 +217,12 @@
 					<div class="eval-toolbar mb-16">
 						<div class="panel-header">
 							<div class="flex gap-4 items-center">
-								<select class="select" id="docRootType" onchange="loadDocQuality()">
-									<option value="">全部类型</option>
-									<option value="knowledge_base">知识库</option>
-									<option value="company_doc">公司文档</option>
-									<option value="dept_doc">部门文档</option>
-									<option value="team_doc">团队文档</option>
-								</select>
+								<select class="select" id="docDept" style="width:160px;flex-shrink:0">
+								<option value="">全部部门</option>
+							</select>
+							<select class="select" id="docTeam" onchange="loadDocQuality()" style="width:160px;flex-shrink:0">
+								<option value="">全部团队</option>
+							</select>
 								<button class="btn btn-primary" onclick="runBatchDocEval()">🔍 批量评估最近文档</button>
 							</div>
 							<div class="text-sub text-sm" id="docSummary"></div>
@@ -341,44 +340,145 @@
 				</div>
 
 				<!-- ===== Tab: 反馈闭环 ===== -->
-				<div class="tab-panel" data-panel="feedback">
-					<!-- 工具栏：执行分析 -->
-					<div class="eval-toolbar mb-16">
-						<div class="panel-header">
-							<div class="flex gap-4 items-center">
-								<button class="btn btn-primary" onclick="runFeedbackLoop()">🔍 执行反馈闭环分析</button>
-								<span class="text-sm text-sub">将差评自动关联到对应文档 chunk，给出处理建议</span>
-							</div>
-						</div>
-					</div>
-
-					<!-- KPI 卡片 -->
-					<div class="kpi-grid mb-16">
-						<div class="kpi-card"><div class="kpi-label">差评总数</div><div class="kpi-value" id="fbTotal">--</div></div>
-						<div class="kpi-card"><div class="kpi-label">已关联闭环</div><div class="kpi-value" id="fbLinked">--</div></div>
-						<div class="kpi-card"><div class="kpi-label">关联率</div><div class="kpi-value" id="fbLinkRate">--<span class="text-sm text-sub">%</span></div></div>
-					</div>
-
-					<!-- 待处理的反馈闭环 -->
-					<div class="panel">
-						<div class="panel-header"><div class="panel-title">待处理的反馈闭环</div></div>
-						<div class="panel-body">
-							<table class="table" id="feedbackTable">
-								<thead>
-									<tr>
-										<th>反馈ID</th><th>问题</th><th>评分</th><th>标签</th>
-										<th>关联Chunk</th><th>建议处理</th><th>操作</th>
-									</tr>
-								</thead>
-								<tbody id="feedbackBody">
-									<tr><td colspan="7" class="text-center text-sub">点击上方按钮执行分析</td></tr>
-								</tbody>
-							</table>
+			<div class="tab-panel" data-panel="feedback">
+				<!-- 工具栏：执行分析 -->
+				<div class="eval-toolbar mb-16">
+					<div class="panel-header">
+						<div class="flex gap-4 items-center">
+							<button class="btn btn-primary" onclick="runFeedbackLoop()">🔍 执行反馈闭环分析</button>
+							<span class="text-sm text-sub">将差评自动关联到对应文档 chunk，给出处理建议</span>
 						</div>
 					</div>
 				</div>
 
-			</div><!-- /.eval-scroll -->
+				<!-- KPI 卡片 -->
+				<div class="kpi-grid mb-16">
+					<div class="kpi-card"><div class="kpi-label">差评总数</div><div class="kpi-value" id="fbTotal">--</div></div>
+					<div class="kpi-card"><div class="kpi-label">已关联闭环</div><div class="kpi-value" id="fbLinked">--</div></div>
+					<div class="kpi-card"><div class="kpi-label">关联率</div><div class="kpi-value" id="fbLinkRate">--<span class="text-sm text-sub">%</span></div></div>
+				</div>
+
+				<!-- 待处理的反馈闭环 -->
+				<div class="panel">
+					<div class="panel-header"><div class="panel-title">待处理的反馈闭环</div></div>
+					<div class="panel-body">
+						<table class="table" id="feedbackTable">
+							<thead>
+								<tr>
+									<th>反馈ID</th><th>问题</th><th>评分</th><th>标签</th>
+									<th>关联Chunk</th><th>建议处理</th><th>操作</th>
+								</tr>
+							</thead>
+							<tbody id="feedbackBody">
+								<tr><td colspan="7" class="text-center text-sub">点击上方按钮执行分析</td></tr>
+							</tbody>
+						</table>
+					</div>
+				</div>
+			</div>
+
+			<!-- ===== Tab: 低分归因 ===== -->
+			<div class="tab-panel" data-panel="attribution">
+				<!-- 工具栏：筛选器(左) + 手动触发(右) -->
+				<div class="eval-toolbar mb-16">
+					<div class="panel-header" style="flex-wrap:nowrap">
+						<div class="flex gap-4 items-center" style="flex:1;min-width:0">
+							<select class="select" id="attrDays" onchange="loadAttribution()" style="width:110px;flex-shrink:0">
+								<option value="7">最近 7 天</option>
+								<option value="30">最近 30 天</option>
+								<option value="90">最近 90 天</option>
+							</select>
+							<select class="select" id="attrCategory" onchange="loadAttribution()" style="width:140px;flex-shrink:0">
+								<option value="">全部归因</option>
+								<option value="retrieval_recall">检索召回不足</option>
+								<option value="retrieval_rank">检索排序失效</option>
+								<option value="content_gap">知识盲区</option>
+								<option value="content_quality">内容质量差</option>
+								<option value="generation_hallucination">生成幻觉</option>
+								<option value="generation_offtopic">生成跑题</option>
+								<option value="generation_incomplete">生成不完整</option>
+								<option value="generation_format">生成表达差</option>
+								<option value="safety">安全问题</option>
+								<option value="question_side">问题侧</option>
+								<option value="unknown">无法归因</option>
+							</select>
+							<select class="select" id="attrLayer" onchange="loadAttribution()" style="width:120px;flex-shrink:0">
+								<option value="">全部层级</option>
+								<option value="retrieval">检索层</option>
+								<option value="content">内容层</option>
+								<option value="generation">生成层</option>
+								<option value="safety">安全层</option>
+								<option value="system">系统层</option>
+								<option value="question">问题侧</option>
+								<option value="unknown">未知</option>
+							</select>
+							<select class="select" id="attrStatus" onchange="loadAttribution()" style="width:110px;flex-shrink:0">
+								<option value="">全部状态</option>
+								<option value="completed">已完成</option>
+								<option value="pending">待分析</option>
+								<option value="failed">失败</option>
+							</select>
+							<select class="select" id="attrDept" style="width:160px;flex-shrink:0">
+								<option value="">全部部门</option>
+							</select>
+							<select class="select" id="attrTeam" onchange="loadAttribution()" style="width:160px;flex-shrink:0">
+								<option value="">全部团队</option>
+							</select>
+							<button class="btn" onclick="loadAttribution()" style="flex-shrink:0">🔄 刷新</button>
+							<div class="text-sub text-sm" id="attrSummary" style="white-space:nowrap;flex-shrink:0;margin-left:8px"></div>
+						</div>
+						<div class="flex gap-4 items-center" style="flex-shrink:0">
+							<input type="number" id="attrManualQaId" placeholder="QA ID" class="input" style="width:100px">
+							<button id="btnRunManualAttr" class="btn btn-primary" onclick="runManualAttribution()">🧪 手动归因</button>
+						</div>
+					</div>
+				</div>
+
+				<!-- KPI 卡片:归因分类统计 -->
+				<div class="kpi-grid mb-16" id="attrKpi">
+					<div class="kpi-card"><div class="kpi-label">归因总数</div><div class="kpi-value" id="attrKpiTotal">--</div></div>
+					<div class="kpi-card kpi-red"><div class="kpi-label">检索层</div><div class="kpi-value" id="attrKpiRetrieval">--</div></div>
+					<div class="kpi-card kpi-highlight"><div class="kpi-label">内容层</div><div class="kpi-value" id="attrKpiContent">--</div></div>
+					<div class="kpi-card kpi-poor"><div class="kpi-label">生成层</div><div class="kpi-value" id="attrKpiGeneration">--</div></div>
+					<div class="kpi-card"><div class="kpi-label">规则归因</div><div class="kpi-value" id="attrKpiRule">--</div></div>
+					<div class="kpi-card kpi-good"><div class="kpi-label">LLM/混合</div><div class="kpi-value" id="attrKpiLlm">--</div></div>
+				</div>
+
+				<!-- 归因分类分布 -->
+				<div class="panel mb-16">
+					<div class="panel-header">
+						<div class="panel-title">归因分类分布</div>
+						<div class="text-sub text-sm">按根因分类聚合,展示占比与平均分</div>
+					</div>
+					<div class="panel-body" id="attrCategoryDist">
+						<div class="text-sub">点击"刷新"加载统计数据</div>
+					</div>
+				</div>
+
+				<!-- 低分归因列表 -->
+				<div class="panel">
+					<div class="panel-header">
+						<div class="panel-title">低分归因列表</div>
+						<div class="text-sub text-sm">均分低于阈值的对话自动归因 + 优化建议(点击行查看详情)</div>
+					</div>
+					<div class="panel-body">
+						<table class="table" id="attrTable">
+							<thead>
+								<tr>
+									<th>QA ID</th><th>问题</th><th>回答摘要</th><th>均分</th>
+									<th>归因分类</th><th>影响层级</th><th>方法</th>
+									<th>知识库</th><th>状态</th><th>时间</th><th>操作</th>
+								</tr>
+							</thead>
+							<tbody id="attrTableBody">
+								<tr><td colspan="11" class="text-center text-sub">点击"刷新"加载归因数据</td></tr>
+							</tbody>
+						</table>
+					</div>
+				</div>
+			</div>
+
+		</div><!-- /.eval-scroll -->
 		</div>
 	</div>
 
@@ -435,6 +535,19 @@
 			</div>
 			<div class="dialog-footer">
 				<button class="btn" onclick="closeDialog('qaDetailDialog')">关闭</button>
+			</div>
+		</div>
+	</div>
+
+	<!-- Dialog: 低分归因详情 -->
+	<div class="dialog-mask" id="attrDetailDialog" style="display:none">
+		<div class="dialog dialog-lg">
+			<div class="dialog-title">低分归因详情 · QA <span id="attrDetailTitle">--</span></div>
+			<div class="dialog-body" id="attrDetailBody">
+				<div class="text-sub">加载中...</div>
+			</div>
+			<div class="dialog-footer">
+				<button class="btn" onclick="closeDialog('attrDetailDialog')">关闭</button>
 			</div>
 		</div>
 	</div>

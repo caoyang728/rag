@@ -589,3 +589,110 @@ class CoverageReport(models.Model):
         indexes = [
             models.Index(fields=['-report_date'], name='idx_covr_date'),
         ]
+
+
+# ============================================================================
+# 低分归因分析
+# ============================================================================
+
+class LowScoreAnalysis(models.Model):
+    """低分对话归因分析 - 对低分 QA 自动归因 + 给出优化建议
+
+    触发时机:MultiDimensionScore 落库后,若 QA 均分 < threshold 则异步派发归因。
+    与 MultiDimensionScore 一对一:同 QA 重新评估后会重新归因(update_or_create 覆盖)。
+
+    归因分类(root_cause_category)结合 RAG 链路 + 12 维评估:
+    - retrieval_recall:  检索召回不足(TopK 命中少)
+    - retrieval_rank:     检索排序失效(rerank 后相关片段掉出)
+    - content_gap:        知识盲区(无对应文档)
+    - content_quality:    内容/切片质量差
+    - generation_hallucination: 生成幻觉(faithfulness 低 + 检索好)
+    - generation_offtopic:      生成跑题(answer_relevancy 低 + 有 contexts)
+    - generation_incomplete:    生成不完整(completeness 低)
+    - generation_format:        生成表达差(clarity/conciseness 低)
+    - safety:            安全问题(toxicity/bias 低,需立即告警)
+    - question_side:     问题侧(模糊/超纲,非系统问题)
+    - unknown:           无法归因(规则未覆盖,留待人工)
+
+    建议生成策略(分层,控成本):
+    - safety: 不走 LLM,直接告警建议(建议无意义,要立即人工处置)
+    - 关键维度低分(faithfulness/context_relevancy/answer_relevancy/hallucination): 走 LLM 生成针对性建议
+    - 边缘维度低分(conciseness/clarity/professionalism 等): 仅模板建议
+    - 多维(>=3)同时低分: 走 LLM(综合问题需深度分析)
+    """
+    CATEGORY_CHOICES = [
+        ('retrieval_recall', '检索召回不足'),
+        ('retrieval_rank', '检索排序失效'),
+        ('content_gap', '知识盲区'),
+        ('content_quality', '内容质量差'),
+        ('generation_hallucination', '生成幻觉'),
+        ('generation_offtopic', '生成跑题'),
+        ('generation_incomplete', '生成不完整'),
+        ('generation_format', '生成表达差'),
+        ('safety', '安全问题'),
+        ('question_side', '问题侧'),
+        ('unknown', '无法归因'),
+    ]
+    LAYER_CHOICES = [
+        ('retrieval', '检索层'),
+        ('content', '内容层'),
+        ('generation', '生成层'),
+        ('safety', '安全层'),
+        ('system', '系统层'),
+        ('question', '问题侧'),
+        ('unknown', '未知'),
+    ]
+    METHOD_CHOICES = [
+        ('rule', '规则归因'),
+        ('llm', 'LLM 归因'),
+        ('hybrid', '规则+LLM'),
+    ]
+    STATUS_CHOICES = [
+        ('pending', '待分析'),
+        ('completed', '已完成'),
+        ('failed', '失败'),
+    ]
+
+    id = models.BigAutoField(primary_key=True)
+    qa_record = models.OneToOneField(QaRecord, on_delete=models.CASCADE,
+                                      db_column='qa_record_id', related_name='low_score_analysis')
+    # 触发归因的均分阈值(快照,便于回溯当时配置)
+    avg_score = models.FloatField(default=0.0, help_text='触发归因时的 QA 12 维均分')
+    threshold = models.FloatField(default=0.5, help_text='触发归因的阈值')
+
+    # 归因结论
+    root_cause_category = models.CharField(max_length=32, choices=CATEGORY_CHOICES,
+                                            default='unknown')
+    root_cause_detail = models.TextField(default='', blank=True,
+                                          help_text='具体原因描述(规则命中条件 / LLM 诊断)')
+    affected_layer = models.CharField(max_length=16, choices=LAYER_CHOICES, default='unknown')
+
+    # 低分维度快照(便于前端展示该 QA 哪几个维度拖了后腿)
+    low_dimensions = models.JSONField(default=list, blank=True,
+                                       help_text='[{"dimension":"faithfulness","score":0.32,"reason":"..."}]')
+
+    # 优化建议
+    diagnosis = models.TextField(default='', blank=True,
+                                  help_text='一句话诊断(LLM 生成,模板归因为空)')
+    suggestions = models.JSONField(default=list, blank=True,
+                                    help_text='[{"type":"short_term","action":"..."},{"type":"long_term","action":"..."}]')
+
+    # 归因元数据
+    analysis_method = models.CharField(max_length=16, choices=METHOD_CHOICES, default='rule')
+    analysis_model = models.CharField(max_length=64, default='', blank=True)
+    analysis_tokens_used = models.IntegerField(default=0)
+    analysis_cost = models.DecimalField(max_digits=8, decimal_places=6, default=0)
+    analysis_latency_ms = models.IntegerField(default=0)
+
+    status = models.CharField(max_length=16, default='pending', choices=STATUS_CHOICES)
+    error_message = models.TextField(default='', blank=True, help_text='失败原因(status=failed 时填充)')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'analytics_low_score_analysis'
+        indexes = [
+            models.Index(fields=['-created_at'], name='idx_lsa_time'),
+            models.Index(fields=['root_cause_category', '-created_at'], name='idx_lsa_cat_time'),
+            models.Index(fields=['status', '-created_at'], name='idx_lsa_status_time'),
+        ]

@@ -316,8 +316,13 @@ def get_document_quality_summary(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     root_type: Optional[str] = None,
+    dept_id: Optional[int] = None,
+    team_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     """获取文档质量汇总数据（供 Dashboard 使用）
+
+    组织筛选优先:team 有值时忽略 dept,按 Document.dept_id/team_id 归属过滤。
+    root_type 保留兼容(目前文档 root_type 多为 knowledge_base,区分度弱)。
 
     Returns:
         {
@@ -335,6 +340,13 @@ def get_document_quality_summary(
         qs = qs.filter(created_at__date__gte=start_date)
     if end_date:
         qs = qs.filter(created_at__date__lte=end_date)
+    if root_type:
+        qs = qs.filter(document__root_type=root_type)
+    # 组织筛选:按 Document 归属过滤(DocumentQualityReport 通过 document FK 关联)
+    if team_id:
+        qs = qs.filter(document__team_id=team_id)
+    elif dept_id:
+        qs = qs.filter(document__dept_id=dept_id)
 
     total = qs.count()
     scores = list(qs.values_list('quality_score', flat=True))

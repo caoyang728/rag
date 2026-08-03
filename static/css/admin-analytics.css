@@ -95,11 +95,6 @@
 	margin-bottom: 10px !important;
 }
 
-/* 忠实度评估：两个 block 之间用紧凑间距，不要双重 padding */
-#qualityBody .kpi-grid + .card {
-	margin-top: 10px;
-}
-
 /* 日报 chart-wrap 头部：标题左 / 天数选择器右 */
 .daily-chart-header {
 	display: flex;
@@ -215,8 +210,7 @@
 
 /* --- 系统指标页卡片内表格的响应式容器：横向可滚动 --- */
 #systemMetricsBody .card .table,
-#orgUsageBody .card .table,
-#qualityBody .card .table {
+#orgUsageBody .card .table {
 	min-width: 100%;
 }
 

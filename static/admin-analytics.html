@@ -38,7 +38,6 @@
 					<div class="tab-item" data-tab="queue" onclick="switchTab('queue')">📦 队列深度</div>
 					<div class="tab-item" data-tab="org" onclick="switchTab('org')">🏢 部门/团队</div>
 					<div class="tab-item" data-tab="qa" onclick="switchTab('qa')">📝 QA 记录</div>
-					<div class="tab-item" data-tab="quality" onclick="switchTab('quality')">🎯 忠实度评估</div>
 					<div class="tab-item" data-tab="daily" onclick="switchTab('daily')">📅 日报详情</div>
 					<div class="tab-item" data-tab="tools" onclick="switchTab('tools')">🔧 运营工具</div>
 				</div>
@@ -168,25 +167,6 @@
 				</div>
 				<div id="qaRecordsBody" class="panel-body"></div>
 				<div id="qaPagination" class="pagination panel-footer"></div>
-			</div>
-
-			<!-- ========== Tab 7: 忠实度评估 ========== -->
-			<div class="tab-panel" data-panel="quality">
-				<div class="panel-header flex items-center justify-between mb-12">
-					<div class="text-lg fw-600">🎯 回答忠实度评估（LLM 异步评分）</div>
-					<div class="flex gap-8 items-center">
-						<label class="text-sm text-sub">状态：</label>
-						<select class="select select-md" id="qualityStatus" onchange="qualityPage=1;loadQualityReports()">
-							<option value="">全部</option>
-							<option value="pending">待评估</option>
-							<option value="running">评估中</option>
-							<option value="completed">已完成</option>
-							<option value="failed">失败</option>
-						</select>
-					</div>
-				</div>
-				<div id="qualityBody" class="panel-body"></div>
-				<div id="qualityPagination" class="pagination panel-footer"></div>
 			</div>
 
 			<!-- ========== Tab 8: 日报详情 ========== -->

@@ -16,7 +16,7 @@ from rest_framework.views import APIView
 
 from apps.analytics.models import (
     KeywordWeight, SystemMetricsReport,
-    OrgUsageReport, AnswerQualityReport,
+    OrgUsageReport,
 )
 from apps.chat.models import QaRecord, QaFeedback
 from apps.users.permissions import CanViewAnalytics
@@ -807,93 +807,6 @@ class RealtimeSnapshotView(APIView):
             }, status=200)
 
 
-class QualityReportView(APIView):
-    """GET /api/v1/analytics/quality-reports/?start_date=&end_date=&status=
-
-    - 查询回答忠实度评估报告
-    - 支持按日期范围和状态筛选
-    - 仅管理员可访问
-    """
-    permission_classes = [IsAuthenticated, CanViewAnalytics]
-    required_perm = 'analytics.system.read'
-
-    def get(self, request):
-        start_date = request.query_params.get('start_date')
-        end_date = request.query_params.get('end_date')
-        status = request.query_params.get('status')
-
-        try:
-            page = int(request.query_params.get('page', 1))
-            page_size = int(request.query_params.get('page_size', 20))
-        except (ValueError, TypeError):
-            return Response({'detail': 'page 和 page_size 必须为整数'}, status=400)
-
-        if page < 1:
-            page = 1
-        if page_size < 1 or page_size > 100:
-            page_size = 20
-
-        qs = AnswerQualityReport.objects.select_related('qa_record').order_by('-created_at')
-
-        # 日期过滤：统一使用 __date 后缀，
-        # 避免 created_at (aware) 与 naive datetime 比较的 RuntimeWarning，且 end_date 当天全部记录都包含
-        if start_date:
-            try:
-                start = datetime.fromisoformat(start_date).date()
-                qs = qs.filter(created_at__date__gte=start)
-            except ValueError:
-                return Response({'detail': 'start_date 格式应为 YYYY-MM-DD'}, status=400)
-
-        if end_date:
-            try:
-                end = datetime.fromisoformat(end_date).date()
-                qs = qs.filter(created_at__date__lte=end)
-            except ValueError:
-                return Response({'detail': 'end_date 格式应为 YYYY-MM-DD'}, status=400)
-
-        if status:
-            qs = qs.filter(status=status)
-
-        total = qs.count()
-        offset = (page - 1) * page_size
-
-        rows = []
-        for r in qs[offset:offset + page_size]:
-            rows.append({
-                'id': r.id,
-                'qa_record_id': r.qa_record_id,
-                'faithfulness_score': r.faithfulness_score,
-                'faithfulness_reason': r.faithfulness_reason,
-                'eval_model': r.eval_model,
-                'eval_tokens_used': r.eval_tokens_used,
-                'eval_cost': float(r.eval_cost),
-                'eval_latency_ms': r.eval_latency_ms,
-                'status': r.status,
-                'error_message': r.error_message,
-                'retry_count': r.retry_count,
-                'created_at': r.created_at.isoformat(),
-            })
-
-        # --- 汇总统计 ---
-        summary_agg = qs.aggregate(
-            total_evaluated=models.Count('id', filter=models.Q(status='completed')),
-            avg_score=models.Avg('faithfulness_score', filter=models.Q(status='completed')),
-        )
-        total_evaluated = summary_agg['total_evaluated'] or 0
-        avg_score = summary_agg['avg_score'] or 0
-
-        return Response({
-            'total': total,
-            'page': page,
-            'page_size': page_size,
-            'rows': rows,
-            'summary': {
-                'total_evaluated': total_evaluated,
-                'avg_faithfulness_score': round(float(avg_score), 4),
-            },
-        })
-
-
 # ============================================================================
 # 黄金测试集管理 Views
 # ============================================================================
@@ -902,6 +815,15 @@ class GoldenDatasetListView(APIView):
     """GET/POST /api/v1/analytics/golden-datasets/"""
     permission_classes = [IsAuthenticated, CanViewAnalytics]
     required_perm = 'analytics.system.read'
+
+    def get_permissions(self):
+        # POST 为写操作,需要 write 权限;GET 只需 read
+        # 在 get_permissions 阶段按 HTTP 方法切换 required_perm,避免读权限用户越权创建测试集
+        if self.request.method == 'POST':
+            self.required_perm = 'analytics.system.write'
+        else:
+            self.required_perm = 'analytics.system.read'
+        return super().get_permissions()
 
     def get(self, request):
         from apps.analytics.models import GoldenDataset
@@ -938,6 +860,15 @@ class GoldenDatasetDetailView(APIView):
     """GET/PUT/DELETE /api/v1/analytics/golden-datasets/<id>/"""
     permission_classes = [IsAuthenticated, CanViewAnalytics]
     required_perm = 'analytics.system.write'
+
+    def get_permissions(self):
+        # GET 为读操作,只需 read 权限;PUT/DELETE 为写操作,需要 write 权限
+        # 避免原实现中 GET 也要求 write 权限,导致只有读权限的用户无法查看单个测试集
+        if self.request.method == 'GET':
+            self.required_perm = 'analytics.system.read'
+        else:
+            self.required_perm = 'analytics.system.write'
+        return super().get_permissions()
 
     def get(self, request, ds_id):
         from apps.analytics.models import GoldenDataset, GoldenQuestion
@@ -996,6 +927,7 @@ class GoldenDatasetDetailView(APIView):
 class GoldenDatasetImportView(APIView):
     """POST /api/v1/analytics/golden-datasets/<id>/import/"""
     permission_classes = [IsAuthenticated, CanViewAnalytics]
+    required_perm = 'analytics.system.write'
 
     def post(self, request, ds_id):
         from apps.analytics.offline_eval import import_questions_from_json
@@ -1013,6 +945,7 @@ class GoldenDatasetImportView(APIView):
 class GoldenDatasetExportView(APIView):
     """GET /api/v1/analytics/golden-datasets/<id>/export/"""
     permission_classes = [IsAuthenticated, CanViewAnalytics]
+    required_perm = 'analytics.system.read'
 
     def get(self, request, ds_id):
         from apps.analytics.offline_eval import export_dataset_to_json
@@ -1098,6 +1031,7 @@ class RunRetrievalEvalView(APIView):
 class RunAnswerEvalView(APIView):
     """POST /api/v1/analytics/eval/answer/ - 执行离线回答质量评估"""
     permission_classes = [IsAuthenticated, CanViewAnalytics]
+    required_perm = 'analytics.system.write'
 
     def post(self, request):
         from apps.analytics.offline_eval import run_answer_quality_evaluation
@@ -1108,7 +1042,6 @@ class RunAnswerEvalView(APIView):
             dataset_id = int(dataset_id)
         except (ValueError, TypeError):
             return Response({'detail': 'dataset_id 必须为整数'}, status=400)
-        dimensions = request.data.get('dimensions')
         try:
             max_questions = int(request.data.get('max_questions', 50))
         except (ValueError, TypeError):
@@ -1119,7 +1052,6 @@ class RunAnswerEvalView(APIView):
             results = run_answer_quality_evaluation(
                 dataset_id=int(dataset_id),
                 user=request.user,
-                dimensions=dimensions,
                 max_questions=max_questions,
             )
             return Response({
@@ -1135,6 +1067,7 @@ class RunAnswerEvalView(APIView):
 class RetrievalReportListView(APIView):
     """GET /api/v1/analytics/eval/retrieval-reports/"""
     permission_classes = [IsAuthenticated, CanViewAnalytics]
+    required_perm = 'analytics.system.read'
 
     def get(self, request):
         from apps.analytics.models import RetrievalQualityReport
@@ -1156,6 +1089,7 @@ class RetrievalReportListView(APIView):
 class DocumentQualityReportView(APIView):
     """GET /api/v1/analytics/doc-quality/ - 文档质量汇总"""
     permission_classes = [IsAuthenticated, CanViewAnalytics]
+    required_perm = 'analytics.system.read'
 
     def get(self, request):
         from apps.analytics.doc_quality import get_document_quality_summary
@@ -1202,6 +1136,7 @@ class RunDocQualityEvalView(APIView):
 class DocumentQualityReportListView(APIView):
     """GET /api/v1/analytics/doc-quality/reports/"""
     permission_classes = [IsAuthenticated, CanViewAnalytics]
+    required_perm = 'analytics.system.read'
 
     def get(self, request):
         from apps.analytics.models import DocumentQualityReport
@@ -1230,6 +1165,7 @@ class DocumentQualityReportListView(APIView):
 class MultiDimensionScoreView(APIView):
     """GET /api/v1/analytics/multi-dim-scores/ - 多维度评估结果"""
     permission_classes = [IsAuthenticated, CanViewAnalytics]
+    required_perm = 'analytics.system.read'
 
     def get(self, request):
         from apps.analytics.models import MultiDimensionScore
@@ -1277,31 +1213,71 @@ class MultiDimensionScoreView(APIView):
 
 
 class RunMultiDimEvalView(APIView):
-    """POST /api/v1/analytics/multi-dim-eval/ - 触发多维度评估"""
+    """POST /api/v1/analytics/multi-dim-eval/ - 手动触发单条 QA 的 DeepEval 12 维评估
+
+    用于看板中"手动评估指定 QA"场景:运营发现某条对话异常,手动触发评估。
+    实际启用维度由 PRODUCTION_EVAL_METRIC_GROUPS 控制(默认 12 维)。
+    """
     permission_classes = [IsAuthenticated, CanViewAnalytics]
     required_perm = 'analytics.system.write'
 
     def post(self, request):
-        from apps.analytics.models import QaRecord
-        from apps.analytics.evaluation_engine import evaluate_all_dimensions, build_context_from_qa_record
+        from decimal import Decimal
+        from apps.analytics.models import QaRecord, MultiDimensionScore
+        from apps.analytics.deepeval_metrics import evaluate_with_deepeval
+        from apps.analytics.production_eval import _build_context_list
+        from rag_project.config import AnalyticsConfig
+
         qa_id = request.data.get('qa_record_id')
         if not qa_id:
             return Response({'detail': 'qa_record_id 必填'}, status=400)
-        dimensions = request.data.get('dimensions')
+        try:
+            qa_id = int(qa_id)
+        except (ValueError, TypeError):
+            return Response({'detail': 'qa_record_id 必须为整数'}, status=400)
+
         try:
             qa = QaRecord.objects.get(id=qa_id)
         except QaRecord.DoesNotExist:
             return Response({'detail': 'QA记录不存在'}, status=404)
 
-        context = build_context_from_qa_record(qa)
-        results = evaluate_all_dimensions(
-            question=qa.question,
-            answer=qa.answer,
-            context=context,
-            dimensions=dimensions,
-            qa_record_id=qa_id,
-        )
-        return Response({'ok': True, 'results': results})
+        contexts = _build_context_list(qa)
+        if not contexts:
+            return Response({'detail': '该 QA 无检索上下文,无法评估'}, status=400)
+
+        eval_model = AnalyticsConfig.eval_model()
+        try:
+            results = evaluate_with_deepeval(
+                question=qa.question,
+                answer=qa.answer,
+                contexts=contexts,
+                model=eval_model,
+            )
+        except Exception as e:
+            logger.exception('Manual DeepEval failed')
+            return Response({'detail': f'评估失败: {e}'}, status=500)
+
+        # 落库(与 production_eval / run_multi_dimension_evaluation 同口径)
+        eval_batch_id = f'manual_{timezone.now().strftime("%Y%m%d%H%M%S")}_{qa_id}'
+        for res in results:
+            MultiDimensionScore.objects.update_or_create(
+                qa_record_id=qa_id,
+                dimension=res['dimension'],
+                defaults={
+                    'score': res['score'],
+                    'reason': res['reason'],
+                    'eval_model': f'deepeval-{eval_model}',
+                    'eval_latency_ms': res.get('latency_ms', 0),
+                    'eval_batch_id': eval_batch_id,
+                    'status': 'completed',
+                },
+            )
+
+        return Response({
+            'ok': True,
+            'evaluated': len(results),
+            'results': results,
+        })
 
 
 # ============================================================================
@@ -1311,6 +1287,7 @@ class RunMultiDimEvalView(APIView):
 class CoverageReportView(APIView):
     """GET /api/v1/analytics/coverage/ - 覆盖率报告"""
     permission_classes = [IsAuthenticated, CanViewAnalytics]
+    required_perm = 'analytics.system.read'
 
     def get(self, request):
         from apps.analytics.coverage import (
@@ -1341,6 +1318,7 @@ class CoverageReportView(APIView):
 class FeedbackLoopView(APIView):
     """POST /api/v1/analytics/feedback-loop/ - 执行反馈闭环分析"""
     permission_classes = [IsAuthenticated, CanViewAnalytics]
+    required_perm = 'analytics.system.write'
 
     def post(self, request):
         from apps.analytics.coverage import auto_link_feedback_to_chunks
@@ -1382,6 +1360,7 @@ class CoverageReportListView(APIView):
     - 供前端「历史报告」面板展示，支持下载和删除
     """
     permission_classes = [IsAuthenticated, CanViewAnalytics]
+    required_perm = 'analytics.system.read'
 
     def get(self, request):
         from apps.analytics.models import CoverageReport
@@ -1431,6 +1410,7 @@ class CoverageReportExportView(APIView):
     - 使用 openpyxl 生成多 Sheet Excel
     """
     permission_classes = [IsAuthenticated, CanViewAnalytics]
+    required_perm = 'analytics.system.read'
 
     def get(self, request, report_id):
         from apps.analytics.models import CoverageReport
@@ -1546,3 +1526,383 @@ class CoverageReportExportView(APIView):
             report_id, request.user.username
         )
         return response
+
+
+# ============================================================================
+# 评估看板 (DeepEval 12 维生产评估结果展示)
+# ============================================================================
+# 参考 LangSmith / Phoenix / Datadog 风格:
+# - overview: 顶部 KPI(12 维均分按 4 大类分组 + 评估量 + 低分占比 + 安全告警)
+# - trend: 时间序列(按天聚合,支持维度切换)
+# - low-score-qa: 低分对话 Top N(按 QA 总分升序)
+# - qa-detail: 单条 QA 完整明细(12 维 score+reason + 完整对话)
+
+# 维度分组定义(与 deepeval_metrics.py 保持一致)
+_DIMENSION_GROUPS = {
+    'retrieval': ['context_relevancy'],
+    'quality': ['faithfulness', 'hallucination', 'answer_relevancy',
+                'completeness', 'conciseness', 'clarity'],
+    'safety': ['toxicity', 'bias'],
+    'business': ['professionalism', 'helpfulness', 'actionability'],
+}
+
+
+def _parse_dashboard_days(request) -> int:
+    """解析看板 days 参数(默认 7,范围 1-90)"""
+    try:
+        days = int(request.query_params.get('days', 7))
+    except (ValueError, TypeError):
+        days = 7
+    return max(1, min(days, 90))
+
+
+class EvalDashboardOverviewView(APIView):
+    """GET /api/v1/analytics/eval-dashboard/overview/?days=7&root_type=
+
+    看板顶部 KPI:
+    - total_evaluated: 评估过的 QA 数(distinct qa_record_id)
+    - total_qa: 时间窗口内 QA 总数(用于覆盖率计算)
+    - low_score_count: 平均分 < threshold 的 QA 数
+    - safety_alert_count: toxicity<0.5 或 bias<0.5 的 QA 数(安全告警)
+    - dimension_groups: 4 大类均分 + 各维度均分(雷达图用)
+    """
+    permission_classes = [IsAuthenticated, CanViewAnalytics]
+    required_perm = 'analytics.system.read'
+
+    def get(self, request):
+        from apps.analytics.models import MultiDimensionScore
+        days = _parse_dashboard_days(request)
+        root_type = request.query_params.get('root_type', '').strip()
+        threshold = 0.5
+
+        since = timezone.now() - timedelta(days=days)
+
+        # 基础 queryset(按时间 + 可选 root_type 过滤)
+        scores_qs = MultiDimensionScore.objects.filter(created_at__gte=since)
+        qa_qs = QaRecord.objects.filter(created_at__gte=since, is_success=True).exclude(answer_type='refused')
+        if root_type:
+            scores_qs = scores_qs.filter(qa_record__root_type=root_type)
+            qa_qs = qa_qs.filter(root_type=root_type)
+
+        # 1. 评估量(去重 qa_record_id)
+        total_evaluated = scores_qs.values('qa_record_id').distinct().count()
+        total_qa = qa_qs.count()
+
+        # 无评估数据时直接返回空结构,避免前端渲染 0 值雷达图/维度标签造成"写死数据"的误解
+        if total_evaluated == 0:
+            return Response({
+                'days': days,
+                'root_type': root_type or 'all',
+                'total_evaluated': 0,
+                'total_qa': total_qa,
+                'coverage_rate': 0,
+                'low_score_count': 0,
+                'low_score_rate': 0,
+                'safety_alert_count': 0,
+                'threshold': threshold,
+                'date_range': [],
+                'dimension_groups': {},
+            })
+
+        # 2. 各维度均分(一次 GROUP BY 拿全)
+        dim_agg = scores_qs.values('dimension').annotate(
+            avg_score=models.Avg('score'),
+            count=models.Count('id'),
+        )
+        dim_map = {r['dimension']: {'avg': float(r['avg_score'] or 0), 'count': r['count']} for r in dim_agg}
+
+        # 3. 每个 QA 的均分(用于低分统计)
+        # 用 GROUP BY qa_record_id + Avg,一次查询拿到所有 QA 的均分
+        qa_avg = scores_qs.values('qa_record_id').annotate(
+            avg_score=models.Avg('score'),
+        )
+        qa_avg_list = list(qa_avg)
+        low_score_count = sum(1 for r in qa_avg_list if float(r['avg_score'] or 0) < threshold)
+
+        # 4. 安全告警:toxicity 或 bias 维度 < 0.5 的 QA 数(精确查 toxicity/bias 维度)
+        safety_qs = scores_qs.filter(
+            dimension__in=['toxicity', 'bias'], score__lt=0.5
+        ).values_list('qa_record_id', flat=True).distinct()
+        safety_alert_count = len(set(safety_qs))
+
+        # 5. 每个维度最近 7 天每日均分(用于前端 sparkline + 环比)
+        # 一次 TruncDate+dimension 聚合,拿到所有 (date, dimension, avg) 三元组
+        today = timezone.now().date()
+        trend_start = today - timedelta(days=max(days, 7) - 1)
+        trend_qs = scores_qs.filter(
+            created_at__date__gte=trend_start,
+        ).annotate(
+            _date=models.functions.TruncDate('created_at'),
+        ).values('_date', 'dimension').annotate(
+            avg_score=models.Avg('score'),
+        ).order_by('_date', 'dimension')
+        # 按维度分桶: {dim: ['0.8','0.82',...]} 每天一个 float,缺失天用 0 填充
+        dim_trend_map = {}
+        dim_dates = []
+        for r in trend_qs:
+            d = r['dimension']
+            date_str = r['_date'].isoformat()
+            if date_str not in dim_dates:
+                dim_dates.append(date_str)
+            if d not in dim_trend_map:
+                dim_trend_map[d] = {}
+            dim_trend_map[d][date_str] = round(float(r['avg_score'] or 0), 4)
+        # 补齐所有日期,确保每个维度 trend_7d 长度一致
+        dim_dates.sort()
+        for d in dim_trend_map:
+            dim_trend_map[d] = [dim_trend_map[d].get(dt, 0) for dt in dim_dates]
+
+        # 前一周期均分(环比用):前 7 天(不含当前窗口)的维度均分
+        prev_since = since - timedelta(days=days)
+        prev_end = since
+        prev_scores_qs = MultiDimensionScore.objects.filter(
+            created_at__gte=prev_since, created_at__lt=prev_end,
+        )
+        if root_type:
+            prev_scores_qs = prev_scores_qs.filter(qa_record__root_type=root_type)
+        prev_dim_agg = prev_scores_qs.values('dimension').annotate(
+            prev_avg=models.Avg('score'),
+        )
+        prev_dim_map = {r['dimension']: round(float(r['prev_avg'] or 0), 4) for r in prev_dim_agg}
+
+        # 6. 组装 4 大类
+        groups = {}
+        for group_name, dims in _DIMENSION_GROUPS.items():
+            dim_list = []
+            scores_in_group = []
+            for d in dims:
+                info = dim_map.get(d)
+                if info:
+                    cur_avg = round(info['avg'], 4)
+                    prev_avg = prev_dim_map.get(d, 0)
+                    # 环比变化率(prev 为 0 时无意义,置 None)
+                    mom_change = round((cur_avg - prev_avg) / prev_avg, 4) if prev_avg > 0 else None
+                    dim_list.append({
+                        'name': d,
+                        'avg': cur_avg,
+                        'count': info['count'],
+                        'prev_avg': prev_avg,
+                        'mom_change': mom_change,
+                        'trend_7d': dim_trend_map.get(d, []),
+                    })
+                    scores_in_group.append(info['avg'])
+            groups[group_name] = {
+                'avg_score': round(sum(scores_in_group) / len(scores_in_group), 4) if scores_in_group else 0,
+                'dimensions': dim_list,
+            }
+
+        return Response({
+            'days': days,
+            'root_type': root_type or 'all',
+            'total_evaluated': total_evaluated,
+            'total_qa': total_qa,
+            'coverage_rate': round(total_evaluated / total_qa, 4) if total_qa else 0,
+            'low_score_count': low_score_count,
+            'low_score_rate': round(low_score_count / total_evaluated, 4) if total_evaluated else 0,
+            'safety_alert_count': safety_alert_count,
+            'threshold': threshold,
+            'date_range': dim_dates,
+            'dimension_groups': groups,
+        })
+
+
+class EvalDashboardTrendView(APIView):
+    """GET /api/v1/analytics/eval-dashboard/trend/?days=7&root_type=&dimension=
+
+    看板趋势线:按天聚合各维度均分。
+    - dimension 为空:返回 12 维全部趋势(前端可切换显示)
+    - dimension 指定:只返回该维度趋势
+    """
+    permission_classes = [IsAuthenticated, CanViewAnalytics]
+    required_perm = 'analytics.system.read'
+
+    def get(self, request):
+        from apps.analytics.models import MultiDimensionScore
+        days = _parse_dashboard_days(request)
+        root_type = request.query_params.get('root_type', '').strip()
+        dimension = request.query_params.get('dimension', '').strip()
+
+        since = timezone.now() - timedelta(days=days)
+        qs = MultiDimensionScore.objects.filter(created_at__gte=since)
+        if root_type:
+            qs = qs.filter(qa_record__root_type=root_type)
+        if dimension:
+            qs = qs.filter(dimension=dimension)
+
+        # 按天 + 维度聚合:TruncDate(created_at) + dimension + Avg(score)
+        # 一次查询拿到所有 (date, dimension, avg) 三元组
+        trend_qs = qs.annotate(
+            date=models.functions.TruncDate('created_at'),
+        ).values('date', 'dimension').annotate(
+            avg_score=models.Avg('score'),
+            count=models.Count('id'),
+        ).order_by('date', 'dimension')
+
+        # 组装成 {dates: [...], series: [{dimension, scores: [{date, avg, count}]}]}
+        dates_set = sorted({r['date'].isoformat() for r in trend_qs})
+        dim_series = {}
+        for r in trend_qs:
+            d = r['dimension']
+            if d not in dim_series:
+                dim_series[d] = []
+            dim_series[d].append({
+                'date': r['date'].isoformat(),
+                'avg': round(float(r['avg_score'] or 0), 4),
+                'count': r['count'],
+            })
+
+        return Response({
+            'days': days,
+            'root_type': root_type or 'all',
+            'dimension': dimension or 'all',
+            'dates': dates_set,
+            'series': [
+                {'dimension': d, 'scores': s}
+                for d, s in dim_series.items()
+            ],
+        })
+
+
+class EvalDashboardLowScoreView(APIView):
+    """GET /api/v1/analytics/eval-dashboard/low-score-qa/?days=7&limit=20&threshold=0.5&root_type=
+
+    低分对话 Top N(按 QA 均分升序)。
+    返回每个 QA 的:question/answer 摘要 + 均分 + 最低维度 + 最低分 + root_type + 时间。
+    前端点击展开调 qa-detail 看完整明细。
+    """
+    permission_classes = [IsAuthenticated, CanViewAnalytics]
+    required_perm = 'analytics.system.read'
+
+    def get(self, request):
+        from apps.analytics.models import MultiDimensionScore
+        days = _parse_dashboard_days(request)
+        root_type = request.query_params.get('root_type', '').strip()
+        try:
+            limit = int(request.query_params.get('limit', 20))
+        except (ValueError, TypeError):
+            limit = 20
+        limit = max(1, min(limit, 100))
+        try:
+            threshold = float(request.query_params.get('threshold', 0.5))
+        except (ValueError, TypeError):
+            threshold = 0.5
+
+        since = timezone.now() - timedelta(days=days)
+        qs = MultiDimensionScore.objects.filter(created_at__gte=since)
+        if root_type:
+            qs = qs.filter(qa_record__root_type=root_type)
+
+        # 每个 QA 的均分 + 最低分维度(子查询取 min)
+        qa_agg = qs.values('qa_record_id').annotate(
+            avg_score=models.Avg('score'),
+            min_score=models.Min('score'),
+        ).filter(avg_score__lt=threshold).order_by('avg_score')[:limit]
+
+        if not qa_agg:
+            return Response({'total': 0, 'threshold': threshold, 'rows': []})
+
+        # 批量取 QaRecord 详情(避免 N+1)
+        qa_ids = [r['qa_record_id'] for r in qa_agg]
+        qa_map = {
+            q.id: q for q in QaRecord.objects.filter(id__in=qa_ids).only(
+                'id', 'question', 'answer', 'root_type', 'created_at', 'user_id'
+            )
+        }
+
+        # 批量取每个 QA 的最低分维度(一次 GROUP BY)
+        min_dim_qs = qs.filter(qa_record_id__in=qa_ids).values(
+            'qa_record_id', 'dimension', 'score'
+        )
+        # 对每个 qa_id 取 score 最低的 dimension
+        qa_min_dim = {}
+        for r in min_dim_qs:
+            qid = r['qa_record_id']
+            if qid not in qa_min_dim or r['score'] < qa_min_dim[qid]['score']:
+                qa_min_dim[qid] = {'dimension': r['dimension'], 'score': float(r['score'])}
+
+        rows = []
+        for r in qa_agg:
+            qid = r['qa_record_id']
+            q = qa_map.get(qid)
+            if not q:
+                continue
+            min_info = qa_min_dim.get(qid, {'dimension': '-', 'score': 0})
+            rows.append({
+                'qa_record_id': qid,
+                'question': q.question[:80],
+                'answer': q.answer[:120],
+                'avg_score': round(float(r['avg_score'] or 0), 4),
+                'min_dimension': min_info['dimension'],
+                'min_score': round(min_info['score'], 4),
+                'root_type': q.root_type,
+                'created_at': q.created_at.isoformat(),
+            })
+
+        return Response({'total': len(rows), 'threshold': threshold, 'rows': rows})
+
+
+class EvalDashboardQaDetailView(APIView):
+    """GET /api/v1/analytics/eval-dashboard/qa-detail/?qa_record_id=123
+
+    单条 QA 完整明细:
+    - qa: 完整对话(question/answer/root_type/created_at/user/retrieval_hits)
+    - scores: 12 维 score+reason+eval_model+latency(按 4 大类顺序)
+    - avg_score: 总均分
+    """
+    permission_classes = [IsAuthenticated, CanViewAnalytics]
+    required_perm = 'analytics.system.read'
+
+    def get(self, request):
+        from apps.analytics.models import MultiDimensionScore
+        qa_id = request.query_params.get('qa_record_id')
+        if not qa_id:
+            return Response({'detail': 'qa_record_id 必填'}, status=400)
+        try:
+            qa_id = int(qa_id)
+        except (ValueError, TypeError):
+            return Response({'detail': 'qa_record_id 必须为整数'}, status=400)
+
+        try:
+            qa = QaRecord.objects.select_related('user').get(id=qa_id)
+        except QaRecord.DoesNotExist:
+            return Response({'detail': 'QA 不存在'}, status=404)
+
+        scores = list(
+            MultiDimensionScore.objects.filter(qa_record_id=qa_id)
+            .order_by('created_at')
+            .values('dimension', 'score', 'reason', 'eval_model', 'eval_latency_ms', 'eval_batch_id', 'created_at')
+        )
+
+        # 按 4 大类顺序排序(未分类的维度放最后)
+        dim_order = {d: (g, i) for g, (group, dims) in enumerate(_DIMENSION_GROUPS.items()) for i, d in enumerate(dims)}
+        scores.sort(key=lambda s: dim_order.get(s['dimension'], (99, 99)))
+
+        avg_score = sum(float(s['score'] or 0) for s in scores) / max(len(scores), 1)
+
+        return Response({
+            'qa': {
+                'id': qa.id,
+                'question': qa.question,
+                'answer': qa.answer,
+                'root_type': qa.root_type,
+                'answer_type': qa.answer_type,
+                'created_at': qa.created_at.isoformat(),
+                'user': qa.user.username if qa.user else '-',
+                'retrieval_hits': qa.retrieval_hits[:10],
+                'latency_total_ms': qa.latency_total_ms,
+                'tokens_total': qa.tokens_prompt + qa.tokens_completion,
+            },
+            'scores': [
+                {
+                    'dimension': s['dimension'],
+                    'score': round(float(s['score'] or 0), 4),
+                    'reason': s['reason'],
+                    'eval_model': s['eval_model'],
+                    'eval_latency_ms': s['eval_latency_ms'],
+                    'eval_batch_id': s['eval_batch_id'],
+                    'created_at': s['created_at'].isoformat(),
+                }
+                for s in scores
+            ],
+            'avg_score': round(avg_score, 4),
+        })

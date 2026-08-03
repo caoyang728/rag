@@ -1024,6 +1024,16 @@ def _persist_qa(*, user, session, question, answer, citations,
     except Exception:
         logger.exception('[Executor] Failed to report realtime metrics (non-critical)')
 
+    # --- 生产对话自动评估（采样 + 限速，异步触发，不阻塞用户响应）---
+    # 默认关闭（PRODUCTION_EVAL_ENABLED=false）；开启后按采样率 + 令牌桶限速
+    # 派发 Celery 任务做 LLM-as-judge 评估，结果落 MultiDimensionScore。
+    # 放在实时指标之后、return 之前；异常不影响主对话流程。
+    try:
+        from apps.analytics.production_eval import maybe_dispatch_eval
+        maybe_dispatch_eval(qa)
+    except Exception:
+        logger.exception('[Executor] Failed to dispatch production eval (non-critical)')
+
     return qa
 
 

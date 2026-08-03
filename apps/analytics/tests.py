@@ -22,7 +22,7 @@ from apps.users.models import (
 from apps.chat.models import QaRecord, QaFeedback
 from apps.memory.models import Session
 from apps.analytics.models import (
-    SystemMetricsReport, OrgUsageReport, QueueDepthLog, AnswerQualityReport,
+    SystemMetricsReport, OrgUsageReport, QueueDepthLog,
     KeywordWeight,
 )
 from apps.knowledge.models import KnowledgeNode
@@ -184,17 +184,6 @@ class AnalyticsAPITestBase(TestCase):
         QueueDepthLog.objects.create(
             queue_name='default', depth=5, worker_count=2,
             minute_bucket=timezone.now().replace(second=0, microsecond=0))
-
-        # 为一个非缓存 + 成功的 QA 记录创建质量报告
-        clean_record = QaRecord.objects.filter(is_success=True, is_hit_cache=False).first()
-        if clean_record:
-            AnswerQualityReport.objects.create(
-                qa_record=clean_record,
-                status='completed', faithfulness_score=0.85,
-                faithfulness_reason='回答忠实于原文',
-                eval_model='deepseek-chat', eval_tokens_used=100,
-                eval_cost=Decimal('0.050000'), eval_latency_ms=2000,
-            )
 
 
 class TestKeywordWeightAPI(AnalyticsAPITestBase):
@@ -433,23 +422,6 @@ class TestOrgUsageAPI(AnalyticsAPITestBase):
         self.assertEqual(resp.status_code, 400)
 
 
-class TestQualityReportAPI(AnalyticsAPITestBase):
-    """质量报告 API 测试"""
-
-    def test_list_with_read_perm_200(self):
-        resp = self.client.get('/api/v1/analytics/quality-reports/', **self.reader_headers)
-        self.assertEqual(resp.status_code, 200)
-        data = resp.json()
-        self.assertIn('rows', data)
-        self.assertIn('summary', data)
-
-    def test_list_invalid_date_400(self):
-        resp = self.client.get(
-            '/api/v1/analytics/quality-reports/?start_date=invalid',
-            **self.reader_headers)
-        self.assertEqual(resp.status_code, 400)
-
-
 class TestQueueDepthAPI(AnalyticsAPITestBase):
     """队列深度 API 测试"""
 
@@ -483,49 +455,6 @@ class TestDailyReportAPI(AnalyticsAPITestBase):
         self.assertIn('yesterday', data)
 
 
-class TestFaithfulnessEvaluation(AnalyticsAPITestBase):
-    """忠实度评估任务集成测试"""
-
-    def test_parse_faithfulness_result_valid(self):
-        """测试 LLM 输出解析"""
-        from apps.analytics.utils import parse_faithfulness_result
-
-        valid_output = '{"score": 0.85, "reason": "回答忠实于原文"}'
-        score, reason = parse_faithfulness_result(valid_output)
-        self.assertEqual(score, 0.85)
-        self.assertEqual(reason, '回答忠实于原文')
-
-    def test_parse_faithfulness_result_invalid(self):
-        """测试无效 LLM 输出的容错"""
-        from apps.analytics.utils import parse_faithfulness_result
-
-        invalid_output = 'I dont understand'
-        score, reason = parse_faithfulness_result(invalid_output)
-        self.assertEqual(score, 0.0)
-        self.assertIn('解析失败', reason)
-
-    def test_parse_faithfulness_result_score_clamping(self):
-        """测试分数钳位"""
-        from apps.analytics.utils import parse_faithfulness_result
-
-        too_high = '{"score": 1.5, "reason": ""}'
-        score, _ = parse_faithfulness_result(too_high)
-        self.assertEqual(score, 1.0)
-
-        too_low = '{"score": -0.5, "reason": ""}'
-        score, _ = parse_faithfulness_result(too_low)
-        self.assertEqual(score, 0.0)
-
-    def test_parse_faithfulness_result_markdown(self):
-        """测试 markdown 包装去除"""
-        from apps.analytics.utils import parse_faithfulness_result
-
-        md_output = '```json\n{"score": 0.7, "reason": "好"}\n```'
-        score, reason = parse_faithfulness_result(md_output)
-        self.assertEqual(score, 0.7)
-        self.assertEqual(reason, '好')
-
-
 class TestEdgeCases(AnalyticsAPITestBase):
     """边界条件测试"""
 
@@ -535,7 +464,6 @@ class TestEdgeCases(AnalyticsAPITestBase):
             '/api/v1/analytics/keywords/',
             '/api/v1/analytics/bad-feedbacks/',
             '/api/v1/analytics/system-metrics/',
-            '/api/v1/analytics/quality-reports/',
         ]
         for endpoint in admin_endpoints:
             resp = self.client.get(endpoint, **self.normal_headers)
@@ -548,7 +476,6 @@ class TestEdgeCases(AnalyticsAPITestBase):
             '/api/v1/analytics/keywords/',
             '/api/v1/analytics/bad-feedbacks/',
             '/api/v1/analytics/system-metrics/',
-            '/api/v1/analytics/quality-reports/',
         ]
         for endpoint in system_endpoints:
             resp = self.client.get(endpoint, **self.org_headers)

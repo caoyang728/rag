@@ -39,11 +39,6 @@ app.conf.beat_schedule = {
         'task': 'apps.analytics.tasks.flush_realtime_metrics_task',
         'schedule': crontab(minute='*/5'),
     },
-    # 每小时整点执行忠实度评估（成本受 .env 控制）
-    'faithfulness-evaluation': {
-        'task': 'apps.analytics.tasks.run_faithfulness_evaluation',
-        'schedule': crontab(minute=0),
-    },
     # 每 5 分钟清理过期临时 IP 封禁
     'expire-ip-blacklist': {
         'task': 'apps.security.tasks.expire_ip_blacklist',

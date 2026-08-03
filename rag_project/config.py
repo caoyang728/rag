@@ -241,29 +241,70 @@ class AnalyticsConfig:
         return val in ('1', 'true', 'yes', 'on')
 
     @staticmethod
-    def faithfulness_enabled() -> bool:
-        """是否启用忠实度评估总开关"""
-        return AnalyticsConfig._parse_bool('FAITHFULNESS_ENABLED', 'true')
+    def eval_enabled() -> bool:
+        """是否启用评估总开关"""
+        return AnalyticsConfig._parse_bool('EVAL_ENABLED', 'true')
 
     @staticmethod
-    def faithfulness_batch_size() -> int:
-        """每次评估的最大记录数（默认 50，越大消耗越多 Token）"""
-        return int(os.getenv('FAITHFULNESS_BATCH_SIZE', '50'))
-
-    @staticmethod
-    def faithfulness_daily_limit() -> int:
+    def eval_daily_limit() -> int:
         """每日评估总量上限（默认 500，防止成本失控）"""
-        return int(os.getenv('FAITHFULNESS_DAILY_LIMIT', '500'))
+        return int(os.getenv('EVAL_DAILY_LIMIT', '500'))
 
     @staticmethod
-    def faithfulness_model() -> str:
-        """忠实度评估所用模型（默认 deepseek-chat，可改为更便宜的模型）"""
-        return os.getenv('FAITHFULNESS_MODEL', 'deepseek-chat')
+    def eval_model() -> str:
+        """评估所用模型（默认 deepseek-chat）"""
+        return os.getenv('EVAL_MODEL', 'deepseek-chat')
 
     @staticmethod
-    def faithfulness_cost_limit() -> float:
+    def eval_cost_limit() -> float:
         """每日评估成本上限（元，默认 1.0）"""
-        return float(os.getenv('FAITHFULNESS_COST_LIMIT', '1.0'))
+        return float(os.getenv('EVAL_COST_LIMIT', '1.0'))
+
+    # --- 生产对话自动评估（内联采样 + 限速）---
+    # 对话持久化后按采样率 + 令牌桶限速异步触发 DeepEval 12 维评估
+    # (evaluate_with_deepeval)，与定时批量任务 run_multi_dimension_evaluation 互补:
+    # 采样负责即时代表性样本，批量负责回扫未采样项；默认关闭，按需开启
+
+    @staticmethod
+    def production_eval_enabled() -> bool:
+        """是否启用生产对话内联采样评估（默认关闭，按需开启）"""
+        return AnalyticsConfig._parse_bool('PRODUCTION_EVAL_ENABLED', 'false')
+
+    @staticmethod
+    def production_eval_sample_rate() -> float:
+        """采样率（0~1，默认 0.05 即 5% 对话触发评估）
+        采样而非全量，兼顾覆盖度与成本；配合 rate_per_min 做双重限速
+        """
+        return float(os.getenv('PRODUCTION_EVAL_SAMPLE_RATE', '0.05'))
+
+    @staticmethod
+    def production_eval_rate_per_min() -> int:
+        """每分钟最大评估请求数（令牌桶，默认 10）
+        防止高峰对话量打爆 LLM 评估接口；与 daily_limit/cost_limit 三重保护
+        """
+        return int(os.getenv('PRODUCTION_EVAL_RATE_PER_MIN', '10'))
+
+    @staticmethod
+    def production_eval_metric_groups() -> list:
+        """生产评估启用的指标组（默认 all 全部 12 维）
+
+        可选值(逗号分隔组合,小写):
+        - all: 全部 12 维(默认,指标最全面)
+        - core: 核心质量(2维) faithfulness + answer_relevancy
+        - retrieval: 检索质量(2维) context_relevancy + hallucination
+        - safety: 安全性(2维) toxicity + bias
+        - quality: 答案质量(3维) completeness + conciseness + clarity
+        - business: 业务体验(3维) professionalism + helpfulness + actionability
+
+        降本场景示例:
+        - PRODUCTION_EVAL_METRIC_GROUPS=core,safety  → 4 维,核心+安全
+        - PRODUCTION_EVAL_METRIC_GROUPS=core         → 2 维,最低成本
+        - 不设置或 all                               → 12 维,全覆盖
+        """
+        raw = os.getenv('PRODUCTION_EVAL_METRIC_GROUPS', 'all').strip().lower()
+        if not raw:
+            return ['all']
+        return [g.strip() for g in raw.split(',') if g.strip()]
 
     @staticmethod
     def queue_monitor_enabled() -> bool:

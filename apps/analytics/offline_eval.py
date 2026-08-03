@@ -165,14 +165,23 @@ def export_dataset_to_json(dataset_id: int) -> List[Dict[str, Any]]:
     Returns:
         问题数据列表
     """
-    from apps.analytics.models import GoldenQuestion, GoldenRelevantDoc, GoldenReferenceAnswer
+    from apps.analytics.models import GoldenQuestion, GoldenReferenceAnswer
 
-    questions = GoldenQuestion.objects.filter(dataset_id=dataset_id).order_by('order')
+    # prefetch 预加载相关文档与参考答案,避免循环内 N+1 查询
+    questions = (
+        GoldenQuestion.objects
+        .filter(dataset_id=dataset_id)
+        .order_by('order')
+        .prefetch_related('relevant_docs', 'reference_answer')
+    )
     result = []
     for q in questions:
-        relevant_docs = GoldenRelevantDoc.objects.filter(question=q)
-        rel_doc_ids = [rd.document_id for rd in relevant_docs]
-        reference = GoldenReferenceAnswer.objects.filter(question=q).first()
+        rel_doc_ids = [rd.document_id for rd in q.relevant_docs.all()]
+        # 反向 OneToOne:预取后无关联对象时访问会抛 DoesNotExist,需安全兜底
+        try:
+            reference = q.reference_answer
+        except GoldenReferenceAnswer.DoesNotExist:
+            reference = None
 
         item = {
             'id': q.id,
@@ -218,13 +227,20 @@ def run_retrieval_evaluation(
         RetrievalQualityReport 实例
     """
     from apps.analytics.models import (
-        GoldenQuestion, GoldenRelevantDoc, RetrievalQualityReport
+        GoldenQuestion, RetrievalQualityReport
     )
     from apps.retrieval.hybrid import hybrid_search
 
     eval_batch_id = str(uuid.uuid4())[:8]
 
-    questions = GoldenQuestion.objects.filter(dataset_id=dataset_id)
+    # select_related('dataset') 避免 q.dataset.root_type 触发 N+1;
+    # prefetch_related('relevant_docs') 避免每题一次 GoldenRelevantDoc 查询
+    questions = (
+        GoldenQuestion.objects
+        .filter(dataset_id=dataset_id)
+        .select_related('dataset')
+        .prefetch_related('relevant_docs')
+    )
     if not questions.exists():
         raise ValueError(f'Dataset {dataset_id} has no questions')
 
@@ -247,11 +263,8 @@ def run_retrieval_evaluation(
     total_latency = 0
 
     for q in questions:
-        # 获取标注的相关文档 ID
-        relevant_doc_ids = set(
-            GoldenRelevantDoc.objects.filter(question=q)
-            .values_list('document_id', flat=True)
-        )
+        # 获取标注的相关文档 ID(使用预取数据,避免 N+1)
+        relevant_doc_ids = set(rd.document_id for rd in q.relevant_docs.all())
 
         if not relevant_doc_ids:
             # 无标注相关文档，跳过该问题的精确率计算
@@ -426,34 +439,29 @@ def _avg(values: List[float]) -> float:
 def run_answer_quality_evaluation(
     dataset_id: int,
     user=None,
-    dimensions: Optional[List[str]] = None,
     model: str = 'deepseek-chat',
     max_questions: int = 50,
 ) -> List[Dict[str, Any]]:
     """对黄金测试集执行离线回答质量评估
 
-    对每个问题执行完整 QA（检索 + 回答生成），然后用多维度引擎评估回答质量。
-    结果写入 MultiDimensionScore 表。
+    对每个问题执行完整 QA（检索 + 回答生成），然后用 DeepEval 12 维指标评估回答质量。
+    结果不落库（离线评估无 QaRecord），仅返回给前端展示；
+    生产对话评估由 production_eval.py 落 MultiDimensionScore 表。
 
     Args:
         dataset_id: 测试集 ID
         user: 执行检索的用户
-        dimensions: 要评估的维度列表
         model: 评估模型
         max_questions: 最多评估的问题数（限制成本）
 
     Returns:
         每个问题的评估结果汇总
     """
-    from apps.analytics.models import (
-        GoldenQuestion, GoldenReferenceAnswer, MultiDimensionScore,
-    )
+    from apps.analytics.models import GoldenQuestion, GoldenReferenceAnswer
+    from apps.knowledge.models import DocumentChunk
     from apps.retrieval.hybrid import hybrid_search
     from apps.llm.factory import get_llm
-    from apps.analytics.evaluation_engine import (
-        evaluate_all_dimensions,
-        build_context_from_chunks,
-    )
+    from apps.analytics.deepeval_metrics import evaluate_with_deepeval
 
     eval_batch_id = str(uuid.uuid4())[:8]
 
@@ -461,10 +469,7 @@ def run_answer_quality_evaluation(
     results = []
 
     for q in questions:
-        reference = GoldenReferenceAnswer.objects.filter(question=q).first()
-
         try:
-            # Step 1: 检索
             search_result = hybrid_search(
                 query=q.question,
                 user=user,
@@ -472,22 +477,21 @@ def run_answer_quality_evaluation(
             )
             chunks = search_result.get('chunks', [])
 
-            # Step 2: 构建上下文
+            # DeepEval retrieval_context 需要 list[str]
             chunk_ids = [c.get('chunk_id') for c in chunks[:5] if c.get('chunk_id')]
-            context = build_context_from_chunks(chunk_ids)
+            chunk_objs = DocumentChunk.objects.filter(id__in=chunk_ids)
+            chunk_map = {c.id: c.content for c in chunk_objs if c.content}
+            contexts = [chunk_map[cid][:500] for cid in chunk_ids if cid in chunk_map]
 
-            # Step 3: 生成回答
-            answer = _generate_answer(q.question, context, model)
+            context_str = '\n\n'.join(contexts) if contexts else ''
+            answer = _generate_answer(q.question, context_str, model)
 
-            # Step 4: 多维度评估
-            eval_results = evaluate_all_dimensions(
+            # DeepEval 12 维评估(无 reference 也能算,reference 仅用于人工对照)
+            eval_results = evaluate_with_deepeval(
                 question=q.question,
                 answer=answer,
-                context=context,
-                reference=reference.reference_answer if reference else '',
-                dimensions=dimensions,
+                contexts=contexts,
                 model=model,
-                eval_batch_id=eval_batch_id,
             )
 
             # 计算该问题的平均分
@@ -499,6 +503,7 @@ def run_answer_quality_evaluation(
                 'answer': answer[:200],
                 'avg_score': round(avg_score, 3),
                 'dimension_scores': {r['dimension']: r['score'] for r in eval_results},
+                'eval_batch_id': eval_batch_id,
             })
 
         except Exception as e:
@@ -511,11 +516,13 @@ def run_answer_quality_evaluation(
 
     # 汇总
     if results:
-        total_avg = sum(r['avg_score'] for r in results if 'avg_score' in r) / max(len(results), 1)
-        logger.info(
-            f'[AnswerEval] Completed: {len(results)} questions, '
-            f'avg_score={total_avg:.3f}, batch={eval_batch_id}'
-        )
+        scored = [r for r in results if 'avg_score' in r]
+        if scored:
+            total_avg = sum(r['avg_score'] for r in scored) / len(scored)
+            logger.info(
+                f'[AnswerEval] Completed: {len(results)} questions, '
+                f'avg_score={total_avg:.3f}, batch={eval_batch_id}'
+            )
 
     return results
 

@@ -79,12 +79,10 @@ django-extensions==4.1
 # torch==2.13.0
 
 # --- RAG 评估（Ragas 离线校准 + DeepEval 生产对话评估）---
-# ragas: 离线全自动测试集生成 + 标准指标,校准自研引擎(见 ragas_pipeline.py)
-#   ragas 0.4+ 与 langchain-community 0.4+ 路径差异,通过 ragas_pipeline 顶部 shim 处理
-# deepeval: 生产对话多维度 LLM-as-judge(7 维,见 deepeval_metrics.py / production_eval.py)
-#   内置 DeepSeekModel,直接复用项目 LLM_API_KEY
-# click 显式 pin:deepeval 安装时会降级 click,而 huggingface-hub 要求 click>=8.4.2
-ragas>=0.4.0,<1.0.0
-deepeval>=4.0.0,<5.0.0
-pandas>=2.0.0
-click>=8.4.2
+# ragas>=0.4.0,<1.0.0
+# deepeval>=4.0.0,<5.0.0
+# pandas>=2.0.0
+# click==8.4.2
+# ragas / deepeval / pandas 不在此安装,改为在 Dockerfile 中分步安装
+# 原因:deepeval(要求 click<8.4) 与 huggingface-hub(要求 click>=8.4.2) 存在 pip resolver 冲突
+# Dockerfile 中按 ragas → deepeval → click 强制升级 的顺序分步安装解决

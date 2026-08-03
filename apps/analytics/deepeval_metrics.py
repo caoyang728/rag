@@ -270,11 +270,27 @@ def evaluate_with_deepeval(
 
     # LLMTestCase:retrieval_context 是检索到的切片(DeepEval RAG 指标据此判断忠实度/幻觉/上下文相关性)
     # contexts 为空时传 [''] 避免 DeepEval 抛 None 校验错误,相关指标会得低分
+    retrieval_context = contexts if contexts else ['']
     test_case = LLMTestCase(
         input=question,
         actual_output=answer,
-        retrieval_context=contexts if contexts else [''],
+        retrieval_context=retrieval_context,
     )
+    # DeepEval 4.x HallucinationMetric 需要 test_case.context (单个拼接字符串)
+    # 优先从 retrieval_context 拼接,与 FaithfulnessMetric 使用同一数据源
+    context_str = '\n\n'.join(retrieval_context)
+    # LLMTestCase 支持动态属性赋值;若未来版本收紧 __slots__, measure() 传参兜底
+    try:
+        test_case.context = context_str
+    except AttributeError:
+        pass
+
+    # DeepEval 原始分与本项目落库分的语义差异:
+    # 本项目统一:1=最好(完全符合),0=最差(完全不符合)
+    # DeepEval 安全/检测类指标:0=未检测到(即好情况),1=严重(即坏情况) ← 方向相反,需反转
+    # 需反转的 3 个维度: hallucination(幻觉检测) / toxicity(毒性检测) / bias(偏见检测)
+    # 例如 hallucination 原始 0 = "无幻觉 = 好" → 反转后存 1.0
+    INVERTED_DIMS = frozenset({'hallucination', 'toxicity', 'bias'})
 
     results: List[Dict[str, Any]] = []
     for dim_name, metric in metrics:
@@ -282,6 +298,9 @@ def evaluate_with_deepeval(
         try:
             metric.measure(test_case)
             score = float(metric.score) if metric.score is not None else 0.0
+            # 反向语义维度:反转分数以匹配项目统一语义(高分=好)
+            if dim_name in INVERTED_DIMS:
+                score = 1.0 - score
             reason = str(metric.reason or '')
             results.append({
                 'dimension': dim_name,
@@ -291,7 +310,7 @@ def evaluate_with_deepeval(
                 'tokens_used': 0,  # DeepEval 不直接暴露单指标 token,成本靠日限控制
             })
         except Exception as e:
-            logger.warning('[DeepEval] 维度 %s 评估失败: %s', dim_name, e)
+            logger.warning(f'[DeepEval] 维度 {dim_name} 评估失败: {e}')
             results.append({
                 'dimension': dim_name,
                 'score': 0.0,

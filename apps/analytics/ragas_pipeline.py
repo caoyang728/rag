@@ -244,7 +244,7 @@ def generate_testset(
         embedding_model=generator_embeddings,
     )
 
-    logger.info('[RagasPipeline] 开始生成测试集, target_size=%d', testset_size)
+    logger.info(f'[RagasPipeline] 开始生成测试集, target_size={testset_size}')
     t0 = time.time()
 
     # generate_with_langchain_docs 接受 LangChain Document 列表,
@@ -255,7 +255,7 @@ def generate_testset(
     )
 
     elapsed = int(time.time() - t0)
-    logger.info('[RagasPipeline] 测试集生成完成, 耗时=%ds', elapsed)
+    logger.info(f'[RagasPipeline] 测试集生成完成, 耗时={elapsed}s')
 
     # 转为统一字典格式,屏蔽 Ragas 不同版本的 schema 差异
     df = testset.to_pandas()
@@ -272,7 +272,7 @@ def generate_testset(
     samples = [s for s in samples if s['user_input'] and s['reference']]
 
     testset_id = datetime.now().strftime('%Y%m%d_%H%M%S') + '_' + uuid.uuid4().hex[:6]
-    logger.info('[RagasPipeline] 有效测试样本: %d, testset_id=%s', len(samples), testset_id)
+    logger.info('[RagasPipeline] 有效测试样本: {}, testset_id={}', len(samples), testset_id)
     return samples, testset_id
 
 
@@ -282,7 +282,7 @@ def save_testset(samples: List[Dict[str, Any]], testset_id: str, output_dir: str
     path = os.path.join(output_dir, f'testset_{testset_id}.json')
     with open(path, 'w', encoding='utf-8') as f:
         json.dump(samples, f, ensure_ascii=False, indent=2)
-    logger.info('[RagasPipeline] 测试集已保存: %s', path)
+    logger.info(f'[RagasPipeline] 测试集已保存: {path}')
     return path
 
 
@@ -337,7 +337,7 @@ def run_rag_for_question(question: str, user, model: Optional[str] = None) -> Di
     try:
         search_result = hybrid_search(query=question, user=user)
     except Exception as e:
-        logger.warning('[RagasPipeline] 检索失败: %s, question=%s', e, question[:60])
+        logger.warning(f'[RagasPipeline] 检索失败: {e}, question={question[:60]}')
         result['error'] = f'retrieval_failed: {e}'
         return result
 
@@ -370,7 +370,7 @@ def run_rag_for_question(question: str, user, model: Optional[str] = None) -> Di
         resp = llm.chat(messages, temperature=0.3, max_tokens=1000)
         result['answer'] = resp.get('content', '')
     except Exception as e:
-        logger.warning('[RagasPipeline] 回答生成失败: %s', e)
+        logger.warning(f'[RagasPipeline] 回答生成失败: {e}')
         result['error'] = f'generation_failed: {e}'
         result['answer'] = f'[回答生成失败] {e}'
 
@@ -466,7 +466,7 @@ def _evaluate_sync(samples: List[Dict[str, Any]], evaluator_llm, evaluator_embed
     metrics = _build_metrics(evaluator_llm, evaluator_embeddings)
     dataset = EvaluationDataset(eval_samples)
 
-    logger.info('[RagasPipeline] 开始 Ragas 指标评估, 样本数=%d', len(eval_samples))
+    logger.info('[RagasPipeline] 开始 Ragas 指标评估, 样本数={}', len(eval_samples))
     t0 = time.time()
 
     # evaluate 默认 allow_nest_asyncio=True,在 Django 同步命令环境可正常执行
@@ -476,7 +476,7 @@ def _evaluate_sync(samples: List[Dict[str, Any]], evaluator_llm, evaluator_embed
         show_progress=True,
         raise_exceptions=False,  # 单条失败返回 NaN,不中断整体
     )
-    logger.info('[RagasPipeline] 评估完成, 耗时=%ds', int(time.time() - t0))
+    logger.info('[RagasPipeline] 评估完成, 耗时={}s', int(time.time() - t0))
 
     # 把评估结果合并回 enriched(result 是按行索引的)
     # result.to_pandas() 返回每行各指标分数
@@ -600,7 +600,7 @@ def generate_report(
                 f.write(f'  - RAG错误: {e["_rag_error"]}\n')
             f.write('\n')
 
-    logger.info('[RagasPipeline] 报告已生成: %s, %s', json_path, md_path)
+    logger.info(f'[RagasPipeline] 报告已生成: {json_path}, {md_path}')
     return {'json': json_path, 'markdown': md_path}
 
 
@@ -651,7 +651,7 @@ def run_full_pipeline(
         save_testset(samples, testset_id, output_dir)
     else:
         testset_id = datetime.now().strftime('%Y%m%d_%H%M%S') + '_reuse_' + uuid.uuid4().hex[:6]
-        logger.info('[RagasPipeline] 复用已有测试集, 样本数=%d', len(samples))
+        logger.info(f'[RagasPipeline] 复用已有测试集, 样本数={len(samples)}')
 
     evaluator_llm = _get_evaluator_llm(model)
     evaluator_embeddings = _get_evaluator_embeddings()
@@ -672,7 +672,7 @@ def run_full_pipeline(
     for k in metric_keys:
         scores = [e.get(k) for e in enriched if e.get(k) is not None]
         summary[k] = round(sum(scores) / len(scores), 4) if scores else None
-    logger.info('[RagasPipeline] 评估汇总: %s', summary)
+    logger.info(f'[RagasPipeline] 评估汇总: {summary}')
 
     return {
         'testset_id': testset_id,

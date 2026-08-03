@@ -154,7 +154,7 @@ def load_corpus_chunks(
     - 跳过过短切片(< min_chunk_chars),避免生成低质量问题
 
     Args:
-        root_type: 限定知识库根类型;None 表示全部
+        root_type: 限定领域;None 表示全部
         limit_docs: 最多取多少篇文档(控制生成成本)
         min_chunk_chars: 切片最小字符数,过滤碎片
 
@@ -628,7 +628,7 @@ def run_full_pipeline(
     Args:
         testset_size: 测试集大小
         limit_docs: 取多少篇文档作为语料
-        root_type: 限定知识库类型
+        root_type: 限定领域
         model: 评估/生成用模型;None 用项目默认模型
         output_dir: 报告输出目录
         corpus_docs: 预加载的语料(可选)

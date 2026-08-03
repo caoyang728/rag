@@ -597,3 +597,66 @@ def periodic_retrieval_evaluation():
 
     logger.info(f'[PeriodicEval] Evaluated {len(results)} datasets: {results}')
     return {'ok': True, 'evaluated_datasets': len(results), 'results': results}
+
+
+# ============================================================================
+# 13. 低分回归测试集 - 沉淀(每日) + 全链路评估(每周)
+# ============================================================================
+
+@shared_task(name='analytics.siphon_low_score_regression', queue='analytics')
+def siphon_low_score_regression():
+    """每日从生产低分对话沉淀到回归测试集
+
+    选取最近已评估的 QA 中均分最低的 top N,按 root_type 分流到对应的
+    regression_low_score 测试集,超出容量上限时按 pass_count 降序淘汰。
+    关闭开关(LOW_SCORE_REGRESSION_ENABLED=0)时跳过,手动触发不受影响。
+    """
+    if not AnalyticsConfig.low_score_regression_enabled():
+        logger.debug('[RegressionSiphon] 低分回归已关闭,跳过定时沉淀')
+        return {'ok': True, 'skipped': True, 'reason': 'disabled'}
+
+    from apps.analytics.regression_eval import siphon_low_score_qa_to_regression_set
+    try:
+        result = siphon_low_score_qa_to_regression_set()
+        logger.info(f'[RegressionSiphon] done: {result}')
+        return {'ok': True, **result}
+    except Exception:
+        logger.exception('[RegressionSiphon] 沉淀失败')
+        return {'ok': False, 'error': 'siphon_failed'}
+
+
+@shared_task(name='analytics.run_regression_evaluation', queue='analytics')
+def run_regression_evaluation_task(dataset_id: int = None, limit: int = None):
+    """每周对低分回归测试集执行全链路评估,更新 pass_count
+
+    全链路:检索→生成→12 维评估,均分 ≥ threshold 视为通过(pass_count +1),
+    否则重置为 0。成本较高(每问题 90~180s + LLM 费用),故每周一次。
+
+    Args:
+        dataset_id: 指定测试集;None 评估所有 regression_low_score 测试集
+        limit: 每个测试集最多评估的问题数(手动触发时可限制成本)
+    """
+    if not AnalyticsConfig.low_score_regression_enabled():
+        logger.debug('[RegressionEval] 低分回归已关闭,跳过定时评估')
+        return {'ok': True, 'skipped': True, 'reason': 'disabled'}
+
+    from apps.analytics.regression_eval import run_regression_evaluation
+    from apps.users.models import User
+
+    # 评估需要一个用户做权限过滤,复用 periodic_retrieval_evaluation 的取用户逻辑
+    sys_user = User.objects.filter(username='system').first()
+    if not sys_user:
+        sys_user = User.objects.filter(is_superuser=True).first()
+    if not sys_user:
+        return {'ok': False, 'error': 'no_user_for_eval'}
+
+    try:
+        result = run_regression_evaluation(dataset_id=dataset_id, user=sys_user, limit=limit)
+        logger.info(
+            f'[RegressionEval] done: evaluated={result["evaluated"]} '
+            f'passed={result["passed"]} failed={result["failed"]}'
+        )
+        return {'ok': True, **result}
+    except Exception:
+        logger.exception('[RegressionEval] 评估失败')
+        return {'ok': False, 'error': 'eval_failed'}

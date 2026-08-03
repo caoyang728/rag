@@ -47,9 +47,21 @@
 							<div class="flex gap-4">
 								<button class="btn btn-primary" onclick="showCreateDatasetDialog()">➕ 创建测试集</button>
 								<button class="btn" onclick="showImportDialog()">📥 批量导入</button>
+								<button class="btn" onclick="siphonRegression()">🔬 沉淀低分</button>
+								<button class="btn" onclick="runRegressionEval()">🧪 评估回归</button>
 							</div>
 							<div class="text-sub text-sm" id="datasetSummary"></div>
 						</div>
+					</div>
+
+					<!-- 低分回归说明条(仅提示,不影响操作) -->
+					<div class="regression-tip mb-16">
+						<span class="regression-tip-icon">💡</span>
+						<span class="regression-tip-text">
+							<strong>低分回归测试集</strong>:从生产低分对话自动沉淀,防止已知 bad case 退化。
+							连续通过 <span id="regressionSuggestPasses">3</span> 次后建议人工 review 移除;
+							评估失败则通过次数重置为 0。
+						</span>
 					</div>
 
 					<!-- 测试集列表 -->
@@ -59,12 +71,12 @@
 							<table class="table" id="datasetTable">
 								<thead>
 									<tr>
-										<th>ID</th><th>名称</th><th>类型</th><th>问题数</th>
+										<th>ID</th><th>名称</th><th>分类</th><th>领域</th><th>问题数</th>
 										<th>版本</th><th>状态</th><th>更新时间</th><th>操作</th>
 									</tr>
 								</thead>
 								<tbody id="datasetTableBody">
-									<tr><td colspan="8" class="text-center text-sub">加载中...</td></tr>
+									<tr><td colspan="9" class="text-center text-sub">加载中...</td></tr>
 								</tbody>
 							</table>
 						</div>
@@ -467,7 +479,7 @@
 								<tr>
 									<th>QA ID</th><th>问题</th><th>回答摘要</th><th>均分</th>
 									<th>归因分类</th><th>影响层级</th><th>方法</th>
-									<th>知识库</th><th>状态</th><th>时间</th><th>操作</th>
+									<th>领域</th><th>状态</th><th>时间</th><th>操作</th>
 								</tr>
 							</thead>
 							<tbody id="attrTableBody">
@@ -488,13 +500,8 @@
 			<div class="dialog-title">创建测试集</div>
 			<div class="dialog-body">
 				<div class="form-item"><label for="dsName">测试集名称</label><input id="dsName" class="input" placeholder="如: HR领域2026Q3"></div>
-				<div class="form-item"><label for="dsRootType">知识库类型</label>
-					<select id="dsRootType" class="select">
-						<option value="knowledge_base">知识库</option>
-						<option value="company_doc">公司文档</option>
-						<option value="dept_doc">部门文档</option>
-						<option value="team_doc">团队文档</option>
-					</select>
+				<div class="form-item"><label for="dsRootType">领域</label>
+					<select id="dsRootType" class="select"></select>
 				</div>
 				<div class="form-item"><label for="dsVersion">版本</label><input id="dsVersion" class="input" value="v1"></div>
 				<div class="form-item"><label for="dsDesc">描述</label><textarea id="dsDesc" class="textarea" rows="3" placeholder="测试集用途说明"></textarea></div>

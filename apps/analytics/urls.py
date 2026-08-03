@@ -33,6 +33,14 @@ urlpatterns = [
     path("golden-datasets/<int:ds_id>/questions/", views.GoldenQuestionView.as_view()),
 
     # ========================================================================
+    # RAG 质量评估 - 低分回归测试集(沉淀 + 全链路评估)
+    # ========================================================================
+    # 手动触发沉淀(同步,从生产低分对话取 top N 加入回归测试集)
+    path("regression/siphon/", views.SiphonRegressionView.as_view()),
+    # 手动触发全链路评估(异步,检索→生成→12 维,更新 pass_count)
+    path("regression/eval/", views.RunRegressionEvalView.as_view()),
+
+    # ========================================================================
     # RAG 质量评估 - 离线评估执行
     # ========================================================================
     path("eval/retrieval/", views.RunRetrievalEvalView.as_view()),

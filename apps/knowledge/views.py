@@ -1575,6 +1575,9 @@ class DocumentUploadView(APIView):
 
     visibility_level: TEAM_ONLY / DEPT_ONLY / PUBLIC
     （兼容旧版 visible_scope: team / dept / public）
+
+    TODO: 需要优化上传逻辑,增加 root_type(领域) 参数让用户显式选择领域,
+    当前领域由 node_id 所属的根节点隐式决定,用户无法在上传时选择目标领域。
     """
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser, JSONParser]

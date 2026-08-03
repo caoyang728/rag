@@ -17,14 +17,21 @@ class GoldenDatasetSerializer(serializers.ModelSerializer):
     """黄金测试集序列化器
 
     对应 GoldenDatasetListView / GoldenDatasetDetailView 的列表与详情返回。
+    - dataset_type_label: choices 中文展示名,前端直接渲染无需维护映射表
     """
+
+    dataset_type_label = serializers.SerializerMethodField()
 
     class Meta:
         model = GoldenDataset
         fields = [
             'id', 'name', 'description', 'root_type', 'status',
+            'dataset_type', 'dataset_type_label',
             'question_count', 'version', 'created_at', 'updated_at',
         ]
+
+    def get_dataset_type_label(self, obj):
+        return obj.get_dataset_type_display()
 
 
 class GoldenQuestionSerializer(serializers.ModelSerializer):
@@ -36,6 +43,8 @@ class GoldenQuestionSerializer(serializers.ModelSerializer):
     - has_reference: 由 View 中 select_related('reference_answer') 判断是否存在，
       OneToOne 反向关系无关联时 hasattr 返回 False，这里用 SerializerMethodField
       保持原有判断逻辑，避免 DRF 试图从不存在的字段取值。
+    - pass_count / source_qa_record_id / last_eval_at: 低分回归专用字段,
+      自定义测试集保持默认值(0/null),前端按 dataset_type 决定是否展示。
     """
     relevant_doc_count = serializers.IntegerField(read_only=True, default=0)
     has_reference = serializers.SerializerMethodField()
@@ -45,6 +54,7 @@ class GoldenQuestionSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'question', 'question_type', 'difficulty', 'tags', 'order',
             'relevant_doc_count', 'has_reference',
+            'source_qa_record_id', 'pass_count', 'last_eval_at',
         ]
 
     def get_has_reference(self, obj):

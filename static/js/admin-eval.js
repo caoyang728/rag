@@ -11,6 +11,8 @@
  */
 
 let datasetsCache = [];
+// 领域列表缓存(从 /api/v1/knowledge/nodes/root_types/ 动态获取,避免硬编码)
+let rootTypesCache = null;
 
 // 手动评估相关的模块级状态
 // evalToken: 每次派发评估时递增,用于取消旧轮询(用户切换 QA ID 时)
@@ -130,10 +132,10 @@ async function loadDatasets() {
 		if (!datasetsCache.length) {
 			tbody.innerHTML = `
 				<tr>
-					<td colspan="8">
+					<td colspan="9">
 						<div class="empty-state">
 							<div class="empty-state-icon">📋</div>
-							<div>暂无测试集，点击右上角"创建测试集"开始</div>
+							<div>暂无测试集，点击右上角"创建测试集"或"沉淀低分"开始</div>
 						</div>
 					</td>
 				</tr>`;
@@ -143,7 +145,8 @@ async function loadDatasets() {
 			<tr>
 				<td>${d.id}</td>
 				<td>${escapeHtml(d.name)}</td>
-				<td><span class="tag">${escapeHtml(d.root_type)}</span></td>
+				<td><span class="tag ${d.dataset_type === 'regression_low_score' ? 'tag-regression' : ''}">${escapeHtml(d.dataset_type_label || d.dataset_type || '自定义')}</span></td>
+				<td><span class="tag">${escapeHtml(rootTypeLabel(d.root_type))}</span></td>
 				<td>${d.question_count}</td>
 				<td>${escapeHtml(d.version)}</td>
 				<td><span class="badge ${badgeClass(d.status)}">${statusLabel(d.status)}</span></td>
@@ -168,11 +171,41 @@ function badgeClass(s) {
 	return { draft: 'badge-default', active: 'badge-success', archived: 'badge-warning' }[s] || 'badge-default';
 }
 
-function showCreateDatasetDialog() {
+/** 领域显示名映射:'all' 显示为"全部领域",其余原样返回 */
+function rootTypeLabel(rt) {
+	return rt === 'all' ? '全部领域' : (rt || '-');
+}
+
+/** 加载领域列表(从后端动态获取,避免硬编码与实际节点树脱节)
+ * root_type 是知识库根节点的领域标识,按文档域划分(如 company_doc/tech_doc),
+ * 不是组织架构维度(部门/团队已由节点树 层级表达)。
+ * 首次调用拉取并缓存,后续直接用缓存填充下拉。
+ */
+async function loadRootTypes() {
+	if (rootTypesCache) return rootTypesCache;
+	try {
+		const data = await api.getJson('/api/v1/knowledge/nodes/root_types/');
+		rootTypesCache = data.root_types || [];
+	} catch (e) {
+		// 接口不可用时返回兜底值但不缓存,下次打开弹窗会重试
+		return [{ code: 'company_doc', name: 'company_doc' }];
+	}
+	return rootTypesCache;
+}
+
+async function showCreateDatasetDialog() {
 	$('#createDialog').style.display = 'flex';
 	$('#dsName').value = '';
 	$('#dsDesc').value = '';
 	$('#dsVersion').value = 'v1';
+	// 动态填充领域下拉:默认"全部领域",后接实际根节点类型
+	const sel = $('#dsRootType');
+	// 先放占位 option,防止 API 未返回时用户点击创建导致 root_type 为空
+	sel.innerHTML = '<option value="all" selected>全部领域</option><option disabled>加载中...</option>';
+	const types = await loadRootTypes();
+	sel.innerHTML = '<option value="all">全部领域</option>' +
+		types.map(t => `<option value="${escapeHtml(t.code)}">${escapeHtml(t.name)}</option>`).join('');
+	sel.value = 'all';
 }
 
 async function createDataset() {
@@ -194,29 +227,54 @@ async function createDataset() {
 	}
 }
 
-async function deleteDataset(id) {
-	if (!confirm('确定删除此测试集？关联的问题和标注也会被删除。')) return;
-	try {
-		await api.delete(`/api/v1/analytics/golden-datasets/${id}/`);
-		toast('删除成功', 'success');
-		loadDatasets();
-	} catch (e) {
-		toast('删除失败: ' + e.message, 'error');
-	}
+function deleteDataset(id) {
+	showConfirmDialog({
+		title: '删除测试集',
+		bannerText: '关联的问题和标注也会被删除,此操作不可恢复',
+		bannerType: 'danger',
+		buttons: [
+			{ text: '取消', type: 'cancel', onClick: (ctx) => ctx.close() },
+			{ text: '确认删除', type: 'danger', onClick: async (ctx) => {
+				ctx.close();
+				try {
+					await api.delete(`/api/v1/analytics/golden-datasets/${id}/`);
+					toast('删除成功', 'success');
+					loadDatasets();
+				} catch (e) {
+					toast('删除失败: ' + e.message, 'error');
+				}
+			} },
+		],
+	});
 }
 
 async function viewDataset(id) {
 	try {
 		const data = await api.getJson(`/api/v1/analytics/golden-datasets/${id}/`);
 		const rows = data.questions || [];
+		// 低分回归测试集展示 pass_count/last_eval_at,自定义测试集展示难度
+		const isRegression = data.dataset_type === 'regression_low_score';
+		// 建议移除阈值从后端获取(默认3),避免前端硬编码与配置不一致
+		const suggestPasses = data.suggest_remove_passes || 3;
 		if (!rows.length) {
-			toast('此测试集暂无问题，可点击"批量导入"添加', 'info');
+			toast('此测试集暂无问题，可点击"批量导入"或"沉淀低分"添加', 'info');
 			return;
 		}
-		const lines = [`测试集: ${data.name}`, `共 ${rows.length} 个问题:`, ''];
+		const lines = [
+			`测试集: ${data.name}（${data.dataset_type_label || '自定义'}）`,
+			`共 ${rows.length} 个问题:`, '',
+		];
 		rows.slice(0, 5).forEach((q, i) => {
 			const question = (q.question || '').substring(0, 50);
-			lines.push(`${i + 1}. ${question}... [难度:${q.difficulty}]`);
+			if (isRegression) {
+				// 低分回归:展示连续通过次数 + 最近评估时间 + 建议移除标记
+				const passInfo = `通过 ${q.pass_count || 0} 次`;
+				const evalTime = q.last_eval_at ? formatDate(q.last_eval_at) : '未评估';
+				const suggest = (q.pass_count || 0) >= suggestPasses ? ' ⭐建议移除' : '';
+				lines.push(`${i + 1}. ${question}... [${passInfo} | ${evalTime}]${suggest}`);
+			} else {
+				lines.push(`${i + 1}. ${question}... [难度:${q.difficulty}]`);
+			}
 		});
 		if (rows.length > 5) lines.push('', `... 还有 ${rows.length - 5} 个问题`);
 		toast(lines.join('\n'), 'info');
@@ -264,6 +322,66 @@ async function importQuestions() {
 	} catch (e) {
 		toast('导入失败: ' + e.message, 'error');
 	}
+}
+
+/* ============ 低分回归测试集 ============ */
+
+// 从生产低分对话沉淀到回归测试集(同步,后端直接返回结果)
+function siphonRegression() {
+	showConfirmDialog({
+		title: '沉淀低分对话',
+		bannerText: '从生产低分对话中取 top 50 沉淀到回归测试集',
+		bodyHtml: '<p class="text-sm text-sub">按 12 维均分升序取最低分,按领域分流</p>',
+		buttons: [
+			{ text: '取消', type: 'cancel', onClick: (ctx) => ctx.close() },
+			{ text: '开始沉淀', type: 'primary', onClick: async (ctx) => {
+				ctx.close();
+				toast('正在沉淀低分对话...', 'info');
+				try {
+					const result = await api.postJson('/api/v1/analytics/regression/siphon/', {});
+					const n = result.siphoned || 0;
+					if (n === 0) {
+						toast(result.reason === 'no_candidates' ? '暂无新的低分对话可沉淀(可能已全部沉淀过)' : '沉淀完成,无新增', 'info');
+					} else {
+						const byRoot = result.by_root || {};
+						const detail = Object.entries(byRoot).map(([k, v]) => `${k}:${v}`).join(' ');
+						toast(`沉淀完成: 新增 ${n} 条(${detail})`, 'success');
+					}
+					loadDatasets();
+				} catch (e) {
+					toast('沉淀失败: ' + e.message, 'error');
+				}
+			} },
+		],
+	});
+}
+
+// 对低分回归测试集执行全链路评估(异步派发,前端提示后刷新查看 pass_count)
+function runRegressionEval() {
+	showConfirmDialog({
+		title: '评估回归',
+		bannerText: '对所有低分回归测试集执行全链路评估',
+		bannerType: 'danger',
+		bodyHtml: '<p class="text-sm text-sub">检索→生成→12 维评估,每问题约 90~180s,耗时较长</p>',
+		buttons: [
+			{ text: '取消', type: 'cancel', onClick: (ctx) => ctx.close() },
+			{ text: '开始评估', type: 'primary', onClick: async (ctx) => {
+				ctx.close();
+				toast('正在派发回归评估任务...', 'info');
+				try {
+					const result = await api.postJson('/api/v1/analytics/regression/eval/', {});
+					if (result.queued) {
+						toast(result.message || '评估已派发,请稍后刷新查看 pass_count 变化', 'info');
+					} else {
+						toast(`评估完成: 通过 ${result.passed || 0} / 失败 ${result.failed || 0}`, 'success');
+						loadDatasets();
+					}
+				} catch (e) {
+					toast('评估失败: ' + e.message, 'error');
+				}
+			} },
+		],
+	});
 }
 
 /* ============ 检索质量 ============ */
@@ -745,7 +863,7 @@ async function showQaDetail(qaId) {
 			<div class="mb-16">
 				<div class="flex justify-between items-baseline mb-8">
 					<strong>对话内容</strong>
-					<span class="text-sm text-sub">均分 ${scorePill(data.avg_score, fmtPct)} · 用户 ${escapeHtml(qa.user)} · 知识库 ${escapeHtml(qa.root_type)}</span>
+					<span class="text-sm text-sub">均分 ${scorePill(data.avg_score, fmtPct)} · 用户 ${escapeHtml(qa.user)} · 领域 ${escapeHtml(qa.root_type)}</span>
 				</div>
 				<div class="mb-8"><strong class="text-sub">问题:</strong> ${escapeHtml(qa.question)}</div>
 				<div><strong class="text-sub">回答:</strong> ${escapeHtml(qa.answer)}</div>
@@ -1151,15 +1269,25 @@ async function downloadCoverageReport(id) {
 }
 
 /** 删除覆盖率报告 */
-async function deleteCoverageReport(id) {
-	if (!confirm('确定删除此报告？删除后不可恢复。')) return;
-	try {
-		await api.delete(`/api/v1/analytics/coverage/reports/${id}/`);
-		toast('删除成功', 'success');
-		loadCoverageReports();
-	} catch (e) {
-		toast('删除失败: ' + e.message, 'error');
-	}
+function deleteCoverageReport(id) {
+	showConfirmDialog({
+		title: '删除报告',
+		bannerText: '删除后不可恢复',
+		bannerType: 'danger',
+		buttons: [
+			{ text: '取消', type: 'cancel', onClick: (ctx) => ctx.close() },
+			{ text: '确认删除', type: 'danger', onClick: async (ctx) => {
+				ctx.close();
+				try {
+					await api.delete(`/api/v1/analytics/coverage/reports/${id}/`);
+					toast('删除成功', 'success');
+					loadCoverageReports();
+				} catch (e) {
+					toast('删除失败: ' + e.message, 'error');
+				}
+			} },
+		],
+	});
 }
 
 /* ============ 反馈闭环 ============ */
@@ -1434,7 +1562,7 @@ async function showAttrDetail(qaId) {
 			<div class="mb-16">
 				<div class="flex justify-between items-baseline mb-8">
 					<strong>对话内容</strong>
-					<span class="text-sm text-sub">均分 ${scorePill(data.avg_score, fmtPct)} · 阈值 ${fmtPct(data.threshold)} · 知识库 ${escapeHtml(data.root_type || '-')}</span>
+					<span class="text-sm text-sub">均分 ${scorePill(data.avg_score, fmtPct)} · 阈值 ${fmtPct(data.threshold)} · 领域 ${escapeHtml(data.root_type || '-')}</span>
 				</div>
 				<div class="mb-8"><strong class="text-sub">问题:</strong> ${escapeHtml(data.full_question || data.question || '')}</div>
 				<div><strong class="text-sub">回答:</strong> ${escapeHtml(data.full_answer || data.answer || '')}</div>

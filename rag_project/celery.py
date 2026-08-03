@@ -79,6 +79,17 @@ app.conf.beat_schedule = {
         'task': 'apps.analytics.tasks.periodic_retrieval_evaluation',
         'schedule': crontab(hour=5, minute=0, day_of_week=1),
     },
+    # 每日 05:30 从生产低分对话沉淀到回归测试集(低峰期,避免影响线上评估)
+    'siphon-low-score-regression': {
+        'task': 'apps.analytics.tasks.siphon_low_score_regression',
+        'schedule': crontab(hour=5, minute=30),
+    },
+    # 每周一 06:00 对低分回归测试集执行全链路评估(成本高,周一次)
+    # 与 periodic-retrieval-eval 错开 1h,避免同时跑挤占 LLM 配额
+    'run-regression-evaluation': {
+        'task': 'apps.analytics.tasks.run_regression_evaluation_task',
+        'schedule': crontab(hour=6, minute=0, day_of_week=1),
+    },
 }
 
 

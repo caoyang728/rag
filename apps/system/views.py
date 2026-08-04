@@ -1129,9 +1129,11 @@ class ConfigChangeTicketViewSet(viewsets.ViewSet):
             return Response(self._serialize_ticket(ticket))
 
         if ticket.status == 'first_approved':
-            # 超管复核：仅超管可操作，且不能与审核人同一人
+            # 超管复核：仅超管可操作，且不能与审核人/创建人同一人
             if not request.user.is_super_admin:
                 return Response({"detail": "高风险项复核仅超级管理员可操作"}, status=status.HTTP_403_FORBIDDEN)
+            if ticket.creator_id and ticket.creator_id == request.user.id:
+                return Response({"detail": "不能复核自己创建的工单"}, status=status.HTTP_403_FORBIDDEN)
             if ticket.reviewer_id and ticket.reviewer_id == request.user.id:
                 return Response({"detail": "复核人不能与审核人相同"}, status=status.HTTP_403_FORBIDDEN)
             ticket.super_admin_reviewer = request.user if request.user.is_authenticated else None
@@ -1184,9 +1186,11 @@ class ConfigChangeTicketViewSet(viewsets.ViewSet):
             return Response(self._serialize_ticket(ticket))
 
         if ticket.status == 'first_approved':
-            # 超管复核驳回：仅超管可操作，且不能与审核人同一人
+            # 超管复核驳回：仅超管可操作，且不能与审核人/创建人同一人
             if not request.user.is_super_admin:
                 return Response({"detail": "高风险项复核仅超级管理员可操作"}, status=status.HTTP_403_FORBIDDEN)
+            if ticket.creator_id and ticket.creator_id == request.user.id:
+                return Response({"detail": "不能驳回自己创建的工单"}, status=status.HTTP_403_FORBIDDEN)
             if ticket.reviewer_id and ticket.reviewer_id == request.user.id:
                 return Response({"detail": "复核驳回人与审核人不能相同"}, status=status.HTTP_403_FORBIDDEN)
             ticket.status = 'rejected'
@@ -1491,9 +1495,11 @@ class ModelChangeTicketViewSet(viewsets.ViewSet):
             return Response(self._serialize_ticket(ticket))
 
         if ticket.status == 'first_approved':
-            # 超管复核：仅超管可操作，且不能与审核人同一人
+            # 超管复核：仅超管可操作，且不能与审核人/创建人同一人
             if not request.user.is_super_admin:
                 return Response({"detail": "删除操作复核仅超级管理员可操作"}, status=status.HTTP_403_FORBIDDEN)
+            if ticket.creator_id and ticket.creator_id == request.user.id:
+                return Response({"detail": "不能复核自己创建的工单"}, status=status.HTTP_403_FORBIDDEN)
             if ticket.reviewer_id and ticket.reviewer_id == request.user.id:
                 return Response({"detail": "复核人不能与审核人相同"}, status=status.HTTP_403_FORBIDDEN)
             ticket.super_admin_reviewer = request.user if request.user.is_authenticated else None
@@ -1537,9 +1543,11 @@ class ModelChangeTicketViewSet(viewsets.ViewSet):
             return Response(self._serialize_ticket(ticket))
 
         if ticket.status == 'first_approved':
-            # 超管复核驳回：仅超管可操作，且不能与审核人同一人
+            # 超管复核驳回：仅超管可操作，且不能与审核人/创建人同一人
             if not request.user.is_super_admin:
                 return Response({"detail": "删除操作复核仅超级管理员可操作"}, status=status.HTTP_403_FORBIDDEN)
+            if ticket.creator_id and ticket.creator_id == request.user.id:
+                return Response({"detail": "不能驳回自己创建的工单"}, status=status.HTTP_403_FORBIDDEN)
             if ticket.reviewer_id and ticket.reviewer_id == request.user.id:
                 return Response({"detail": "复核驳回人与审核人不能相同"}, status=status.HTTP_403_FORBIDDEN)
             ticket.status = 'rejected'
@@ -1605,7 +1613,10 @@ class ModelChangeTicketViewSet(viewsets.ViewSet):
                                 {"detail": f"审批期间模型被 {', '.join(refs)} 引用，操作已回滚"},
                                 status=status.HTTP_400_BAD_REQUEST,
                             )
+                        # 先断开所有工单与模型的关联，避免外键约束阻止删除
+                        ModelChangeTicket.objects.filter(target_model=model).update(target_model=None)
                         model.delete()
+                ticket.target_model = None
                 ticket.save()
             elif ticket.operation == 'deactivate':
                 # 停用：重新检查依赖，防止审批期间被引用

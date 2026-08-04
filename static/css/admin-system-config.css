@@ -712,7 +712,8 @@
 /* 工单列表容器：flex 填满 modal-body 剩余空间，仅此区域滚动 */
 .ticket-list-body {
 	flex: 1;
-	min-height: 0;
+	min-height: 520px;
+	max-height: 520px;
 	overflow-y: auto;
 	display: flex;
 	flex-direction: column;

@@ -1100,7 +1100,7 @@ function openTicketDetailModal(ticketId) {
 	const isCreator = t.creator && t.creator === currentUsername;
 	const isSuperAdmin = isSuperAdminRole();
 	const canApprove = (t.status === 'pending' || t.status === 'first_approved') && !isCreator;
-	const canSuperReview = t.status === 'first_approved' && isSuperAdmin;
+	const canSuperReview = t.status === 'first_approved' && isSuperAdmin && !isCreator;
 	const canWithdraw = isCreator && (t.status === 'pending' || t.status === 'first_approved');
 
 	const statusLabel = TICKET_STATUS_LABELS[t.status] || t.status;

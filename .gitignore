@@ -23,6 +23,7 @@ staticfiles/
 .vscode/
 *.swp
 AGENTS.md
+plan.md
 
 # 系统
 .DS_Store

@@ -15,7 +15,7 @@ class SystemConfig(models.Model):
     - is_readonly=true 的项前端不可改（如 EMBEDDING_DIM 改了需重建向量索引），
       这类项只能在 .env 中修改后重启生效
     - category 用于前端分组展示，避免一堆配置堆在一起难以维护
-    - risk_level 标记风险等级，高风险项的变更工单需超管终审后才能生效
+    - risk_level 标记风险等级，高风险项的变更工单需超管复核后才能生效
     """
 
     VALUE_TYPE_CHOICES = [
@@ -27,7 +27,7 @@ class SystemConfig(models.Model):
     ]
 
     # 风险等级：高风险项（存储模式/邮件开关/敏感词/登录锁定等）变更影响面大，
-    # 工单流程需在普通审批之上叠加超管终审，避免单人误改造成线上故障
+    # 工单流程需在普通审批之上叠加超管复核，避免单人误改造成线上故障
     RISK_LEVEL_CHOICES = [
         ('normal', '普通'),
         ('high', '高风险'),
@@ -66,9 +66,9 @@ class SystemConfig(models.Model):
     # 只读标记：EMBEDDING_DIM/AGENT_DEFAULT_MODE 等改了影响索引或路由的项，
     # 不允许前端直接改，必须改 .env 后重启
     is_readonly = models.BooleanField(default=False, help_text='只读项，前端不可改，需改 .env')
-    # 风险等级：高风险项需走"一审 + 超管终审"流程，普通项仅需一审
+    # 风险等级：高风险项需走"审核 + 超管复核"流程，普通项仅需审核
     risk_level = models.CharField(max_length=8, choices=RISK_LEVEL_CHOICES, default='normal',
-                                   help_text='风险等级，高风险项需超管终审')
+                                   help_text='风险等级，高风险项需超管复核')
     updated_by = models.ForeignKey('users.User', null=True, blank=True,
                                     on_delete=models.SET_NULL, db_column='updated_by')
     updated_at = models.DateTimeField(auto_now=True)
@@ -124,24 +124,24 @@ class ConfigChangeTicket(models.Model):
 
     所有配置修改走工单流程，避免单人直接改 DB 造成线上故障：
     - 普通项：1 创建 + 1 审批（审批人 ≠ 创建人），审批通过后自动写入 SystemConfig
-    - 高风险项：1 创建 + 1 审批 + 1 超管终审，终审通过后才写入 SystemConfig
-    - 创建人可撤回待审批/待终审的工单
+    - 高风险项：1 创建 + 1 审批 + 1 超管复核，复核通过后才写入 SystemConfig
+    - 创建人可撤回待审批/待复核的工单
     状态机：
       pending（待审批）
         ├─ approve(normal)  → approved（已通过，已生效）
-        ├─ approve(high)    → first_approved（待超管终审）
+        ├─ approve(high)    → first_approved（待超管复核）
         ├─ reject           → rejected（已驳回）
         └─ withdraw         → withdrawn（已撤回）
-      first_approved（待超管终审）
+      first_approved（待超管复核）
         ├─ super approve    → approved（已通过，已生效）
         ├─ super reject     → rejected（已驳回）
         └─ withdraw         → withdrawn（已撤回）
     """
     STATUS_CHOICES = [
         ('pending', '待审批'),
-        # 高风险项一审通过后进入此状态，等待超管终审；
-        # 与 pending 区分，便于前端按"待终审"筛选和超管定位待办
-        ('first_approved', '待超管终审'),
+        # 高风险项审核通过后进入此状态，等待超管复核；
+        # 与 pending 区分，便于前端按"待复核"筛选和超管定位待办
+        ('first_approved', '待超管复核'),
         ('approved', '已通过'),
         ('rejected', '已驳回'),
         ('withdrawn', '已撤回'),
@@ -163,20 +163,20 @@ class ConfigChangeTicket(models.Model):
                                        help_text='多值配置的差异信息 JSON：{added:[], removed:[]}')
     # 状态：驱动审批流转，前端按状态渲染可执行的操作
     status = models.CharField(max_length=16, choices=STATUS_CHOICES, default='pending', verbose_name='状态')
-    # 人员：creator 提交，super_admin 不允许自审（防自审），超管终审仅超管可操作
+    # 人员：creator 提交，super_admin 不允许自审（防自审），超管复核仅超管可操作
     creator = models.ForeignKey('users.User', on_delete=models.SET_NULL, null=True, blank=True,
                                 related_name='created_config_tickets', verbose_name='创建人')
     reviewer = models.ForeignKey('users.User', on_delete=models.SET_NULL, null=True, blank=True,
-                                 related_name='reviewed_config_tickets', verbose_name='一审审批人')
+                                 related_name='reviewed_config_tickets', verbose_name='审核人')
     super_admin_reviewer = models.ForeignKey('users.User', on_delete=models.SET_NULL, null=True, blank=True,
-                                             related_name='super_admin_reviewed_tickets', verbose_name='超管终审人')
+                                             related_name='super_admin_reviewed_tickets', verbose_name='超管复核人')
     # 审批意见：留痕便于事后追溯驳回原因或通过依据
     review_comment = models.CharField(max_length=256, blank=True, default='', verbose_name='审批意见')
     super_admin_comment = models.CharField(max_length=256, blank=True, default='', verbose_name='超管审批意见')
     # 时间：applied_at 仅在最终通过写库时设置，与 approved 状态一一对应
     created_at = models.DateTimeField(auto_now_add=True)
-    reviewed_at = models.DateTimeField(null=True, blank=True, verbose_name='一审时间')
-    super_admin_reviewed_at = models.DateTimeField(null=True, blank=True, verbose_name='超管终审时间')
+    reviewed_at = models.DateTimeField(null=True, blank=True, verbose_name='审核时间')
+    super_admin_reviewed_at = models.DateTimeField(null=True, blank=True, verbose_name='超管复核时间')
     applied_at = models.DateTimeField(null=True, blank=True, verbose_name='生效时间')
 
     class Meta:
@@ -197,7 +197,7 @@ class ModelChangeTicket(models.Model):
     - 修改显示名(name)：无需审批，直接生效
     - 修改其他字段(base_url/model_name/provider/timeout/model_type)：普通审批
     - 停用(is_active=False)：普通审批 + 检查依赖
-    - 删除：超管终审 + 检查依赖
+    - 删除：超管复核 + 检查依赖
     状态机与 ConfigChangeTicket 一致：
       pending → approved / first_approved → approved / rejected / withdrawn
     """
@@ -208,7 +208,7 @@ class ModelChangeTicket(models.Model):
     ]
     STATUS_CHOICES = [
         ('pending', '待审批'),
-        ('first_approved', '待超管终审'),
+        ('first_approved', '待超管复核'),
         ('approved', '已通过'),
         ('rejected', '已驳回'),
         ('withdrawn', '已撤回'),
@@ -227,7 +227,7 @@ class ModelChangeTicket(models.Model):
     # 停用/删除时的依赖检查结果
     dependency_refs = models.JSONField(default=list, blank=True, verbose_name='依赖引用',
                                         help_text='被哪些配置项引用，空列表=无依赖')
-    # 风险等级：deactivate 为 normal（普通审批），delete 为 high（超管终审）
+    # 风险等级：deactivate 为 normal（普通审批），delete 为 high（超管复核）
     risk_level = models.CharField(max_length=8, choices=SystemConfig.RISK_LEVEL_CHOICES,
                                    default='normal', verbose_name='风险等级')
     reason = models.CharField(max_length=256, blank=True, default='', verbose_name='变更原因')
@@ -235,14 +235,14 @@ class ModelChangeTicket(models.Model):
     creator = models.ForeignKey('users.User', on_delete=models.SET_NULL, null=True, blank=True,
                                 related_name='created_model_tickets', verbose_name='创建人')
     reviewer = models.ForeignKey('users.User', on_delete=models.SET_NULL, null=True, blank=True,
-                                 related_name='reviewed_model_tickets', verbose_name='一审审批人')
+                                 related_name='reviewed_model_tickets', verbose_name='审核人')
     super_admin_reviewer = models.ForeignKey('users.User', on_delete=models.SET_NULL, null=True, blank=True,
-                                             related_name='super_admin_reviewed_model_tickets', verbose_name='超管终审人')
+                                             related_name='super_admin_reviewed_model_tickets', verbose_name='超管复核人')
     review_comment = models.CharField(max_length=256, blank=True, default='', verbose_name='审批意见')
     super_admin_comment = models.CharField(max_length=256, blank=True, default='', verbose_name='超管审批意见')
     created_at = models.DateTimeField(auto_now_add=True)
-    reviewed_at = models.DateTimeField(null=True, blank=True, verbose_name='一审时间')
-    super_admin_reviewed_at = models.DateTimeField(null=True, blank=True, verbose_name='超管终审时间')
+    reviewed_at = models.DateTimeField(null=True, blank=True, verbose_name='审核时间')
+    super_admin_reviewed_at = models.DateTimeField(null=True, blank=True, verbose_name='超管复核时间')
     applied_at = models.DateTimeField(null=True, blank=True, verbose_name='生效时间')
 
     class Meta:

@@ -39,7 +39,7 @@ class Migration(migrations.Migration):
                 ('preview_content', models.BooleanField(default=False, help_text='申请预览时是否允许查看正文')),
                 ('preview_chunks', models.BooleanField(default=False, help_text='申请预览时是否允许查看切片')),
                 ('secret_level', models.SmallIntegerField(choices=[(1, '普通'), (2, '内部'), (3, '机密'), (4, '绝密')], default=1, help_text='密级 1普通~4绝密，4禁止 PUBLIC')),
-                ('audit_status', models.CharField(choices=[('pending_team', '待团队组长一审'), ('pending_compliance', '待合规二审'), ('rejected', '审核驳回'), ('passed', '双审通过'), ('archived', '归档'), ('deleted', '逻辑删除')], default='pending_team', max_length=32)),
+                ('audit_status', models.CharField(choices=[('pending_team', '待团队组长审核'), ('pending_compliance', '待合规复核'), ('rejected', '审核驳回'), ('passed', '双审通过'), ('archived', '归档'), ('deleted', '逻辑删除')], default='pending_team', max_length=32)),
                 ('root_type', models.CharField(help_text='冗余：根节点类型，加速检索过滤', max_length=32)),
                 ('status', models.CharField(choices=[('pending', 'pending'), ('parsing', 'parsing'), ('desensitizing', 'desensitizing'), ('chunking', 'chunking'), ('embedding', 'embedding'), ('embedding_failed', 'embedding_failed'), ('done', 'done'), ('failed', 'failed')], default='pending', help_text='处理状态: pending/parsing/.../done/failed', max_length=16)),
                 ('error_message', models.TextField(blank=True, default='')),
@@ -155,7 +155,7 @@ class Migration(migrations.Migration):
             name='DocOperationLog',
             fields=[
                 ('id', models.BigAutoField(primary_key=True, serialize=False)),
-                ('action', models.CharField(choices=[('doc_create', '上传文档'), ('doc_delete', '删除文档'), ('doc_visibility_change', '修改可见范围'), ('doc_download', '下载文档'), ('doc_reparse', '重新解析'), ('doc_restore', '恢复文档'), ('node_create', '创建节点'), ('node_update', '修改节点'), ('node_delete', '删除节点'), ('doc_audit_team_pass', '团队一审通过'), ('doc_audit_team_reject', '团队一审驳回'), ('doc_audit_compliance_pass', '合规二审通过'), ('doc_audit_compliance_reject', '合规二审驳回'), ('doc_archive', '归档文档'), ('doc_physical_destroy', '物理销毁')], db_index=True, max_length=32)),
+                ('action', models.CharField(choices=[('doc_create', '上传文档'), ('doc_delete', '删除文档'), ('doc_visibility_change', '修改可见范围'), ('doc_download', '下载文档'), ('doc_reparse', '重新解析'), ('doc_restore', '恢复文档'), ('node_create', '创建节点'), ('node_update', '修改节点'), ('node_delete', '删除节点'), ('doc_audit_team_pass', '团队审核通过'), ('doc_audit_team_reject', '团队审核驳回'), ('doc_audit_compliance_pass', '合规复核通过'), ('doc_audit_compliance_reject', '合规复核驳回'), ('doc_archive', '归档文档'), ('doc_physical_destroy', '物理销毁')], db_index=True, max_length=32)),
                 ('operator_name', models.CharField(blank=True, default='', max_length=128)),
                 ('detail', models.JSONField(blank=True, default=dict, help_text='操作详情，如变更前后的值、目标用户等')),
                 ('ip_address', models.GenericIPAddressField(blank=True, null=True)),

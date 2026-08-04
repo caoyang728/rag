@@ -71,7 +71,7 @@ def create_system_configs(config, dry_run=False, force=False):
         category = item.get('category', 'llm')
         is_secret = bool(item.get('is_secret', False))
         is_readonly = bool(item.get('is_readonly', False))
-        # 风险等级：高风险项变更需走超管终审流程，由开发者维护，与 value 解耦
+        # 风险等级：高风险项变更需走超管复核流程，由开发者维护，与 value 解耦
         risk_level = item.get('risk_level', 'normal')
 
         try:

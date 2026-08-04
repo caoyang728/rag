@@ -6,7 +6,7 @@
  * - 普通用户直接跳回首页并提示无权限
  *
  * 功能模块：
- * 1. 待审文档列表：拉取待一审 / 待二审 文档
+ * 1. 待审文档列表：拉取待审核 / 待复核 文档
  * 2. 详情弹窗：展示文档元信息 + 摘要预览（本期仅元信息）
  * 3. 审核动作：通过（备注选填）/ 驳回（理由必填，支持 Ctrl+Enter 提交）
  * ============================================================================ */
@@ -71,10 +71,10 @@ function _renderDocRow(d) {
 	// 密级映射：1=公开, 2=内部, 3=秘密, 4=绝密
 	const secLvMap = { 1: '公开', 2: '内部', 3: '秘密', 4: '绝密' };
 	const secBadge = { 1: '', 2: 'badge-info', 3: 'badge-warn', 4: 'badge-danger' }[d.secret_level] || '';
-	// 审核阶段徽章：待一审 / 待二审
+	// 审核阶段徽章：待审核 / 待复核
 	const auditBadge = d.audit_status === 'pending_team'
-		? '<span class="badge badge-warn">待一审</span>'
-		: '<span class="badge badge-info">待二审</span>';
+		? '<span class="badge badge-warn">待审核</span>'
+		: '<span class="badge badge-info">待复核</span>';
 	const belong = [d.dept_name, d.team_name].filter(Boolean).join(' / ');
 	return `
 	<tr class="table-row-hover" data-doc-id="${d.id}" style="cursor:pointer">
@@ -110,7 +110,7 @@ function _renderDocRow(d) {
  * ============================================================================ */
 function openDocModal(d) {
 	_currentDoc = d;
-	$('#docModalTitle').textContent = '文档审核 · ' + (d.audit_status === 'pending_team' ? '团队组长一审' : '合规二审');
+	$('#docModalTitle').textContent = '文档审核 · ' + (d.audit_status === 'pending_team' ? '团队组长审核' : '合规复核');
 	// 可见性 / 密级 文案映射
 	const visMap = { 1: '全局公开', 2: '部门内可见', 3: '团队内可见', 4: '私有' };
 	const secLvMap = { 1: '公开', 2: '内部', 3: '秘密', 4: '绝密' };
@@ -144,8 +144,8 @@ function openDocModal(d) {
 				<div class="detail-cell-label">当前阶段</div>
 				<div class="detail-cell-value">
 					${isPendingTeam
-						? '<span class="badge badge-warn">待一审（团队组长）</span>'
-						: '<span class="badge badge-info">待二审（合规/部门经理）</span>'}
+						? '<span class="badge badge-warn">待审核（团队组长）</span>'
+						: '<span class="badge badge-info">待复核（合规/部门经理）</span>'}
 				</div>
 			</div>
 			<div class="detail-cell">
@@ -265,10 +265,10 @@ function _submitDocApprove(id, comment) {
 	api.postJson(`/api/v1/knowledge/documents/${id}/audit-approve/`, { comment })
 		.then(res => {
 			if (res?.ok) {
-				// 二审通过 → 已发布；一审通过 → 流转二审
+				// 复核通过 → 已发布；审核通过 → 流转复核
 				const nextLabel = res.audit_status === 'passed'
 					? '审核通过（已发布）'
-					: `一审通过，流转至：${_auditStatusLabel(res.audit_status)}`;
+					: `审核通过，流转至：${_auditStatusLabel(res.audit_status)}`;
 				toast(nextLabel, 'success');
 				closeModal('docModal');
 				_currentDoc = null;
@@ -309,8 +309,8 @@ function _submitDocReject(id, comment) {
 /* ---------- 审核状态文案映射 ---------- */
 function _auditStatusLabel(s) {
 	return {
-		'pending_team': '待一审',
-		'pending_compliance': '待二审',
+		'pending_team': '待审核',
+		'pending_compliance': '待复核',
 		'passed': '已通过',
 		'rejected': '已驳回',
 		'archived': '已归档',

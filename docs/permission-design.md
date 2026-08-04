@@ -8,8 +8,8 @@
 |------|------|----------|
 | 全局管理员 | `super_admin` | 全部配置权限、绕过双审直接发布、修改所有文档权限、可物理销毁文档 |
 | 部门负责人 | `dept_manager` | 管辖本部门全部团队、查看本部门所有文档、审批扩大可见范围申请 |
-| 团队组长 | `team_leader` | 本团队文档一审、管理文档、调整可见范围、发起/审批本团队共享申请、直接收回对外权限 |
-| 文档审核员 | `compliance_reviewer` | 专职合规风控、文档敏感内容二审校验、无日常检索问答权限 |
+| 团队组长 | `team_leader` | 本团队文档审核、管理文档、调整可见范围、发起/审批本团队共享申请、直接收回对外权限 |
+| 文档审核员 | `compliance_reviewer` | 专职合规风控、文档敏感内容复核校验、无日常检索问答权限 |
 | 普通员工 | `employee` | 检索权限内已审核文档、上传发起双审工单、发起权限申请 |
 | 只读员工 | `readonly` | 检索已发布文档、发起 read 权限申请、禁止上传 |
 
@@ -147,8 +147,8 @@ knowledge_document
 
 | 状态 | 含义 | 检索可见 |
 |------|------|:---:|
-| `pending_team` | 待团队组长一审 | ❌ |
-| `pending_compliance` | 待合规二审 | ❌ |
+| `pending_team` | 待团队组长审核 | ❌ |
+| `pending_compliance` | 待合规复核 | ❌ |
 | `rejected` | 审核驳回 | ❌ |
 | `passed` | 双审通过 | ✅ |
 | `archived` | 归档 | ✅（仅本团队+管理员） |
@@ -238,10 +238,10 @@ ACTION_CHOICES = [
     ('node_update', '修改节点'),
     ('node_delete', '删除节点'),
     # 审核
-    ('doc_audit_team_pass', '团队一审通过'),
-    ('doc_audit_team_reject', '团队一审驳回'),
-    ('doc_audit_compliance_pass', '合规二审通过'),
-    ('doc_audit_compliance_reject', '合规二审驳回'),
+    ('doc_audit_team_pass', '团队审核通过'),
+    ('doc_audit_team_reject', '团队审核驳回'),
+    ('doc_audit_compliance_pass', '合规复核通过'),
+    ('doc_audit_compliance_reject', '合规复核驳回'),
     # 权限
     ('doc_grant', '授权（白名单/跨团队）'),
     ('doc_revoke', '撤销授权'),
@@ -443,9 +443,9 @@ HotQaCache
     ↓
 系统预检（高危内容 → 驳回）
     ↓
-第一层：团队组长一审（归属/价值/可见范围）
+第一层：团队组长审核（归属/价值/可见范围）
     ↓
-第二层：合规审核员二审（脱敏/合规）
+第二层：合规审核员复核（脱敏/合规）
     ↓
 passed → 入库 → 可检索
 ```

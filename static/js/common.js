@@ -64,8 +64,11 @@ function toast(msg, type) {
 	const t = el('div', { class: 'toast ' + (type || '') }, msg);
 	const remove = () => { t.style.opacity = '0'; setTimeout(() => t.remove(), 200); };
 	t.addEventListener('click', () => { if (t._timer) clearTimeout(t._timer); remove(); });
-	if (type === 'success') {
-		t._timer = setTimeout(remove, 5000);
+	// 自动消除时长：成功 3s、警告 6s、错误/失败不自动消除（需手动点击）
+	const durations = { success: 3000, warning: 6000, info: 3000 };
+	const duration = durations[type];
+	if (duration) {
+		t._timer = setTimeout(remove, duration);
 	}
 	wrap.appendChild(t);
 }

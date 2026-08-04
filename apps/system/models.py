@@ -189,6 +189,72 @@ class ConfigChangeTicket(models.Model):
         return f'[{self.status}] {self.config_key}: {self.old_value} → {self.new_value}'
 
 
+class ModelChangeTicket(models.Model):
+    """模型变更工单
+
+    模型的高风险操作（修改、停用、删除）走工单审批流程：
+    - 新增模型：无需审批，直接生效
+    - 修改显示名(name)：无需审批，直接生效
+    - 修改其他字段(base_url/model_name/provider/timeout/model_type)：普通审批
+    - 停用(is_active=False)：普通审批 + 检查依赖
+    - 删除：超管终审 + 检查依赖
+    状态机与 ConfigChangeTicket 一致：
+      pending → approved / first_approved → approved / rejected / withdrawn
+    """
+    OPERATION_CHOICES = [
+        ('update_normal', '修改普通字段'),
+        ('deactivate', '停用模型'),
+        ('delete', '删除模型'),
+    ]
+    STATUS_CHOICES = [
+        ('pending', '待审批'),
+        ('first_approved', '待超管终审'),
+        ('approved', '已通过'),
+        ('rejected', '已驳回'),
+        ('withdrawn', '已撤回'),
+    ]
+
+    id = models.BigAutoField(primary_key=True)
+    # 目标模型：变更完成后按 id 定位 LLMModel 执行操作
+    target_model = models.ForeignKey(LLMModel, on_delete=models.SET_NULL, null=True,
+                                     blank=True, related_name='change_tickets',
+                                     verbose_name='目标模型')
+    target_model_snapshot = models.JSONField(default=dict, verbose_name='模型快照',
+                                              help_text='工单创建时的模型完整数据，防止目标模型被他人先改')
+    operation = models.CharField(max_length=20, choices=OPERATION_CHOICES, verbose_name='操作类型')
+    # 变更字段：仅 update_normal 时填写，存储 {field: {old, new}} JSON
+    changed_fields = models.JSONField(default=dict, blank=True, verbose_name='变更字段')
+    # 停用/删除时的依赖检查结果
+    dependency_refs = models.JSONField(default=list, blank=True, verbose_name='依赖引用',
+                                        help_text='被哪些配置项引用，空列表=无依赖')
+    # 风险等级：deactivate 为 normal（普通审批），delete 为 high（超管终审）
+    risk_level = models.CharField(max_length=8, choices=SystemConfig.RISK_LEVEL_CHOICES,
+                                   default='normal', verbose_name='风险等级')
+    reason = models.CharField(max_length=256, blank=True, default='', verbose_name='变更原因')
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default='pending', verbose_name='状态')
+    creator = models.ForeignKey('users.User', on_delete=models.SET_NULL, null=True, blank=True,
+                                related_name='created_model_tickets', verbose_name='创建人')
+    reviewer = models.ForeignKey('users.User', on_delete=models.SET_NULL, null=True, blank=True,
+                                 related_name='reviewed_model_tickets', verbose_name='一审审批人')
+    super_admin_reviewer = models.ForeignKey('users.User', on_delete=models.SET_NULL, null=True, blank=True,
+                                             related_name='super_admin_reviewed_model_tickets', verbose_name='超管终审人')
+    review_comment = models.CharField(max_length=256, blank=True, default='', verbose_name='审批意见')
+    super_admin_comment = models.CharField(max_length=256, blank=True, default='', verbose_name='超管审批意见')
+    created_at = models.DateTimeField(auto_now_add=True)
+    reviewed_at = models.DateTimeField(null=True, blank=True, verbose_name='一审时间')
+    super_admin_reviewed_at = models.DateTimeField(null=True, blank=True, verbose_name='超管终审时间')
+    applied_at = models.DateTimeField(null=True, blank=True, verbose_name='生效时间')
+
+    class Meta:
+        db_table = 'system_model_ticket'
+        ordering = ['-created_at']
+        verbose_name = '模型变更工单'
+        verbose_name_plural = verbose_name
+
+    def __str__(self):
+        return f'[{self.status}] {self.operation} model_id={self.target_model_id}'
+
+
 class CeleryTaskLog(models.Model):
     """G1 celery_task_log - 异步任务日志"""
 

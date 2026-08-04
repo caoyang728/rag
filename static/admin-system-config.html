@@ -41,7 +41,7 @@
 							<span id="currentCategoryName">配置项</span>
 							<span id="configCount" class="text-sub text-sm" style="font-weight:400;margin-left:8px"></span>
 						</div>
-						<a href="/admin-audit/?category=config" class="btn btn-sm btn-outline">📜 操作记录</a>
+						<button class="btn btn-sm btn-outline" onclick="openHistoryModal()">📜 变更记录</button>
 					</div>
 					<div id="configList" class="card-scroll">
 						<div class="empty">
@@ -57,9 +57,7 @@
 	<div id="mask" class="mask"></div>
 	<div id="toast-wrap" class="toast-wrap"></div>
 
-	<!-- ===== 模型管理弹窗 =====
-	     按 model_type 分三个 tab（LLM / Embedding / Rerank），
-	     每个 tab 下表格展示该类型模型，底部"新增模型"按钮唤起表单。 -->
+	<!-- ===== 模型管理弹窗 =====  -->
 	<div class="modal" id="modelManageModal" style="width:880px;max-width:95vw">
 		<div class="modal-header">
 			<div class="modal-title">模型管理</div>
@@ -102,71 +100,24 @@
 		</div>
 	</div>
 
-	<!-- ===== 模型新增/编辑表单弹窗 =====
-	     嵌套在模型管理弹窗之上，复用 .modal 通用样式。 -->
-	<div class="modal" id="modelFormModal" style="width:520px;max-width:95vw">
-		<div class="modal-header">
-			<div class="modal-title" id="modelFormTitle">新增模型</div>
-			<button class="modal-close" onclick="closeModelForm()">&times;</button>
-		</div>
-		<div class="modal-body" style="padding:16px 20px">
-			<input type="hidden" id="modelFormFieldId">
-			<div class="form-item">
-				<label class="form-label">显示名称 <span class="required">*</span></label>
-				<input id="modelFormFieldName" class="input" placeholder="如：DeepSeek 对话">
-			</div>
-			<div class="form-item">
-				<label class="form-label">提供商 <span class="required">*</span></label>
-				<input id="modelFormFieldProvider" class="input" placeholder="如：deepseek、openai">
-			</div>
-			<div class="form-item">
-				<label class="form-label">模型类型 <span class="required">*</span></label>
-				<select id="modelFormFieldType" class="input">
-					<option value="llm">LLM 对话模型</option>
-					<option value="embedding">Embedding 向量模型</option>
-					<option value="rerank">Rerank 重排序模型</option>
-				</select>
-			</div>
-			<div class="form-item">
-				<label class="form-label">API 地址</label>
-				<input id="modelFormFieldBaseUrl" class="input" placeholder="https://api.deepseek.com">
-			</div>
-			<div class="form-item">
-			<label class="form-label">模型标识 <span class="required">*</span></label>
-			<input id="modelFormFieldModelName" class="input" placeholder="如：deepseek-chat">
-		</div>
-		<div class="form-item">
-			<label class="form-label">超时秒数</label>
-			<input id="modelFormFieldTimeout" type="number" min="1" step="1" class="input" placeholder="为空时使用全局 LLM_TIMEOUT">
-		</div>
-		<div class="form-item">
-			<label class="form-label">启用</label>
-			<label class="switch">
-				<input type="checkbox" id="modelFormFieldActive" checked>
-				<span class="slider"></span>
-			</label>
-		</div>
-		</div>
-		<div class="modal-footer">
-			<button class="btn btn-sm btn-outline" onclick="closeModelForm()">取消</button>
-			<button class="btn btn-sm btn-primary" onclick="saveModel()">保存</button>
-		</div>
-	</div>
-
 	<!-- ===== 配置变更工单列表弹窗 =====
 	     展示工单流转情况：配置项、原值→新值、风险等级、状态、创建人、创建时间。
-	     支持按状态筛选（全部/待审批/待终审/已通过/已驳回），点击工单展开详情 + 审批操作。 -->
+	     支持按状态筛选（待审核/我的工单/已通过/已驳回/已撤回），点击工单展开详情 + 审批操作。 -->
 	<div class="modal" id="ticketListModal" style="width:960px;max-width:95vw">
 		<div class="modal-header">
-			<div class="modal-title">配置变更工单</div>
+			<div class="modal-title">变更工单</div>
 			<button class="modal-close" onclick="closeTicketModal()">&times;</button>
 		</div>
-		<div class="modal-body" style="padding:16px 20px">
+		<div class="modal-body" style="padding:12px 20px;overflow:hidden;display:flex;flex-direction:column">
+			<!-- 工单类型切换 -->
+			<div class="ticket-tabs" style="margin-bottom:8px">
+				<button class="ticket-tab active" data-type="config" onclick="switchTicketType('config')">配置工单</button>
+				<button class="ticket-tab" data-type="model" onclick="switchTicketType('model')">模型工单</button>
+			</div>
 			<!-- 状态筛选 tab -->
 			<div class="ticket-tabs" id="ticketTabs">
-				<button class="ticket-tab active" data-status="all" onclick="switchTicketTab('all')">全部</button>
-				<button class="ticket-tab" data-status="pending" onclick="switchTicketTab('pending')">待审批</button>
-				<button class="ticket-tab" data-status="first_approved" onclick="switchTicketTab('first_approved')">待终审</button>
+				<button class="ticket-tab active" data-status="pending,first_approved" onclick="switchTicketTab('pending,first_approved')">待审核</button>
+				<button class="ticket-tab" data-status="mine" onclick="switchTicketTab('mine')">我的工单</button>
 				<button class="ticket-tab" data-status="approved" onclick="switchTicketTab('approved')">已通过</button>
 				<button class="ticket-tab" data-status="rejected" onclick="switchTicketTab('rejected')">已驳回</button>
 				<button class="ticket-tab" data-status="withdrawn" onclick="switchTicketTab('withdrawn')">已撤回</button>
@@ -176,7 +127,28 @@
 			</div>
 		</div>
 		<div class="modal-footer">
-			<button class="btn btn-sm btn-outline" onclick="closeTicketModal()">关闭</button>
+			<div id="ticketPagination" class="ticket-pagination"></div>
+		</div>
+	</div>
+
+	<!-- ===== 配置变更记录弹窗 =====
+	     展示所有已生效的配置变更历史（从已通过工单汇总），
+	     包含配置项、变更前后的值、操作人、生效时间。 -->
+	<div class="modal" id="historyModal" style="width:900px;max-width:95vw">
+		<div class="modal-header">
+			<div class="modal-title">配置变更记录</div>
+			<button class="modal-close" onclick="closeHistoryModal()">&times;</button>
+		</div>
+		<div class="modal-body" style="padding:16px 20px">
+			<div class="history-search-bar">
+				<input type="text" class="input" id="historySearchInput" placeholder="搜索申请人或配置项（中文名/字段名）" oninput="filterHistoryRecords()">
+			</div>
+			<div id="historyListBody" class="history-list-body">
+				<div class="ticket-empty">加载中...</div>
+			</div>
+		</div>
+		<div class="modal-footer">
+			<div id="historyPagination" class="ticket-pagination"></div>
 		</div>
 	</div>
 
@@ -210,17 +182,18 @@
 				</div>
 				<div class="config-item-control" id="cfg-control-__KEY_ATTR__">__CONTROL__</div>
 				<div class="config-item-actions">
-					<!-- 通过 dataset.key 传参，避免内联 onclick 拼接导致的 XSS 风险 -->
-					<button class="btn btn-sm btn-outline btn-reset" data-key="__KEY_ATTR__" onclick="resetConfig(this.dataset.key)" title="恢复当前值">↺</button>
+					<!-- 重置按钮：默认隐藏，仅在修改值后显示 -->
+					<button class="btn btn-sm btn-outline btn-reset hidden" data-key="__KEY_ATTR__" onclick="resetConfig(this.dataset.key)" title="恢复当前值">↺</button>
 					<button class="btn btn-sm btn-primary btn-save" data-key="__KEY_ATTR__" onclick="submitTicket(this.dataset.key)" disabled>提交工单</button>
 				</div>
 			</div>
-			<!-- 第二行：字段名(200px) + 解释（与控件对齐） -->
+			<!-- 第二行：字段名(200px) + 解释（与控件对齐） + 上次修改时间 -->
 			<div class="config-item-row config-item-meta">
 				<div class="config-item-meta-left">
 					<span class="config-item-key-text">__KEY_ESC__</span>
 				</div>
 				<span class="config-item-hint">__DESC__</span>
+				<span class="config-item-updated" id="cfg-updated-__KEY_ATTR__"></span>
 			</div>
 		</div>
 	</template>

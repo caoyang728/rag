@@ -7,13 +7,15 @@
 ## 一、项目特性
 
 - **混合检索 + Rerank**：pgvector 向量检索 + BM25 关键词检索 + RRF 融合 + BGE-Reranker 重排序，二次权限过滤保证安全
-- **四层权限模型**：可见范围（team/dept/public）+ 黑名单/白名单/跨团队授权 + 双审流程 + 权限申请双轨制
+- **五层权限模型**：可见范围（TEAM_ONLY/DEPT_ONLY/PUBLIC）+ 主动共享（部门/团队/个人统一表）+ 黑名单（Deny Override 铁律）+ 双审流程 + 权限申请工单双轨制
 - **流式问答**：SSE 流式响应，TTFB/总延迟展示，AbortController 终止，断线自动保存部分回答
-- **文档全生命周期**：多格式解析（PDF/DOCX/Markdown/代码/表格/PPT）→ 智能切分 → 向量化 → 版本管理 + 软删除
+- **文档全生命周期**：多格式解析（PDF/DOCX/Markdown/代码/表格/PPT）→ 语义感知切分 → 数据脱敏 → 向量化 → 版本管理 + 软删除
 - **PDF 深度解析**：PyMuPDF `find_tables()` 表格提取 + 跨页表格合并 + 图片提取（base64 + OSS 双存储）
-- **RAG 质量评估中心**：黄金测试集 + 6 维度 LLM-as-Judge + 离线检索评估（Recall@K/MRR/NDCG）+ 文档质量量化 + 知识库覆盖率 + 反馈闭环
+- **RAG 质量评估中心**：黄金测试集 + DeepEval 12 维 LLM-as-Judge + 生产对话自动评估（采样+分层限速）+ 低分回归测试集 + 低分对话归因分析 + 离线检索评估（Recall@K/MRR/NDCG）+ 文档质量量化 + 知识库覆盖率 + Ragas 部署前评估 + 反馈闭环
 - **系统监控**：P50/P95/P99 延迟百分位（预计算 + 直方图）、Celery 队列深度（5 分钟快照）、组织使用报表、实时指标（Redis 5 分钟刷新）
-- **审计可追溯**：哈希链防篡改审计日志、文档操作日志（20 种 action）、敏感词过滤、IP 黑白名单、登录锁定
+- **审计可追溯**：哈希链防篡改审计日志、权限审计日志（只追加不删）、文档操作日志（15 种 action）、敏感词过滤、IP 黑白名单、登录锁定
+- **系统配置工单化**：SystemConfig KV 存储 + LLMModel 模型管理 + 配置/模型变更工单（高风险项超管复核）+ 风险等级分级
+- **权限缓存分层**：L1~L5 五层缓存（功能权限/部门范围/团队范围/数据等级/资源临时授权）+ 延迟双删防并发脏写
 - **四层记忆**：short/session/user/global 记忆，每晚提炼稳定用户偏好
 
 ---
@@ -54,14 +56,21 @@ docker compose exec django python scripts/init_system.py
 ```
 rag/
 ├── apps/
-│   ├── users/                  # 用户系统（User + RBAC 权限 + 部门/团队 + 文档级权限）
-│   │   ├── models.py           # User(AbstractBaseUser), Department, Team, Role, Permission + DocDenyUser/DocAllowUser/DocCrossTeam/AccessApplication
+│   ├── users/                  # 用户系统（User + RBAC 权限 + 部门/团队 + 文档级权限 + 审批工单）
+│   │   ├── models.py           # User/Department/Team/Role/Permission + Scope 关联表 + PermissionApprovalTicket/RoleConflictRule/PermissionAuditLog
 │   │   ├── signals.py          # 部门/团队变更 → 自动同步 KnowledgeNode 树 + 缓存失效
-│   │   └── views.py            # 部门/团队 CRUD（含删除保护：有成员/有文档→禁止删除）
-│   ├── knowledge/              # 知识节点 + 文档 + 切片 + 多格式解析器
-│   │   ├── models.py           # KnowledgeNode(固定4层树) + Document(版本管理+软删除) + DocumentChunk + CodeChunk + ImageResource + DocOperationLog
+│   │   ├── views.py            # 部门/团队 CRUD（含删除保护：有成员/有文档→禁止删除）
+│   │   ├── perm_cache.py       # RBAC 权限分层缓存 L1~L5 + 延迟双删（super_admin 不走缓存）
+│   │   ├── audit_service.py    # 统一权限审计日志写入服务（只 INSERT 不删，失败不阻断主业务）
+│   │   ├── ticket_service.py   # 权限配置审批工单服务（共享审批池 + 顺序执行 + 状态机）
+│   │   ├── permissions.py      # DRF 自定义权限类
+│   │   └── management/commands/ # grant_superadmin / seed_permissions 管理命令
+│   ├── knowledge/              # 知识节点 + 文档 + 切片 + 多格式解析器 + 资源共享
+│   │   ├── models.py           # KnowledgeNode(固定4层树) + Document(版本管理+软删除) + DocumentChunk + CodeChunk + ImageResource + DocOperationLog + ResourceShare + ResourceBlockList
 │   │   ├── access.py           # resolve_doc_access() — 7 步优先级权限判定（支持多团队）
 │   │   ├── node_sync.py        # 部门/团队 ↔ KnowledgeNode 双向同步 + 子树文档计数
+│   │   ├── chunker.py          # 语义感知切片（按段落聚合 + 表格双层存储 + section_path 溯源）
+│   │   ├── desensitizer.py     # 数据脱敏（手机号/身份证/邮箱/银行卡入库前脱敏）
 │   │   ├── parsers/            # pdf / docx / markdown / code / spreadsheet / presentation / config 七套解析器
 │   │   │   └── pdf_parser.py   # PyMuPDF find_tables() 表格提取 + 跨页合并 + 图片 base64
 │   │   ├── storage.py          # 文档存储抽象层（local/OSS，按节点路径存储）
@@ -79,41 +88,57 @@ rag/
 │   ├── audit/                  # 审计日志（sha256 哈希链防篡改）
 │   ├── security/               # 验证码 / IP 黑白名单 / 登录失败锁定 / 敏感词
 │   ├── analytics/              # 关键词权重 / 准确率日报 / 趋势统计 / 系统监控 / RAG 质量评估
-│   │   ├── models.py           # 13 个模型：日报/系统指标/组织报表/队列深度/忠实度 + 8 个质量评估模型
-│   │   ├── evaluation_engine.py # 6 维度 LLM-as-Judge 评估引擎（Faithfulness/Relevance/Completeness/Correctness/Harmlessness/ContextRecall）
+│   │   ├── models.py           # 14 个模型：关键词权重/日报/系统指标/组织报表/队列深度 + 8 个质量评估模型 + LowScoreAnalysis
+│   │   ├── deepeval_metrics.py # DeepEval 12 维 LLM-as-Judge 评估（检索1+答案6+安全2+业务3）
+│   │   ├── production_eval.py  # 生产对话自动评估（采样率 + 分层限速 + 日预算四重保护）
+│   │   ├── regression_eval.py  # 低分回归测试集（沉淀 + 全链路评估 + pass_count 淘汰）
+│   │   ├── low_score_analyzer.py # 低分对话归因分析（规则归因为主 + LLM 个性化建议兜底）
+│   │   ├── ragas_pipeline.py   # Ragas 部署前评估流水线（零标注 + 自动合成测试集）
 │   │   ├── offline_eval.py     # 黄金测试集 + 离线检索评估（Recall@K/MRR/NDCG + 各阶段增益）
 │   │   ├── doc_quality.py      # 文档入库质量量化（解析/切分/向量化质量 + 综合评分 0-100）
 │   │   ├── coverage.py         # 知识库覆盖率 + 反馈闭环自动化（差评自动关联 chunk）
 │   │   ├── realtime.py         # Redis 实时指标（5 分钟刷新，独立 DB 避免干扰）
-│   │   ├── tasks.py            # Celery 任务（9 个定时任务：指标聚合/评估/清理）
-│   │   └── views.py            # 16+ 个 View 类，覆盖监控 + 质量评估全套接口
+│   │   ├── tasks.py            # Celery 任务（指标聚合/评估/清理/沉淀/回归）
+│   │   ├── views.py            # 监控 + 质量评估 + 评估看板 + 归因分析全套接口
+│   │   └── management/commands/ragas_eval.py  # Ragas 评估管理命令
 │   ├── notification/           # 邮件订阅 / 发送日志
-│   └── system/                 # 系统配置 / Celery 任务日志 / LLM 调用日志
+│   └── system/                 # 系统配置 / 模型管理 / 变更工单 / Celery 任务日志 / LLM 调用日志
+│       ├── models.py           # SystemConfig + LLMModel + ConfigChangeTicket + ModelChangeTicket + CeleryTaskLog + LlmCallLog + DataExportLog
+│       ├── config_loader.py    # 配置加载器（优先 DB，回退 .env）
+│       └── middleware.py       # 系统级中间件
 ├── rag_project/                # Django 项目配置、根 URL、Celery、ASGI/WSGI
-│   └── celery.py               # 6 队列 + 13 个 Beat 定时任务
+│   └── celery.py               # 5 队列 + 14 个 Beat 定时任务
 ├── docs/
 │   └── permission-design.md    # 权限体系设计文档（最终方案）
 ├── scripts/
 │   ├── init_system.py          # 系统初始化（角色/权限/部门/团队/用户）
 │   ├── initial_data.yaml       # 初始化数据配置
-│   └── batch_import_docs.py    # 批量导入文档（双阶段异步导入）
+│   ├── batch_import_docs.py    # 批量导入文档（双阶段异步导入）
+│   ├── clean_docs.py           # 清理文档相关数据（Document/Chunk/Vector/Log）
+│   └── test_analytics_runtime.py # Analytics API 端点运行时验证脚本
 ├── static/                     # 前端静态资源（开发源码）
-│   ├── css/                    # 公共 common.css + 各页面 page.css
+│   ├── css/                    # 公共 common.css + layout.css + 各页面 page.css
 │   ├── fonts/                  # 字体文件（验证码使用 DejaVuSans-Bold.ttf）
-│   ├── js/                     # API_SERVICE 通用请求 + 各页面模块
-│   │   ├── common.js           # 通用请求封装（token / 401 / 流式 / 侧边栏 / 模态框）
+│   ├── js/                     # 通用能力 + 各页面模块
+│   │   ├── common.js           # 通用工具（DOM/状态/toast/escapeHtml/formatDate/PAGE_MAP/goto）
+│   │   ├── api.js              # 统一 API 请求服务（token 管理 / 自动刷新 / SSE 流式）
+│   │   ├── layout.js           # 应用壳布局（顶栏/侧栏/全局搜索/用户菜单/登出/通知/角色判断）
 │   │   ├── multi-select.js     # 多选下拉组件（搜索 + 全选 + 部门→团队联动）
 │   │   ├── chat.js             # 会话问答（流式 + AbortController + TTFB 展示）
 │   │   ├── upload.js           # 文档上传（版本管理 + 三选项对话框 + 历史轮询）
 │   │   ├── login.js            # 登录（含验证码）
 │   │   ├── profile.js          # 个人资料
 │   │   ├── reset-password.js   # 修改密码
+│   │   ├── admin.js            # 管理后台通用逻辑
 │   │   ├── admin-users.js      # 用户管理
 │   │   ├── admin-org.js        # 组织架构管理（部门/团队）
 │   │   ├── admin-rbac.js       # 角色权限管理
 │   │   ├── admin-nodes.js      # 知识节点管理（动态加载根类型）
+│   │   ├── admin-docs.js       # 文档审核（待审列表 + 通过/驳回）
+│   │   ├── admin-approvals.js  # 权限审批中心（四视角：待我审批/我已审批/我发起的/全部工单）
 │   │   ├── admin-analytics.js  # 统计分析
-│   │   ├── admin-eval.js       # 质量评估中心（6 Tab：黄金集/检索/回答/文档/覆盖率/反馈）
+│   │   ├── admin-eval.js       # 质量评估中心（黄金集/检索/回答/文档/覆盖率/反馈/归因）
+│   │   ├── admin-system-config.js # 系统配置（KV 配置 + 模型管理 + 工单审批）
 │   │   └── admin-audit.js      # 审计日志
 │   ├── index.html              # 首页
 │   ├── login.html              # 登录页
@@ -125,8 +150,11 @@ rag/
 │   ├── admin-org.html          # 组织架构管理页
 │   ├── admin-rbac.html         # 角色权限管理页
 │   ├── admin-nodes.html        # 知识节点管理页
+│   ├── admin-docs.html         # 文档审核页
+│   ├── admin-approvals.html    # 权限审批中心页
 │   ├── admin-analytics.html    # 统计分析页
 │   ├── admin-eval.html         # 质量评估中心页
+│   ├── admin-system-config.html # 系统配置页
 │   └── admin-audit.html        # 审计日志页
 ├── tests/                      # API 测试用例
 ├── Dockerfile
@@ -149,13 +177,26 @@ rag/
 | POST | `/api/v1/auth/logout/` | 登出（refresh 加黑名单） |
 | GET/PATCH | `/api/v1/auth/profile/` | 当前用户资料 |
 | POST | `/api/v1/auth/reset-password/` | 修改密码 |
+| POST | `/api/v1/auth/password-reset/request/` | 忘记密码：发送重置邮件 |
+| POST | `/api/v1/auth/password-reset/confirm/` | 忘记密码：确认重置 |
+| POST | `/api/v1/auth/token/refresh/` | 刷新 JWT access token |
 | CRUD | `/api/v1/users/` | 用户管理 |
 | POST | `/api/v1/users/{id}/toggle_status/` | 启用/禁用用户 |
 | CRUD | `/api/v1/departments/` | 部门管理（自动同步知识节点树） |
 | CRUD | `/api/v1/teams/` | 团队管理（自动同步知识节点树） |
 | CRUD | `/api/v1/roles/` `/permissions/` | 角色/权限管理 |
 | GET | `/api/v1/permissions/me/` | 当前用户权限 |
-| CRUD | `/api/v1/access-applications/` | 文档访问权限申请 |
+| GET | `/api/v1/permissions/approvers/` | 可用审批人列表 |
+| GET | `/api/v1/permissions/assignable-roles/` | 可申请角色清单 |
+| POST | `/api/v1/permissions/approval-chain-preview/` | 审批链预览（申请前展示） |
+| GET | `/api/v1/permissions/pending-approvals/` | 待我审批工单（共享审批池） |
+| GET | `/api/v1/permissions/processed-tickets/` | 我已审批工单 |
+| GET | `/api/v1/permissions/my-tickets/` | 我发起的工单 |
+| GET | `/api/v1/permissions/all-tickets/` | 全部工单（仅超管/合规管理员） |
+| POST | `/api/v1/permissions/tickets/{id}/approve/` | 工单通过 |
+| POST | `/api/v1/permissions/tickets/{id}/reject/` | 工单驳回 |
+| GET/POST | `/api/v1/permissions/applications/` | 权限申请单（双轨：申请拉） |
+| POST | `/api/v1/permissions/applications/{id}/withdraw/` | 撤回权限申请 |
 
 ### 知识库
 
@@ -168,17 +209,22 @@ rag/
 | GET | `/api/v1/knowledge/documents/` | 文档列表（支持 discover 模式） |
 | GET | `/api/v1/knowledge/documents/{id}/` | 文档详情 |
 | GET | `/api/v1/knowledge/documents/pending/` | 待处理文档列表（轮询状态） |
+| GET | `/api/v1/knowledge/documents/allowed_visibility/` | 当前用户允许设置的可见范围 |
+| GET | `/api/v1/knowledge/documents/pending-audits/` | 待审核文档列表（审核/复核） |
+| POST | `/api/v1/knowledge/documents/{id}/audit-approve/` | 文档审核通过 |
+| POST | `/api/v1/knowledge/documents/{id}/audit-reject/` | 文档审核驳回（理由必填） |
 | GET | `/api/v1/knowledge/documents/{id}/chunks/` | 文档分块列表 |
-| GET/PATCH | `/api/v1/knowledge/documents/{id}/visibility/` | 查看/修改文档可见范围 |
+| GET/PATCH | `/api/v1/knowledge/documents/{id}/` | 文档详情/修改（含可见范围 visibility_level） |
 | POST | `/api/v1/knowledge/documents/{id}/reparse/` | 重新解析 |
 | DELETE | `/api/v1/knowledge/documents/{id}/` | 删除文档（软删除） |
-| GET | `/api/v1/knowledge/documents/{id}/raw/` | 文档原文预览（50MB 限制，分页 5000 字符/页） |
+| GET | `/api/v1/knowledge/documents/{id}/raw_content/` | 文档原文预览（50MB 限制，分页 5000 字符/页） |
+| GET | `/api/v1/knowledge/celery/status/` | Celery 任务状态查询 |
 
 ### 检索 & 问答
 
 | Method | Path | 说明 |
 |--------|------|------|
-| POST | `/api/v1/chat/ask/` | **核心问答接口**（SSE 流式 + TTFB + 终止控制） |
+| POST | `/api/v1/chat/ask_stream/` | **核心问答接口**（SSE 流式 + TTFB + 终止控制） |
 | POST | `/api/v1/chat/feedback/` | 提交问答反馈 |
 | CRUD | `/api/v1/chat/sessions/` | 会话管理 |
 | GET | `/api/v1/chat/sessions/{id}/qa/` | 问答历史（按 turn_index 升序） |
@@ -196,19 +242,34 @@ rag/
 | GET | `/api/v1/security/ip-whitelist/` `/ip-blacklist/` | IP 黑白名单 |
 | GET | `/api/v1/system/health/` | 健康检查 |
 | GET | `/api/v1/system/stats/` | 首页看板 |
+| GET | `/api/v1/system/search/` | 全局搜索（文档、代码、会话） |
+| GET | `/api/v1/system/configs/` | 系统配置列表（按 category 分组） |
+| GET/PUT | `/api/v1/system/configs/<key>/` | 查看/修改单个配置（走工单流程） |
+| CRUD | `/api/v1/system/llm-models/` | LLM/Embedding/Rerank 模型管理 |
+| GET/POST | `/api/v1/system/config-tickets/` | 配置变更工单列表/创建 |
+| GET | `/api/v1/system/config-tickets/{id}/` | 配置变更工单详情 |
+| POST | `/api/v1/system/config-tickets/{id}/approve/` | 配置工单通过（高风险需超管复核） |
+| POST | `/api/v1/system/config-tickets/{id}/reject/` | 配置工单驳回 |
+| POST | `/api/v1/system/config-tickets/{id}/withdraw/` | 配置工单撤回 |
+| GET | `/api/v1/system/model-tickets/` | 模型变更工单列表 |
+| GET | `/api/v1/system/model-tickets/{id}/` | 模型变更工单详情 |
+| POST | `/api/v1/system/model-tickets/{id}/approve/` | 模型工单通过（删除需超管复核） |
+| POST | `/api/v1/system/model-tickets/{id}/reject/` | 模型工单驳回 |
+| POST | `/api/v1/system/model-tickets/{id}/withdraw/` | 模型工单撤回 |
 
 ### 系统监控（analytics）
 
 | Method | Path | 说明 |
 |--------|------|------|
 | GET | `/api/v1/analytics/overview/` | 概览统计 |
+| GET | `/api/v1/analytics/daily/` | 准确率日报 |
 | GET | `/api/v1/analytics/trend/?days=` | 趋势报表 |
 | GET | `/api/v1/analytics/qa-records/` | 问答记录（需 `analytics:system:read` 权限） |
+| GET/PUT | `/api/v1/analytics/keywords/` | BM25 关键词权重管理（好评 +0.1 / 差评 -0.1） |
 | GET | `/api/v1/analytics/system-metrics/` | 系统指标日报（P50/P95/P99 + 直方图 + 错误分布） |
 | GET | `/api/v1/analytics/org-usage/` | 组织使用报表（部门/团队维度） |
 | GET | `/api/v1/analytics/queue-depth/` | Celery 队列深度（实时 + 历史 7 天趋势） |
 | GET | `/api/v1/analytics/realtime/` | 实时指标快照（5 分钟刷新 + last_flush_at） |
-| GET | `/api/v1/analytics/quality-reports/` | 忠实度评估报告 |
 | GET | `/api/v1/analytics/bad-feedbacks/` | 差评反馈列表 |
 
 ### RAG 质量评估（analytics）
@@ -219,17 +280,28 @@ rag/
 | POST | `/api/v1/analytics/golden-datasets/{id}/import/` | 批量导入测试问题（JSON） |
 | GET | `/api/v1/analytics/golden-datasets/{id}/export/` | 导出测试集 |
 | CRUD | `/api/v1/analytics/golden-datasets/{id}/questions/` | 测试问题管理（含相关文档 + 参考答案） |
+| POST | `/api/v1/analytics/regression/siphon/` | 手动沉淀低分对话到回归测试集 |
+| POST | `/api/v1/analytics/regression/eval/` | 触发回归测试集全链路评估（异步） |
 | POST | `/api/v1/analytics/eval/retrieval/` | 触发离线检索评估（Recall@K/MRR/NDCG） |
 | POST | `/api/v1/analytics/eval/answer/` | 触发回答质量评估 |
 | GET | `/api/v1/analytics/eval/retrieval-reports/` | 检索评估报告列表 |
 | POST | `/api/v1/analytics/doc-quality/evaluate/` | 触发文档质量评估 |
 | GET | `/api/v1/analytics/doc-quality/reports/` | 文档质量报告列表 |
-| POST | `/api/v1/analytics/multi-dim-eval/` | 触发 6 维度回答评估（LLM-as-Judge） |
+| POST | `/api/v1/analytics/multi-dim-eval/` | 触发多维度回答评估（DeepEval 12 维） |
 | GET | `/api/v1/analytics/multi-dim-scores/` | 多维度评估得分 |
+| GET | `/api/v1/analytics/eval-dashboard/overview/` | 评估看板概览（12 维均分 + 低分统计） |
+| GET | `/api/v1/analytics/eval-dashboard/trend/` | 评估趋势（按日聚合） |
+| GET | `/api/v1/analytics/eval-dashboard/low-score-qa/` | 低分 QA 列表 |
+| GET | `/api/v1/analytics/eval-dashboard/qa-detail/` | 单条 QA 评估详情（12 维分数） |
 | POST | `/api/v1/analytics/coverage/generate/` | 生成知识库覆盖率报告 |
 | GET | `/api/v1/analytics/coverage/reports/` | 覆盖率报告列表 |
+| GET | `/api/v1/analytics/coverage/reports/{id}/` | 覆盖率报告详情 |
 | GET | `/api/v1/analytics/coverage/reports/{id}/export/` | 导出覆盖率报告 |
 | GET | `/api/v1/analytics/feedback-loop/` | 反馈闭环（差评自动关联 chunk） |
+| GET | `/api/v1/analytics/low-score-analysis/` | 低分对话归因分析列表 |
+| GET | `/api/v1/analytics/low-score-analysis/detail/` | 归因分析详情（完整对话 + 归因 + 建议） |
+| POST | `/api/v1/analytics/low-score-analysis/run/` | 手动触发归因（异步） |
+| GET | `/api/v1/analytics/low-score-analysis/stats/` | 归因分类统计（分布图） |
 
 ---
 
@@ -242,7 +314,7 @@ rag/
 | 异步 | Celery 5.4 + Redis | 文档解析、记忆提炼、日报、批量导入、质量评估都走队列 |
 | DB | PostgreSQL 16 + pgvector | 结构化 + 向量一站式，避免额外维护 Milvus |
 | 缓存 | Redis 7 | 短时记忆 / 会话 / 验证码 / Celery broker / 权限缓存 / 实时指标（独立 DB） |
-| LLM | DeepSeek Chat/Reasoner | 国内合规 + 成本可控；Provider 抽象保留切换空间 |
+| LLM | DeepSeek Chat/Reasoner | 成本可控；Provider 抽象保留切换空间 |
 | 嵌入 | BGE-M3 (SiliconFlow) | 高性能中文嵌入模型，1024 维 |
 | Rerank | BGE-Reranker-v2 (SiliconFlow) | 轻量级重排序模型 |
 | PDF 解析 | PyMuPDF | 原生支持 `find_tables()` 表格提取 + 跨页合并 + 图片提取 |
@@ -259,26 +331,28 @@ rag/
 | User | `user_account` | 用户实体（AUTH_USER_MODEL） |
 | Department | `user_department` | 部门（自引用树） |
 | Team | `user_team` | 团队（FK → Department） |
-| Role | `user_role_list` | 角色清单（6 种内置角色） |
+| Role | `user_role_list` | 角色清单（9 种内置角色） |
 | Permission | `user_permission_list` | 权限项清单（`module:action:scope` 格式） |
-| RolePermission | `user_role_permission_rel` | 角色↔权限关联 |
-| UserRole | `user_account_role_rel` | 用户↔角色关联 |
-| UserTeam | `user_account_team_rel` | 用户↔团队关联（支持多团队） |
-| DocDenyUser | `doc_deny_user` | 文档黑名单（最高优先级，对超管也生效） |
-| DocAllowUser | `doc_allow_user` | 文档个人白名单（含 expire_time） |
-| DocCrossTeam | `doc_cross_team` | 跨团队授权（含 expire_time） |
-| AccessApplication | `access_application` | 统一权限申请单（双轨：申请拉 + 授权推） |
+| RolePermissionRel | `user_role_permission_rel` | 角色↔权限关联 |
+| UserRoleRel | `user_role_global_rel` | 用户↔全局角色关联 |
+| UserDeptScopeRel | `user_role_dept_scope_rel` | 用户↔部门范围角色关联（限定部门） |
+| UserTeamScopeRel | `user_role_team_scope_rel` | 用户↔团队范围角色关联（限定团队） |
+| PermissionApprovalTicket | `permission_approval_ticket` | 权限配置审批工单（共享审批池 + 顺序执行 + 状态机） |
+| RoleConflictRule | `role_conflict_rule` | 角色冲突规则（互斥角色校验） |
+| PermissionAuditLog | `permission_audit_log` | 权限审计日志（只 INSERT 不删，失败不阻断主业务） |
 
 ### 知识库（knowledge）
 
 | 模型 | 表名 | 说明 |
 |------|------|------|
 | KnowledgeNode | `knowledge_node` | 固定 4 层树（KB→部门→团队→分类），Level 4+ 无限层级 |
-| Document | `knowledge_document` | 文档元数据（visible_scope 三档 + 版本管理 + 软删除） |
+| Document | `knowledge_document` | 文档元数据（visibility_level 三档 + 版本管理 + 软删除） |
+| ResourceShare | `resource_share` | 资源主动共享（部门/团队/个人统一表 + 节点级继承 + 覆盖索引） |
+| ResourceBlockList | `resource_block_list` | 访问黑名单（仅个人，Deny Override 铁律，独立表独立优先级） |
 | DocumentChunk | `knowledge_document_chunk` | 文档切片（表格类型不二次切分） |
 | CodeChunk | `knowledge_code_chunk` | 代码切片（AST 解析） |
 | ImageResource | `knowledge_image` | 图片资源（base64/OSS 双存储） |
-| DocOperationLog | `knowledge_doc_operation_log` | 文档操作审计日志（20 种 action） |
+| DocOperationLog | `knowledge_doc_operation_log` | 文档操作审计日志（15 种 action） |
 
 ### 检索（retrieval）
 
@@ -295,34 +369,94 @@ rag/
 | SystemMetricsReport | `analytics_system_metrics_report` | 系统指标日报（P50/P95/P99 + 直方图 + 错误分布） |
 | OrgUsageReport | `analytics_org_usage_report` | 组织使用报表（部门/团队维度，UPSERT） |
 | QueueDepthLog | `analytics_queue_depth_log` | Celery 队列深度快照（5 分钟） |
-| AnswerQualityReport | `analytics_answer_quality_report` | 忠实度评估报告（便宜模型 + 成本控制） |
-| GoldenDataset | `analytics_golden_dataset` | 黄金测试集（含版本管理） |
+| GoldenDataset | `analytics_golden_dataset` | 黄金测试集（含版本管理 + regression_low_score 类型） |
 | GoldenQuestion | `analytics_golden_question` | 黄金测试问题（含相关文档 + 参考答案） |
 | GoldenRelevantDoc | `analytics_golden_relevant_doc` | 测试问题相关文档标注（high/medium/low） |
 | GoldenReferenceAnswer | `analytics_golden_reference_answer` | 测试问题参考答案 + 关键点 |
-| MultiDimensionScore | `analytics_multi_dimension_score` | 6 维度回答评估（Faithfulness/Relevance/Completeness/Correctness/Harmlessness/ContextRecall） |
+| MultiDimensionScore | `analytics_multi_dimension_score` | 多维度回答评估（DeepEval 12 维：检索1+答案6+安全2+业务3，兼容自研历史维度） |
 | DocumentQualityReport | `analytics_document_quality_report` | 文档入库质量报告（解析/切分/向量化 + 综合评分 0-100） |
 | RetrievalQualityReport | `analytics_retrieval_quality_report` | 检索质量报告（Recall@K/MRR/NDCG + 各阶段增益） |
 | CoverageReport | `analytics_coverage_report` | 知识库覆盖率报告（热门覆盖 + 知识空白 + 重复检测） |
+| LowScoreAnalysis | `analytics_low_score_analysis` | 低分对话归因分析（规则归因为主 + LLM 个性化建议 + 分层触发） |
+
+### 系统配置与日志（system）
+
+| 模型 | 表名 | 说明 |
+|------|------|------|
+| SystemConfig | `system_config` | 系统配置 KV（按 category 分组 + 风险等级 + 只读标记） |
+| LLMModel | `system_llm_model` | LLM/Embedding/Rerank 模型配置（多 Provider 支持） |
+| ConfigChangeTicket | `system_config_ticket` | 配置变更工单（普通审核 + 高风险超管复核） |
+| ModelChangeTicket | `system_model_ticket` | 模型变更工单（修改/停用/删除，删除需超管复核） |
+| CeleryTaskLog | `system_celery_task_log` | Celery 异步任务日志（状态/耗时/重试） |
+| LlmCallLog | `system_llm_call_log` | LLM 调用日志（Token/成本/延迟，成本可观测） |
+| DataExportLog | `system_data_export_log` | 数据导出日志（审计 + 防越权） |
+
+### 会话与反馈（chat）
+
+| 模型 | 表名 | 说明 |
+|------|------|------|
+| QaRecord | `chat_qa_record` | 问答记录（含 TTFB/Token 速率/错误类型/检索得分） |
+| QaFeedback | `chat_feedback` | 问答反馈（好评/差评 + 原因） |
+| HotQaCache | `chat_hot_qa_cache` | 热点问答缓存（高频问题复用） |
+| TaskDecomposition | `chat_task_decomposition` | 任务拆分记录（Agentic RAG） |
+
+### 记忆（memory）
+
+| 模型 | 表名 | 说明 |
+|------|------|------|
+| Session | `memory_session` | 会话实体 |
+| SessionMemory | `memory_session_memory` | 会话级记忆（short/session） |
+| UserMemory | `memory_user_memory` | 用户级记忆（每晚提炼稳定偏好） |
+| GlobalMemory | `memory_global_memory` | 全局记忆（系统级策略） |
+
+### 审计（audit）
+
+| 模型 | 表名 | 说明 |
+|------|------|------|
+| AuditLog | `audit_log` | 审计日志（sha256 哈希链防篡改） |
+
+### 安全（security）
+
+| 模型 | 表名 | 说明 |
+|------|------|------|
+| IpWhitelist | `security_ip_whitelist` | IP 白名单 |
+| IpBlacklist | `security_ip_blacklist` | IP 黑名单（含过期时间，定时清理） |
+| LoginAttempt | `security_login_attempt_record` | 登录尝试记录（失败锁定） |
+| SensitiveWord | `security_sensitive_word_list` | 敏感词词库 |
+
+### 通知（notification）
+
+| 模型 | 表名 | 说明 |
+|------|------|------|
+| EmailSubscription | `notification_email_subscription` | 邮件订阅 |
+| EmailSendLog | `notification_email_send_log` | 邮件发送日志 |
+
+### Agent（agent）
+
+| 模型 | 表名 | 说明 |
+|------|------|------|
+| AgentTrace | `agent_trace` | Agent 执行轨迹（任务拆分 + 工具调用 + 引用合并） |
 
 ---
 
 ## 七、权限系统规则
 
-### 7.1 角色体系（6 种）
+### 7.1 角色体系（9 种）
 
-| 角色编码 | 角色名称 | 核心职责 |
-|---------|---------|---------|
-| super_admin | 超级管理员 | 全部配置权限、绕过双审直接发布、可物理销毁文档 |
-| kb_admin | 知识库管理员 | 全部文档管理权限（CRUD/审核/授权/删除），无用户管理 |
-| user_admin | 用户管理员 | 全部用户管理（CRUD/角色/部门/团队），系统配置 |
-| dept_manager | 部门负责人 | 管辖本部门全部团队、审批扩大可见范围申请 |
-| team_leader | 团队组长 | 本团队文档一审、管理文档、调整可见范围、收回对外权限 |
-| compliance_reviewer | 文档审核员 | 专职合规风控、敏感内容二审、无日常检索问答权限 |
-| employee | 普通员工 | 检索权限内已审核文档、上传发起双审工单、发起权限申请 |
-| readonly | 只读员工 | 检索已发布文档、禁止上传 |
+| 角色编码 | 角色名称 | 角色类型 | 核心职责 |
+|---------|---------|---------|---------|
+| super_admin | 超级管理员 | GLOBAL | 最高权限（系统级快路径，鉴权绕过 permission_key），绕过双审直接发布 |
+| user_admin | 人员管理员 | GLOBAL | 管理组织/人员/部门/团队，不可操作文档 |
+| kb_admin | 文档管理员 | GLOBAL | 管理全部知识库/文档（CRUD/审核/授权/删除），不可管理人 |
+| compliance_admin | 合规审计员 | GLOBAL | 查看审计日志/合规校验，只读 |
+| system_maintainer | 维护管理员 | GLOBAL | 查看和修改系统配置（LLM/Embedding/检索/评估等运行期参数），不持有用户/角色/文档管理权限 |
+| dept_manager | 部门经理 | DEPT_SCOPE | 管理指定部门人员/部门级知识库（绑定部门） |
+| team_leader | 团队组长 | TEAM_SCOPE | 管理指定团队人员/团队级知识库（绑定团队），文档审核 |
+| viewer | 查看者 | NORMAL_USER | 兜底角色，随人事归属生效自带只读，未显式授权 contributor 时自动叠加 |
+| contributor | 参与者 | NORMAL_USER | 显式授权角色，需申请获得，获得后覆盖 viewer 兜底，可查看/上传/下载文档 |
 
 > 内置角色 code 不可修改：前端编辑时 readOnly，后端 update 接口拦截。
+> role_type 决定授权时是否需绑定管辖 Scope：GLOBAL 无需 / DEPT_SCOPE 绑部门 / TEAM_SCOPE 绑团队 / NORMAL_USER 随人事归属。
 
 ### 7.2 节点结构（固定 4 层 + 自定义分类）
 
@@ -339,40 +473,52 @@ rag/
 
 ### 7.3 文档可见范围（三档）
 
-| 可见范围 | 含义 | 默认访问者 |
+| visibility_level | 含义 | 默认访问者 |
 |---------|------|-----------|
-| team | 仅归属团队 | 同团队成员 + 所有者 + 管理员 |
-| dept | 归属全部门 | 同部门所有成员 + 所有者 + 管理员 |
-| public | 全公司公开 | 所有登录用户 |
+| TEAM_ONLY | 仅归属团队 | 同团队成员 + 所有者 + 管理员 |
+| DEPT_ONLY | 归属全部门（含下属团队） | 同部门所有成员 + 所有者 + 管理员 |
+| PUBLIC | 全公司公开 | 所有登录用户 |
 
 ### 7.4 文档双层审核流程
 
 ```
-上传 → 系统预检 → 待团队组长一审 (pending_team)
+上传 → 系统预检 → 待团队组长审核 (pending_team)
                       ↓
-           待合规审核员二审 (pending_compliance)
+           待合规复核 (pending_compliance)  ← 部门经理 / kb_admin / super_admin
                       ↓
               双审通过 (passed) → 可被检索
 ```
 
 super_admin 可绕过双审直接发布。
 
-### 7.5 访问权限判定（7 步优先级，命中即停）
+### 7.5 访问权限判定（Deny Override 铁律 + 优先级判定）
 
-1. 黑名单拦截（DocDenyUser）→ 全部拒绝（最高优先级，对超管也生效）
-2. 所有者 / super_admin / kb_admin → 放行
-3. visible_scope='public' → 放行
-4. visible_scope='dept' 且同部门 → 放行
-5. visible_scope='team' 且同团队（支持多团队） → 放行
-6. 跨团队授权命中（DocCrossTeam，未过期）→ 放行
-7. 个人白名单命中（DocAllowUser，未过期）→ 放行
+权限判定遵循 **Deny > Allow** 不可变原则，优先级从高到低（[apps/knowledge/access.py](apps/knowledge/access.py) `resolve_doc_access`）：
+
+0. **super_admin** → 全权限（系统级快路径，鉴权绕过 permission_key；**但不绕过黑名单**）
+1. **Owner** → 全权限（绕过黑名单，Owner 不被自己文档拉黑）
+2. **黑名单拦截**（ResourceBlockList，仅个人）→ 全部拒绝（Deny Override 铁律，对超管也生效，独立表独立优先级）
+3. **kb_admin / 团队组长** → 全权限
+4. **visibility_level='PUBLIC'** → 放行
+5. **visibility_level='DEPT_ONLY' 且同部门** → 放行
+6. **visibility_level='TEAM_ONLY' 且同团队**（支持多团队） → 放行
+7. **主动共享命中**（ResourceShare，部门/团队/个人统一表，未过期，支持节点级子树继承）→ 放行
 
 否则拒绝。检索层与文档层均做权限过滤，Agent 在混合检索后做二次权限校验。
 
+> 设计要点：黑名单是 Deny Override 铁律，对超管也生效，只有 Owner 绕过（所有权原则）。ResourceShare 单表 + 枚举（部门/团队/个人统一），覆盖索引 0 回表；节点级继承通过 KnowledgeNode.path 前缀匹配（LIKE '/1/5/12/%'）一次搞定，无需递归。ResourceBlockList 独立表独立鉴权优先级，绝不和 Allow 混表，避免 SQL 逻辑判断顺序出错导致 Deny 被覆盖。
+
 ### 7.6 权限申请双轨制
 
-- **轨道 1（申请拉取）**：用户提交 AccessApplication → 审批 → 插入白名单/跨团队记录
-- **轨道 2（授权推送）**：组长/管理员直接操作 DocAllowUser/DocCrossTeam 表
+- **轨道 1（申请拉取）**：用户提交 PermissionApprovalTicket → 共享审批池顺序审批 → 写入 ResourceShare
+- **轨道 2（授权推送）**：组长/管理员直接操作 ResourceShare 表授予
+
+审批规则：
+- 同部门授权：团队组长单审即可
+- 跨部门/跨团队/全局角色：双轨审核（审核 + 复核）
+- super_admin 新增/撤销：强制另一个 super_admin 双人复核
+- 降级/撤销：团队组长可直接执行，无需审批（但记审计）
+- 审批工单永不删除，只改状态
 
 ### 7.7 部门/团队删除保护
 
@@ -425,13 +571,16 @@ media/documents/
 | `cleanup-old-analytics-data` | 每日 03:30 | 清理过期监控数据（低峰期） |
 | `doc-quality-daily` | 每日 04:00 | 批量评估文档质量（解析/切分/向量化） |
 | `coverage-report-daily` | 每日 04:30 | 生成知识库覆盖率报告 |
-| `faithfulness-evaluation` | 每小时整点 | 忠实度评估（成本受 .env 控制） |
-| `multi-dim-evaluation` | 每 2 小时（30 分） | 6 维度回答质量评估（与忠实度错开） |
+| `siphon-low-score-regression` | 每日 05:30 | 从生产低分对话沉淀到回归测试集（低峰期） |
+| `multi-dim-evaluation` | 每 2 小时（30 分） | 多维度回答质量评估（DeepEval 12 维，回扫未覆盖项） |
 | `handle-feedback` | 每小时（15 分） | 处理未处理差评反馈 |
 | `periodic-retrieval-eval` | 每周一 05:00 | 离线检索回归测试（黄金测试集） |
+| `run-regression-evaluation` | 每周一 06:00 | 低分回归测试集全链路评估（与检索评估错开 1h） |
 | `queue-depth-snapshot` | 每 5 分钟 | Celery 队列深度快照（PG 历史 + Redis 实时） |
 | `realtime-metrics-flush` | 每 5 分钟 | 刷新实时指标时间戳 |
 | `expire-ip-blacklist` | 每 5 分钟 | 清理过期临时 IP 封禁 |
+
+> 生产对话自动评估（`production_eval`）不走 Beat，由对话结束后按"采样率 + 分层限速 + 日预算"策略异步触发，与定时批量任务互补。
 
 队列划分：`default / parse / memory / email / analytics`，analytics 独立队列避免监控任务与业务问答争抢 Worker。
 
@@ -447,7 +596,9 @@ celery -A rag_project worker -l info -Q analytics
 
 ## 十、RAG 质量评估中心
 
-> 入口：侧边栏「质量评估」→ `admin-eval.html`。6 个 Tab 页 + KPI 卡片 + 数据可视化 + 报告表格，支持手动触发与定时自动执行。
+> 入口：侧边栏「质量评估」→ `admin-eval.html`。多 Tab 页 + KPI 卡片 + 数据可视化 + 报告表格，支持手动触发与定时自动执行。
+>
+> 评估体系分两条线：**部署前评估**（Ragas，有 reference，指标更全）和**生产评估**（DeepEval，无 reference，采样+限速）。两者互补，Ragas 不在生产链路中调用。
 
 ### 10.1 黄金测试集
 - 创建/编辑/删除测试集（含版本管理）
@@ -461,36 +612,99 @@ celery -A rag_project worker -l info -Q analytics
 - 评估时配置快照（top_k / rrf_k / chunk_size 等）
 - 检索漏召分析：未命中任何相关文档的问题统计
 
-### 10.3 多维度回答质量评估
-LLM-as-Judge，6 维度评分（0-1）：
+### 10.3 多维度回答质量评估（DeepEval 12 维）
+LLM-as-Judge，12 维度评分（0-1），分四大类：
 
-| 维度 | 含义 |
-|------|------|
-| Faithfulness | 忠实度（回答是否基于 context，无幻觉） |
-| Relevance | 相关性（回答是否切中问题要害） |
-| Completeness | 完整性（是否覆盖 context 关键点） |
-| Correctness | 正确性（是否存在事实错误） |
-| Harmlessness | 无害性（是否安全合规） |
-| Context Recall | 上下文召回率（context 是否包含所需信息） |
+| 类别 | 维度 | 含义 |
+|------|------|------|
+| 检索质量(1) | context_relevancy | 上下文相关性 |
+| 答案质量(6) | faithfulness | 忠实度（是否基于 context，无幻觉） |
+| | hallucination | 幻觉（生成内容是否脱离 context） |
+| | answer_relevancy | 相关性（是否切中问题要害） |
+| | completeness | 完整性（是否覆盖 context 关键点） |
+| | conciseness | 简洁性（是否冗余啰嗦） |
+| | clarity | 清晰度（表达是否清晰易懂） |
+| 安全性(2) | toxicity | 毒性（是否含有害内容） |
+| | bias | 偏见（是否含歧视/偏见） |
+| 业务体验(3) | professionalism | 专业性 |
+| | helpfulness | 有用性 |
+| | actionability | 可操作性（建议是否可落地） |
 
 - 使用便宜模型（如 deepseek-chat）控制成本
 - 支持原子级事实核查（atomic facts 逐一验证）
 - 自一致性：多次评估取平均降低随机性
+- 兼容自研历史维度（relevance/correctness/harmlessness/context_recall）
 
-### 10.4 文档质量评估
+### 10.4 生产对话自动评估
+对话结束后按"分层限速 → 采样 → 日预算"策略异步触发 DeepEval 12 维评估，四重成本保护：
+
+**流程顺序**（先限速保护接口，再采样控量）：
+1. 分钟限速 → 2. 小时限速 → 3. 采样率 → 4. 日预算
+
+| 保护层 | 默认值 | 说明 |
+|--------|--------|------|
+| 分钟限速 | 5/min | Redis 原子 INCR 令牌桶，防止 LLM 并发爆炸 |
+| 小时限速 | 50/hour | Redis 原子 INCR，分散评估避免对话集中 + 节约成本 |
+| 采样率 | 5% | 从通过限速的对话中按比例随机抽取，0=不评估，1=全量评估 |
+| 日限 + 成本限 | 500条/日 + ¥1/日 | Redis 日计数 + DB 成本聚合，硬性节约成本 |
+
+> 采样率在限速之后：限速先发挥保护作用（防止打爆接口），再从通过限速的对话中采样（控制评估量）。若采样率在限速之前，95% 对话直接跳过，限速几乎不会触发，失去保护意义。
+
+**过滤规则**（以下对话不评估）：
+- `is_success=False`：链路中断，无有效回答
+- `answer_type='refused'`：正常拒答（无相关资料），无评估意义
+- `is_hit_cache=True`：回答复用历史，评估重复无价值
+
+**评估后联动**：
+- 评估完成后自动异步派发低分归因分析（`run_low_score_analysis`），归因任务内部判断均分 < threshold 才真正分析
+- 手动评估场景（`skip_budget_check=True`）绕过日预算检查，由调用方自行控制
+
+- 即时路径（采样）与批量任务（回扫未覆盖项）互补
+- 可通过 `PRODUCTION_EVAL_METRIC_GROUPS` 选择性启用指标组进一步降本
+- Redis 故障时保守跳过（宁可少评估也不打爆 LLM 评估接口）
+
+### 10.5 低分回归测试集
+从生产低分对话沉淀，防止已知 bad case 在迭代中退化：
+
+- **沉淀**：从 MultiDimensionScore 聚合 QA 均分，取低分 top N，按 root_type 分流到对应回归测试集
+- **评估**：全链路执行 检索→生成→12 维评估，均分 ≥ threshold 视为通过
+- **淘汰**：达到 `suggest_remove_passes` 时标记建议人工移除（不自动删除）
+- 沉淀来源是 QaRecord（生产低分对话），不是 GoldenQuestion
+- 同一 QA 不重复沉淀（source_qa_record_id 查重）
+
+### 10.6 低分对话归因分析
+对低分 QA 自动归因 + 给出优化建议，分层触发控成本：
+
+- **规则归因为主**（零 LLM 成本、可解释、可审计），基于 12 维分数 + retrieval_scores
+- **模板建议兜底**，覆盖 80% 场景
+- **LLM 个性化建议**仅对关键低分触发（关键维度低分 / 多维低分）
+- safety 类不走 LLM，直接告警（需立即人工处置）
+
+归因分类（11 类）：检索召回不足 / 检索排序失效 / 知识盲区 / 内容质量差 / 生成幻觉 / 生成跑题 / 生成不完整 / 生成表达差 / 安全问题 / 问题侧 / 无法归因
+
+### 10.7 Ragas 部署前评估流水线
+零标注全自动评估，部署前对黄金测试集做完整 RAG 评估：
+
+- **零标注**：直接复用知识库现有 DocumentChunk 作为语料，Ragas 自动合成测试集
+- **全自动**：文档 → 测试集 → 检索+回答 → Ragas 标准指标评估 → 报告，一条命令跑通
+- **离线场景**：需要 reference 才能算的指标（context_recall/context_precision/answer_correctness）在此场景可用
+- 自托管数据不出域，符合企业内网审计要求
+- 入口：`docker compose exec django python manage.py ragas_eval`
+
+### 10.8 文档质量评估
 - 解析质量：文本提取率、表格保留率、图片提取率
 - 切分质量：chunk 数量、平均大小、标准差、分布均匀性
 - 向量化质量：embedding 成功率、失败 chunk 数
 - 综合评分 0-100（解析 0.4 + 切分 0.3 + 向量化 0.3）
 - 问题诊断：自动列出 warning 级别问题清单
 
-### 10.5 知识库覆盖率
+### 10.9 知识库覆盖率
 - 热门问题覆盖率（Top 100 查询命中率）
 - 知识空白检测（某领域查询长期无命中）
 - 重复切片检测
 - 领域覆盖分析：按部门 → 团队层级分组，统计文档数 / 切片数 / 占比 / 查询命中率
 
-### 10.6 反馈闭环自动化
+### 10.10 反馈闭环自动化
 - 差评自动关联到命中的 chunk
 - 智能生成处理建议（重新切分 / 重新入库 / 补充文档）
 - 反馈处理追踪（resolved 状态）
@@ -513,7 +727,7 @@ LLM-as-Judge，6 维度评分（0-1）：
 - 包含：总 QA / 缓存命中 / LLM 错误 / 成本估算 / last_flush_at
 
 ### 11.3 队列深度
-- Redis LLEN 实时查询（O(1)）+ PostgreSQL 历史存储（保留 7 天）
+- Redis LLEN 实时查询（O(1)）+ PostgreSQL 历史存储（保留 90 天，供趋势分析）
 - 同时记录 Worker 数量与任务类型
 - 同一队列同一分钟唯一约束，防止 Beat 重入产生重复数据
 
@@ -527,11 +741,13 @@ LLM-as-Judge，6 维度评分（0-1）：
 ## 十二、批量导入
 
 ```bash
-# 默认：team 可见，超级管理员上传
+# 默认：private（归一化为 TEAM_ONLY），超级管理员上传
 docker compose exec django python scripts/batch_import_docs.py
 
-# 指定可见范围
+# 指定可见范围（private/department/team/public，任务内归一化为 VisibilityLevel 三档）
 docker compose exec django python scripts/batch_import_docs.py --visibility public
+docker compose exec django python scripts/batch_import_docs.py --visibility department --department-code R&D
+docker compose exec django python scripts/batch_import_docs.py --visibility team --team-code RAG-PROJ
 
 # 列出可用节点/部门
 docker compose exec django python scripts/batch_import_docs.py --list-nodes
@@ -547,10 +763,12 @@ docker compose exec django python scripts/batch_import_docs.py --list-department
 
 ## 十三、环境变量配置
 
+> 配置分两类：**启动期必填 + 敏感凭证**保留在 `.env`（连 DB 前就要用 / 不进数据库），**业务参数**迁移到 `SystemConfig` 数据库表（运行时可改、走工单审批、支持风险等级分级）。
+
 ```ini
 # --- Django 基础 ---
 DEBUG=1
-SECRET_KEY=change-me-please-in-production
+SECRET_KEY=change-me-please-in-production-generate-a-real-secret-key
 ALLOWED_HOSTS=*
 
 # --- 数据库（PostgreSQL 16 + pgvector）---
@@ -559,45 +777,65 @@ POSTGRES_USER=rag_user
 POSTGRES_PASSWORD=rag_pass_2026
 PG_DB_HOST=localhost
 PG_DB_PORT=5432
+PG_DB_DATABASE=rag_agent
+PG_DB_USER=rag_user
+PG_DB_PASSWORD=rag_pass_2026
+PG_CONN_MAX_AGE=600
 
-# --- Redis ---
+# --- Redis（缓存 / 短时记忆 / Celery broker）---
 REDIS_DB_HOST=localhost
 REDIS_DB_PORT=6379
+REDIS_DB_PASSWORD=
+REDIS_DB_DB=0
 
-# --- LLM ---
-LLM_API_KEY=sk-your-api-key
-LLM_BASE_MODEL=deepseek-v4-flash
-LLM_ADVANCED_MODEL=deepseek-v4-pro
+# --- LLM 配置（API Key 敏感凭证保留 .env）---
+LLM_API_KEY=sk-your-llm-api-key-here
 
-# --- Embedding & Rerank ---
-EMBEDDING_API_KEY=sk-your-embedding-key
-EMBEDDING_MODEL=BAAI/bge-m3
-EMBEDDING_DIM=1024
-RERANK_MODEL=BAAI/bge-reranker-v2-m3
+# --- Agent 配置（Agentic RAG 工具调用）---
+# TAVILY_API_KEY: 联网搜索工具（未配置时降级到 DuckDuckGo）
+TAVILY_API_KEY=
+# BUSINESS_DB_DSN: Text2SQL 业务数据库连接串（含密码，敏感凭证保留 .env）
+BUSINESS_DB_DSN=
 
-# --- Embedding Provider ---
-EMBEDDING_PROVIDER=docker     # docker / api
+# --- Embedding & Rerank（API Key 敏感凭证保留 .env）---
+EMBEDDING_API_KEY=sk-your-embedding-api-key-here
 
-# --- 文档存储 ---
-DOCUMENT_STORAGE_MODE=local   # local / oss
-DOCUMENT_MAX_SIZE_MB=100
+# --- OSS 配置（DOCUMENT_STORAGE_MODE=oss 时使用）---
+OSS_ACCESS_KEY_ID=your-access-key-id
+OSS_ACCESS_KEY_SECRET=your-access-key-secret
 
-# --- 质量评估（成本控制）---
-EVAL_MODEL=deepseek-chat
-EVAL_BATCH_SIZE=20
-EVAL_DAILY_LIMIT=200
-EVAL_DAILY_COST_LIMIT=10.0
-EVAL_ENABLED=true
+# --- 时区 ---
+TZ=Asia/Shanghai
+
+# --- 邮件服务（SMTP）---
+EMAIL_HOST_PASSWORD=your-smtp-password
 ```
 
-完整变量列表见 `.env.example`。
+**业务参数（SystemConfig 数据库表）**：首次部署通过 `scripts/init_system.py` 写入默认值，后续通过 `admin-system-config.html` 页面修改（走工单审批）。包括：
+
+- LLM 模型与超时（LLM_BASE_MODEL / LLM_ADVANCED_MODEL / LLM_TIMEOUT）
+- Embedding & Rerank（EMBEDDING_MODEL / EMBEDDING_DIM / RERANK_MODEL / EMBEDDING_PROVIDER）
+- 检索参数（top_k / rrf_k / chunk_size / chunk_overlap）
+- 文档存储（DOCUMENT_STORAGE_MODE / DOCUMENT_MAX_SIZE_MB）
+- 邮件 SMTP（EMAIL_HOST / EMAIL_PORT / EMAIL_HOST_USER）
+- Agent（AGENT_DEFAULT_MODE）
+- 安全（敏感词 / 登录锁定阈值）
+- 记忆（Token 预算）
+- Analytics（Redis DB / 队列监控）
+- 评估（EVAL_MODEL / 采样率 / 限速 / 日预算）
+
+完整变量列表见 `.env.example`，SystemConfig 配置项默认值详见 [scripts/initial_data.yaml](scripts/initial_data.yaml)（首次部署由 `scripts/init_system.py` 写入）。
 
 ---
 
 ## 十四、测试
 
 ```bash
+# 运行时 API 烟雾测试（需先启动服务，基于 requests 直连 8000 端口）
 docker compose exec django python tests/test_api_simple.py
+
+# Django 标准单元测试（基于 TestCase，使用 tests/test_settings.py 独立配置）
+docker compose exec django python manage.py test tests.test_api --settings=tests.test_settings
 ```
 
 ---
@@ -606,7 +844,10 @@ docker compose exec django python tests/test_api_simple.py
 
 1. **检索向量库**：当前走 pgvector，可切换 Milvus/Qdrant，只改 `upsert_vector` / `vector_search`
 2. **Rerank**：已抽象签名 `rerank_docs`，可换 Cohere API
-3. **多租户**：`Document` 已有 `dept_node_id`/`team_node_id`，扩展 tenant_id 即可
+3. **多租户**：`Document` 已有 `dept_id`/`team_id`（归属部门/团队，CHECK 约束至少一个非空），扩展 tenant_id 即可
 4. **前端替换**：`static/` 为极简演示，正式项目建议 Vue3 + Element Plus
-5. **质量评估模块拆分**：当前在 analytics app 内通过 4 个独立 Python 文件实现隔离；当模型数增长到 30+ 或代码量超过 3000 行时，可拆分为独立 app（只需 move 文件 + 改 INSTALLED_APPS，成本极低）
+5. **质量评估模块拆分**：当前在 analytics app 内通过多个独立 Python 文件（deepeval_metrics / production_eval / regression_eval / low_score_analyzer / ragas_pipeline / offline_eval / doc_quality / coverage）实现隔离；当模型数增长到 30+ 或代码量超过 3000 行时，可拆分为独立 app（只需 move 文件 + 改 INSTALLED_APPS，成本极低）
 6. **A/B 测试框架**：top_k / rrf_k / chunk_size 等参数可扩展为生产流量灰度对比
+7. **评估指标扩展**：DeepEval 12 维可通过 `PRODUCTION_EVAL_METRIC_GROUPS` 选择性启用，新增维度只需在 `deepeval_metrics.py` 注册 metric 即可
+8. **权限缓存替换**：当前 `perm_cache.py` 基于 LocMemCache，生产环境可换 Redis 分布式缓存，接口契约不变
+9. **配置热更新**：`SystemConfig` 已支持 DB 存储 + `config_loader.py` 读取，可扩展 Redis Pub/Sub 实现多 Worker 配置热更新

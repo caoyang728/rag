@@ -345,7 +345,7 @@ class User(AbstractBaseUser):
 class Role(models.Model):
     """角色表 —— 权限点集合模板，不绑定任何组织 ID
 
-    role_key 全局唯一：7 个内置角色（is_builtin=True）系统启动时种子写入，不可删除。
+    role_key 全局唯一：9 个内置角色（is_builtin=True）系统启动时种子写入，不可删除。
     自定义角色（未来扩展）可软删。
     """
     role_key = models.CharField(_('角色标识'), max_length=64, unique=True,
@@ -551,7 +551,7 @@ class PermissionApprovalTicket(models.Model):
 
     审批规则（最终计划）：
     - 同部门授权（GRANT team_leader/employee）：团队组长单审即可
-    - 跨部门/跨团队/全局角色：双轨审核（一审 + 二审）
+    - 跨部门/跨团队/全局角色：双轨审核（审核 + 复核）
     - super_admin 新增/撤销：强制另一个 super_admin 双人复核
     - 降级/撤销（REVOKE）：团队组长可直接执行，无需审批（但记审计）
     - 任一节点 REJECTED → 工单终态 REJECTED，不执行授权表写入

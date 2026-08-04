@@ -1430,7 +1430,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
         if need_double:
             current_step = ticket.current_step or 0
             step_info = chain[current_step] if current_step < len(chain) else {}
-            # 一审：不能与已审步骤为同一人（二审校验）
+            # 审核：不能与已审步骤为同一人（复核校验）
             for prev in chain[:current_step]:
                 if prev.get('approver_id') == reviewer.id:
                     raise PermissionDenied("双层审批不能由同一管理员完成，请另一位管理员审批")
@@ -2029,7 +2029,7 @@ class PendingDocsView(APIView):
 
 
 # ============================================================================
-# 文档审核（双审：团队组长一审 → 部门经理/合规二审）
+# 文档审核（双审：团队组长审核 → 部门经理/合规复核）
 # ============================================================================
 
 class DocAuditPendingView(APIView):
@@ -2037,8 +2037,8 @@ class DocAuditPendingView(APIView):
     获取待当前用户审核的文档列表
 
     审核规则（对齐 Document.AUDIT_STATUS_CHOICES）：
-    - pending_team: 待团队组长一审 → 文档 team_id 对应当前用户为团队 leader
-    - pending_compliance: 待合规二审 → 部门 leader / kb_admin / super_admin
+    - pending_team: 待团队组长审核 → 文档 team_id 对应当前用户为团队 leader
+    - pending_compliance: 待合规复核 → 部门 leader / kb_admin / super_admin
     """
     permission_classes = [IsAuthenticated]
 
@@ -2068,26 +2068,26 @@ class DocAuditPendingView(APIView):
             can_audit = False
             audit_step = ''
             if doc.audit_status == 'pending_team':
-                # 团队组长一审：文档 team_id 对应团队 leader
+                # 团队组长审核：文档 team_id 对应团队 leader
                 if doc.team_id and Team.objects.filter(
                     id=doc.team_id, leader_id=user.id, is_deleted=False
                 ).exists():
                     can_audit = True
-                    audit_step = '一审（团队组长）'
+                    audit_step = '审核（团队组长）'
                 # 用户显式拥有 kb_admin / super_admin：也可以审（兜底，防止团队 leader 空缺）
                 elif user.is_super_admin or user.is_kb_admin:
                     can_audit = True
-                    audit_step = '一审（管理员代审）'
+                    audit_step = '审核（管理员代审）'
             elif doc.audit_status == 'pending_compliance':
-                # 二审：部门经理 / kb_admin / super_admin
+                # 复核：部门经理 / kb_admin / super_admin
                 if user.is_super_admin or user.is_kb_admin:
                     can_audit = True
-                    audit_step = '二审（合规审核）'
+                    audit_step = '复核（合规审核）'
                 elif doc.dept_id and Department.objects.filter(
                     id=doc.dept_id, leader_id=user.id, is_deleted=False
                 ).exists():
                     can_audit = True
-                    audit_step = '二审（部门经理）'
+                    audit_step = '复核（部门经理）'
             if not can_audit:
                 continue
 
@@ -2141,8 +2141,8 @@ class DocAuditApproveView(APIView):
     审核通过文档
 
     状态流转：
-    - pending_team → pending_compliance（一审通过，进入二审）
-    - pending_compliance → passed（二审通过，正式放行）
+    - pending_team → pending_compliance（审核通过，进入复核）
+    - pending_compliance → passed（复核通过，正式放行）
     """
     permission_classes = [IsAuthenticated]
 
@@ -2167,8 +2167,8 @@ class DocAuditApproveView(APIView):
             elif user.is_super_admin or user.is_kb_admin:
                 can = True
             if not can:
-                raise PermissionDenied("您不是该文档所属团队的组长，无权进行一审")
-            # 一审通过 → 进入二审
+                raise PermissionDenied("您不是该文档所属团队的组长，无权进行审核")
+            # 审核通过 → 进入复核
             doc.audit_status = 'pending_compliance'
         elif doc.audit_status == 'pending_compliance':
             can = False
@@ -2179,8 +2179,8 @@ class DocAuditApproveView(APIView):
             ).exists():
                 can = True
             if not can:
-                raise PermissionDenied("您没有该文档的二审权限")
-            # 二审通过 → passed
+                raise PermissionDenied("您没有该文档的复核权限")
+            # 复核通过 → passed
             doc.audit_status = 'passed'
         else:
             return Response({"detail": f"文档当前状态 {doc.audit_status} 不可审核"}, status=400)

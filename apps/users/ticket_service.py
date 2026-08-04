@@ -3,7 +3,7 @@ apps.users.ticket_service - 权限配置审批工单服务
 
 审批规则（对齐 RAG_RBAC_权限架构设计.md 最终计划）：
 - 同部门授权（GRANT team_leader/employee，目标用户与申请人同团队）：团队组长单审即可
-- 跨部门/跨团队/全局角色：双轨审核（一审 + 二审）
+- 跨部门/跨团队/全局角色：双轨审核（审核 + 复核）
 - super_admin 新增/撤销：强制另一个 super_admin 双人复核
 - 降级/撤销（REVOKE）：团队组长可直接执行，无需审批（但记审计）
 - 任一节点 REJECTED → 工单终态 REJECTED，不执行授权表写入
@@ -54,8 +54,8 @@ class ApproverRole:
     - USER_ADMIN:持有 user_admin 角色的用户(用于部门经理/文档管理员/合规管理员审批链)
     - SUPER_ADMIN:持有 super_admin 角色的用户(用于全局高权角色审批链 / 兜底)
     """
-    TEAM_LEADER = 'TEAM_LEADER'    # 团队组长(单审 / 跨团队一审)
-    DEPT_LEADER = 'DEPT_LEADER'    # 部门负责人(团队组长审批 / 跨部门二审)
+    TEAM_LEADER = 'TEAM_LEADER'    # 团队组长(单审 / 跨团队审核)
+    DEPT_LEADER = 'DEPT_LEADER'    # 部门负责人(团队组长审批 / 跨部门复核)
     USER_ADMIN = 'USER_ADMIN'      # 用户管理员(部门经理/文档管理员/合规管理员审批链第一节点)
     SUPER_ADMIN = 'SUPER_ADMIN'    # 超级管理员(全局高权角色审批链第二节点 / super_admin 双人复核)
 
@@ -104,8 +104,8 @@ def _can_approve_for_role(user, approver_role: str, ticket=None) -> bool:
     """判定用户是否能审批指定 approver_role 的节点 —— 共享审批池的核心校验
 
     各 approver_role 对应的判定逻辑:
-    - SUPER_ADMIN:用户持有 super_admin 角色(用于超管工单双审 / 全局角色二审)
-    - USER_ADMIN:用户持有 user_admin 角色(用于部门经理/文档管理员/合规管理员工单一审)
+    - SUPER_ADMIN:用户持有 super_admin 角色(用于超管工单双审 / 全局角色复核)
+    - USER_ADMIN:用户持有 user_admin 角色(用于部门经理/文档管理员/合规管理员工单审核)
         注:用户管理员 × 超管互斥,故 USER_ADMIN 与 SUPER_ADMIN 节点的候选池天然不重叠
     - TEAM_LEADER:用户是审批节点指定 scope 的团队组长(team.leader_id == user.id)
         节点带 approver_scope_id,区分"本团队组长"和"目标团队组长"
@@ -152,7 +152,7 @@ def _can_approve_for_role(user, approver_role: str, ticket=None) -> bool:
         ).exists()
 
     if approver_role == ApproverRole.USER_ADMIN:
-        # 持有 user_admin 角色即可(部门经理/文档管理员/合规管理员工单一审)
+        # 持有 user_admin 角色即可(部门经理/文档管理员/合规管理员工单审核)
         # 注:user_admin × super_admin 互斥,此处不会误匹配超管
         return UserRoleRel.objects.filter(
             user=user, role__role_key='user_admin',
@@ -250,7 +250,7 @@ def _find_approver_ids_for_role(approver_role: str, ticket=None) -> list:
 # ============================================================================
 
 def _get_team_leader_id(team_id) -> Optional[int]:
-    """获取团队组长 ID —— 单审/一审审批人
+    """获取团队组长 ID —— 单审/审核人
 
     组长可能为空（团队刚建立未指派），此时退化为该团队所属部门负责人审批。
     """
@@ -263,7 +263,7 @@ def _get_team_leader_id(team_id) -> Optional[int]:
 
 
 def _get_dept_leader_id(dept_id) -> Optional[int]:
-    """获取部门负责人 ID —— 二审审批人"""
+    """获取部门负责人 ID —— 复核人"""
     if not dept_id:
         return None
     return Department.objects.filter(id=dept_id).values_list('leader_id', flat=True).first()

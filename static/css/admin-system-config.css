@@ -231,7 +231,7 @@
 	border: 1px solid #f48fb1;
 }
 
-/* 高风险项标识：与只读/敏感标签并列，提示用户该工单走二审流程 */
+/* 高风险项标识：与只读/敏感标签并列，提示用户该工单走复核流程 */
 .config-badge-risk {
 	background: #fff3e0;
 	color: #e65100;

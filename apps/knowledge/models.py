@@ -181,8 +181,8 @@ class Document(models.Model):
         ('other', 'other'),
     ]
     AUDIT_STATUS_CHOICES = [
-        ('pending_team', '待团队组长一审'),
-        ('pending_compliance', '待合规二审'),
+        ('pending_team', '待团队组长审核'),
+        ('pending_compliance', '待合规复核'),
         ('rejected', '审核驳回'),
         ('passed', '双审通过'),
         ('archived', '归档'),
@@ -600,10 +600,10 @@ class DocOperationLog(models.Model):
         ('node_update', '修改节点'),
         ('node_delete', '删除节点'),
         # 审核操作
-        ('doc_audit_team_pass', '团队一审通过'),
-        ('doc_audit_team_reject', '团队一审驳回'),
-        ('doc_audit_compliance_pass', '合规二审通过'),
-        ('doc_audit_compliance_reject', '合规二审驳回'),
+        ('doc_audit_team_pass', '团队审核通过'),
+        ('doc_audit_team_reject', '团队审核驳回'),
+        ('doc_audit_compliance_pass', '合规复核通过'),
+        ('doc_audit_compliance_reject', '合规复核驳回'),
         # 归档
         ('doc_archive', '归档文档'),
         ('doc_physical_destroy', '物理销毁'),

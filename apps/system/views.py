@@ -190,7 +190,7 @@ class SystemConfigView(APIView):
         return Response(self._serialize_ticket(ticket), status=status.HTTP_201_CREATED)
 
     def _compute_change_summary(self, config_key, old_value, new_value):
-        """计算多值类配置的差异摘要（仅 BUSINESS_DB_TABLES 等逗号分隔多值项）
+        """计算多值类配置的差异摘要（仅 BUSINESS_DB_TABLES / EVAL_DISPLAY_DIMENSIONS 等逗号分隔多值项）
 
         Returns: JSON 字符串 {added:[...], removed:[...]}；非多值项返回空串
         - added: 新值中存在但旧值中不存在的项
@@ -198,7 +198,8 @@ class SystemConfigView(APIView):
         审批人据此快速识别本次变更点，无需逐项对比新旧完整列表
         """
         # 仅多值类配置计算差异；单值配置（如 LLM_TIMEOUT）返回空，避免噪声
-        multi_value_keys = {'BUSINESS_DB_TABLES'}
+        # EVAL_DISPLAY_DIMENSIONS 也按多值处理，便于审批人快速识别新增/移除了哪些维度
+        multi_value_keys = {'BUSINESS_DB_TABLES', 'EVAL_DISPLAY_DIMENSIONS'}
         if config_key not in multi_value_keys:
             return ''
         try:

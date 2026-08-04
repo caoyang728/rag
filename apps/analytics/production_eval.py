@@ -258,7 +258,7 @@ def evaluate_sampled_qa(
     """异步评估单条对话:成本检查 → DeepEval 12 维评估 → 落 MultiDimensionScore
 
     与定时批量任务 run_multi_dimension_evaluation 共用同一套指标与表,便于统一对比。
-    实际启用维度由 PRODUCTION_EVAL_METRIC_GROUPS 控制(默认 all=12 维)。
+    实际启用维度由 EVAL_DISPLAY_DIMENSIONS 控制(默认 12 维,评估=展示强绑定)。
 
     成本控制:采样时已检查,这里二次检查防止 worker 积压期间超额。
     手动评估场景(skip_budget_check=True)绕过日预算检查,由调用方自行控制。

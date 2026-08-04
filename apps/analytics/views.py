@@ -1367,7 +1367,7 @@ class RunMultiDimEvalView(APIView):
     """POST /api/v1/analytics/multi-dim-eval/ - 手动触发单条 QA 的 DeepEval 12 维评估
 
     用于看板中"手动评估指定 QA"场景:运营发现某条对话异常,手动触发评估。
-    实际启用维度由 PRODUCTION_EVAL_METRIC_GROUPS 控制(默认 12 维)。
+    实际启用维度由 EVAL_DISPLAY_DIMENSIONS 控制(默认 12 维,评估=展示强绑定)。
 
     异步执行:POST 立即派发 Celery 任务并返回 eval_batch_id,前端通过轮询
     qa-detail 接口检查该 batch_id 的评估结果是否落库。
@@ -1745,6 +1745,8 @@ class EvalDashboardOverviewView(APIView):
                 'threshold': threshold,
                 'date_range': [],
                 'dimension_groups': {},
+                # 即使无评估数据也返回展示维度白名单,前端据此渲染维度组的空态结构
+                'display_dimensions': AnalyticsConfig.eval_display_dimensions(),
             })
 
         # 2. 各维度均分(一次 GROUP BY 拿全)
@@ -1850,6 +1852,9 @@ class EvalDashboardOverviewView(APIView):
             'threshold': threshold,
             'date_range': dim_dates,
             'dimension_groups': groups,
+            # 展示维度白名单：前端据此过滤「回答质量」页的维度画像，
+            # 未在白名单中的维度不再展示（由 SystemConfig.EVAL_DISPLAY_DIMENSIONS 控制）
+            'display_dimensions': AnalyticsConfig.eval_display_dimensions(),
         })
 
 

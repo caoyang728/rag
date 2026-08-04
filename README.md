@@ -660,7 +660,7 @@ LLM-as-Judge，12 维度评分（0-1），分四大类：
 - 手动评估场景（`skip_budget_check=True`）绕过日预算检查，由调用方自行控制
 
 - 即时路径（采样）与批量任务（回扫未覆盖项）互补
-- 可通过 `PRODUCTION_EVAL_METRIC_GROUPS` 选择性启用指标组进一步降本
+- 可通过 `EVAL_DISPLAY_DIMENSIONS` 选择性启用维度进一步降本（评估=展示强绑定）
 - Redis 故障时保守跳过（宁可少评估也不打爆 LLM 评估接口）
 
 ### 10.5 低分回归测试集
@@ -848,6 +848,6 @@ docker compose exec django python manage.py test tests.test_api --settings=tests
 4. **前端替换**：`static/` 为极简演示，正式项目建议 Vue3 + Element Plus
 5. **质量评估模块拆分**：当前在 analytics app 内通过多个独立 Python 文件（deepeval_metrics / production_eval / regression_eval / low_score_analyzer / ragas_pipeline / offline_eval / doc_quality / coverage）实现隔离；当模型数增长到 30+ 或代码量超过 3000 行时，可拆分为独立 app（只需 move 文件 + 改 INSTALLED_APPS，成本极低）
 6. **A/B 测试框架**：top_k / rrf_k / chunk_size 等参数可扩展为生产流量灰度对比
-7. **评估指标扩展**：DeepEval 12 维可通过 `PRODUCTION_EVAL_METRIC_GROUPS` 选择性启用，新增维度只需在 `deepeval_metrics.py` 注册 metric 即可
+7. **评估指标扩展**：DeepEval 12 维可通过 `EVAL_DISPLAY_DIMENSIONS` 选择性启用（评估=展示强绑定），新增维度只需在 `deepeval_metrics.py` 注册 metric 即可
 8. **权限缓存替换**：当前 `perm_cache.py` 基于 LocMemCache，生产环境可换 Redis 分布式缓存，接口契约不变
 9. **配置热更新**：`SystemConfig` 已支持 DB 存储 + `config_loader.py` 读取，可扩展 Redis Pub/Sub 实现多 Worker 配置热更新

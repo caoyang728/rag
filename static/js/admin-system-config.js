@@ -64,7 +64,11 @@ const CONFIG_METADATA = {
 
 	// ===== Agent =====
 	AGENT_DEFAULT_MODE: { label: '默认问答模式', description: '新会话的默认问答模式：Agent 自主决策、传统 RAG 或强制 Agent', sortOrder: 1 },
-	BUSINESS_DB_TABLES: { label: 'Text2SQL 白名单', description: '多选，空=不允许任何表查询（Text2SQL 不生效）；需主动勾选表后才生效', sortOrder: 2 },
+	// 多选组件的展示文案通过 multiSelect 字段定制，避免复用 Text2SQL 白名单的硬编码文案
+	BUSINESS_DB_TABLES: {
+		label: 'Text2SQL 白名单', description: '多选，空=不允许任何表查询（Text2SQL 不生效）；需主动勾选表后才生效', sortOrder: 2,
+		multiSelect: { emptyText: '未选择任何表（Text2SQL 不生效）', searchPlaceholder: '搜索表名...' },
+	},
 
 	// ===== 安全 =====
 	SENSITIVE_FILTER_ENABLED: { label: '敏感词审查', description: '是否启用 LLM 输出侧的敏感词审查', sortOrder: 1 },
@@ -95,7 +99,13 @@ const CONFIG_METADATA = {
 	EVAL_DAILY_LIMIT: { label: '每日评估上限', description: '仅限当天已发起对话的评估总量，主要用于控制成本。', unit: '次', sortOrder: 7 },
 	EVAL_COST_LIMIT: { label: '每日评估成本上限', description: '每日评估 LLM 调用成本上限，超出后停止评估', unit: '元', sortOrder: 8 },
 	PRODUCTION_EVAL_BATCH_SIZE: { label: '2h 批量回扫每次评估条数', description: '每 2 小时回扫未评估的历史对话进行批量评估，每次处理的条数', unit: '条', sortOrder: 9 },
-	PRODUCTION_EVAL_METRIC_GROUPS: { label: '评估指标组', description: '多选，逗号分隔组合；各指标组包含不同维度的评估指标，按需组合以平衡覆盖度与成本。选项：全部(all) 核心(core) 检索(retrieval) 安全(safety) 质量(quality) 业务(business)', sortOrder: 10 },
+	// 评估维度：评估=展示强绑定，勾选的维度既参与 LLM 评估也在看板展示，未勾选的维度不评估也不展示
+	EVAL_DISPLAY_DIMENSIONS: {
+		label: '评估维度',
+		description: '多选，评估=展示强绑定：勾选的维度既参与 LLM 评估也在 admin-eval「回答质量」页展示，未勾选的维度不评估也不展示。默认全选 12 维。降本场景可只勾选核心维度（如 faithfulness + answer_relevancy）',
+		sortOrder: 10,
+		multiSelect: { emptyText: '未选择任何维度（不评估也不展示，相当于关闭评估）', searchPlaceholder: '搜索维度...' },
+	},
 	LOW_SCORE_REGRESSION_ENABLED: { label: '低分回归', description: '是否启用低分回归测试集（沉淀+定时评估），关闭后定时任务跳过，手动触发仍可用', sortOrder: 11 },
 	LOW_SCORE_REGRESSION_TOP_N: { label: '低分沉淀数量', description: '每次从历史评估中取低分 N 条沉淀到回归测试集', unit: '条', sortOrder: 12 },
 	LOW_SCORE_REGRESSION_PASS_THRESHOLD: { label: '回归通过阈值', description: '回归评估 12 维均分 ≥ 此值视为通过', sortOrder: 13 },
@@ -343,15 +353,22 @@ function onConfigChange(key) {
 	}
 }
 
-/* ============ 自定义多选组件（紧凑显示 + 搜索过滤 + 复选框）============ */
+/* ============ 自定义多选组件（紧凑显示 + 搜索过滤 + 复选框）============
+ * 通过 CONFIG_METADATA[key].multiSelect 定制空态文案与搜索占位符，
+ * 未配置时回退到通用文案，避免不同业务场景复用硬编码文案。
+ */
 function renderMultiSelect(c) {
 	const val = c.value || '';
 	const disabled = c.is_readonly ? 'disabled' : '';
 	const selectedVals = val ? val.split(',').map(v => v.trim()).filter(Boolean) : [];
 	const totalOptions = c.options.length;
+	// 从 CONFIG_METADATA 读取定制文案，未配置时回退到通用文案
+	const meta = (CONFIG_METADATA[c.key] || {}).multiSelect || {};
+	const emptyText = meta.emptyText || '未选择任何项';
+	const searchPlaceholder = meta.searchPlaceholder || '搜索...';
 	// 紧凑显示：选中数量或提示文案
 	const displayText = selectedVals.length === 0
-		? `未选择任何表（Text2SQL 不生效）`
+		? emptyText
 		: `已选 ${selectedVals.length} 项 / ${totalOptions}`;
 
 	return `
@@ -359,12 +376,12 @@ function renderMultiSelect(c) {
 			<input type="hidden" id="cfg-${c.key}" value="${escapeHtml(val)}" />
 			<div class="multi-select-display" id="ms-display-${c.key}" ${disabled}
 				 onclick="toggleMultiSelect('${c.key}')">
-				<span class="multi-select-text">${displayText}</span>
+				<span class="multi-select-text">${escapeHtml(displayText)}</span>
 				<span class="multi-select-arrow">▾</span>
 			</div>
 			<div class="multi-select-dropdown" id="ms-dropdown-${c.key}" style="display:none">
 				<div class="multi-select-search">
-					<input type="text" class="input" placeholder="搜索表名..."
+					<input type="text" class="input" placeholder="${escapeHtml(searchPlaceholder)}"
 						   id="ms-search-${c.key}" oninput="filterMultiSelect('${c.key}')">
 				</div>
 				<div class="multi-select-actions">
@@ -424,12 +441,14 @@ function onMultiSelectChange(key) {
 	// 更新 hidden input 的值
 	const hidden = $(`#cfg-${key}`);
 	if (hidden) hidden.value = selected.join(',');
-	// 更新显示文本
+	// 更新显示文本：从 CONFIG_METADATA 读取定制空态文案，保持与 renderMultiSelect 一致
 	const displayText = $(`#ms-display-${key} .multi-select-text`);
 	if (displayText) {
 		const total = checkboxes.length;
+		const meta = (CONFIG_METADATA[key] || {}).multiSelect || {};
+		const emptyText = meta.emptyText || '未选择任何项';
 		displayText.textContent = selected.length === 0
-			? `未选择任何表（Text2SQL 不生效）`
+			? emptyText
 			: `已选 ${selected.length} 项 / ${total}`;
 	}
 	onConfigChange(key);

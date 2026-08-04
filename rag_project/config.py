@@ -344,29 +344,49 @@ class AnalyticsConfig:
         """
         return _get_db_config('PRODUCTION_EVAL_BATCH_SIZE', default=10, value_type='int')
 
+    # 12 维全集，与 deepeval_metrics.build_production_metrics 保持一致
+    # 用于校验 EVAL_DISPLAY_DIMENSIONS 配置项的合法性，以及空配置时回退展示全部
+    _ALL_EVAL_DIMENSIONS = [
+        'faithfulness', 'hallucination', 'answer_relevancy', 'context_relevancy',
+        'toxicity', 'bias', 'completeness', 'conciseness', 'clarity',
+        'professionalism', 'helpfulness', 'actionability',
+    ]
+
     @staticmethod
-    def production_eval_metric_groups() -> list:
-        """生产评估启用的指标组（默认 all 全部 12 维）
+    def eval_display_dimensions() -> list:
+        """评估+展示的维度白名单（评估=展示，强绑定，默认全部 12 维）
 
-        可选值(逗号分隔组合,小写):
-        - all: 全部 12 维(默认,指标最全面)
-        - core: 核心质量(2维) faithfulness + answer_relevancy
-        - retrieval: 检索质量(2维) context_relevancy + hallucination
-        - safety: 安全性(2维) toxicity + bias
-        - quality: 答案质量(3维) completeness + conciseness + clarity
-        - business: 业务体验(3维) professionalism + helpfulness + actionability
+        统一控制"评估哪些维度"和"看板展示哪些维度"：
+        - deepeval_metrics.build_production_metrics 据此构建 metric（决定评估成本）
+        - admin-eval「回答质量」页据此过滤展示（决定看板可见性）
+        两者共用同一配置，避免"评估了不展示=白评估"或"展示但没评估=空白"的不一致。
 
-        降本场景示例:
-        - PRODUCTION_EVAL_METRIC_GROUPS=core,safety  → 4 维,核心+安全
-        - PRODUCTION_EVAL_METRIC_GROUPS=core         → 2 维,最低成本
-        - 不设置或 all                               → 12 维,全覆盖
+        配置为逗号分隔的维度名组合，未勾选的维度不评估也不展示。
+        - 配置项不存在（老部署未初始化）→ 回退到全部 12 维（向后兼容）
+        - 配置项存在但为空（用户主动清空）→ 返回空列表（不评估也不展示）
+        - 配置项存在且有值 → 返回勾选的维度（过滤非法值）
 
         从 DB 读取可在线变更
         """
-        raw = _get_db_config('PRODUCTION_EVAL_METRIC_GROUPS', default='all', value_type='string')
-        if not raw:
-            return ['all']
-        return [g.strip() for g in raw.split(',') if g.strip()]
+        # 直接查 DB 判断配置项是否存在，区分"不存在"与"存在但为空"两种情况：
+        # - 不存在：老部署未初始化该配置，回退到全部 12 维保持向后兼容
+        # - 存在但为空：用户主动清空所有维度，返回空列表让评估和看板都跳过
+        try:
+            from apps.system.models import SystemConfig
+            row = SystemConfig.objects.filter(key='EVAL_DISPLAY_DIMENSIONS').only('value').first()
+        except Exception:
+            row = None
+        if row is None:
+            # 配置项不存在（老部署），回退到全部 12 维
+            return list(AnalyticsConfig._ALL_EVAL_DIMENSIONS)
+        # 配置项存在，按值解析；空字符串 = 用户主动清空 = 返回空列表
+        dims = [d.strip() for d in (row.value or '').split(',') if d.strip()]
+        if not dims:
+            return []
+        # 过滤掉非法维度名，防止配置错误导致前端展示异常
+        valid = [d for d in dims if d in AnalyticsConfig._ALL_EVAL_DIMENSIONS]
+        # 按预定义顺序排序，保持雷达图/sparkline 维度顺序稳定
+        return sorted(valid, key=AnalyticsConfig._ALL_EVAL_DIMENSIONS.index)
 
     @staticmethod
     def queue_monitor_enabled() -> bool:

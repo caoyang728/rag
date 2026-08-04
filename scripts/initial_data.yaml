@@ -1060,25 +1060,39 @@ system_configs:
     is_secret: false
     is_readonly: false
 
-  - key: PRODUCTION_EVAL_METRIC_GROUPS
-    value: "all"
+  # 评估维度：评估=展示强绑定，勾选的维度既参与 LLM 评估也在看板展示，未勾选的维度不评估也不展示。
+  # 降本场景可只勾选核心维度（如 faithfulness + answer_relevancy），默认全选 12 维。
+  - key: EVAL_DISPLAY_DIMENSIONS
+    value: "faithfulness,hallucination,answer_relevancy,context_relevancy,toxicity,bias,completeness,conciseness,clarity,professionalism,helpfulness,actionability"
     value_type: string
     category: eval
-    label: "评估指标组"
-    description: "多选，逗号分隔组合；各指标组包含不同维度的评估指标，按需组合以平衡覆盖度与成本"
+    label: "评估维度"
+    description: "多选，评估=展示强绑定：勾选的维度既参与 LLM 评估也在 admin-eval「回答质量」页展示，未勾选的维度不评估也不展示。默认全选 12 维。降本场景可只勾选核心维度（如 faithfulness + answer_relevancy）"
     options:
-      - value: "all"
-        label: "全部 (all)"
-      - value: "core"
-        label: "核心 (core)"
-      - value: "retrieval"
-        label: "检索 (retrieval)"
-      - value: "safety"
-        label: "安全 (safety)"
-      - value: "quality"
-        label: "质量 (quality)"
-      - value: "business"
-        label: "业务 (business)"
+      - value: "faithfulness"
+        label: "忠实度 (faithfulness)"
+      - value: "hallucination"
+        label: "幻觉 (hallucination)"
+      - value: "answer_relevancy"
+        label: "回答相关性 (answer_relevancy)"
+      - value: "context_relevancy"
+        label: "检索相关性 (context_relevancy)"
+      - value: "toxicity"
+        label: "毒性 (toxicity)"
+      - value: "bias"
+        label: "偏见 (bias)"
+      - value: "completeness"
+        label: "完整性 (completeness)"
+      - value: "conciseness"
+        label: "简洁性 (conciseness)"
+      - value: "clarity"
+        label: "清晰度 (clarity)"
+      - value: "professionalism"
+        label: "专业性 (professionalism)"
+      - value: "helpfulness"
+        label: "有用性 (helpfulness)"
+      - value: "actionability"
+        label: "可操作性 (actionability)"
     is_secret: false
     is_readonly: false
 

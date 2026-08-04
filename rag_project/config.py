@@ -57,10 +57,6 @@ class LLMConfig:
         return os.getenv('LLM_API_KEY', '')
 
     @staticmethod
-    def base_url() -> str:
-        return os.getenv('LLM_BASE_URL', 'https://api.deepseek.com')
-
-    @staticmethod
     def default_model() -> str:
         """默认模型（基础模型，用于简单任务）"""
         return os.getenv('LLM_BASE_MODEL', 'deepseek-v4-flash')
@@ -81,10 +77,6 @@ class EmbeddingConfig:
     @staticmethod
     def api_key() -> str:
         return os.getenv('EMBEDDING_API_KEY', '')
-
-    @staticmethod
-    def base_url() -> str:
-        return os.getenv('EMBEDDING_BASE_URL', 'https://api.siliconflow.cn/v1')
 
     @staticmethod
     def model() -> str:

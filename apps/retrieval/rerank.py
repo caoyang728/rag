@@ -27,5 +27,5 @@ def rerank_docs(query: str, docs: List[Dict[str, Any]], top_k: int = 5) -> List[
             doc = dict(docs[idx])
             doc['rerank_score'] = float(hit.get('score', 0.0))
             result.append(doc)
-    logger.info('[Rerank] returned=%d', len(result))
+    logger.info(f'[Rerank] returned={len(result)}')
     return result

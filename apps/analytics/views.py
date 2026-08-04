@@ -161,9 +161,7 @@ class KeywordWeightDetailView(APIView):
             kw.weight_score = max(0.1, min(2.0, kw.weight_score + delta))
             kw.save(update_fields=["weight_score"])
             logger.info(
-                "keyword_weight_adjusted kw_id=%s keyword=%s old=%.2f delta=%+.2f new=%.2f user=%s",
-                kw.id, kw.keyword, old_score, delta, kw.weight_score,
-                request.user.username
+                f"keyword_weight_adjusted kw_id={kw.id} keyword={kw.keyword} old={old_score:.2f} delta={delta:+.2f} new={kw.weight_score:.2f} user={request.user.username}"
             )
             return Response({
                 "id": kw.id, "keyword": kw.keyword, "weight_score": kw.weight_score
@@ -590,8 +588,7 @@ class BadFeedbackDetailView(APIView):
             fb.status = status
             fb.save(update_fields=["status"])
             logger.info(
-                "feedback_status_updated fb_id=%s status=%s user=%s",
-                fb.id, status, request.user.username
+                f"feedback_status_updated fb_id={fb.id} status={status} user={request.user.username}"
             )
             return Response({"id": fb.id, "status": fb.status})
         except QaFeedback.DoesNotExist:
@@ -1538,8 +1535,7 @@ class CoverageReportDetailView(APIView):
             return Response({'detail': '报告不存在'}, status=404)
         report.delete()
         logger.info(
-            'coverage_report_deleted report_id=%s date=%s user=%s',
-            report_id, report.report_date, request.user.username
+            f'coverage_report_deleted report_id={report_id} date={report.report_date} user={request.user.username}'
         )
         return Response({'ok': True})
 
@@ -1664,8 +1660,7 @@ class CoverageReportExportView(APIView):
         )
         response['Content-Disposition'] = f'attachment; filename="{filename}"'
         logger.info(
-            'coverage_report_exported report_id=%s user=%s',
-            report_id, request.user.username
+            f'coverage_report_exported report_id={report_id} user={request.user.username}'
         )
         return response
 

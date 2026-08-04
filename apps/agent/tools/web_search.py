@@ -133,7 +133,7 @@ class WebSearchTool(BaseTool):
                 'meta': {'results': results, 'source': 'tavily'},
             }
         except Exception as e:
-            logger.warning('[WebSearchTool] Tavily error: %s', e)
+            logger.warning(f'[WebSearchTool] Tavily error: {e}')
             return {'result': f'Tavily 调用失败: {e}', 'ok': False,
                     'meta': {'results': [], 'source': 'tavily'}}
 
@@ -177,6 +177,6 @@ class WebSearchTool(BaseTool):
                 'meta': {'results': results, 'source': 'duckduckgo'},
             }
         except Exception as e:
-            logger.warning('[WebSearchTool] DuckDuckGo error: %s', e)
+            logger.warning(f'[WebSearchTool] DuckDuckGo error: {e}')
             return {'result': f'DuckDuckGo 调用失败: {e}', 'ok': False,
                     'meta': {'results': [], 'source': 'duckduckgo'}}

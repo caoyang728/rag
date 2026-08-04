@@ -233,15 +233,13 @@ def agent_ask(user, question: str, session, root_types: list = None,
                 'meta': r.get('meta', {}),
                 'latency_ms': r.get('latency_ms', 0),
             })
-            logger.info('[Agent] round %d tool %s ok=%s latency=%dms',
-                        round_idx + 1, tc.get('name'), r.get('ok'), r.get('latency_ms'))
+            logger.info(f'[Agent] round {round_idx + 1} tool {tc.get("name")} ok={r.get("ok")} latency={r.get("latency_ms")}ms')
 
         # 把 assistant tool_calls + tool results 加入 messages
         messages.extend(_build_tool_messages(tool_calls, results))
     else:
         # 达到最大轮数仍未给出最终答案：强制要求 LLM 总结
-        logger.warning('[Agent] reached MAX_TOOL_ROUNDS=%d, forcing final answer',
-                       MAX_TOOL_ROUNDS)
+        logger.warning(f'[Agent] reached MAX_TOOL_ROUNDS={MAX_TOOL_ROUNDS}, forcing final answer')
         messages.append({
             'role': 'user',
             'content': '已达到工具调用上限，请基于已获取的信息直接回答用户问题，不要再调用工具。',
@@ -397,10 +395,10 @@ def agent_ask_stream(user, question: str, session, root_types: list = None,
                         yield {'type': 'delta', 'delta': delta}
         except GeneratorExit:
             # 客户端断开：保存已生成内容（由 executor 的 finally 处理落库）
-            logger.info('[agent_ask_stream] client aborted at round %d', round_idx + 1)
+            logger.info(f'[agent_ask_stream] client aborted at round {round_idx + 1}')
             raise
         except Exception as e:
-            logger.exception('[agent_ask_stream] llm stream error at round %d', round_idx + 1)
+            logger.exception(f'[agent_ask_stream] llm stream error at round {round_idx + 1}')
             # 异常路径也尝试 flush，避免已审查安全内容滞留 buffer 丢失
             if sf and filter_state and not filter_hit:
                 try:
@@ -461,8 +459,7 @@ def agent_ask_stream(user, question: str, session, root_types: list = None,
                 'latency_ms': r.get('latency_ms', 0),
                 'result_preview': result_preview,
             }
-            logger.info('[Agent stream] round %d tool %s ok=%s latency=%dms',
-                        round_idx + 1, tc.get('name'), r.get('ok'), r.get('latency_ms'))
+            logger.info(f'[Agent stream] round {round_idx + 1} tool {tc.get("name")} ok={r.get("ok")} latency={r.get("latency_ms")}ms')
 
         # 把 assistant tool_calls + tool results 加入 messages，继续下一轮
         messages.extend(_build_tool_messages(round_tool_calls, results))

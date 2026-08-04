@@ -15,7 +15,7 @@ def expire_ip_blacklist():
     from apps.security.models import IpBlacklist
     now = timezone.now()
     n = IpBlacklist.objects.filter(is_active=True, expires_at__lt=now).update(is_active=False)
-    logger.info('[Security] expired %d ip blacklist', n)
+    logger.info(f'[Security] expired {n} ip blacklist')
     return {'expired': n}
 
 
@@ -42,6 +42,6 @@ def handle_login_fail(ip: str, username: str = ''):
                 'expires_at': expires,
             }
         )
-        logger.warning('[Security] BANNED ip=%s until=%s', ip, expires)
+        logger.warning(f'[Security] BANNED ip={ip} until={expires}')
         return {'banned': True, 'ip': ip, 'expires_at': expires.isoformat()}
     return {'banned': False, 'fail_count': fail_count}

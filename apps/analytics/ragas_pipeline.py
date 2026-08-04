@@ -79,11 +79,16 @@ _patch_ragas_langchain_compat()
 def _get_evaluator_llm(model: Optional[str] = None):
     """构建 Ragas 评估用 LLM
 
-    复用项目 DeepSeek 配置(LLM_API_KEY/LLM_BASE_URL),用 langchain_openai.ChatOpenAI
-    接入(DeepSeek 兼容 OpenAI 协议),再用 LangchainLLMWrapper 包装为 Ragas 的 BaseRagasLLM。
+    复用项目 DeepSeek 配置，用 langchain_openai.ChatOpenAI 接入
+    (DeepSeek 兼容 OpenAI 协议)，再用 LangchainLLMWrapper 包装为 Ragas 的 BaseRagasLLM。
+
+    配置读取：
+    - model_name：SystemConfig.LLM_BASE_MODEL
+    - base_url：LLMModel 表按 model_name 反查
+    - api_key：从 env 读取（敏感凭证不入库）
 
     Args:
-        model: 指定模型名;None 则用 settings.LLM_BASE_MODEL
+        model: 指定模型名;None 则用 SystemConfig.LLM_BASE_MODEL
 
     Returns:
         LangchainLLMWrapper 实例
@@ -91,12 +96,26 @@ def _get_evaluator_llm(model: Optional[str] = None):
     from django.conf import settings
     from langchain_openai import ChatOpenAI
     from ragas.llms import LangchainLLMWrapper
+    from apps.system.config_loader import get_config_value, get_llm_model_config
+
+    model_name = model or get_config_value('LLM_BASE_MODEL', default='', value_type='string')
+    if not model_name:
+        raise ValueError('SystemConfig.LLM_BASE_MODEL 未配置，无法启动 Ragas 评估')
+
+    llm_row = get_llm_model_config(model_name, model_type='llm')
+    if llm_row and llm_row.get('base_url'):
+        base_url = llm_row['base_url']
+    else:
+        logger.warning(f'[Ragas] LLMModel 表未配置 model={model_name}，base_url 为空可能导致评估失败')
+        base_url = ''
+
+    api_key = getattr(settings, 'LLM_API_KEY', '')
 
     # temperature=0 降低评估随机性,保证同一输入打分可复现
     chat = ChatOpenAI(
-        api_key=settings.LLM_API_KEY,
-        base_url=settings.LLM_BASE_URL,
-        model=model or settings.LLM_BASE_MODEL,
+        api_key=api_key,
+        base_url=base_url,
+        model=model_name,
         temperature=0,
         timeout=120,
     )
@@ -201,8 +220,7 @@ def load_corpus_chunks(
         ))
 
     logger.info(
-        '[RagasPipeline] 加载语料: docs=%d, chunks=%d, root_type=%s',
-        len(doc_ids), len(docs), root_type or 'ALL',
+        f'[RagasPipeline] 加载语料: docs={len(doc_ids)}, chunks={len(docs)}, root_type={root_type or "ALL"}',
     )
     return docs
 
@@ -638,8 +656,7 @@ def run_full_pipeline(
         {'testset_id', 'samples', 'report_paths', 'summary'}
     """
     logger.info(
-        '[RagasPipeline] 启动全自动评估: testset_size=%d, limit_docs=%d, root_type=%s',
-        testset_size, limit_docs, root_type or 'ALL',
+        f'[RagasPipeline] 启动全自动评估: testset_size={testset_size}, limit_docs={limit_docs}, root_type={root_type or "ALL"}',
     )
 
     if samples is None:

@@ -119,7 +119,7 @@ class Text2SqlTool(BaseTool):
         try:
             rows, columns = self._execute_sql(sql)
         except Exception as e:
-            logger.warning('[Text2SqlTool] sql execute error: %s | sql: %s', e, sql[:200])
+            logger.warning(f'[Text2SqlTool] sql execute error: {e} | sql: {sql[:200]}')
             return {'result': f'SQL 执行失败: {e.__class__.__name__}: {str(e)[:300]}',
                     'ok': False, 'meta': {'sql': sql, 'error': str(e)}}
 

@@ -106,4 +106,4 @@ class AgentTrace(models.Model):
             # 持久化失败不影响主流程，仅记录日志
             import logging
             logging.getLogger(__name__).exception(
-                '[AgentTrace] batch_create failed for qa_record=%s', qa_record.id)
+                f'[AgentTrace] batch_create failed for qa_record={qa_record.id}')

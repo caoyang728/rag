@@ -1,31 +1,49 @@
 #!/usr/bin/env python3
 """
-系统初始化脚本
-首次部署时运行，创建必要的账号、角色、权限、部门等基础数据
+系统初始化脚本（总入口）
+首次部署时运行，创建必要的账号、角色、权限、部门、系统配置等基础数据
+
+各数据类型的初始化逻辑已按类型拆分到 scripts/init/ 目录下：
+- init/common.py           公共工具（DB 连接 / Django 启动 / 迁移检查 / yaml 加载）
+- init/roles.py            角色初始化
+- init/permissions.py      权限点初始化
+- init/role_permissions.py 角色-权限映射
+- init/departments.py      部门初始化
+- init/teams.py            团队初始化
+- init/users.py            初始用户
+- init/global_memories.py  全局记忆
+- init/system_configs.py   系统配置（KV，从 .env 迁移而来）
+- init/models.py           模型配置（LLM/Embedding/Rerank）
+
+本文件仅做流程编排，不包含具体业务逻辑。
 
 使用方法：
     python scripts/init_system.py
     python scripts/init_system.py --config scripts/initial_data.yaml
     python scripts/init_system.py --dry-run
+    python scripts/init_system.py --force   # 强制覆盖已存在的配置项 value
+    python scripts/init_system.py --with-org  # 同时创建示例部门/团队（开发期间使用）
 
 参数：
     --config: 指定配置文件路径（默认: scripts/initial_data.yaml）
     --dry-run: 仅预览，不实际写入数据库
-    --force: 强制覆盖已存在的数据
+    --force: 强制覆盖已存在的数据（含 SystemConfig 的 value）
+    --with-org: 同时创建示例部门/团队（默认不创建，生产环境无需示例组织数据）
 """
 
 import os
 import sys
 import argparse
-import yaml
 import traceback
-import socket
-import time
 
 from loguru import logger
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
+
+# 将 scripts/ 目录加入 path，使其下的 init/ 子包可被导入
+SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, SCRIPTS_DIR)
 
 try:
     from dotenv import load_dotenv
@@ -40,407 +58,28 @@ except ImportError:
 
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'rag_project.settings')
 
-
-def test_db_connection():
-    import psycopg
-    db_url = os.getenv('DATABASE_URL')
-    if not db_url:
-        host = os.getenv('PG_DB_HOST', 'localhost')
-        port = int(os.getenv('PG_DB_PORT', '5432'))
-        db = os.getenv('PG_DB_DATABASE', 'rag_agent')
-        user = os.getenv('PG_DB_USER', 'rag_user')
-        password = os.getenv('PG_DB_PASSWORD', 'rag_pass_2026')
-        ssl_mode = os.getenv('PG_SSL_MODE', 'prefer')
-    else:
-        from urllib.parse import urlparse
-        parsed = urlparse(db_url)
-        host = parsed.hostname
-        port = parsed.port or 5432
-        db = parsed.path.lstrip('/')
-        user = parsed.username
-        password = parsed.password
-        ssl_mode = 'prefer'
-
-    logger.info(f'🔍 测试数据库连接: {user}@{host}:{port}/{db}')
-    try:
-        conn = psycopg.connect(
-            host=host,
-            port=port,
-            dbname=db,
-            user=user,
-            password=password,
-            sslmode=ssl_mode,
-            connect_timeout=10
-        )
-        cursor = conn.cursor()
-        cursor.execute("SELECT version();")
-        result = cursor.fetchone()
-        logger.info(f'✅ 数据库连接成功: {result[0].split()[0]}')
-        conn.close()
-        return True
-    except psycopg.Error as e:
-        logger.info(f'❌ 数据库连接失败: {e}')
-        return False
-    except Exception as e:
-        logger.info(f'❌ 连接测试异常: {e}')
-        return False
-
-
-def setup_django():
-    try:
-        import django
-        django.setup()
-        logger.info('✅ Django 初始化成功')
-        return True
-    except Exception as e:
-        logger.info(f'❌ Django 初始化失败: {e}')
-        traceback.print_exc()
-        return False
-
-
-def check_migrations():
-    from django.core.management import call_command
-    try:
-        from django.db import connection
-        cursor = connection.cursor()
-        cursor.execute("SELECT COUNT(*) FROM django_migrations WHERE app='users';")
-        count = cursor.fetchone()[0]
-        if count == 0:
-            logger.info('❌ 用户模块迁移未执行，请先运行:')
-            logger.info('   python manage.py makemigrations')
-            logger.info('   python manage.py migrate')
-            return False
-        logger.info(f'✅ 用户模块迁移已执行（{count} 条记录）')
-        return True
-    except Exception as e:
-        logger.info(f'⚠️  检查迁移状态失败: {e}')
-        return False
-
-
-def check_table_exists(table_name):
-    from django.db import connection
-    try:
-        cursor = connection.cursor()
-        cursor.execute(
-            "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = %s);",
-            [table_name]
-        )
-        exists = cursor.fetchone()[0]
-        return exists
-    except Exception as e:
-        logger.info(f'❌ 检查表 "{table_name}" 失败: {e}')
-        return False
-
-
-def import_models():
-    try:
-        # 导入权限相关模型
-        from apps.users.models import (
-            User, Role, Permission, RolePermissionRel, UserRoleRel, Department, Team,
-        )
-        logger.info('模型导入成功')
-        return User, Role, Permission, RolePermissionRel, UserRoleRel, Department, Team
-    except Exception as e:
-        logger.info(f'模型导入失败: {e}')
-        traceback.print_exc()
-        return None
-
-
-def load_config(config_path):
-    try:
-        with open(config_path, 'r', encoding='utf-8') as f:
-            return yaml.safe_load(f)
-    except Exception as e:
-        logger.info(f'❌ 配置文件加载失败: {e}')
-        traceback.print_exc()
-        return None
-
-
-def create_roles(config, dry_run=False):
-    logger.info('\n=== 创建角色 ===')
-    from apps.users.models import Role
-    roles_config = config.get('roles', [])
-    created = 0
-    skipped = 0
-
-    for role_data in roles_config:
-        # YAML 中的 code 值作为 role_key
-        # role_type / data_scope 决定授权时是否需要绑定管辖 Scope
-        role_key = role_data['code']
-        name = role_data['name']
-        description = role_data.get('description', '')
-        is_builtin = role_data.get('is_builtin', False)
-        role_type = role_data.get('role_type', 'NORMAL_USER')
-        data_scope = role_data.get('data_scope', 'TEAM')
-
-        try:
-            if Role.objects.filter(role_key=role_key).exists():
-                logger.info(f'  ⏭️  角色 "{role_key}" 已存在，跳过')
-                skipped += 1
-            else:
-                if not dry_run:
-                    Role.objects.create(
-                        role_key=role_key,
-                        name=name,
-                        description=description,
-                        is_builtin=is_builtin,
-                        role_type=role_type,
-                        data_scope=data_scope,
-                    )
-                logger.info(f'  ✅ 创建角色: {role_key} - {name}')
-                created += 1
-        except Exception as e:
-            logger.info(f'  ❌ 创建角色 "{role_key}" 失败: {e}')
-            traceback.print_exc()
-
-    logger.info(f'  总计: 创建 {created} 个，跳过 {skipped} 个')
-    return created
-
-
-def create_permissions(config, dry_run=False):
-    logger.info('\n=== 创建权限 ===')
-    from apps.users.models import Permission
-    perms_config = config.get('permissions', [])
-    created = 0
-    skipped = 0
-
-    for perm_data in perms_config:
-        # permission_key 三段式：module.resource.action
-        perm_key = perm_data['code']
-        perm_name = perm_data['name']
-        module = perm_data.get('module', '')
-        description = perm_data.get('description', '')
-        is_builtin = perm_data.get('is_builtin', False)
-
-        try:
-            if Permission.objects.filter(permission_key=perm_key).exists():
-                logger.info(f'  ⏭️  权限 "{perm_key}" 已存在，跳过')
-                skipped += 1
-            else:
-                if not dry_run:
-                    Permission.objects.create(
-                        permission_key=perm_key,
-                        permission_name=perm_name,
-                        module=module,
-                        description=description,
-                        is_builtin=is_builtin,
-                    )
-                logger.info(f'  ✅ 创建权限: {perm_key}')
-                created += 1
-        except Exception as e:
-            logger.info(f'  ❌ 创建权限 "{perm_key}" 失败: {e}')
-            traceback.print_exc()
-
-    logger.info(f'  总计: 创建 {created} 个，跳过 {skipped} 个')
-    return created
-
-
-def create_role_permissions(config, dry_run=False):
-    logger.info('\n=== 创建角色-权限映射 ===')
-    from apps.users.models import Role, Permission, RolePermissionRel
-    rp_config = config.get('role_permissions', {})
-    created = 0
-    skipped = 0
-
-    for role_code, perm_codes in rp_config.items():
-        try:
-            role = Role.objects.get(role_key=role_code)
-        except Role.DoesNotExist:
-            logger.info(f'  ❌ 角色 "{role_code}" 不存在，跳过')
-            continue
-
-        for perm_code in perm_codes:
-            try:
-                perm = Permission.objects.get(permission_key=perm_code)
-            except Permission.DoesNotExist:
-                logger.info(f'  ❌ 权限 "{perm_code}" 不存在，跳过')
-                continue
-
-            try:
-                if RolePermissionRel.objects.filter(role=role, permission=perm).exists():
-                    skipped += 1
-                else:
-                    if not dry_run:
-                        RolePermissionRel.objects.create(role=role, permission=perm)
-                    logger.info(f'  ✅ {role_code} -> {perm_code}')
-                    created += 1
-            except Exception as e:
-                logger.info(f'  ❌ 创建角色权限映射失败: {role_code} -> {perm_code}: {e}')
-                traceback.print_exc()
-
-    logger.info(f'  总计: 创建 {created} 个，跳过 {skipped} 个')
-    return created
-
-
-def create_departments(config, dry_run=False):
-    logger.info('\n=== 创建部门 ===')
-    from apps.users.models import Department
-    depts_config = config.get('departments', [])
-    created = 0
-    skipped = 0
-
-    for dept_data in depts_config:
-        code = dept_data['code']
-        name = dept_data['name']
-        sort_order = dept_data.get('sort_order', 0)
-
-        try:
-            if Department.objects.filter(code=code).exists():
-                logger.info(f'  ⏭️  部门 "{code}" 已存在，跳过')
-                skipped += 1
-            else:
-                if not dry_run:
-                    Department.objects.create(
-                        name=name,
-                        code=code,
-                        sort_order=sort_order
-                    )
-                logger.info(f'  ✅ 创建部门: {code} - {name}')
-                created += 1
-        except Exception as e:
-            logger.info(f'  ❌ 创建部门 "{code}" 失败: {e}')
-            traceback.print_exc()
-
-    logger.info(f'  总计: 创建 {created} 个，跳过 {skipped} 个')
-    return created
-
-
-def create_teams(config, dry_run=False):
-    logger.info('\n=== 创建团队 ===')
-    from apps.users.models import Team, Department
-    teams_config = config.get('teams', [])
-    created = 0
-    skipped = 0
-
-    for team_data in teams_config:
-        code = team_data['code']
-        name = team_data['name']
-        description = team_data.get('description', '')
-        dept_name = team_data.get('department')
-
-        try:
-            if Team.objects.filter(code=code).exists():
-                logger.info(f'  ⏭️  团队 "{code}" 已存在，跳过')
-                skipped += 1
-                continue
-
-            department = None
-            if dept_name:
-                try:
-                    department = Department.objects.get(name=dept_name)
-                except Department.DoesNotExist:
-                    logger.info(f'  ⚠️  团队 "{code}" 的部门 "{dept_name}" 不存在，将不设置部门')
-
-            if not dry_run:
-                Team.objects.create(
-                    name=name,
-                    code=code,
-                    description=description,
-                    department=department
-                )
-            logger.info(f'  ✅ 创建团队: {code} - {name}')
-            created += 1
-        except Exception as e:
-            logger.info(f'  ❌ 创建团队 "{code}" 失败: {e}')
-            traceback.print_exc()
-
-    logger.info(f'  总计: 创建 {created} 个，跳过 {skipped} 个')
-    return created
-
-
-def create_users(config, dry_run=False):
-    logger.info('\n=== 创建用户 ===')
-    # UserRole → UserRoleRel，Role.code → Role.role_key
-    from apps.users.models import User, Role, UserRoleRel, GrantStatus
-    users_config = config.get('users', [])
-    created = 0
-    skipped = 0
-
-    for user_data in users_config:
-        username = user_data['username']
-        email = user_data['email']
-        real_name = user_data.get('real_name', '')
-        password = user_data['password']
-
-        try:
-            if User.objects.filter(username=username).exists():
-                logger.info(f'用户 "{username}" 已存在，跳过')
-                skipped += 1
-                continue
-
-            if not dry_run:
-                user = User.objects.create_user(
-                    username=username,
-                    email=email,
-                    password=password
-                )
-                user.real_name = real_name
-                user.save()
-
-                # 处理角色分配 —— 通过 UserRoleRel 绑定，需指定 status=ACTIVE
-                role_code = user_data.get('role')
-                if role_code:
-                    try:
-                        role = Role.objects.get(role_key=role_code)
-                        UserRoleRel.objects.get_or_create(
-                            user=user, role=role,
-                            defaults={'status': GrantStatus.ACTIVE},
-                        )
-                    except Role.DoesNotExist:
-                        logger.info(f'  ⚠️  角色 "{role_code}" 不存在，用户 "{username}" 将没有角色')
-
-            logger.info(f'  ✅ 创建用户: {username} ({real_name})')
-            created += 1
-        except Exception as e:
-            logger.info(f'  ❌ 创建用户 "{username}" 失败: {e}')
-            traceback.print_exc()
-
-    logger.info(f'  总计: 创建 {created} 个，跳过 {skipped} 个')
-    return created
-
-
-def create_global_memories(config, dry_run=False):
-    logger.info('\n=== 创建全局记忆 ===')
-    from apps.memory.models import GlobalMemory
-    gm_config = config.get('global_memories', [])
-    created = 0
-    skipped = 0
-
-    for gm_data in gm_config:
-        key = gm_data['key']
-        content = gm_data['content']
-        scope_root_types = gm_data.get('scope_root_types', [])
-        priority = gm_data.get('priority', 0)
-        is_enabled = gm_data.get('is_enabled', True)
-
-        try:
-            if GlobalMemory.objects.filter(key=key).exists():
-                logger.info(f'  ⏭️  全局记忆 "{key}" 已存在，跳过')
-                skipped += 1
-            else:
-                if not dry_run:
-                    GlobalMemory.objects.create(
-                        key=key,
-                        content=content,
-                        scope_root_types=scope_root_types,
-                        priority=priority,
-                        is_enabled=is_enabled
-                    )
-                logger.info(f'  ✅ 创建全局记忆: {key}')
-                created += 1
-        except Exception as e:
-            logger.info(f'  ❌ 创建全局记忆 "{key}" 失败: {e}')
-            traceback.print_exc()
-
-    logger.info(f'  总计: 创建 {created} 个，跳过 {skipped} 个')
-    return created
+# 导入各初始化模块（此时 django 尚未 setup，模块内函数体不会触发 ORM 调用）
+from init import (
+    common,
+    roles,
+    permissions,
+    role_permissions,
+    departments,
+    teams,
+    users,
+    global_memories,
+    system_configs,
+    models,
+)
 
 
 def main():
     parser = argparse.ArgumentParser(description='系统初始化脚本')
     parser.add_argument('--config', default='scripts/initial_data.yaml', help='配置文件路径')
     parser.add_argument('--dry-run', action='store_true', help='仅预览，不实际写入数据库')
-    parser.add_argument('--force', action='store_true', help='强制覆盖已存在的数据')
+    parser.add_argument('--force', action='store_true', help='强制覆盖已存在的数据（含 SystemConfig value）')
+    parser.add_argument('--with-org', action='store_true',
+                        help='同时创建示例部门/团队（默认不创建，生产环境无需示例组织数据）')
     args = parser.parse_args()
 
     config_path = os.path.join(PROJECT_ROOT, args.config)
@@ -452,52 +91,82 @@ def main():
     logger.info('RAG-Agent 系统初始化')
     logger.info('=' * 60)
     logger.info(f'配置文件: {config_path}')
-    logger.info(f'模式: {"预览模式 (Dry Run)" if args.dry_run else "实际写入模式"}')
+    logger.info(f'模式: {"预览模式 (Dry Run)" if args.dry_run else "实际写入模式"}'
+                f'{" (Force)" if args.force else ""}')
     logger.info('=' * 60)
 
+    # --- 步骤1: 测试数据库连接 ---
+    # settings 未就绪前用 psycopg 直连，避免 ORM 依赖未初始化时报错
     logger.info('\n--- 步骤1: 测试数据库连接 ---')
-    if not test_db_connection():
+    if not common.test_db_connection():
         sys.exit(1)
 
+    # --- 步骤2: 初始化 Django ---
     logger.info('\n--- 步骤2: 初始化 Django ---')
-    if not setup_django():
+    if not common.setup_django():
         sys.exit(1)
 
+    # --- 步骤3: 检查迁移状态 ---
     logger.info('\n--- 步骤3: 检查迁移状态 ---')
-    if not check_migrations():
+    if not common.check_migrations():
         sys.exit(1)
 
+    # --- 步骤4: 检查角色表 ---
     logger.info('\n--- 步骤4: 检查角色表 ---')
-    if not check_table_exists('user_role_list'):
+    if not common.check_table_exists('user_role_list'):
         logger.info('❌ 角色表不存在，请先运行迁移命令')
         sys.exit(1)
     logger.info('✅ 角色表存在')
 
+    # --- 步骤5: 加载配置 ---
     logger.info('\n--- 步骤5: 加载配置 ---')
-    config = load_config(config_path)
+    config = common.load_config(config_path)
     if config is None:
         sys.exit(1)
 
+    # --- 步骤6: 检查系统是否已初始化 ---
+    # super_admin 角色存在视为已初始化，避免重复执行覆盖用户已调整数据
     logger.info('\n--- 步骤6: 检查系统是否已初始化 ---')
     from apps.users.models import Role
-    # super_admin → super_admin（is_super_admin 判定 role_key='super_admin'）
     if Role.objects.filter(role_key='super_admin').exists():
-        logger.info('❌ 检测到 super_admin 角色已存在，系统可能已初始化')
-        logger.info('   如果需要重新初始化，请先清空数据库或使用 --force 参数')
         if not args.force:
-            logger.info('   终止执行')
-            sys.exit(1)
+            # 已初始化 + 非 force：仅增量更新系统配置（新增项创建 + 已有项更新元数据）
+            # 不覆盖用户已调整的 value，但同步 label/description/category 等开发者维护的元数据
+            logger.info('⚠️ 检测到系统已初始化，仅更新系统配置元数据')
+            logger.info('   如需完全重新初始化，请使用 --force 参数')
+            system_configs.create_system_configs(config, args.dry_run, False)
+            # 模型配置同样走增量：补齐缺失条目，已存在的保留用户在前端调整的值
+            models.create_llm_models(config, args.dry_run, False)
+            logger.info('\n' + '=' * 60)
+            if args.dry_run:
+                logger.info('预览完成！运行时不带 --dry-run 参数以实际更新')
+            else:
+                logger.info('系统配置更新完成！')
+            logger.info('=' * 60)
+            sys.exit(0)
         else:
-            logger.info('   使用 --force 参数强制继续')
+            logger.info('⚠️ 检测到系统已初始化，使用 --force 强制重新初始化所有数据')
 
+    # --- 步骤7: 创建数据 ---
+    # 顺序：角色 → 权限 → 角色权限映射 → [部门 → 团队] → 用户 → 全局记忆 → 系统配置
+    # 部门/团队默认不创建（生产环境无需示例组织数据），开发期间可用 --with-org 开启
+    # 系统配置放最后，因为部分配置项可能依赖角色/权限已就绪（如 system_maintainer）
     logger.info('\n--- 步骤7: 创建数据 ---')
-    create_roles(config, args.dry_run)
-    create_permissions(config, args.dry_run)
-    create_role_permissions(config, args.dry_run)
-    create_departments(config, args.dry_run)
-    create_teams(config, args.dry_run)
-    create_users(config, args.dry_run)
-    create_global_memories(config, args.dry_run)
+    roles.create_roles(config, args.dry_run)
+    permissions.create_permissions(config, args.dry_run)
+    role_permissions.create_role_permissions(config, args.dry_run)
+    if args.with_org:
+        # 仅开发期间 --with-org 时创建示例部门/团队
+        departments.create_departments(config, args.dry_run)
+        teams.create_teams(config, args.dry_run)
+    else:
+        logger.info('\n⏭️  跳过部门/团队创建（生产默认行为，开发期间可用 --with-org 开启）')
+    users.create_users(config, args.dry_run)
+    global_memories.create_global_memories(config, args.dry_run)
+    # 系统配置：--force 时覆盖 value，否则仅创建缺失项 + 更新元数据
+    system_configs.create_system_configs(config, args.dry_run, args.force)
+    # 模型配置：首次部署创建预置模型，--force 时覆盖已存在项字段
+    models.create_llm_models(config, args.dry_run, args.force)
 
     logger.info('\n' + '=' * 60)
     if args.dry_run:

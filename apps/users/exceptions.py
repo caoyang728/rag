@@ -14,7 +14,7 @@ from django.http import Http404
 def custom_exception_handler(exc, context):
     resp = exception_handler(exc, context)
     if resp is None:
-        logger.exception('Unhandled: %s', exc)
+        logger.exception(f'Unhandled: {exc}')
         return None
 
     code = 40000

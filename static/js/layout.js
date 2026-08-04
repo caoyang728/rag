@@ -35,7 +35,6 @@ function renderTopNav(active) {
         </div>
         <div id="userMenu" class="dropdown-menu">
           <div class="dropdown-item" onclick="goto('profile')">👤 我的资料</div>
-          <div class="dropdown-item" onclick="toast('设置页占位','')">⚙️ 系统设置</div>
           <div class="dropdown-divider"></div>
           <div class="dropdown-item" onclick="doLogout()">🚪 退出登录</div>
         </div>
@@ -221,6 +220,11 @@ function isAdminOrOps() {
 	return hasAnyRole('super_admin', 'kb_admin');
 }
 
+function isSystemMaintainer() {
+	// 可查看/修改系统配置的角色：超级管理员 / 维护管理员
+	return hasAnyRole('super_admin', 'system_maintainer');
+}
+
 function renderSidebar(active) {
 	// 非 contributor 且无管理角色 = viewer 只读准入，隐藏上传
 	// 管理角色（team_leader/dept_manager/*_admin）即使 viewer 兜底也可操作上传
@@ -261,6 +265,12 @@ function renderSidebar(active) {
 			{ icon: '&#9881;&#65039;', name: 'RBAC 权限配置', page: 'admin-rbac', key: 'admin-rbac' },
 		);
 	}
+	// 系统配置：超级管理员 / 维护管理员可见（运行期 KV 配置项管理）
+	if (isSystemMaintainer()) {
+		adminItems.push(
+			{ icon: '🔧', name: '系统配置', page: 'admin-system-config', key: 'admin-system-config' },
+		);
+	}
 	const items = [
 		{
 			group: '工作台', items: [
@@ -271,7 +281,6 @@ function renderSidebar(active) {
 		{
 			group: '个人', items: [
 				{ icon: '👤', name: '个人资料', page: 'profile', key: 'profile' },
-				{ icon: '⚙️', name: '系统设置', page: null, key: 'system-settings' }
 			]
 		},
 		{ group: '管理后台', items: adminItems }

@@ -127,7 +127,7 @@ class ToolRegistry:
             return ret
         except Exception as e:
             from loguru import logger
-            logger.exception('[ToolRegistry] tool %s execute error', name)
+            logger.exception(f'[ToolRegistry] tool {name} execute error')
             return {
                 'result': f'工具执行失败: {e.__class__.__name__}: {str(e)[:300]}',
                 'ok': False,

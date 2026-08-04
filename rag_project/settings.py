@@ -232,8 +232,8 @@ CELERY_TASK_QUEUES = {
 
 # --- LLM ---
 # 支持双模型：基础模型（简单任务）和高级模型（复杂任务）
+# base_url 已迁移到模型管理（LLMModel 表），不再作为系统配置项
 LLM_API_KEY = LLMConfig.api_key()
-LLM_BASE_URL = LLMConfig.base_url()
 LLM_BASE_MODEL = LLMConfig.default_model()         # 基础模型（用于简单任务）
 LLM_ADVANCED_MODEL = LLMConfig.advanced_model()    # 高级模型（用于复杂任务）
 
@@ -267,8 +267,8 @@ SENSITIVE_FILTER_RELOAD_TTL = int(os.getenv('SENSITIVE_FILTER_RELOAD_TTL', '300'
 
 # --- Embedding & Rerank ---
 # 使用通用变量名，支持切换不同平台
+# base_url 已迁移到模型管理（LLMModel 表），不再作为系统配置项
 EMBEDDING_API_KEY = EmbeddingConfig.api_key()
-EMBEDDING_BASE_URL = EmbeddingConfig.base_url()
 EMBEDDING_MODEL = EmbeddingConfig.model()
 EMBEDDING_DIM = EmbeddingConfig.dim()
 RERANK_MODEL = EmbeddingConfig.rerank_model()

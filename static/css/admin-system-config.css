@@ -120,7 +120,7 @@
 
 /* ===== 第一行：中文名 ===== */
 .config-item-label {
-	font-size: 14px;
+	font-size: 12px;
 	font-weight: 600;
 	color: var(--text-main, #1a1a2e);
 	line-height: 1.4;
@@ -129,7 +129,7 @@
 	gap: 6px;
 	flex-wrap: wrap;
 	flex-shrink: 0;
-	width: 200px;
+	width: 220px;
 	min-width: 0;
 }
 
@@ -172,7 +172,7 @@
 
 /* 第二行左侧（字段名+类型标签），与中文名对齐 */
 .config-item-meta-left {
-	width: 200px;
+	width: 220px;
 	flex-shrink: 0;
 	display: flex;
 	align-items: center;
@@ -182,7 +182,7 @@
 
 /* 字段名（灰色小字，mono 字体） */
 .config-item-key-text {
-	font-size: 11px;
+	font-size: 10px;
 	color: var(--text-sub, #888);
 	font-family: 'SF Mono', 'Consolas', 'Menlo', monospace;
 	opacity: 0.65;
@@ -193,12 +193,20 @@
 
 /* 解释（灰色小字，与控件对齐） */
 .config-item-hint {
-	font-size: 12px;
+	font-size: 11px;
 	color: var(--text-sub, #888);
 	line-height: 1.5;
 	flex: 1;
 	min-width: 0;
-	max-width: 480px;
+	max-width: 580px;
+}
+
+/* 上次修改时间（右侧灰色小字） */
+.config-item-updated {
+	font-size: 10px;
+	color: var(--text-sub, #999);
+	margin-left: auto;
+	white-space: nowrap;
 }
 
 /* ===== 标签 ===== */
@@ -298,7 +306,7 @@
 .multi-select-search .input {
 	width: 100%;
 	padding: 5px 10px;
-	font-size: 13px;
+	font-size: 12px;
 	border-radius: 6px;
 }
 
@@ -621,6 +629,30 @@
 	color: #991b1b;
 }
 
+/* 依赖标记：模型被配置项引用时显示 */
+.model-dependency-badge {
+	display: inline-flex;
+	align-items: center;
+	font-size: 11px;
+	padding: 1px 6px;
+	border-radius: 8px;
+	background: #fef3c7;
+	color: #92400e;
+	margin-left: 4px;
+}
+
+/* 待审批工单标记 */
+.model-ticket-badge {
+	display: inline-flex;
+	align-items: center;
+	font-size: 11px;
+	padding: 1px 6px;
+	border-radius: 8px;
+	background: #dbeafe;
+	color: #1e40af;
+	margin-left: 4px;
+}
+
 /* 操作按钮区 */
 .model-row-actions {
 	display: flex;
@@ -677,13 +709,29 @@
 	font-weight: 600;
 }
 
-/* 工单列表容器：纵向滚动，限制最大高度避免遮挡背景 */
+/* 工单列表容器：flex 填满 modal-body 剩余空间，仅此区域滚动 */
 .ticket-list-body {
-	max-height: 60vh;
+	flex: 1;
+	min-height: 520px;
+	max-height: 520px;
 	overflow-y: auto;
 	display: flex;
 	flex-direction: column;
-	gap: 8px;
+	gap: 4px;
+}
+
+/* 分页控件（放在 modal-footer 中，居中显示） */
+.ticket-pagination {
+	width: 100%;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 12px;
+}
+
+.pagination-info {
+	font-size: 13px;
+	color: var(--text-sub, #888);
 }
 
 /* 空态 */
@@ -694,26 +742,33 @@
 	font-size: 13px;
 }
 
-/* 工单卡片：可点击展开详情 */
+/* 工单卡片：固定 70px 高度，flex row 布局 */
 .ticket-card {
 	border: 1px solid var(--border-light, #eee);
-	border-radius: 8px;
+	border-radius: 6px;
 	overflow: hidden;
 	transition: box-shadow 0.15s;
+	display: flex;
+	align-items: stretch;
+	min-height: 70px;
+	max-height: 70px;
 }
 
 .ticket-card:hover {
 	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
 }
 
-/* 卡片头部：标题行 + 元信息行，点击展开/收起 */
+/* 卡片头部：紧凑布局，flex:1 占满左侧空间 */
 .ticket-card-header {
-	padding: 12px 14px;
+	padding: 8px 12px;
 	cursor: pointer;
 	display: flex;
 	flex-direction: column;
-	gap: 6px;
+	gap: 4px;
 	background: var(--bg-sub, #fafbfc);
+	flex: 1;
+	min-width: 0;
+	justify-content: center;
 }
 
 .ticket-card-header:hover {
@@ -729,13 +784,13 @@
 }
 
 .ticket-config-label {
-	font-size: 14px;
+	font-size: 12px;
 	font-weight: 600;
 	color: var(--text-main, #1a1a2e);
 }
 
 .ticket-config-key {
-	font-size: 11px;
+	font-size: 10px;
 	color: var(--text-sub, #888);
 	font-family: 'SF Mono', 'Consolas', monospace;
 	background: var(--bg-tag, #f0f0f0);
@@ -743,19 +798,19 @@
 	border-radius: 4px;
 }
 
-/* 高风险徽标 */
+/* 高风险徽标：红色醒目标签 */
 .ticket-badge {
 	font-size: 10px;
 	padding: 1px 7px;
 	border-radius: 4px;
-	font-weight: 400;
+	font-weight: 500;
 	white-space: nowrap;
 }
 
 .ticket-badge-risk {
-	background: #fff3e0;
-	color: #e65100;
-	border: 1px solid #ffcc80;
+	background: #fef2f2;
+	color: #dc2626;
+	border: 1px solid #fecaca;
 }
 
 /* 状态徽标：不同状态用不同颜色便于快速识别 */
@@ -769,12 +824,14 @@
 
 .ticket-status-pending {
 	background: #fff8e1;
-	color: #e65100;
+	color: #b45309;
+	border: 1px solid #fde68a;
 }
 
 .ticket-status-first {
-	background: #fce4ec;
-	color: #c62828;
+	background: #fce7f3;
+	color: #be185d;
+	border: 1px solid #fbcfe8;
 }
 
 .ticket-status-approved {
@@ -792,12 +849,12 @@
 	color: #6b7280;
 }
 
-/* 元信息行：值变化 + 创建人 + 时间 + 展开箭头 */
+/* 元信息行：值变化 + 创建人 + 时间 */
 .ticket-card-meta {
 	display: flex;
 	align-items: center;
-	gap: 16px;
-	font-size: 12px;
+	gap: 12px;
+	font-size: 11px;
 	color: var(--text-sub, #888);
 	flex-wrap: wrap;
 }
@@ -819,10 +876,17 @@
 	white-space: nowrap;
 }
 
+/* 查看详情按钮：右侧独立列，垂直居中 */
 .ticket-toggle {
-	margin-left: auto;
-	font-size: 14px;
-	color: var(--text-sub, #aaa);
+	display: flex;
+	align-items: center;
+	padding: 0 14px;
+	font-size: 12px;
+	color: var(--text-sub, #888);
+	white-space: nowrap;
+	border-left: 1px solid var(--border-light, #eee);
+	background: #fff;
+	flex-shrink: 0;
 }
 
 /* 详情区：展开后显示审批意见/人员/操作按钮 */
@@ -904,4 +968,470 @@
 	margin-top: 12px;
 	padding-top: 12px;
 	border-top: 1px dashed var(--border-light, #eee);
+}
+
+/* ==========================================================
+   工单详情弹窗样式（card 模式）
+   ========================================================== */
+
+/* 每个区块独立卡片 */
+.ticket-detail-card {
+	background: #fff;
+	border: 1px solid var(--border-light, #eee);
+	border-radius: 10px;
+	padding: 14px 16px;
+	margin-bottom: 12px;
+}
+
+/* 头部行：配置名 + key + 状态 */
+.ticket-detail-header-row {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	flex-wrap: wrap;
+	margin-bottom: 8px;
+}
+
+.ticket-detail-config-label {
+	font-size: 14px;
+	font-weight: 600;
+	color: var(--text-main, #1a1a1a);
+}
+
+.ticket-detail-config-key {
+	font-size: 11px;
+	color: var(--text-sub, #888);
+	background: #f5f5f5;
+	padding: 2px 8px;
+	border-radius: 4px;
+	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.ticket-detail-meta-row {
+	display: flex;
+	gap: 20px;
+	font-size: 12px;
+	color: var(--text-sub, #888);
+}
+
+/* 变更对比区域标题 */
+.ticket-diff-label {
+	font-size: 12px;
+	font-weight: 500;
+	color: var(--text-sub, #666);
+	margin-bottom: 8px;
+}
+
+/* 变更对比盒子 */
+.ticket-diff-box {
+	background: #fafafa;
+	border: 1px solid var(--border-light, #eee);
+	border-radius: 8px;
+	padding: 14px;
+}
+
+.ticket-diff-row {
+	display: flex;
+	align-items: stretch;
+	gap: 12px;
+}
+
+/* 变更原因区域：带浅色背景突出显示 */
+.ticket-detail-reason {
+	background: #fffbeb;
+	border: 1px solid #fde68a;
+	border-radius: 8px;
+	padding: 12px 14px;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.ticket-detail-reason-label {
+	font-size: 12px;
+	font-weight: 600;
+	color: #92400e;
+}
+
+.ticket-detail-reason-value {
+	font-size: 13px;
+	color: var(--text-main, #333);
+	line-height: 1.5;
+	word-break: break-all;
+	white-space: pre-wrap;
+}
+
+/* 多行文本字段（审批意见等）：保留换行 + 合并连续空白行 */
+.ticket-detail-multiline {
+	white-space: pre-wrap;
+}
+
+.ticket-diff-side {
+	flex: 1;
+	border-radius: 8px;
+	padding: 12px 14px;
+	border: 1px solid;
+}
+
+.ticket-diff-old {
+	background: #fef2f2;
+	border-color: #fecaca;
+}
+
+.ticket-diff-new {
+	background: #f0f9ff;
+	border-color: #bfdbfe;
+}
+
+.ticket-diff-side-label {
+	font-size: 11px;
+	font-weight: 600;
+	margin-bottom: 6px;
+}
+
+.ticket-diff-old .ticket-diff-side-label {
+	color: #dc2626;
+}
+
+.ticket-diff-new .ticket-diff-side-label {
+	color: #2563eb;
+}
+
+.ticket-diff-side-value {
+	font-size: 13px;
+	color: var(--text-main, #333);
+	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	word-break: break-all;
+	line-height: 1.5;
+	max-height: 80px;
+	overflow-y: auto;
+}
+
+.ticket-diff-arrow {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 20px;
+	color: var(--text-sub, #999);
+	font-weight: 300;
+}
+
+/* 工单详情 - 详情行（审批信息等） */
+.ticket-detail-row {
+	display: flex;
+	gap: 8px;
+	font-size: 12px;
+	margin-bottom: 8px;
+	line-height: 1.5;
+}
+
+.ticket-detail-row .ticket-detail-label {
+	color: var(--text-sub, #888);
+	flex-shrink: 0;
+	min-width: 72px;
+}
+
+.ticket-detail-row .ticket-detail-value {
+	color: var(--text-main, #333);
+	flex: 1;
+	min-width: 0;
+	word-break: break-all;
+}
+
+/* 工单卡片可点击样式 */
+.ticket-card-clickable {
+	cursor: pointer;
+	transition: box-shadow 0.15s, transform 0.1s;
+}
+
+.ticket-card-clickable:hover {
+	box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
+	transform: translateY(-1px);
+}
+
+/* 工单卡片中 diff 的紧凑展示（列表中） */
+.diff-old {
+	color: #dc2626;
+	text-decoration: line-through;
+	text-decoration-color: rgba(220, 38, 38, 0.4);
+}
+
+.diff-new {
+	color: #2563eb;
+	font-weight: 500;
+}
+
+.diff-arrow {
+	color: var(--text-sub, #aaa);
+	margin: 0 2px;
+}
+
+/* ===== 模型工单 - 删除/停用 专属样式 ===== */
+
+/* 删除警告条 */
+.ticket-delete-warning {
+	display: flex;
+	align-items: flex-start;
+	gap: 12px;
+	padding: 12px 14px;
+	background: linear-gradient(135deg, #fef2f2 0%, #fff1f2 100%);
+	border: 1px solid #fecaca;
+	border-radius: 8px;
+	margin-bottom: 14px;
+}
+
+.ticket-delete-warning-icon {
+	font-size: 20px;
+	line-height: 1;
+	flex-shrink: 0;
+}
+
+.ticket-delete-warning-text {
+	font-size: 12px;
+	line-height: 1.6;
+	color: #991b1b;
+}
+
+.ticket-delete-warning-text strong {
+	display: block;
+	font-size: 13px;
+	color: #dc2626;
+	margin-bottom: 2px;
+}
+
+/* 停用提示条 */
+.ticket-deactivate-notice {
+	display: flex;
+	align-items: flex-start;
+	gap: 12px;
+	padding: 12px 14px;
+	background: linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%);
+	border: 1px solid #fde68a;
+	border-radius: 8px;
+	margin-bottom: 14px;
+}
+
+.ticket-deactivate-icon {
+	font-size: 20px;
+	line-height: 1;
+	flex-shrink: 0;
+}
+
+.ticket-deactivate-text {
+	font-size: 12px;
+	line-height: 1.6;
+	color: #92400e;
+}
+
+.ticket-deactivate-text strong {
+	display: block;
+	font-size: 13px;
+	color: #b45309;
+	margin-bottom: 2px;
+}
+
+/* 删除工单 - 模型信息卡片（单行列表） */
+.ticket-delete-info-card {
+	border: 1px solid #e2e8f0;
+	border-radius: 8px;
+	background: #f8fafc;
+	overflow: hidden;
+}
+
+.ticket-delete-info-title {
+	padding: 10px 14px;
+	font-size: 12px;
+	font-weight: 600;
+	color: #475569;
+	background: #f1f5f9;
+	border-bottom: 1px solid #e2e8f0;
+}
+
+.ticket-delete-info-list {
+	display: flex;
+	flex-direction: column;
+}
+
+.ticket-delete-info-row {
+	display: flex;
+	align-items: center;
+	padding: 10px 14px;
+	border-bottom: 1px solid #e2e8f0;
+}
+
+.ticket-delete-info-row:last-child {
+	border-bottom: none;
+}
+
+.ticket-delete-info-label {
+	flex: 0 0 100px;
+	font-size: 12px;
+	color: #64748b;
+	font-weight: 500;
+}
+
+.ticket-delete-info-value {
+	flex: 1;
+	font-size: 13px;
+	color: #1e293b;
+	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	word-break: break-all;
+}
+
+/* 停用工单 - 状态展示 */
+.ticket-info-grid {
+	display: grid;
+	grid-template-columns: repeat(2, 1fr);
+	gap: 8px;
+}
+
+.ticket-info-item {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	padding: 8px 10px;
+	background: #f8fafc;
+	border: 1px solid #e2e8f0;
+	border-radius: 6px;
+}
+
+.ticket-info-label {
+	font-size: 11px;
+	color: #64748b;
+	font-weight: 500;
+}
+
+.ticket-info-value {
+	font-size: 13px;
+	color: #1e293b;
+	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	word-break: break-all;
+}
+
+/* 工单详情弹窗 footer 按钮统一样式 */
+#ticketDetailFooter .btn {
+	min-width: 96px;
+	justify-content: center;
+}
+
+/* 二级弹窗（showConfirmDialog）宽度调整：工单详情/模型表单需要更宽 */
+.confirm-dialog {
+	width: 560px;
+}
+
+/* ==========================================================
+   配置变更记录弹窗样式
+   ========================================================== */
+
+/* 搜索栏 */
+.history-search-bar {
+	margin-bottom: 12px;
+}
+
+.history-search-bar .input {
+	width: 100%;
+}
+
+.history-list-body {
+	max-height: 55vh;
+	overflow-y: auto;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.history-card {
+	border: 1px solid var(--border-light, #eee);
+	border-radius: 8px;
+	overflow: hidden;
+	transition: box-shadow 0.15s;
+}
+
+.history-card:hover {
+	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+}
+
+.history-card-header {
+	padding: 10px 14px;
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	background: var(--bg-sub, #fafbfc);
+}
+
+.history-card-title {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	flex-wrap: wrap;
+}
+
+.history-card-time {
+	font-size: 12px;
+	color: var(--text-sub, #888);
+	white-space: nowrap;
+}
+
+.history-card-body {
+	padding: 12px 14px;
+	background: #fff;
+}
+
+.history-card-diff {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	font-family: 'SF Mono', 'Consolas', monospace;
+	font-size: 13px;
+	margin-bottom: 8px;
+	flex-wrap: wrap;
+}
+
+.history-old {
+	background: #fef2f2;
+	color: #991b1b;
+	padding: 2px 8px;
+	border-radius: 4px;
+	border: 1px solid #fecaca;
+	max-width: 200px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.history-arrow {
+	color: var(--text-sub, #aaa);
+	font-weight: bold;
+}
+
+.history-new {
+	background: #f0fdf4;
+	color: #166534;
+	padding: 2px 8px;
+	border-radius: 4px;
+	border: 1px solid #bbf7d0;
+	max-width: 200px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.history-card-meta {
+	display: flex;
+	align-items: center;
+	gap: 16px;
+	font-size: 12px;
+	color: var(--text-sub, #888);
+	flex-wrap: wrap;
+	margin-bottom: 6px;
+}
+
+.history-card-reason {
+	font-size: 13px;
+	color: var(--text-main, #555);
+	line-height: 1.5;
+	padding-top: 6px;
+	border-top: 1px dashed var(--border-light, #eee);
+	white-space: pre-wrap;
 }

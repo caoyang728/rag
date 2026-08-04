@@ -18,6 +18,12 @@ urlpatterns = [
     path("config-tickets/<int:pk>/approve/", views.ConfigChangeTicketViewSet.as_view({'post': 'approve'})),
     path("config-tickets/<int:pk>/reject/", views.ConfigChangeTicketViewSet.as_view({'post': 'reject'})),
     path("config-tickets/<int:pk>/withdraw/", views.ConfigChangeTicketViewSet.as_view({'post': 'withdraw'})),
+    # 模型变更工单：列表/详情/审批/驳回/撤回
+    path("model-tickets/", views.ModelChangeTicketViewSet.as_view({'get': 'list'})),
+    path("model-tickets/<int:pk>/", views.ModelChangeTicketViewSet.as_view({'get': 'retrieve'})),
+    path("model-tickets/<int:pk>/approve/", views.ModelChangeTicketViewSet.as_view({'post': 'approve'})),
+    path("model-tickets/<int:pk>/reject/", views.ModelChangeTicketViewSet.as_view({'post': 'reject'})),
+    path("model-tickets/<int:pk>/withdraw/", views.ModelChangeTicketViewSet.as_view({'post': 'withdraw'})),
     path("stats/", views.StatsView.as_view()),
     path("search/", views.GlobalSearchView.as_view()),
 ]

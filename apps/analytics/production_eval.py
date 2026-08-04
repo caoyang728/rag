@@ -1,20 +1,20 @@
 """
-生产对话自动评估 —— 保底优先 + 采样兜底 + 令牌桶限速 + 异步评估
+生产对话自动评估 —— 采样率 + 分层限速 + 异步评估
 
-对话结束后按"保底评估 + 采样率 + 令牌桶限速"三级策略,异步触发 DeepEval 12 维评估
+对话结束后按"采样率 + 分层限速"策略,异步触发 DeepEval 12 维评估
 (evaluate_with_deepeval),结果落 MultiDimensionScore。与定时批量任务
-run_multi_dimension_evaluation 互补:即时路径负责保底头部 + 采样尾部,批量负责回扫未覆盖项。
+run_multi_dimension_evaluation 互补:即时路径负责采样,批量负责回扫未覆盖项。
 
 评估入口策略(maybe_dispatch_eval):
-1. 保底评估:每小时前 N 条 + 每日前 M 条直接评估(不经采样率),保证低流量初期也有即时信号
-2. 采样兜底:保底额度用尽后,剩余对话按采样率(默认 5%)随机抽取
-3. 令牌桶限速:Redis 原子 INCR,每分钟最多 rate_per_min 个评估
+1. 采样率:按配置比例随机抽取对话进行评估(默认 5%),0=不评估,1=全量评估
+2. 分钟限速:Redis 原子 INCR,每分钟最多 rate_per_min 个评估(默认 5)
+3. 小时限速:Redis 原子 INCR,每小时最多 rate_per_hour 个评估(默认 50)
+4. 日预算:每日最多 eval_daily_limit 条 + 成本不超过 eval_cost_limit 元
 
 成本保护:
-1. 保底上限(默认 10/h + 50/日):Redis 小时/日计数器,防止保底成本失控
-2. 采样率(默认 5%):保底用尽后入口拦截
-3. 令牌桶(默认 10/min):Redis 原子 INCR
-4. 日限(默认 500/日)+ 成本限(默认 1 元/日):Redis 日计数 + DB 成本聚合
+1. 采样率(默认 5%):入口拦截,控制评估触发量
+2. 令牌桶(默认 5/min + 50/h):Redis 原子 INCR,分层限速
+3. 日限(默认 500/日)+ 成本限(默认 1 元/日):Redis 日计数 + DB 成本聚合
 """
 import random
 import time
@@ -75,6 +75,24 @@ def _acquire_token(rate_per_min: int) -> bool:
         return count <= rate_per_min
     except Exception as e:
         logger.warning(f'[ProdEval] 令牌桶 Redis 异常,保守跳过: {e}')
+        return False
+
+
+def _acquire_hourly_token(rate_per_hour: int) -> bool:
+    """小时级令牌桶限速:每小时最多 rate_per_hour 个评估
+
+    与每分钟令牌桶配合做分层限速:分钟级防止突发,小时级控制总量。
+    实现方式与 _acquire_token 一致,key 带小时时间戳,EXPIRE 3700s(略大于 3600s 容错)。
+    """
+    try:
+        r = _get_redis()
+        hour_key = f'analytics:eval_rate_hourly:{int(time.time() // 3600)}'
+        count = r.incr(hour_key)
+        if count == 1:
+            r.expire(hour_key, 3700)
+        return count <= rate_per_hour
+    except Exception as e:
+        logger.warning(f'[ProdEval] 小时限速 Redis 异常,保守跳过: {e}')
         return False
 
 
@@ -174,9 +192,10 @@ def maybe_dispatch_eval(qa_record) -> None:
     - answer_type='refused':正常拒答(无相关资料),无评估意义
     - 缓存命中:回答复用历史,评估重复无价值
 
-    评估入口策略(保底优先 + 采样兜底):
-    - 保底评估:每小时前 N 条 + 每日前 M 条直接评估,保证低流量初期即时质量信号
-    - 采样兜底:保底额度用尽后,剩余对话按采样率随机抽取,覆盖长尾
+    评估入口策略(采样 + 分层限速):
+    - 采样率:按配置比例随机抽取对话进行评估,0=不评估,1=全量评估
+    - 分层限速:每分钟 + 每小时 + 每日三级令牌桶,防止打爆 LLM 评估接口
+    - 成本保护:每日成本上限,超出后停止评估
 
     该函数在 _persist_qa 同步路径调用,必须轻量(只做判断 + delay),
     实际评估在 Celery 异步执行,不阻塞用户对话响应。
@@ -195,32 +214,36 @@ def maybe_dispatch_eval(qa_record) -> None:
         if getattr(qa_record, 'is_hit_cache', False):
             return
 
-        # 保底评估优先:前 N 条/小时 + 前 M 条/天 直接评估(不经采样率)
-        # 保底用尽后降级为采样率兜底,覆盖保底之外的随机样本
-        # Redis 故障时保底不可用,降级为采样(_check_guarantee 内部已捕获,
-        # 但 _get_redis 本身可能抛异常,此处再兜一层)
-        is_guaranteed = False
+        # 采样率检查:按比例随机抽取,未命中则跳过
+        sample_rate = AnalyticsConfig.production_eval_sample_rate()
+        if random.random() >= sample_rate:
+            return
+
+        # 分层限速:分钟级 → 小时级 → 日预算
+        # 分钟级:防止突发请求打爆 LLM 评估接口
+        if not _acquire_token(AnalyticsConfig.production_eval_rate_per_min()):
+            logger.debug(f'[ProdEval] 分钟限速,跳过 qa_id={qa_record.id}')
+            return
+
+        # 小时级:控制每小时评估总量,与分钟级配合做分层限速
+        if not _acquire_hourly_token(AnalyticsConfig.production_eval_rate_per_hour()):
+            logger.debug(f'[ProdEval] 小时限速,跳过 qa_id={qa_record.id}')
+            return
+
+        # 日预算检查:数量上限 + 成本上限
         try:
             r = _get_redis()
-            is_guaranteed, _reason = _check_guarantee(r)
-        except Exception as e:
-            logger.warning(f'[ProdEval] 保底检查异常,降级采样: {e}')
-
-        if not is_guaranteed:
-            # 保底名额用尽,走采样率兜底
-            sample_rate = AnalyticsConfig.production_eval_sample_rate()
-            if random.random() >= sample_rate:
+            passed, reason = _check_daily_budget(r)
+            if not passed:
+                logger.debug(f'[ProdEval] 日预算超限({reason}),跳过 qa_id={qa_record.id}')
                 return
-
-        # 令牌桶限速(保底与采样共享同一令牌桶,统一限速)
-        if not _acquire_token(AnalyticsConfig.production_eval_rate_per_min()):
-            logger.debug(f'[ProdEval] 令牌桶限速,跳过 qa_id={qa_record.id}')
+        except Exception as e:
+            logger.warning(f'[ProdEval] 日预算检查异常,保守跳过: {e}')
             return
 
         # dispatch 异步评估任务
         evaluate_sampled_qa.delay(qa_record.id)
-        tag = '保底' if is_guaranteed else '采样'
-        logger.info(f'[ProdEval] 已派发评估任务({tag}) qa_id={qa_record.id}')
+        logger.info(f'[ProdEval] 已派发评估任务(采样) qa_id={qa_record.id}')
     except Exception as e:
         # 采样钩子异常绝不影响主对话流程
         logger.exception(f'[ProdEval] 派发评估异常(已忽略): {e}')

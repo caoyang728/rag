@@ -1,10 +1,11 @@
-"""系统配置统一读取入口（DB 存储 + 5min TTL 缓存）
+"""系统配置统一读取入口（Redis → DB 两层缓存）
 
 设计要点：
 - 配置来源为 SystemConfig / LLMModel 表；API Key 例外从 env 读取（敏感凭证不入库）。
-- 缓存策略：5min TTL + 写后延迟双删。读路径走缓存，写路径同步删一次 + 异步延迟再删一次，
-  折中解决"写后立即读仍命中旧缓存"与"DB 事务未提交就清缓存导致回填旧值"两类问题。
-- 失败降级：DB 异常时返回调用方传入的 default，保证业务可用性优先于配置实时性。
+- 两层缓存读取顺序：Redis（5min TTL，跨进程共享）→ DB（源头）。
+  本地 Redis 调用为亚毫秒级，无需额外内存层；多进程下 Redis 天然共享，无一致性问题。
+- 写后失效：配置变更后延迟双删 Redis，解决"写后立即读命中旧缓存"与"事务未提交清缓存导致回填旧值"问题。
+- 失败降级：Redis 异常时透传到 DB，DB 异常时返回调用方传入的 default。
 - 类型转换：按 SystemConfig.value_type 转换为 Python 类型，避免调用方重复处理。
 
 使用示例：
@@ -21,7 +22,7 @@ from django.core.cache import cache
 from loguru import logger
 
 
-# 缓存 TTL：5 分钟，平衡配置实时性与 DB 压力
+# Redis 缓存 TTL：5 分钟，平衡配置实时性与 DB 压力
 _CACHE_TTL = 300
 
 # 缓存 key 前缀，便于批量清理与隔离命名空间
@@ -30,7 +31,12 @@ _LLM_KEY_PREFIX = 'sys:llm:'
 
 
 def get_config_value(key: str, default: Any = None, value_type: str = 'string') -> Any:
-    """读取 SystemConfig 配置值（DB + 缓存）
+    """读取 SystemConfig 配置值（Redis → DB 两层缓存）
+
+    读取顺序：
+    1. Redis 缓存：命中则直接返回（跨进程共享，5min TTL）
+    2. DB：读取后回填 Redis 并返回（源头）
+    3. 以上均未命中或异常：返回 default
 
     Args:
         key: 配置项 key，如 'LLM_TIMEOUT'
@@ -46,7 +52,7 @@ def get_config_value(key: str, default: Any = None, value_type: str = 'string') 
         if cached is not None:
             return _cast_value(cached, value_type)
     except Exception as e:
-        logger.warning(f'[config_loader] 读缓存失败 key={key}: {e}')
+        logger.warning(f'[config_loader] 读 Redis 缓存失败 key={key}: {e}')
 
     raw_value, db_value_type = _read_config_from_db(key)
     if raw_value is not None and raw_value != '':
@@ -54,7 +60,7 @@ def get_config_value(key: str, default: Any = None, value_type: str = 'string') 
         try:
             cache.set(cache_key, raw_value, _CACHE_TTL)
         except Exception as e:
-            logger.warning(f'[config_loader] 写缓存失败 key={key}: {e}')
+            logger.warning(f'[config_loader] 写 Redis 缓存失败 key={key}: {e}')
         return _cast_value(raw_value, effective_type)
 
     return default
@@ -147,7 +153,10 @@ def get_llm_config_by_system_key(system_key: str) -> Dict[str, Any]:
 
 
 def invalidate_config_cache(key: Optional[str] = None) -> None:
-    """失效 SystemConfig 缓存
+    """失效 SystemConfig 缓存（Redis 延迟双删）
+
+    配置变更后调用：立即删一次 Redis + 1s 后再删一次，解决并发场景下
+    "写库事务未提交就清缓存导致回填旧值"和"写后立即读命中旧缓存"两类问题。
 
     Args:
         key: 指定 key 仅失效该项；None 表示清空所有 SystemConfig 缓存

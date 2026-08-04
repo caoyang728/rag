@@ -6,11 +6,11 @@ text2sql 工具 - 结构化数据查询
 1. 表结构通过代码读取 information_schema，传入 LLM 约束生成范围
 2. 只允许 SELECT，SQL 执行前做关键词白名单校验
 3. statement_timeout 限制执行时间，LIMIT 强制限制返回行数
-4. 可通过 BUSINESS_DB_TABLES 配置表白名单
+4. 通过 BUSINESS_DB_TABLES 系统配置白名单控制可查询的表
 
-环境变量：
-- BUSINESS_DB_DSN: 业务数据库连接串（默认用 django 数据库）
-- BUSINESS_DB_TABLES: 允查询的表白名单（逗号分隔，空=public schema 全部表）
+配置读取：
+- 表白名单从 SystemConfig 表读取（key=BUSINESS_DB_TABLES）
+- 业务数据库连接串仍从 env 读取（BUSINESS_DB_DSN），属于基础设施配置
 """
 import json
 import re
@@ -143,18 +143,31 @@ class Text2SqlTool(BaseTool):
         """读取业务数据库表结构
 
         从 information_schema 读取 public schema 下的表和列信息。
-        可通过 BUSINESS_DB_TABLES 环境变量配置白名单，或通过 tables 参数临时限定。
+        可通过 BUSINESS_DB_TABLES 配置白名单，或通过 tables 参数临时限定。
+
+        新语义：
+        - BUSINESS_DB_TABLES 为空（未勾选任何表）→ 不允许查询任何表，Text2SQL 不生效
+        - BUSINESS_DB_TABLES 有值 → 仅白名单内的表可查询
+        - 显式传 tables 参数 → 临时覆盖配置白名单
 
         Returns:
             {table_name: [{'name': str, 'type': str, 'nullable': bool, 'comment': str}]}
+            空字典表示无可查询的表
         """
-        from django.conf import settings
+        from apps.system.config_loader import get_config_value
 
-        # 确定可查询的表白名单
-        # 优先级：参数 tables > 环境变量 BUSINESS_DB_TABLES > public schema 全部表
-        env_tables = getattr(settings, 'BUSINESS_DB_TABLES', '') or ''
-        env_table_list = [t.strip() for t in env_tables.split(',') if t.strip()]
-        whitelist = tables or env_table_list or None
+        # 从 SystemConfig 表读取表白名单（已不在 env 中存储，统一从 DB 读取）
+        # default 为空字符串时表示未配置白名单，此时 Text2SQL 不生效
+        raw_tables = get_config_value('BUSINESS_DB_TABLES', default='', value_type='string') or ''
+        env_table_list = [t.strip() for t in raw_tables.split(',') if t.strip()]
+
+        # 优先级：参数 tables > DB 中的配置白名单
+        # 空配置=未勾选任何表，Text2SQL 不生效
+        whitelist = tables or env_table_list
+
+        # 白名单为空时直接返回空 schema，阻止 Text2SQL 查询
+        if not whitelist:
+            return {}
 
         sql = """
             SELECT

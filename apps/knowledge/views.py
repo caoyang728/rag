@@ -1396,7 +1396,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
 
         通过 PermissionApprovalTicket 管理审批工单：
         - 双层审批通过 approval_chain（JSON 数组）记录每步审批人/意见/时间
-        - 终审通过后写入 ResourceShare（文档级个人共享）
+        - 复核通过后写入 ResourceShare（文档级个人共享）
         - visibility_change 类型工单通过后修改 doc.visibility_level
         """
         req_id = request.data.get("request_id")

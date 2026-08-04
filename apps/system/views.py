@@ -20,9 +20,18 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.system.models import SystemConfig, LLMModel, ConfigChangeTicket
+from apps.system.models import SystemConfig, LLMModel, ConfigChangeTicket, ModelChangeTicket
 
 User = get_user_model()
+
+# 已废弃的配置 key 集合：这些配置项在 YAML 定义中已移除，
+# 但 DB 中可能残留历史记录，需在 API 层过滤掉，避免前端展示无效项。
+# 如需彻底清理，可在 Django shell 中执行:
+#   SystemConfig.objects.filter(key__in=DEPRECATED_CONFIG_KEYS).delete()
+DEPRECATED_CONFIG_KEYS = frozenset({
+    'PRODUCTION_EVAL_HOURLY_GUARANTEE',  # 保底机制已废弃：无对话则无法评估
+    'PRODUCTION_EVAL_DAILY_GUARANTEE',
+})
 
 
 class HealthView(APIView):
@@ -71,13 +80,17 @@ class SystemConfigView(APIView):
 
     def get(self, request, key=None):
         if key:
+            # 废弃的配置项直接返回 404，不对外暴露
+            if key in DEPRECATED_CONFIG_KEYS:
+                return Response({"detail": "not found"}, status=404)
             try:
                 c = SystemConfig.objects.get(key=key)
             except SystemConfig.DoesNotExist:
                 return Response({"detail": "not found"}, status=404)
             return Response(self._ser(c))
         # 列表按 category 分组返回，方便前端按 tab 渲染
-        rows = list(SystemConfig.objects.all().order_by("category", "key"))
+        rows = [r for r in SystemConfig.objects.all().order_by("category", "key")
+                if r.key not in DEPRECATED_CONFIG_KEYS]
 
         # 模型 options 一次查出全部启用模型，按 model_type 预分组，避免 5 次独立 DB 查询
         llm_options_map = self._get_llm_model_options_map()
@@ -114,13 +127,16 @@ class SystemConfigView(APIView):
         """PUT /api/v1/system/configs/<key>/  创建配置变更工单
 
         配置修改不再直接落库，而是创建一份 ConfigChangeTicket 等待审批：
-        - 普通项：一审通过后生效
-        - 高风险项：一审 + 超管终审通过后生效
+        - 普通项：审核通过后生效
+        - 高风险项：审核 + 超管复核通过后生效
         这样可以避免单人误改造成线上故障，并保留完整审批链路用于审计追溯。
         """
         # 权限：超级管理员或持有 system.config.write 权限（维护管理员）
         if not request.user.has_perm('system.config.write'):
             return Response({"detail": "仅超级管理员或维护管理员可修改系统配置"}, status=403)
+        # 废弃的配置项禁止修改
+        if key and key in DEPRECATED_CONFIG_KEYS:
+            return Response({"detail": f"配置项 {key} 已废弃，不可修改"}, status=400)
         if not key:
             return Response({"detail": "key required"}, status=400)
         try:
@@ -136,7 +152,11 @@ class SystemConfigView(APIView):
         value = request.data.get("value", "")
         # value_type 是元数据，由开发者维护，前端不可修改（防止类型混乱）
         # 按类型规范化存储，避免前端传入不规范格式
-        new_value = self._normalize_value(value, obj.value_type)
+        try:
+            new_value = self._normalize_value(value, obj.value_type)
+        except ValueError as e:
+            logger.warning(f"SystemConfig.put normalize failed key={key}: {e}")
+            return Response({"detail": str(e)}, status=400)
         # 新值与原值一致则无需创建工单，避免无效审批占位
         if new_value == old_value:
             return Response({"detail": "新值与当前值一致，无需提交工单"}, status=400)
@@ -192,7 +212,31 @@ class SystemConfigView(APIView):
             return ''
 
     def _normalize_value(self, value, value_type):
-        """按 value_type 规范化为字符串存储"""
+        """按 value_type 规范化为字符串存储
+
+        对 int / float 类型增加校验：
+        - int：必须为整数，否则抛出 ValueError（前端虽有 min/step 限制，后端仍需兜底）
+        - float：必须为数字，允许小数
+        """
+        if value_type == 'int':
+            # 整数校验：拒绝小数和非数字
+            try:
+                s = str(value).strip()
+                # 允许 "3.0" 这类格式，但拒绝 "3.5"
+                f = float(s)
+                if f != int(f):
+                    raise ValueError(f'配置项需要整数，收到小数 {value}')
+                return str(int(f))
+            except (ValueError, TypeError) as e:
+                if '配置项需要整数' in str(e):
+                    raise
+                raise ValueError(f'配置项需要整数类型，收到: {value}')
+        if value_type == 'float':
+            try:
+                f = float(str(value).strip())
+                return str(f)
+            except (ValueError, TypeError):
+                raise ValueError(f'配置项需要数字类型，收到: {value}')
         if value_type == 'bool':
             if isinstance(value, bool):
                 return 'true' if value else 'false'
@@ -384,7 +428,8 @@ class SystemConfigView(APIView):
                 "description": c.description, "unit": c.unit, "options": options,
                 "is_secret": c.is_secret, "is_readonly": c.is_readonly,
                 "risk_level": c.risk_level,
-                "category": c.category, "updated_at": c.updated_at.isoformat()}
+                "category": c.category,
+                "updated_at": c.updated_at.isoformat() if c.updated_at else None}
 
 
 class LLMModelViewSet(viewsets.ModelViewSet):
@@ -437,9 +482,37 @@ class LLMModelViewSet(viewsets.ModelViewSet):
             return denied
         # 按 model_type 分组返回，前端按 LLM / Embedding / Rerank 三个 tab 渲染
         rows = list(self.get_queryset())
+        # 批量查询每个模型的待审批工单数和依赖引用
+        model_ids = [m.id for m in rows]
+        pending_tickets = {}
+        if model_ids:
+            from django.db.models import Count
+            ticket_qs = ModelChangeTicket.objects.filter(
+                target_model_id__in=model_ids,
+                status__in=['pending', 'first_approved']
+            ).values('target_model_id').annotate(cnt=Count('id'))
+            pending_tickets = {t['target_model_id']: t['cnt'] for t in ticket_qs}
+
+        SYSTEM_CONFIG_KEYS_REFERENCING_MODELS = [
+            'LLM_BASE_MODEL', 'LLM_ADVANCED_MODEL', 'EVAL_MODEL',
+            'EMBEDDING_MODEL', 'RERANK_MODEL',
+        ]
+        model_names = [m.model_name for m in rows]
+        dep_counts = {}
+        if model_names:
+            from django.db.models import Count
+            dep_qs = SystemConfig.objects.filter(
+                key__in=SYSTEM_CONFIG_KEYS_REFERENCING_MODELS,
+                value__in=model_names,
+            ).values('value').annotate(cnt=Count('id'))
+            dep_counts = {d['value']: d['cnt'] for d in dep_qs}
+
         groups = {}
         for m in rows:
-            groups.setdefault(m.model_type, []).append(self._ser(m))
+            item = self._ser(m)
+            item['pending_ticket_count'] = pending_tickets.get(m.id, 0)
+            item['dependency_count'] = dep_counts.get(m.model_name, 0)
+            groups.setdefault(m.model_type, []).append(item)
         return Response({'groups': groups, 'total': len(rows)})
 
     def retrieve(self, request, *args, **kwargs):
@@ -529,8 +602,9 @@ class LLMModelViewSet(viewsets.ModelViewSet):
                 is_active=norm.get('is_active', True),
             )
         except Exception as e:
-            # 唯一约束冲突等数据库错误，统一转 400 让前端可友好提示
-            return Response({"detail": f"创建失败：{e}"}, status=status.HTTP_400_BAD_REQUEST)
+            # 记录完整错误日志便于排查，前端只返回简要原因
+            logger.error(f"LLMModel.create failed by {request.user.username}: {e}")
+            return Response({"detail": "创建失败，请检查模型名称是否已存在"}, status=status.HTTP_400_BAD_REQUEST)
         # 新增模型可能被同名调用方命中，全清 LLMModel 缓存避免脏读
         self._invalidate_llm_cache()
         self._write_audit(request, 'create', obj, None, self._ser(obj))
@@ -538,61 +612,220 @@ class LLMModelViewSet(viewsets.ModelViewSet):
         return Response(self._ser(obj), status=status.HTTP_201_CREATED)
 
     def update(self, request, *args, **kwargs):
+        """模型更新：分级审批
+
+        - 修改 name(显示名)：无需审批，直接生效（仅影响前端展示）
+        - 修改其他字段(base_url/model_name/provider/timeout/model_type)：创建工单走普通审批
+        - 停用(is_active=False)：创建工单走普通审批 + 检查依赖
+        """
         denied = self._check_perm(request, 'system.config.write')
         if denied:
             return denied
         obj = self.get_object()
         data = request.data or {}
         before = self._ser(obj)
-        # 统一字段校验 + 规范化；is_create=False 表示不校验必填，只校验传入字段的合法性
+        # 统一字段校验 + 规范化
         err, norm = self._validate_model_payload(data, is_create=False)
         if err:
             return err
-        # 仅当字段在请求中显式传入才更新（区分"未传"和"传空字符串"两种意图）
-        if 'name' in norm:
+
+        # 判断是否仅修改 name 字段
+        only_name_changed = (
+            'name' in norm and len(norm) == 1 and
+            all(k not in norm for k in ('provider', 'model_type', 'base_url', 'model_name', 'timeout', 'is_active'))
+        )
+
+        if only_name_changed:
+            # 修改显示名：无需审批，直接生效
             obj.name = norm['name']
-        if 'provider' in norm:
-            obj.provider = norm['provider']
+            try:
+                obj.save()
+            except Exception as e:
+                logger.error(f"LLMModel.update(name) failed id={obj.id} by {request.user.username}: {e}")
+                return Response({"detail": "更新失败，请检查模型名称是否已存在"}, status=status.HTTP_400_BAD_REQUEST)
+            self._invalidate_llm_cache()
+            self._write_audit(request, 'update_name', obj, before, self._ser(obj))
+            logger.info(f"LLMModel.update(name) by {request.user.username}: {obj}")
+            return Response(self._ser(obj))
+
+        # 停用场景：检查依赖
+        deactivating = 'is_active' in norm and not norm['is_active']
+        if deactivating:
+            refs = self._check_model_dependency(obj.model_name)
+            if refs:
+                return Response(
+                    {"detail": f"模型正在被 {', '.join(refs)} 引用，禁止停用"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        # 其他修改：创建工单走审批
+        changed_fields = {}
+        if 'name' in norm:
+            changed_fields['name'] = {'old': obj.name, 'new': norm['name']}
         if 'model_type' in data:
-            obj.model_type = data['model_type']
+            changed_fields['model_type'] = {'old': obj.model_type, 'new': data['model_type']}
         if 'base_url' in norm:
-            obj.base_url = norm['base_url']
+            changed_fields['base_url'] = {'old': obj.base_url, 'new': norm['base_url']}
         if 'model_name' in norm:
-            obj.model_name = norm['model_name']
+            changed_fields['model_name'] = {'old': obj.model_name, 'new': norm['model_name']}
         if 'timeout' in norm:
-            obj.timeout = norm['timeout']
+            changed_fields['timeout'] = {'old': obj.timeout, 'new': norm['timeout']}
         if 'is_active' in norm:
-            obj.is_active = norm['is_active']
+            changed_fields['is_active'] = {'old': obj.is_active, 'new': norm['is_active']}
+
+        if not changed_fields:
+            return Response({"detail": "未检测到字段变更"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # 检查是否已有待审批的工单，避免重复提交
+        existing = ModelChangeTicket.objects.filter(
+            target_model=obj, status__in=['pending', 'first_approved']
+        ).first()
+        if existing:
+            return Response(
+                {"detail": f"该模型已有待审批工单(id={existing.id})，请等待审批完成"},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        is_deactivate_op = 'is_active' in changed_fields and not changed_fields['is_active']['new']
+        operation = 'deactivate' if is_deactivate_op else 'update_normal'
+        risk_level = 'normal'  # 修改和停用都是普通审批
+
+        ticket = ModelChangeTicket.objects.create(
+            target_model=obj,
+            target_model_snapshot=before,
+            operation=operation,
+            changed_fields=changed_fields,
+            dependency_refs=self._check_model_dependency(obj.model_name) if is_deactivate_op else [],
+            risk_level=risk_level,
+            reason=(data.get('reason') or '').strip(),
+            status='pending',
+            creator=request.user if request.user.is_authenticated else None,
+        )
+        # 写审计日志
         try:
-            obj.save()
+            from apps.audit.models import AuditLog
+            AuditLog.objects.create(
+                actor=request.user,
+                actor_username=request.user.username,
+                action='create_model_ticket',
+                action_category='config',
+                target_type='model_ticket',
+                target_id=str(ticket.id),
+                result='success',
+                detail={
+                    'ticket_id': ticket.id,
+                    'operation': operation,
+                    'model_id': obj.id,
+                    'changed_fields': changed_fields,
+                    'reason': ticket.reason,
+                },
+                ip_address=request.META.get('REMOTE_ADDR', ''),
+                user_agent=request.META.get('HTTP_USER_AGENT', '')[:256],
+                method=request.method,
+                path=request.path,
+            )
         except Exception as e:
-            return Response({"detail": f"更新失败：{e}"}, status=status.HTTP_400_BAD_REQUEST)
-        # 更新可能影响 base_url/timeout/model_name/is_active，全清 LLMModel 缓存
-        # model_name 改动会让旧缓存 key 残留，全清更安全
-        self._invalidate_llm_cache()
-        self._write_audit(request, 'update', obj, before, self._ser(obj))
-        logger.info(f"LLMModel.update by {request.user.username}: {obj}")
-        return Response(self._ser(obj))
+            logger.warning(f"写模型工单审计日志失败: {e}")
+
+        logger.info(f"模型变更工单已创建: ticket={ticket.id} model_id={obj.id} by {request.user.username}")
+        return Response({
+            "detail": "已提交审批",
+            "ticket_id": ticket.id,
+            "operation": operation,
+        }, status=status.HTTP_202_ACCEPTED)
 
     def partial_update(self, request, *args, **kwargs):
         """PATCH 部分更新，复用 update 逻辑"""
         return self.update(request, *args, **kwargs)
 
     def destroy(self, request, *args, **kwargs):
+        """模型删除：超管复核 + 检查依赖
+
+        删除操作风险最高：物理删除不可恢复，必须经过超管复核。
+        同时检查是否被配置项引用，有依赖则禁止删除。
+        """
         denied = self._check_perm(request, 'system.config.write')
         if denied:
             return denied
         obj = self.get_object()
         before = self._ser(obj)
+
+        # 检查依赖
+        refs = self._check_model_dependency(obj.model_name)
+        if refs:
+            return Response(
+                {"detail": f"模型正在被 {', '.join(refs)} 引用，禁止删除"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # 检查是否已有待审批的工单
+        existing = ModelChangeTicket.objects.filter(
+            target_model=obj, status__in=['pending', 'first_approved']
+        ).first()
+        if existing:
+            return Response(
+                {"detail": f"该模型已有待审批工单(id={existing.id})，请等待审批完成"},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        # 创建删除工单（超管复核）
+        ticket = ModelChangeTicket.objects.create(
+            target_model=obj,
+            target_model_snapshot=before,
+            operation='delete',
+            changed_fields={},
+            dependency_refs=refs,
+            risk_level='high',
+            reason=(request.data.get('reason') or '').strip(),
+            status='pending',
+            creator=request.user if request.user.is_authenticated else None,
+        )
+        # 写审计日志
         try:
-            obj.delete()
+            from apps.audit.models import AuditLog
+            AuditLog.objects.create(
+                actor=request.user,
+                actor_username=request.user.username,
+                action='create_model_ticket',
+                action_category='config',
+                target_type='model_ticket',
+                target_id=str(ticket.id),
+                result='success',
+                detail={
+                    'ticket_id': ticket.id,
+                    'operation': 'delete',
+                    'model_id': obj.id,
+                    'reason': ticket.reason,
+                },
+                ip_address=request.META.get('REMOTE_ADDR', ''),
+                user_agent=request.META.get('HTTP_USER_AGENT', '')[:256],
+                method=request.method,
+                path=request.path,
+            )
         except Exception as e:
-            return Response({"detail": f"删除失败：{e}"}, status=status.HTTP_400_BAD_REQUEST)
-        # 删除后业务侧调用应回退到 env，全清 LLMModel 缓存
-        self._invalidate_llm_cache()
-        self._write_audit(request, 'delete', obj, before, None)
-        logger.info(f"LLMModel.delete by {request.user.username}: {before}")
-        return Response(status=status.HTTP_204_NO_CONTENT)
+            logger.warning(f"写模型工单审计日志失败: {e}")
+
+        logger.info(f"模型删除工单已创建: ticket={ticket.id} model_id={obj.id} by {request.user.username}")
+        return Response({
+            "detail": "删除已提交审批（超管复核）",
+            "ticket_id": ticket.id,
+        }, status=status.HTTP_202_ACCEPTED)
+
+    def _check_model_dependency(self, model_name):
+        """检查模型是否被 SystemConfig 中的配置项引用
+
+        引用模型的配置 key 列表：LLM 模型用于对话/评估，Embedding/Rerank 用于向量化/重排序。
+        若模型被引用，停用或删除会导致引用方找不到模型，直接报错。
+        """
+        SYSTEM_CONFIG_KEYS_REFERENCING_MODELS = [
+            'LLM_BASE_MODEL', 'LLM_ADVANCED_MODEL', 'EVAL_MODEL',
+            'EMBEDDING_MODEL', 'RERANK_MODEL',
+        ]
+        refs = SystemConfig.objects.filter(
+            key__in=SYSTEM_CONFIG_KEYS_REFERENCING_MODELS,
+            value=model_name,
+        ).values_list('key', flat=True)
+        return list(refs)
 
     def _invalidate_llm_cache(self):
         """失效 LLMModel 相关缓存
@@ -642,14 +875,14 @@ class ConfigChangeTicketViewSet(viewsets.ViewSet):
     - POST /config-tickets/           创建工单（create_ticket）
     - GET  /config-tickets/           工单列表（list，支持 status 筛选）
     - GET  /config-tickets/<id>/      工单详情（retrieve）
-    - POST /config-tickets/<id>/approve/  审批通过（普通项直接生效；高风险项进入待终审）
-    - POST /config-tickets/<id>/reject/   驳回（含一审/超管终审两种场景）
+    - POST /config-tickets/<id>/approve/  审批通过（普通项直接生效；高风险项进入待复核）
+    - POST /config-tickets/<id>/reject/   驳回（含审核/超管复核两种场景）
     - POST /config-tickets/<id>/withdraw/ 创建人撤回
 
     权限模型：
     - list/retrieve：system.config.read（维护管理员/超管可看）
     - create_ticket/approve/reject：system.config.write，且审批人 ≠ 创建人（防自审）
-    - 高风险项超管终审：仅 is_super_admin 可操作
+    - 高风险项超管复核：仅 is_super_admin 可操作
     - withdraw：仅创建人本人可操作
     """
     permission_classes = [IsAuthenticated]
@@ -742,17 +975,36 @@ class ConfigChangeTicketViewSet(viewsets.ViewSet):
     def list(self, request):
         """工单列表，支持 status 筛选（pending/first_approved/approved/rejected/withdrawn）
 
+        支持多个状态筛选，用逗号分隔，如 ?status=pending,first_approved。
+        支持 ?creator=me 筛选当前用户创建的工单（所有状态）。
+        自动过滤：
+        - 发起人自己创建的工单不展示在"待审核"列表中（避免自己审自己）
+        - 对于 first_approved 状态，额外过滤掉审核人（防止同一个人完成审核+复核）
         权限：system.config.read，确保只有维护管理员/超管能看工单流转情况。
         """
         denied = self._check_perm(request, 'system.config.read')
         if denied:
             return denied
         qs = ConfigChangeTicket.objects.all()
-        # status 筛选：不传则返回全部，传 all 也返回全部（前端"全部"选项）
-        status_filter = (request.query_params.get('status') or '').strip()
-        if status_filter and status_filter != 'all':
-            qs = qs.filter(status=status_filter)
-        # 仅取必要字段，避免序列化时反复查 creator/reviewer
+
+        # "我的工单"：按创建人筛选，展示自己创建的工单（所有状态）
+        creator_filter = (request.query_params.get('creator') or '').strip()
+        if creator_filter == 'me':
+            qs = qs.filter(creator=request.user)
+        else:
+            # 非"我的工单"时，按状态筛选
+            status_filter = (request.query_params.get('status') or '').strip()
+            if status_filter and status_filter != 'all':
+                statuses = [s.strip() for s in status_filter.split(',') if s.strip()]
+                if len(statuses) == 1:
+                    qs = qs.filter(status=statuses[0])
+                elif len(statuses) > 1:
+                    qs = qs.filter(status__in=statuses)
+            # 过滤：创建人不能审批自己的工单
+            qs = qs.exclude(creator=request.user)
+            # 过滤：复核阶段的工单，审核人不可见（防止审核+复核由同一人完成）
+            qs = qs.exclude(status='first_approved', reviewer=request.user)
+
         qs = qs.select_related('creator', 'reviewer', 'super_admin_reviewer')
         tickets = [self._serialize_ticket(t) for t in qs]
         return Response({"tickets": tickets, "total": len(tickets)})
@@ -800,7 +1052,11 @@ class ConfigChangeTicketViewSet(viewsets.ViewSet):
                             status=status.HTTP_409_CONFLICT)
 
         # 按类型规范化存储，避免前端传入不规范格式
-        normalized = SystemConfigView()._normalize_value(new_value, obj.value_type)
+        try:
+            normalized = SystemConfigView()._normalize_value(new_value, obj.value_type)
+        except ValueError as e:
+            logger.warning(f"ConfigTicketView.put normalize failed key={config_key}: {e}")
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
         if normalized == obj.value:
             return Response({"detail": "新值与当前值一致，无需提交工单"}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -829,8 +1085,8 @@ class ConfigChangeTicketViewSet(viewsets.ViewSet):
         """POST /config-tickets/<id>/approve/  审批通过
 
         流程：
-        - pending 状态：一审。普通项直接通过并生效；高风险项进入 first_approved 待超管终审
-        - first_approved 状态：超管终审（仅 is_super_admin 可操作），通过后生效
+        - pending 状态：审核。普通项直接通过并生效；高风险项进入 first_approved 待超管复核
+        - first_approved 状态：超管复核（仅 is_super_admin 可操作），通过后生效
         防自审：审批人不能是创建人自己（避免单人完成创建+审批）
         """
         denied = self._check_perm(request, 'system.config.write')
@@ -844,10 +1100,10 @@ class ConfigChangeTicketViewSet(viewsets.ViewSet):
         comment = (request.data.get('comment') or '').strip()
 
         if ticket.status == 'pending':
-            # 一审：防自审，审批人不能是创建人
+            # 审核：防自审，审批人不能是创建人
             if ticket.creator_id and ticket.creator_id == request.user.id:
                 return Response({"detail": "不能审批自己创建的工单"}, status=status.HTTP_403_FORBIDDEN)
-            # 一审通过：高风险项进入待终审，普通项直接生效
+            # 审核通过：高风险项进入待复核，普通项直接生效
             if ticket.risk_level == 'high':
                 ticket.status = 'first_approved'
                 ticket.reviewer = request.user if request.user.is_authenticated else None
@@ -858,9 +1114,9 @@ class ConfigChangeTicketViewSet(viewsets.ViewSet):
                     request, action='approve_config_ticket', ticket=ticket,
                     extra={'stage': 'first_review', 'comment': comment},
                 )
-                logger.info(f"工单 {ticket.id} 一审通过，等待超管终审 by {request.user.username}")
+                logger.info(f"工单 {ticket.id} 审核通过，等待超管复核 by {request.user.username}")
                 return Response(self._serialize_ticket(ticket))
-            # 普通项一审通过即生效
+            # 普通项审核通过即生效
             ticket.reviewer = request.user if request.user.is_authenticated else None
             ticket.review_comment = comment
             ticket.reviewed_at = timezone.now()
@@ -869,13 +1125,17 @@ class ConfigChangeTicketViewSet(viewsets.ViewSet):
                 request, action='approve_config_ticket', ticket=ticket,
                 extra={'stage': 'first_review', 'comment': comment},
             )
-            logger.info(f"工单 {ticket.id} 一审通过并已生效 by {request.user.username}")
+            logger.info(f"工单 {ticket.id} 审核通过并已生效 by {request.user.username}")
             return Response(self._serialize_ticket(ticket))
 
         if ticket.status == 'first_approved':
-            # 超管终审：仅超管可操作，确保高风险项有二次把关
+            # 超管复核：仅超管可操作，且不能与审核人/创建人同一人
             if not request.user.is_super_admin:
-                return Response({"detail": "高风险项终审仅超级管理员可操作"}, status=status.HTTP_403_FORBIDDEN)
+                return Response({"detail": "高风险项复核仅超级管理员可操作"}, status=status.HTTP_403_FORBIDDEN)
+            if ticket.creator_id and ticket.creator_id == request.user.id:
+                return Response({"detail": "不能复核自己创建的工单"}, status=status.HTTP_403_FORBIDDEN)
+            if ticket.reviewer_id and ticket.reviewer_id == request.user.id:
+                return Response({"detail": "复核人不能与审核人相同"}, status=status.HTTP_403_FORBIDDEN)
             ticket.super_admin_reviewer = request.user if request.user.is_authenticated else None
             ticket.super_admin_comment = comment
             ticket.super_admin_reviewed_at = timezone.now()
@@ -884,7 +1144,7 @@ class ConfigChangeTicketViewSet(viewsets.ViewSet):
                 request, action='approve_config_ticket', ticket=ticket,
                 extra={'stage': 'super_admin_review', 'comment': comment},
             )
-            logger.info(f"工单 {ticket.id} 超管终审通过并已生效 by {request.user.username}")
+            logger.info(f"工单 {ticket.id} 超管复核通过并已生效 by {request.user.username}")
             return Response(self._serialize_ticket(ticket))
 
         # 非 pending/first_approved 状态不可审批
@@ -893,8 +1153,8 @@ class ConfigChangeTicketViewSet(viewsets.ViewSet):
     def reject(self, request, pk=None):
         """POST /config-tickets/<id>/reject/  驳回
 
-        - pending：一审驳回（需 system.config.write，且审批人 ≠ 创建人）
-        - first_approved：超管终审驳回（仅 is_super_admin）
+        - pending：审核驳回（需 system.config.write，且审批人 ≠ 创建人）
+        - first_approved：超管复核驳回（仅 is_super_admin）
         驳回需填写原因，便于创建人了解被驳回依据。
         """
         denied = self._check_perm(request, 'system.config.write')
@@ -910,7 +1170,7 @@ class ConfigChangeTicketViewSet(viewsets.ViewSet):
             return Response({"detail": "请填写驳回原因"}, status=status.HTTP_400_BAD_REQUEST)
 
         if ticket.status == 'pending':
-            # 一审驳回：防自审
+            # 审核驳回：防自审
             if ticket.creator_id and ticket.creator_id == request.user.id:
                 return Response({"detail": "不能驳回自己创建的工单"}, status=status.HTTP_403_FORBIDDEN)
             ticket.status = 'rejected'
@@ -922,13 +1182,17 @@ class ConfigChangeTicketViewSet(viewsets.ViewSet):
                 request, action='reject_config_ticket', ticket=ticket,
                 extra={'stage': 'first_review', 'comment': comment},
             )
-            logger.info(f"工单 {ticket.id} 一审驳回 by {request.user.username}")
+            logger.info(f"工单 {ticket.id} 审核驳回 by {request.user.username}")
             return Response(self._serialize_ticket(ticket))
 
         if ticket.status == 'first_approved':
-            # 超管终审驳回：仅超管可操作
+            # 超管复核驳回：仅超管可操作，且不能与审核人/创建人同一人
             if not request.user.is_super_admin:
-                return Response({"detail": "高风险项终审仅超级管理员可操作"}, status=status.HTTP_403_FORBIDDEN)
+                return Response({"detail": "高风险项复核仅超级管理员可操作"}, status=status.HTTP_403_FORBIDDEN)
+            if ticket.creator_id and ticket.creator_id == request.user.id:
+                return Response({"detail": "不能驳回自己创建的工单"}, status=status.HTTP_403_FORBIDDEN)
+            if ticket.reviewer_id and ticket.reviewer_id == request.user.id:
+                return Response({"detail": "复核驳回人与审核人不能相同"}, status=status.HTTP_403_FORBIDDEN)
             ticket.status = 'rejected'
             ticket.super_admin_reviewer = request.user if request.user.is_authenticated else None
             ticket.super_admin_comment = comment
@@ -938,7 +1202,7 @@ class ConfigChangeTicketViewSet(viewsets.ViewSet):
                 request, action='reject_config_ticket', ticket=ticket,
                 extra={'stage': 'super_admin_review', 'comment': comment},
             )
-            logger.info(f"工单 {ticket.id} 超管终审驳回 by {request.user.username}")
+            logger.info(f"工单 {ticket.id} 超管复核驳回 by {request.user.username}")
             return Response(self._serialize_ticket(ticket))
 
         return Response({"detail": f"工单当前状态 {ticket.status} 不可驳回"}, status=status.HTTP_409_CONFLICT)
@@ -1004,6 +1268,407 @@ class ConfigChangeTicketViewSet(viewsets.ViewSet):
             request, action='apply_config_ticket', ticket=ticket,
             extra={'applied_old': old_value, 'applied_new': ticket.new_value},
         )
+
+
+class ModelChangeTicketViewSet(viewsets.ViewSet):
+    """模型变更工单管理
+
+    工单流转：
+    - GET  /model-tickets/           工单列表（支持 status/operation 筛选）
+    - GET  /model-tickets/<id>/      工单详情
+    - POST /model-tickets/<id>/approve/  审批通过
+    - POST /model-tickets/<id>/reject/   驳回
+    - POST /model-tickets/<id>/withdraw/ 创建人撤回
+
+    权限：
+    - list/retrieve：system.config.read
+    - approve/reject：system.config.write，且审批人 ≠ 创建人
+    - delete 操作的超管复核：仅 is_super_admin 可操作
+    - withdraw：仅创建人本人可操作
+    """
+    permission_classes = [IsAuthenticated]
+
+    def _check_perm(self, request, perm):
+        if not request.user.has_perm(perm):
+            return Response(
+                {"detail": "无权限执行此操作，需要 " + perm + " 权限"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        return None
+
+    def _serialize_ticket(self, t):
+        """序列化工单：供前端渲染审批详情"""
+        model_name = ''
+        model_id = t.target_model_id
+        if t.target_model_id:
+            m = LLMModel.objects.filter(id=t.target_model_id).first()
+            if m:
+                model_name = f'{m.name} ({m.model_name})'
+        # changed_fields 存储格式: {field: {old, new}}，前端需要 list of field names + change_data
+        changed_field_names = list(t.changed_fields.keys()) if isinstance(t.changed_fields, dict) else []
+        # 非修改操作（删除/停用）时，从快照构造展示数据
+        snapshot = t.target_model_snapshot if isinstance(t.target_model_snapshot, dict) else {}
+        if t.operation == 'delete':
+            # 删除：展示当前模型关键信息作为"原值"
+            changed_field_names = ['name', 'model_name', 'model_type', 'base_url', 'timeout']
+        elif t.operation == 'deactivate':
+            changed_field_names = ['is_active']
+        return {
+            "id": t.id,
+            "model_id": model_id,
+            "model_name": model_name,
+            "target_model_id": t.target_model_id,
+            "target_model_name": model_name,
+            "target_model_snapshot": snapshot,
+            "action": t.operation,
+            "operation": t.operation,
+            "operation_display": dict(ModelChangeTicket.OPERATION_CHOICES).get(t.operation, t.operation),
+            "changed_fields": changed_field_names,
+            "change_data": t.changed_fields if isinstance(t.changed_fields, dict) else {},
+            # 快照中的模型当前值，供前端展示删除/停用时的"原值"
+            "snapshot_data": {
+                'name': snapshot.get('name', ''),
+                'model_name': snapshot.get('model_name', ''),
+                'model_type': snapshot.get('model_type', ''),
+                'provider': snapshot.get('provider', ''),
+                'base_url': snapshot.get('base_url', ''),
+                'timeout': snapshot.get('timeout', ''),
+                'is_active': snapshot.get('is_active', True),
+            } if snapshot else {},
+            "dependency_refs": t.dependency_refs,
+            "risk_level": t.risk_level,
+            "reason": t.reason,
+            "status": t.status,
+            "status_display": dict(ModelChangeTicket.STATUS_CHOICES).get(t.status, t.status),
+            "creator": t.creator.username if t.creator else '',
+            "reviewer": t.reviewer.username if t.reviewer else '',
+            "super_admin_reviewer": t.super_admin_reviewer.username if t.super_admin_reviewer else '',
+            "review_comment": t.review_comment,
+            "super_admin_comment": t.super_admin_comment,
+            "created_at": t.created_at.isoformat() if t.created_at else None,
+            "reviewed_at": t.reviewed_at.isoformat() if t.reviewed_at else None,
+            "super_admin_reviewed_at": t.super_admin_reviewed_at.isoformat() if t.super_admin_reviewed_at else None,
+            "applied_at": t.applied_at.isoformat() if t.applied_at else None,
+        }
+
+    def _write_audit(self, request, action, ticket, extra=None):
+        try:
+            from apps.audit.models import AuditLog
+            detail = {
+                'ticket_id': ticket.id,
+                'operation': ticket.operation,
+                'model_id': ticket.target_model_id,
+                'status': ticket.status,
+            }
+            if extra:
+                detail.update(extra)
+            AuditLog.objects.create(
+                actor=request.user,
+                actor_username=request.user.username,
+                action=action,
+                action_category='config',
+                target_type='model_ticket',
+                target_id=str(ticket.id),
+                result='success',
+                detail=detail,
+                ip_address=request.META.get('REMOTE_ADDR', ''),
+                user_agent=request.META.get('HTTP_USER_AGENT', '')[:256],
+                method=request.method,
+                path=request.path,
+            )
+        except Exception as e:
+            logger.warning(f"写模型工单审计日志失败: {e}")
+
+    def list(self, request):
+        """工单列表，支持 status 和 operation 筛选
+
+        支持多个状态筛选，用逗号分隔，如 ?status=pending,first_approved。
+        支持 ?creator=me 筛选当前用户创建的工单（所有状态）。
+        自动过滤：
+        - 发起人自己创建的工单不展示在"待审核"列表中（避免自己审自己）
+        - 对于 first_approved 状态，额外过滤掉审核人（防止同一人完成审核+复核）。
+        """
+        denied = self._check_perm(request, 'system.config.read')
+        if denied:
+            return denied
+        qs = ModelChangeTicket.objects.all()
+
+        # "我的工单"：按创建人筛选，展示自己创建的工单（所有状态）
+        creator_filter = (request.query_params.get('creator') or '').strip()
+        if creator_filter == 'me':
+            qs = qs.filter(creator=request.user)
+        else:
+            # 非"我的工单"时，按状态筛选
+            status_filter = (request.query_params.get('status') or '').strip()
+            if status_filter and status_filter != 'all':
+                statuses = [s.strip() for s in status_filter.split(',') if s.strip()]
+                if len(statuses) == 1:
+                    qs = qs.filter(status=statuses[0])
+                elif len(statuses) > 1:
+                    qs = qs.filter(status__in=statuses)
+            op_filter = (request.query_params.get('operation') or '').strip()
+            if op_filter and op_filter != 'all':
+                qs = qs.filter(operation=op_filter)
+            # 过滤：创建人不能审批自己的工单
+            qs = qs.exclude(creator=request.user)
+            # 过滤：复核阶段的工单，审核人不可见（防止审核+复核由同一人完成）
+            qs = qs.exclude(status='first_approved', reviewer=request.user)
+
+        qs = qs.select_related('creator', 'reviewer', 'super_admin_reviewer', 'target_model')
+        tickets = [self._serialize_ticket(t) for t in qs]
+        return Response({"tickets": tickets, "total": len(tickets)})
+
+    def retrieve(self, request, pk=None):
+        """工单详情"""
+        denied = self._check_perm(request, 'system.config.read')
+        if denied:
+            return denied
+        try:
+            t = ModelChangeTicket.objects.get(pk=pk)
+        except ModelChangeTicket.DoesNotExist:
+            return Response({"detail": "工单不存在"}, status=status.HTTP_404_NOT_FOUND)
+        return Response(self._serialize_ticket(t))
+
+    def approve(self, request, pk=None):
+        """审批通过
+
+        - pending：审核。普通项直接生效；delete(high) 进入 first_approved 待超管复核
+        - first_approved：超管复核（仅 is_super_admin 可操作），通过后执行删除
+        """
+        denied = self._check_perm(request, 'system.config.write')
+        if denied:
+            return denied
+        try:
+            ticket = ModelChangeTicket.objects.get(pk=pk)
+        except ModelChangeTicket.DoesNotExist:
+            return Response({"detail": "工单不存在"}, status=status.HTTP_404_NOT_FOUND)
+
+        comment = (request.data.get('comment') or '').strip()
+
+        if ticket.status == 'pending':
+            if ticket.creator_id and ticket.creator_id == request.user.id:
+                return Response({"detail": "不能审批自己创建的工单"}, status=status.HTTP_403_FORBIDDEN)
+
+            if ticket.risk_level == 'high':
+                # 高风险（删除）：审核通过后进入待超管复核
+                # 双保险：审核时也重新检查依赖，防止创建后到审批前被引用
+                if ticket.operation == 'delete' and ticket.target_model_id:
+                    refs = self._check_model_dependency_for_id(ticket.target_model_id)
+                    if refs:
+                        return Response(
+                            {"detail": f"模型已被 {', '.join(refs)} 引用，无法进入复核"},
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+                ticket.status = 'first_approved'
+                ticket.reviewer = request.user if request.user.is_authenticated else None
+                ticket.review_comment = comment
+                ticket.reviewed_at = timezone.now()
+                # 更新依赖快照（审批时重新检查，更新到工单上）
+                if ticket.operation in ('delete', 'deactivate') and ticket.target_model_id:
+                    ticket.dependency_refs = self._check_model_dependency_for_id(ticket.target_model_id)
+                ticket.save()
+                self._write_audit(request, 'approve_model_ticket', ticket,
+                                  extra={'stage': 'first_review', 'comment': comment})
+                logger.info(f"模型工单 {ticket.id} 审核通过，等待超管复核 by {request.user.username}")
+                return Response(self._serialize_ticket(ticket))
+
+            # 普通项（修改/停用）：审核通过即生效
+            # 停用操作：审核时也先快速检查依赖，防止创建后到审批前被引用
+            if ticket.operation == 'deactivate' and ticket.target_model_id:
+                refs = self._check_model_dependency_for_id(ticket.target_model_id)
+                if refs:
+                    return Response(
+                        {"detail": f"模型已被 {', '.join(refs)} 引用，无法停用"},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                # 更新依赖快照
+                ticket.dependency_refs = refs
+            ticket.reviewer = request.user if request.user.is_authenticated else None
+            ticket.review_comment = comment
+            ticket.reviewed_at = timezone.now()
+            result = self._apply_ticket(ticket, request)
+            if isinstance(result, Response):
+                return result
+            self._write_audit(request, 'approve_model_ticket', ticket,
+                              extra={'stage': 'first_review', 'comment': comment})
+            logger.info(f"模型工单 {ticket.id} 审核通过并已生效 by {request.user.username}")
+            return Response(self._serialize_ticket(ticket))
+
+        if ticket.status == 'first_approved':
+            # 超管复核：仅超管可操作，且不能与审核人/创建人同一人
+            if not request.user.is_super_admin:
+                return Response({"detail": "删除操作复核仅超级管理员可操作"}, status=status.HTTP_403_FORBIDDEN)
+            if ticket.creator_id and ticket.creator_id == request.user.id:
+                return Response({"detail": "不能复核自己创建的工单"}, status=status.HTTP_403_FORBIDDEN)
+            if ticket.reviewer_id and ticket.reviewer_id == request.user.id:
+                return Response({"detail": "复核人不能与审核人相同"}, status=status.HTTP_403_FORBIDDEN)
+            ticket.super_admin_reviewer = request.user if request.user.is_authenticated else None
+            ticket.super_admin_comment = comment
+            ticket.super_admin_reviewed_at = timezone.now()
+            result = self._apply_ticket(ticket, request)
+            if isinstance(result, Response):
+                return result
+            self._write_audit(request, 'approve_model_ticket', ticket,
+                              extra={'stage': 'super_admin_review', 'comment': comment})
+            logger.info(f"模型工单 {ticket.id} 超管复核通过并已生效 by {request.user.username}")
+            return Response(self._serialize_ticket(ticket))
+
+        return Response({"detail": f"工单当前状态 {ticket.status} 不可审批"}, status=status.HTTP_409_CONFLICT)
+
+    def reject(self, request, pk=None):
+        """驳回"""
+        denied = self._check_perm(request, 'system.config.write')
+        if denied:
+            return denied
+        try:
+            ticket = ModelChangeTicket.objects.get(pk=pk)
+        except ModelChangeTicket.DoesNotExist:
+            return Response({"detail": "工单不存在"}, status=status.HTTP_404_NOT_FOUND)
+
+        comment = (request.data.get('comment') or '').strip()
+        if not comment:
+            return Response({"detail": "请填写驳回原因"}, status=status.HTTP_400_BAD_REQUEST)
+
+        if ticket.status == 'pending':
+            if ticket.creator_id and ticket.creator_id == request.user.id:
+                return Response({"detail": "不能驳回自己创建的工单"}, status=status.HTTP_403_FORBIDDEN)
+            ticket.status = 'rejected'
+            ticket.reviewer = request.user if request.user.is_authenticated else None
+            ticket.review_comment = comment
+            ticket.reviewed_at = timezone.now()
+            ticket.save()
+            self._write_audit(request, 'reject_model_ticket', ticket,
+                              extra={'stage': 'first_review', 'comment': comment})
+            logger.info(f"模型工单 {ticket.id} 审核驳回 by {request.user.username}")
+            return Response(self._serialize_ticket(ticket))
+
+        if ticket.status == 'first_approved':
+            # 超管复核驳回：仅超管可操作，且不能与审核人/创建人同一人
+            if not request.user.is_super_admin:
+                return Response({"detail": "删除操作复核仅超级管理员可操作"}, status=status.HTTP_403_FORBIDDEN)
+            if ticket.creator_id and ticket.creator_id == request.user.id:
+                return Response({"detail": "不能驳回自己创建的工单"}, status=status.HTTP_403_FORBIDDEN)
+            if ticket.reviewer_id and ticket.reviewer_id == request.user.id:
+                return Response({"detail": "复核驳回人与审核人不能相同"}, status=status.HTTP_403_FORBIDDEN)
+            ticket.status = 'rejected'
+            ticket.super_admin_reviewer = request.user if request.user.is_authenticated else None
+            ticket.super_admin_comment = comment
+            ticket.super_admin_reviewed_at = timezone.now()
+            ticket.save()
+            self._write_audit(request, 'reject_model_ticket', ticket,
+                              extra={'stage': 'super_admin_review', 'comment': comment})
+            logger.info(f"模型工单 {ticket.id} 超管复核驳回 by {request.user.username}")
+            return Response(self._serialize_ticket(ticket))
+
+        return Response({"detail": f"工单当前状态 {ticket.status} 不可驳回"}, status=status.HTTP_409_CONFLICT)
+
+    def withdraw(self, request, pk=None):
+        """创建人撤回"""
+        try:
+            ticket = ModelChangeTicket.objects.get(pk=pk)
+        except ModelChangeTicket.DoesNotExist:
+            return Response({"detail": "工单不存在"}, status=status.HTTP_404_NOT_FOUND)
+
+        if not ticket.creator_id or ticket.creator_id != request.user.id:
+            return Response({"detail": "仅创建人可撤回工单"}, status=status.HTTP_403_FORBIDDEN)
+        if ticket.status not in ('pending', 'first_approved'):
+            return Response({"detail": f"工单当前状态 {ticket.status} 不可撤回"}, status=status.HTTP_409_CONFLICT)
+
+        comment = (request.data.get('comment') or '').strip()
+        ticket.status = 'withdrawn'
+        if comment:
+            ticket.review_comment = comment
+        ticket.save()
+        self._write_audit(request, 'withdraw_model_ticket', ticket,
+                          extra={'comment': comment})
+        logger.info(f"模型工单 {ticket.id} 已撤回 by {request.user.username}")
+        return Response(self._serialize_ticket(ticket))
+
+    def _apply_ticket(self, ticket, request):
+        """工单通过后执行模型变更
+
+        操作类型：
+        - update_normal：修改字段（base_url/model_name/provider/timeout/model_type）
+        - deactivate：设置 is_active=False
+        - delete：删除模型
+        用事务保证工单状态与模型变更的一致性。
+        审批时重新检查依赖，防止工单创建后到审批前模型被其他配置引用。
+        """
+        with transaction.atomic():
+            ticket.status = 'approved'
+            ticket.applied_at = timezone.now()
+
+            if ticket.operation == 'delete':
+                # 删除模型：先检查依赖（双保险，创建时+审核时均已检查）
+                if ticket.target_model_id:
+                    model = LLMModel.objects.select_for_update().filter(id=ticket.target_model_id).first()
+                    if model:
+                        refs = self._check_model_dependency_for_id(model.id)
+                        if refs:
+                            # 有依赖则回滚工单状态，拒绝生效
+                            ticket.status = 'pending'
+                            ticket.applied_at = None
+                            ticket.save()
+                            return Response(
+                                {"detail": f"审批期间模型被 {', '.join(refs)} 引用，操作已回滚"},
+                                status=status.HTTP_400_BAD_REQUEST,
+                            )
+                        # 先断开所有工单与模型的关联，避免外键约束阻止删除
+                        ModelChangeTicket.objects.filter(target_model=model).update(target_model=None)
+                        model.delete()
+                ticket.target_model = None
+                ticket.save()
+            elif ticket.operation == 'deactivate':
+                # 停用：重新检查依赖，防止审批期间被引用
+                if ticket.target_model_id:
+                    model = LLMModel.objects.select_for_update().filter(id=ticket.target_model_id).first()
+                    if model:
+                        refs = self._check_model_dependency_for_id(model.id)
+                        if refs:
+                            ticket.status = 'pending'
+                            ticket.applied_at = None
+                            ticket.save()
+                            return Response(
+                                {"detail": f"审批期间模型被 {', '.join(refs)} 引用，停用操作已回滚"},
+                                status=status.HTTP_400_BAD_REQUEST,
+                            )
+                        model.is_active = False
+                        model.save()
+                ticket.save()
+            elif ticket.operation == 'update_normal':
+                # 修改：应用变更字段
+                if ticket.target_model_id:
+                    model = LLMModel.objects.select_for_update().filter(id=ticket.target_model_id).first()
+                    if model:
+                        for field, changes in ticket.changed_fields.items():
+                            setattr(model, field, changes['new'])
+                        model.save()
+                ticket.save()
+
+        # 清缓存
+        try:
+            from .config_loader import invalidate_llm_model_cache
+            invalidate_llm_model_cache()
+        except Exception as e:
+            logger.warning(f"失效 LLMModel 缓存失败: {e}")
+
+        # 写 apply 审计日志
+        self._write_audit(request, 'apply_model_ticket', ticket)
+
+    def _check_model_dependency_for_id(self, model_id):
+        """按模型 ID 检查依赖"""
+        model = LLMModel.objects.filter(id=model_id).first()
+        if not model:
+            return []
+        SYSTEM_CONFIG_KEYS = [
+            'LLM_BASE_MODEL', 'LLM_ADVANCED_MODEL', 'EVAL_MODEL',
+            'EMBEDDING_MODEL', 'RERANK_MODEL',
+        ]
+        refs = SystemConfig.objects.filter(
+            key__in=SYSTEM_CONFIG_KEYS,
+            value=model.model_name,
+        ).values_list('key', flat=True)
+        return list(refs)
 
 
 class StatsView(APIView):

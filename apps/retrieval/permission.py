@@ -5,10 +5,10 @@ retrieval app - 检索层权限过滤
 一次 SQL 完成"自然可见范围 + Owner + 跨范围共享 + 黑名单剔除"，避免 N+1 查询。
 
 判定优先级（Deny Override 铁律）：
-  0. 黑名单（ResourceBlockList）命中 → 立即剔除，不再执行任何白名单判定
-  1. 系统级管理员（super_admin）→ 全部可见（黑名单由 access.py 二次过滤）
+  0. 黑名单（ResourceBlockList）命中 → 立即剔除，不再执行任何白名单判定（对超管也生效）
+  1. 系统级管理员（super_admin）→ 全部可见（但不绕过黑名单）
   2. 自然可见范围（visibility_level + 组织归属）
-  3. 资源所有权（Owner 直接可见）
+  3. 资源所有权（Owner 直接可见，Owner 绕过黑名单）
   4. 跨范围共享白名单（ResourceShare：文档级 + 节点级继承）
   5. 兜底：不命中 = 不召回
 
@@ -171,7 +171,7 @@ def build_permission_q(user, root_types=None, node_path_prefix=None, node_ids=No
     if user is None or not getattr(user, 'is_authenticated', False):
         return Q(pk__in=[])
 
-    # 2) super_admin → 全可见（黑名单由 access.py 二次过滤，检索层不做）
+    # 2) super_admin → 全可见（黑名单在下方统一剔除，不绕过 Deny Override 铁律）
     if user.is_super_admin:
         q = Q()
     else:
@@ -201,9 +201,9 @@ def build_permission_q(user, root_types=None, node_path_prefix=None, node_ids=No
         q = q_natural | q_owner | q_doc_share | q_node_share
 
     # 4) 黑名单剔除（文档级，has_block_user 标志位跳过空子查询）
+    #    对所有用户生效（含超管，Deny Override 铁律）；Owner 绕过由 access.py 二次过滤保证。
     #    节点级黑名单留 access.py 二次过滤（涉及 path 前缀匹配，SQL 复杂）
-    if not user.is_super_admin:
-        q &= ~Q(has_block_user=True, document_id__in=_get_blocked_doc_ids(user))
+    q &= ~Q(has_block_user=True, document_id__in=_get_blocked_doc_ids(user))
 
     # 5) 业务过滤（root_types / node_path_prefix / node_ids）
     if root_types:

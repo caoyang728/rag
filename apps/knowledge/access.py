@@ -7,9 +7,9 @@ apps.knowledge.access - 文档访问权限判定（单文档鉴权）
 - 代码判定基于 permission_key（清除角色硬编码），super_admin 为系统级快路径
 
 判定优先级（Deny Override 铁律）：
-0. super_admin → 全权限（系统级快路径，绕过黑名单）
-1. Owner → 全权限（Owner 对自己文档全权，不被自己文档拉黑）
-2. 黑名单（ResourceBlockList，文档级 + 节点级继承）命中 → 拒绝
+0. Owner → 全权限（绕过黑名单，Owner 不被自己文档拉黑——所有权原则，唯一绕过黑名单的角色）
+1. 黑名单（ResourceBlockList，文档级 + 节点级继承）命中 → 拒绝（Deny Override，对超管也生效）
+2. super_admin → 全权限（系统级快路径，鉴权绕过 permission_key；但不绕过黑名单）
 3. 管理员（kb_admin / 团队组长对该文档归属团队）→ 全权限
 4. 自然可见范围（visibility_level + 组织归属）→ can_read
 5. 跨范围共享（ResourceShare，文档级 + 节点级继承）→ can_read
@@ -228,7 +228,8 @@ def _has_active_share(user, doc, grants_map=None, ctx=None) -> bool:
 def _is_denied(user, doc, grants_map=None, ctx=None) -> bool:
     """检查用户是否在文档黑名单中（文档级 + 节点级继承）
 
-    Deny Override：黑名单优先级最高，命中即拒绝（super_admin/Owner 除外，见 resolve_doc_access）。
+    Deny Override：黑名单优先级最高，命中即拒绝；
+    仅 Owner 绕过（所有权原则），由 resolve_doc_access 在调用本函数前先判定 Owner。
     优化：先检查 doc.has_block_user 标志，为 False 时跳过文档级查询。
     """
     # 1) 文档级黑名单
@@ -270,9 +271,9 @@ def resolve_doc_access(user, doc, ctx=None, grants_map=None) -> dict:
     }
 
     判定优先级（Deny Override 铁律）：
-    0. super_admin → 全权限（系统级快路径，绕过黑名单）
-    1. Owner → 全权限（Owner 对自己文档全权，不被自己文档拉黑）
-    2. 黑名单命中 → 全拒绝
+    0. Owner → 全权限（绕过黑名单——所有权原则，唯一绕过黑名单的角色）
+    1. 黑名单命中 → 全拒绝（Deny Override）
+    2. super_admin → 全权限（系统级快路径，鉴权绕过 permission_key；但不绕过黑名单）
     3. 管理员/团队组长 → 全权限
     4. 自然可见范围 → can_read
     5. 跨范围共享 → can_read
@@ -288,20 +289,20 @@ def resolve_doc_access(user, doc, ctx=None, grants_map=None) -> dict:
 
     is_owner = doc.owner_id == user.id
 
-    # 0) super_admin 系统级快路径（绕过黑名单）
-    if user.is_super_admin:
-        return {'is_owner': is_owner, 'is_manager': True,
-                'can_read': True, 'can_download': True, 'can_share': True}
-
-    # 1) Owner 全权限（绕过黑名单，Owner 不被自己文档拉黑）
+    # 0) Owner 全权限（绕过黑名单——所有权原则，Owner 不被自己文档拉黑，唯一绕过黑名单的角色）
     if is_owner:
         return {'is_owner': True, 'is_manager': False,
                 'can_read': True, 'can_download': True, 'can_share': True}
 
-    # 2) 黑名单命中 → 全拒绝（Deny Override，最高优先级）
+    # 1) 黑名单命中 → 全拒绝（Deny Override 铁律，只有 Owner 绕过）
     if _is_denied(user, doc, grants_map, ctx):
         return {'is_owner': False, 'is_manager': False,
                 'can_read': False, 'can_download': False, 'can_share': False}
+
+    # 2) super_admin 系统级快路径（鉴权绕过 permission_key；但不绕过黑名单）
+    if user.is_super_admin:
+        return {'is_owner': is_owner, 'is_manager': True,
+                'can_read': True, 'can_download': True, 'can_share': True}
 
     # 3) 管理员 / 团队组长 → 全权限
     #    kb_admin：有 kb.manage_all 权限

@@ -55,13 +55,13 @@ def parse_with_schema(text: str, schema_cls) -> Optional[BaseModel]:
     try:
         data = json.loads(json_str)
     except json.JSONDecodeError as e:
-        logger.warning('[Parser] JSON decode error: %s', e)
+        logger.warning(f'[Parser] JSON decode error: {e}')
         return None
 
     try:
         return schema_cls(**data)
     except ValidationError as e:
-        logger.warning('[Parser] Schema validation error: %s', e)
+        logger.warning(f'[Parser] Schema validation error: {e}')
         return None
 
 
@@ -77,10 +77,10 @@ def llm_with_retry(llm, msgs: List[Dict], schema_cls,
         
         result = parse_with_schema(content, schema_cls)
         if result:
-            logger.info('[Parser] LLM parse success after %d attempts', attempt + 1)
+            logger.info(f'[Parser] LLM parse success after {attempt + 1} attempts')
             return result
 
-        logger.warning('[Parser] Attempt %d/%d failed, retrying...', attempt + 1, max_retries)
+        logger.warning(f'[Parser] Attempt {attempt + 1}/{max_retries} failed, retrying...')
         
         if attempt < max_retries - 1:
             retry_msg = [
@@ -92,5 +92,5 @@ def llm_with_retry(llm, msgs: List[Dict], schema_cls,
             ]
             msgs = retry_msg
 
-    logger.error('[Parser] All %d attempts failed', max_retries)
+    logger.error(f'[Parser] All {max_retries} attempts failed')
     return None

@@ -48,7 +48,7 @@ def refine_session_memory(session_id: int):
             'keywords': result.keywords,
         }
     else:
-        logger.warning('[refine_session] All retries failed for session %d', session_id)
+        logger.warning(f'[refine_session] All retries failed for session {session_id}')
         data = {'summary': '（提炼失败）', 'entities': [], 'keywords': []}
 
     sm, _ = SessionMemory.objects.update_or_create(
@@ -136,5 +136,5 @@ def refine_user_memory(user_id: int = None):
             um.save()
             updated += 1
         else:
-            logger.warning('[refine_user] All retries failed for user %d, keeping existing profile', user.id)
+            logger.warning(f'[refine_user] All retries failed for user {user.id}, keeping existing profile')
     return {'ok': True, 'updated': updated}

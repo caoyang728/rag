@@ -130,7 +130,7 @@ class CalculatorTool(BaseTool):
                 'meta': {'value': value, 'expression': expression},
             }
         except Exception as e:
-            logger.info('[CalculatorTool] eval failed: %s | expr: %s', e, expr[:100])
+            logger.info(f'[CalculatorTool] eval failed: {e} | expr: {expr[:100]}')
             return {
                 'result': f'计算失败: {e.__class__.__name__}: {str(e)[:200]}',
                 'ok': False,

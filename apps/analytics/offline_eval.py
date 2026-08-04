@@ -39,7 +39,7 @@ def create_golden_dataset(
 
     Args:
         name: 测试集名称
-        root_type: 覆盖的知识库类型
+        root_type: 覆盖的领域
         description: 描述
         version: 版本号
         created_by_id: 创建者用户 ID
@@ -273,10 +273,12 @@ def run_retrieval_evaluation(
         t0 = time.time()
         try:
             # 执行完整混合检索
+            # root_type='all' 时不限领域(跨全域检索),其余按测试集领域过滤
+            rt = q.dataset.root_type
             result = hybrid_search(
                 query=q.question,
                 user=user,
-                root_types=[q.dataset.root_type],
+                root_types=[rt] if rt and rt != 'all' else None,
                 vector_top_k=vector_top_k,
                 bm25_top_k=bm25_top_k,
                 rerank_top_k=rerank_top_k,
@@ -470,10 +472,12 @@ def run_answer_quality_evaluation(
 
     for q in questions:
         try:
+            # root_type='all' 时不限领域(跨全域检索)
+            rt = q.dataset.root_type
             search_result = hybrid_search(
                 query=q.question,
                 user=user,
-                root_types=[q.dataset.root_type],
+                root_types=[rt] if rt and rt != 'all' else None,
             )
             chunks = search_result.get('chunks', [])
 

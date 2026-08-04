@@ -45,7 +45,7 @@ class Command(BaseCommand):
         )
         parser.add_argument(
             '--root-type', type=str, default='',
-            help='限定知识库根类型(默认全部)',
+            help='限定领域(默认全部)',
         )
         parser.add_argument(
             '--model', type=str, default='',

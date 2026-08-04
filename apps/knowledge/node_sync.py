@@ -18,6 +18,11 @@ from loguru import logger
 from apps.knowledge.models import KnowledgeNode, Document
 
 
+# TODO: 当前系统仅支持单一领域(knowledge_base),需扩展为多领域架构:
+# 1. 上传文档时需选择领域(如 公司文档/技术资料/产品文档/HR人事/财务/法务/运营SOP 等),
+#    现有上传逻辑仅要求 node_id,领域由节点树隐式继承,无法让用户显式选择
+# 2. 需支持创建多个 KB 根节点(每个根节点一个领域),而非当前的 get_or_create 单根
+# 3. 领域列表建议按业务功能划分(非组织架构维度),组织架构已由 部门/团队节点层级表达
 _ROOT_TYPE = 'knowledge_base'
 _KB_ROOT_NAME = '知识库'
 

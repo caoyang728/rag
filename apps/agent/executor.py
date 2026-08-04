@@ -175,7 +175,7 @@ def ask(user, question: str, session: Session,
         chunks = retrieval['chunks']
         r_stats = retrieval['stats']
     except EmbeddingException as e:
-        logger.error('[Executor] embedding failed during search: %s', e)
+        logger.error(f'[Executor] embedding failed during search: {e}')
         # 返回错误提示给前端
         answer = '当前向量服务暂时不可用，请稍后重试。'
         answer_type = 'refused'
@@ -215,7 +215,7 @@ def ask(user, question: str, session: Session,
                 filtered_chunks.append(chunk)
         
         if filtered_chunks != chunks:
-            logger.info('[Executor] permission filter removed %d chunks', len(chunks) - len(filtered_chunks))
+            logger.info(f'[Executor] permission filter removed {len(chunks) - len(filtered_chunks)} chunks')
             chunks = filtered_chunks
 
     # 4. 记忆加载
@@ -609,7 +609,7 @@ def ask_stream(user, question: str, session: Session,
         chunks = retrieval['chunks']
         r_stats = retrieval['stats']
     except EmbeddingException as e:
-        logger.error('[ask_stream] embedding failed during search: %s', e)
+        logger.error(f'[ask_stream] embedding failed during search: {e}')
         answer = '当前向量服务暂时不可用，请稍后重试。'
         ttfb_ms = int((time.time() - t0) * 1000)
         yield {
@@ -654,7 +654,7 @@ def ask_stream(user, question: str, session: Session,
         accessible_ids = filter_accessible_doc_ids(user, doc_ids)
         filtered_chunks = [c for c in chunks if c['document_id'] in accessible_ids]
         if filtered_chunks != chunks:
-            logger.info('[ask_stream] permission filter removed %d chunks', len(chunks) - len(filtered_chunks))
+            logger.info(f'[ask_stream] permission filter removed {len(chunks) - len(filtered_chunks)} chunks')
             chunks = filtered_chunks
 
     # 4. 记忆加载
@@ -755,7 +755,7 @@ def ask_stream(user, question: str, session: Session,
                         yield {'type': 'delta', 'delta': delta}
         except GeneratorExit:
             # 客户端主动终止流式：保存已生成的部分回答到 QaRecord（不能 yield，连接已断）
-            logger.info('[ask_stream] client aborted, saving partial answer (%d chars)', len(full_answer))
+            logger.info(f'[ask_stream] client aborted, saving partial answer ({len(full_answer)} chars)')
             answer = ''.join(full_answer)
             try:
                 _persist_qa(

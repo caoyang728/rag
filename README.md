@@ -566,13 +566,11 @@ REDIS_DB_PORT=6379
 
 # --- LLM ---
 LLM_API_KEY=sk-your-api-key
-LLM_BASE_URL=https://api.deepseek.com
 LLM_BASE_MODEL=deepseek-v4-flash
 LLM_ADVANCED_MODEL=deepseek-v4-pro
 
 # --- Embedding & Rerank ---
 EMBEDDING_API_KEY=sk-your-embedding-key
-EMBEDDING_BASE_URL=https://api.siliconflow.cn/v1
 EMBEDDING_MODEL=BAAI/bge-m3
 EMBEDDING_DIM=1024
 RERANK_MODEL=BAAI/bge-reranker-v2-m3

@@ -29,7 +29,7 @@ class ShortTermMemory:
             self._client = get_redis_connection('default')
             return self._client
         except Exception as e:
-            logger.error('[ShortTerm] Redis connection failed: %s', e)
+            logger.error(f'[ShortTerm] Redis connection failed: {e}')
             return None
 
     def get_turns(self, session_id: int) -> List[Dict]:
@@ -41,7 +41,7 @@ class ShortTermMemory:
             raws = r.lrange(self._key(session_id), 0, -1)
             return [json.loads(x) for x in raws]
         except Exception as e:
-            logger.warning('[ShortTerm] get failed: %s', e)
+            logger.warning(f'[ShortTerm] get failed: {e}')
             return []
 
     def append_turn(self, session_id: int, question: str, answer: str):
@@ -57,7 +57,7 @@ class ShortTermMemory:
             pipe.expire(key, self.ttl)
             pipe.execute()
         except Exception as e:
-            logger.warning('[ShortTerm] append failed: %s', e)
+            logger.warning(f'[ShortTerm] append failed: {e}')
 
     def clear(self, session_id: int):
         r = self._get_client()
@@ -65,4 +65,4 @@ class ShortTermMemory:
             try:
                 r.delete(self._key(session_id))
             except Exception as e:
-                logger.warning('[ShortTerm] clear failed: %s', e)
+                logger.warning(f'[ShortTerm] clear failed: {e}')

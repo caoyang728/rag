@@ -276,7 +276,7 @@ class SensitiveFilter:
             return 0
         try:
             new_v = r.incr(cls._REDIS_VERSION_KEY)
-            logger.info('[SensitiveFilter] redis version INCR -> %d', new_v)
+            logger.info(f'[SensitiveFilter] redis version INCR -> {new_v}')
             return int(new_v)
         except Exception:
             # 连接异常：清空缓存客户端，下次 _get_redis 会重建
@@ -321,8 +321,7 @@ class SensitiveFilter:
             redis_v = cls._read_redis_version()
             if redis_v > 0 and redis_v != inst._last_redis_version:
                 # 其他进程触发了 force_reload：本进程也立即重载（绕过 TTL 守卫）
-                logger.info('[SensitiveFilter] redis version diverged local=%d redis=%d, reload',
-                            inst._last_redis_version, redis_v)
+                logger.info(f'[SensitiveFilter] redis version diverged local={inst._last_redis_version} redis={redis_v}, reload')
                 inst._force_reload_local(redis_v)
             else:
                 # 2. TTL 兜底检查：超过 TTL 则后台刷新（不阻塞当前请求）
@@ -340,8 +339,7 @@ class SensitiveFilter:
         if cls._instance is not None:
             with cls._reload_lock:
                 cls._instance._load_from_db()
-                logger.info('[SensitiveFilter] force reloaded, version=%d',
-                            cls._instance._version)
+                logger.info(f'[SensitiveFilter] force reloaded, version={cls._instance._version}')
                 # 更新进程内 _last_redis_version，避免 get_instance 马上重复 reload
                 try:
                     new_v = cls._incr_redis_version()
@@ -403,7 +401,7 @@ class SensitiveFilter:
                         pattern = re.compile(sw.word)
                         new_regexes.append((pattern, sw.word, sw.category, sw.action))
                     except re.error as e:
-                        logger.warning('[SensitiveFilter] invalid regex %r: %s', sw.word, e)
+                        logger.warning(f'[SensitiveFilter] invalid regex {sw.word!r}: {e}')
                 else:
                     new_ac.add_word(sw.word)
 
@@ -413,8 +411,7 @@ class SensitiveFilter:
             self._ac, self._regexes, self._word_meta = new_ac, new_regexes, new_meta
             self._loaded_at = time.time()
             self._version += 1
-            logger.info('[SensitiveFilter] loaded %d words + %d regexes (v%d)',
-                        new_ac.word_count, len(new_regexes), self._version)
+            logger.info(f'[SensitiveFilter] loaded {new_ac.word_count} words + {len(new_regexes)} regexes (v{self._version})')
         except Exception:
             logger.exception('[SensitiveFilter] load_from_db failed, keep old version')
 
@@ -547,8 +544,7 @@ class SensitiveFilter:
         # 优先处理 block：立即中断，不下发任何内容
         for h in hits:
             if h.action == 'block':
-                logger.warning('[SensitiveFilter] BLOCK hit: word=%r category=%s',
-                               h.word, h.category)
+                logger.warning(f'[SensitiveFilter] BLOCK hit: word={h.word!r} category={h.category}')
                 state['buffer'] = ''
                 return [], h
 
@@ -564,8 +560,7 @@ class SensitiveFilter:
             # 按 start 降序替换（避免索引错位）
             for h in sorted(mask_hits, key=lambda x: x.start, reverse=True):
                 masked = masked[:h.start] + self.MASK_STR + masked[h.end:]
-            logger.info('[SensitiveFilter] MASK %d words in %d chars',
-                        len(mask_hits), len(text))
+            logger.info(f'[SensitiveFilter] MASK {len(mask_hits)} words in {len(text)} chars')
 
         if flush:
             # 流结束：全部下发

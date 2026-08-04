@@ -79,7 +79,7 @@ class KnowledgeSearchTool(BaseTool):
             )
             chunks = retrieval.get('chunks', [])
         except EmbeddingException as e:
-            logger.warning('[KnowledgeSearchTool] embedding unavailable: %s', e)
+            logger.warning(f'[KnowledgeSearchTool] embedding unavailable: {e}')
             return {
                 'result': '知识库向量检索服务暂时不可用，请尝试其他方式回答。',
                 'ok': False,
@@ -107,8 +107,7 @@ class KnowledgeSearchTool(BaseTool):
             accessible_ids = filter_accessible_doc_ids(user, doc_ids)
             filtered = [c for c in chunks if c['document_id'] in accessible_ids]
             if len(filtered) != len(chunks):
-                logger.info('[KnowledgeSearchTool] permission filter removed %d chunks',
-                            len(chunks) - len(filtered))
+                logger.info(f'[KnowledgeSearchTool] permission filter removed {len(chunks) - len(filtered)} chunks')
             chunks = filtered
 
         if not chunks:

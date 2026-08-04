@@ -50,7 +50,7 @@ class _OpenAICompatibleProvider(BaseLLMProvider):
                     'finish_reason': resp.choices[0].finish_reason,
                     'tool_calls': tool_calls}
         except Exception as e:
-            logger.exception('[%s] chat error', self.name)
+            logger.exception(f'[{self.name}] chat error')
             return {'content': f'[{self.name} 调用失败: {e}]', 'prompt_tokens': 0,
                     'completion_tokens': 0, 'total_tokens': 0,
                     'latency_ms': int((time.time() - t0) * 1000),
@@ -96,7 +96,7 @@ class _OpenAICompatibleProvider(BaseLLMProvider):
                    'tool_calls': accumulated_tool_calls,
                    'finish_reason': finish_reason or 'stop'}
         except Exception as e:
-            logger.exception('[%s] stream error', self.name)
+            logger.exception(f'[{self.name}] stream error')
             yield {'delta': f'[流式失败: {e}]', 'finish': True, 'error': str(e),
                    'tool_calls': [], 'finish_reason': 'error'}
 

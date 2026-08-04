@@ -906,3 +906,32 @@ svg {
 	line-height: 1.5;
 	color: var(--text);
 }
+
+/* ============ 低分回归测试集 ============ */
+/* 说明条:工具栏下方的蓝色提示条,解释低分回归机制 */
+.regression-tip {
+	display: flex;
+	align-items: flex-start;
+	gap: 8px;
+	padding: 10px 14px;
+	background: #eff6ff;
+	border: 1px solid #bfdbfe;
+	border-radius: 6px;
+	color: #1e40af;
+	font-size: 13px;
+	line-height: 1.6;
+}
+.regression-tip-icon {
+	flex-shrink: 0;
+	font-size: 16px;
+	line-height: 1.6;
+}
+.regression-tip-text strong {
+	color: #1e3a8a;
+}
+/* 低分回归测试集的 tag 高亮(橙色调,区别于普通 tag) */
+.tag-regression {
+	background: #fef3c7;
+	color: #92400e;
+	border: 1px solid #fcd34d;
+}

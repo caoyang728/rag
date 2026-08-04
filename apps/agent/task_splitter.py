@@ -34,7 +34,7 @@ def maybe_split(question: str) -> Dict[str, Any]:
     try:
         data = json.loads(raw)
     except Exception:
-        logger.warning('[TaskSplit] json parse fail: %s', raw[:200])
+        logger.warning(f'[TaskSplit] json parse fail: {raw[:200]}')
         return {'need_split': False, 'reason': 'llm output invalid json'}
     return data
 
@@ -56,7 +56,7 @@ def execute_split(user, session, question: str, split: Dict[str, Any],
             if all(dep in answers for dep in t.get('depends_on', []))
         ]
         if not current_batch:
-            logger.warning('[TaskSplit] 循环依赖或未满足，剩余 %s', remaining)
+            logger.warning(f'[TaskSplit] 循环依赖或未满足，剩余 {remaining}')
             break
 
         def _run(t):

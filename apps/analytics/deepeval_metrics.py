@@ -32,18 +32,30 @@ from loguru import logger
 def get_deepeval_model(model: Optional[str] = None):
     """构建 DeepEval 评估用 DeepSeek 模型
 
-    复用项目 settings.LLM_API_KEY,DeepSeekModel 内置 DeepSeek API 端点。
+    复用项目 DeepSeek 配置，DeepSeekModel 内置 DeepSeek API 端点。
     temperature=0 保证评估打分可复现。
 
+    配置读取：
+    - model_name：SystemConfig.EVAL_MODEL
+    - api_key：从 env 读取（敏感凭证不入库）
+    - base_url：DeepSeekModel 内置端点，无需配置
+
     Args:
-        model: 模型名;None 用 'deepseek-chat'
+        model: 模型名;None 用 SystemConfig.EVAL_MODEL
     """
     from django.conf import settings
     from deepeval.models import DeepSeekModel
+    from apps.system.config_loader import get_config_value
+
+    model_name = model or get_config_value('EVAL_MODEL', default='', value_type='string')
+    if not model_name:
+        raise ValueError('SystemConfig.EVAL_MODEL 未配置，无法启动 DeepEval 评估')
+
+    api_key = getattr(settings, 'LLM_API_KEY', '')
 
     return DeepSeekModel(
-        model=model or 'deepseek-chat',
-        api_key=settings.LLM_API_KEY,
+        model=model_name,
+        api_key=api_key,
         temperature=0,
     )
 

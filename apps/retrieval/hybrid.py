@@ -65,7 +65,7 @@ def hybrid_search(query: str,
     try:
         qvec = embed_client.embed_one(query)
     except EmbeddingException as e:
-        logger.error('[Hybrid] query embedding failed: %s', e)
+        logger.error(f'[Hybrid] query embedding failed: {e}')
         raise
     
     # 检测零向量
@@ -112,8 +112,7 @@ def hybrid_search(query: str,
     _enrich_chunks(final)
 
     stats['total_ms'] = int((time.time() - t_total) * 1000)
-    logger.info('[Hybrid] vec=%d bm25=%d rrf=%d final=%d stats=%s',
-                len(vec_res), len(bm_res), len(rrf_res), len(final), stats)
+    logger.info(f'[Hybrid] vec={len(vec_res)} bm25={len(bm_res)} rrf={len(rrf_res)} final={len(final)} stats={stats}')
 
     return {
         'chunks': final,

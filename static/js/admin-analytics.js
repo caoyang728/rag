@@ -1085,7 +1085,7 @@ async function showQaDetail(id) {
       </div>
       <div class="grid-2">
         <div><div class="text-sub text-sm">回答类型</div><div>${escapeHtml(r.answer_type || '-')}</div></div>
-        <div><div class="text-sub text-sm">知识库类型</div><div>${escapeHtml(r.root_type || '-')}</div></div>
+        <div><div class="text-sub text-sm">领域</div><div>${escapeHtml(r.root_type || '-')}</div></div>
         <div><div class="text-sub text-sm">总延迟</div><div>${(r.latency_total_ms || 0).toLocaleString()} ms</div></div>
         <div><div class="text-sub text-sm">缓存命中</div><div>${r.is_hit_cache ? '是' : '否'}</div></div>
         <div><div class="text-sub text-sm">Prompt Token</div><div>${(r.tokens_prompt || 0).toLocaleString()}</div></div>

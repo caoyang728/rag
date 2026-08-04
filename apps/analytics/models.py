@@ -230,19 +230,33 @@ class GoldenDataset(models.Model):
 
     用于离线评估检索和回答质量。管理员可创建多个测试集，
     每个测试集包含一批业务典型问题，每个问题标注相关文档和参考答案。
+
+    dataset_type 区分测试集来源:
+    - custom: 人工维护的静态测试集,长期稳定,用于回归基线
+    - regression_low_score: 低分回归测试集,从生产低分对话沉淀,
+      连续通过 N 次后人工 review 移除,防止已知 bad case 退化
     """
     STATUS_CHOICES = [
         ('draft', '草稿'),
         ('active', '已启用'),
         ('archived', '已归档'),
     ]
+    DATASET_TYPE_CHOICES = [
+        ('custom', '自定义'),
+        ('regression_low_score', '低分回归'),
+    ]
 
     id = models.BigAutoField(primary_key=True)
     name = models.CharField(max_length=128, help_text='测试集名称，如"HR领域2026Q3"')
     description = models.TextField(default='', blank=True)
     root_type = models.CharField(max_length=32, default='company_doc',
-                                 help_text='测试集覆盖的知识库类型')
+                                 help_text='测试集覆盖的领域')
     status = models.CharField(max_length=16, default='active', choices=STATUS_CHOICES)
+    # dataset_type 用于区分人工维护的静态测试集与自动沉淀的低分回归测试集
+    # 默认 custom 保持向后兼容:历史数据无需迁移即归入自定义类型
+    dataset_type = models.CharField(
+        max_length=32, default='custom', choices=DATASET_TYPE_CHOICES,
+        help_text='测试集类型: custom(人工维护) / regression_low_score(低分回归)')
     question_count = models.IntegerField(default=0, help_text='问题数量（冗余，批量更新）')
     version = models.CharField(max_length=16, default='v1', help_text='版本号，如 v1/v2')
     created_by = models.ForeignKey('users.User', on_delete=models.SET_NULL,
@@ -256,6 +270,8 @@ class GoldenDataset(models.Model):
         indexes = [
             models.Index(fields=['status', '-updated_at'], name='idx_gds_status_time'),
             models.Index(fields=['root_type'], name='idx_gds_root'),
+            # 低分回归测试集按类型查询是高频操作(沉淀/评估/前端列表)
+            models.Index(fields=['dataset_type', '-updated_at'], name='idx_gds_type_time'),
         ]
 
 
@@ -263,6 +279,12 @@ class GoldenQuestion(models.Model):
     """黄金测试问题 - 测试集中的单个问题
 
     每个问题可关联多个相关文档（通过 GoldenRelevantDoc）和一个参考答案。
+
+    低分回归测试集专用字段(自定义测试集保持默认值不使用):
+    - source_qa_record_id: 沉淀来源的 QaRecord.id,用于追溯原始低分对话
+    - pass_count: 连续通过次数,每次回归评估通过 +1,失败重置为 0
+      达到 suggest_remove_passes(默认 3) 时前端提示"建议人工 review 移除"
+    - last_eval_at: 最近一次回归评估时间,用于排序与展示新鲜度
     """
     id = models.BigAutoField(primary_key=True)
     dataset = models.ForeignKey(GoldenDataset, on_delete=models.CASCADE,
@@ -275,12 +297,25 @@ class GoldenQuestion(models.Model):
     tags = ArrayField(models.CharField(max_length=32), default=list, blank=True,
                       help_text='标签，如 ["HR","入职"]')
     order = models.IntegerField(default=0, help_text='排序号，用于在测试集中排列')
+    # 低分回归专用:沉淀来源 QA,自定义测试集保持 null
+    source_qa_record_id = models.BigIntegerField(
+        null=True, blank=True, help_text='低分回归专用:沉淀来源的 QaRecord.id')
+    # 低分回归专用:连续通过次数,失败重置为 0;达到阈值前端提示建议移除
+    pass_count = models.IntegerField(
+        default=0, help_text='低分回归专用:连续通过次数,失败重置为 0')
+    # 低分回归专用:最近一次回归评估时间,用于排序与新鲜度展示
+    last_eval_at = models.DateTimeField(
+        null=True, blank=True, help_text='低分回归专用:最近一次回归评估时间')
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         db_table = 'analytics_golden_question'
         indexes = [
             models.Index(fields=['dataset_id', 'order'], name='idx_gq_dataset_order'),
+            # 低分回归:按来源 QA 查重(防止同一低分对话重复沉淀)
+            models.Index(fields=['source_qa_record_id'], name='idx_gq_source_qa'),
+            # 低分回归:按通过次数筛选"建议移除"的候选
+            models.Index(fields=['pass_count'], name='idx_gq_pass_count'),
         ]
 
 

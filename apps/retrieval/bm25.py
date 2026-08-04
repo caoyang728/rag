@@ -85,5 +85,5 @@ def bm25_search(query: str,
         max_s = max(x['score'] for x in result) or 1.0
         for x in result:
             x['score'] = x['score'] / max_s if max_s else 0.0
-    logger.info('[BM25] hit=%d latency=%dms', len(result), int((time.time() - t0) * 1000))
+    logger.info(f'[BM25] hit={len(result)} latency={int((time.time() - t0) * 1000)}ms')
     return result

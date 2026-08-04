@@ -63,27 +63,26 @@ class MemoryManager:
         try:
             parts['global'] = self._load_global(root_type)
         except Exception as e:
-            logger.error('[Memory] load global failed: %s', e)
+            logger.error(f'[Memory] load global failed: {e}')
 
         try:
             parts['user'] = self._load_user(user)
         except Exception as e:
-            logger.error('[Memory] load user failed: %s', e)
+            logger.error(f'[Memory] load user failed: {e}')
 
         try:
             parts['session'] = self._load_session(session)
         except Exception as e:
-            logger.error('[Memory] load session failed: %s', e)
+            logger.error(f'[Memory] load session failed: {e}')
 
         try:
             parts['short_term'] = self.short_term.get_turns(session.id)
         except Exception as e:
-            logger.error('[Memory] load short_term failed: %s', e)
+            logger.error(f'[Memory] load short_term failed: {e}')
 
         memory_block = self._assemble(parts)
 
-        logger.info('[Memory] load ctx tokens≈%d cost=%dms',
-                    estimate_tokens(memory_block), int((time.time() - t0) * 1000))
+        logger.info(f'[Memory] load ctx tokens≈{estimate_tokens(memory_block)} cost={int((time.time() - t0) * 1000)}ms')
         return {
             'memory_block': memory_block,
             'parts': parts,
@@ -186,4 +185,4 @@ class MemoryManager:
                 from apps.memory.tasks import refine_session_memory
                 refine_session_memory.delay(session.id)
             except Exception as e:
-                logger.error('[Memory] trigger session refine failed: %s', e)
+                logger.error(f'[Memory] trigger session refine failed: {e}')

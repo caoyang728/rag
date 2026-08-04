@@ -20,6 +20,7 @@ from apps.analytics.models import (
 )
 from apps.chat.models import QaRecord, QaFeedback
 from apps.users.permissions import CanViewAnalytics
+from rag_project.config import AnalyticsConfig
 
 
 # ============================================================================
@@ -160,9 +161,7 @@ class KeywordWeightDetailView(APIView):
             kw.weight_score = max(0.1, min(2.0, kw.weight_score + delta))
             kw.save(update_fields=["weight_score"])
             logger.info(
-                "keyword_weight_adjusted kw_id=%s keyword=%s old=%.2f delta=%+.2f new=%.2f user=%s",
-                kw.id, kw.keyword, old_score, delta, kw.weight_score,
-                request.user.username
+                f"keyword_weight_adjusted kw_id={kw.id} keyword={kw.keyword} old={old_score:.2f} delta={delta:+.2f} new={kw.weight_score:.2f} user={request.user.username}"
             )
             return Response({
                 "id": kw.id, "keyword": kw.keyword, "weight_score": kw.weight_score
@@ -176,7 +175,7 @@ class DailyReportView(APIView):
     - 展示最近 2 天（今日/昨日）的 QA 概览 + 反馈统计
     - 使用条件聚合一次性查出 qa_count/good/bad，避免 3 次 COUNT 查询
     - 仅聚合实时数据（T+1 精确指标请使用 SystemMetricsReport）
-    - 支持 root_type 参数（知识库类型过滤），与前端 loadDailyReport 传参对齐
+    - 支持 root_type 参数（领域过滤），与前端 loadDailyReport 传参对齐
     """
     permission_classes = [IsAuthenticated, CanViewAnalytics]
     required_perm = 'analytics.system.read'
@@ -463,7 +462,7 @@ class QaRecordView(APIView):
     - 返回 QA 记录列表，供 Dashboard 查看对话历史
     - 可选 qa_id 参数：返回单条 QA 详情（用于 QA 详情弹窗，避免列表前 100 条限制）
     - 仅管理员或具备 analytics:system:read 权限的用户可访问
-    - 支持日期范围、知识库类型过滤和分页
+    - 支持日期范围、领域过滤和分页
     - feedback 是 OneToOne，需用 hasattr 判断存在性（select_related 做 LEFT JOIN，无反馈时为 None）
     """
     permission_classes = [IsAuthenticated, CanViewAnalytics]
@@ -589,8 +588,7 @@ class BadFeedbackDetailView(APIView):
             fb.status = status
             fb.save(update_fields=["status"])
             logger.info(
-                "feedback_status_updated fb_id=%s status=%s user=%s",
-                fb.id, status, request.user.username
+                f"feedback_status_updated fb_id={fb.id} status={status} user={request.user.username}"
             )
             return Response({"id": fb.id, "status": fb.status})
         except QaFeedback.DoesNotExist:
@@ -885,13 +883,22 @@ class GoldenDatasetListView(APIView):
     def get(self, request):
         from apps.analytics.models import GoldenDataset
         status = request.query_params.get('status')
+        dataset_type = request.query_params.get('dataset_type')
         qs = GoldenDataset.objects.all().order_by('-updated_at')
         if status:
             qs = qs.filter(status=status)
+        # 支持按 dataset_type 筛选(custom / regression_low_score),前端低分回归 Tab 用
+        if dataset_type:
+            qs = qs.filter(dataset_type=dataset_type)
         rows = list(qs[:100].values(
             'id', 'name', 'description', 'root_type', 'status',
-            'question_count', 'version', 'created_at', 'updated_at',
+            'dataset_type', 'question_count', 'version',
+            'created_at', 'updated_at',
         ))
+        # 补充 dataset_type 的中文展示名(避免前端维护映射表)
+        type_label_map = dict(GoldenDataset.DATASET_TYPE_CHOICES)
+        for r in rows:
+            r['dataset_type_label'] = type_label_map.get(r['dataset_type'], r['dataset_type'])
         return Response({'rows': rows, 'count': len(rows)})
 
     def post(self, request):
@@ -949,8 +956,12 @@ class GoldenDatasetDetailView(APIView):
         return Response({
             'id': ds.id, 'name': ds.name, 'description': ds.description,
             'root_type': ds.root_type, 'status': ds.status,
+            'dataset_type': ds.dataset_type,
+            'dataset_type_label': ds.get_dataset_type_display(),
             'question_count': ds.question_count, 'version': ds.version,
             'questions': questions_data,
+            # 建议移除阈值:前端据此标记"建议人工 review 移除",避免硬编码不一致
+            'suggest_remove_passes': AnalyticsConfig.low_score_regression_suggest_remove_passes(),
         })
 
     def put(self, request, ds_id):
@@ -1044,6 +1055,79 @@ class GoldenQuestionView(APIView):
             return Response({'ok': True})
         except GoldenQuestion.DoesNotExist:
             return Response({'detail': '问题不存在'}, status=404)
+
+
+# ============================================================================
+# 低分回归测试集 Views
+# ============================================================================
+
+class SiphonRegressionView(APIView):
+    """POST /api/v1/analytics/regression/siphon/ - 手动触发低分沉淀
+
+    从生产低分对话中取 top N 沉淀到回归测试集。同步执行(DB 操作,通常 1~2s),
+    直接返回沉淀结果,前端刷新测试集列表查看新增问题。
+    """
+    permission_classes = [IsAuthenticated, CanViewAnalytics]
+    required_perm = 'analytics.system.write'
+
+    def post(self, request):
+        # 手动触发不受 LOW_SCORE_REGRESSION_ENABLED 开关限制
+        # (开关只控制定时任务;管理员主动操作应生效)
+        top_n = request.data.get('top_n')
+        kwargs = {}
+        if top_n:
+            try:
+                top_n = int(top_n)
+                if top_n > 0:
+                    kwargs['top_n'] = top_n
+            except (ValueError, TypeError):
+                return Response({'detail': 'top_n 必须为正整数'}, status=400)
+        # 同步执行沉淀(DB 操作,通常 1~2s,直接返回结果避免前端轮询)
+        from apps.analytics.regression_eval import siphon_low_score_qa_to_regression_set
+        try:
+            result = siphon_low_score_qa_to_regression_set(**kwargs)
+            return Response({'ok': True, **result})
+        except Exception as e:
+            logger.exception('Siphon regression failed')
+            return Response({'detail': f'沉淀失败: {e}'}, status=500)
+
+
+class RunRegressionEvalView(APIView):
+    """POST /api/v1/analytics/regression/eval/ - 手动触发低分回归全链路评估
+
+    对低分回归测试集执行 检索→生成→12 维评估,更新 pass_count。
+    成本较高(每问题 90~180s),异步派发 Celery 任务,前端提示后刷新查看结果。
+
+    可选参数:
+    - dataset_id: 指定测试集;不传则评估所有 regression_low_score 测试集
+    - limit: 每个测试集最多评估的问题数(控制单次成本)
+    """
+    permission_classes = [IsAuthenticated, CanViewAnalytics]
+    required_perm = 'analytics.system.write'
+
+    def post(self, request):
+        from apps.analytics.tasks import run_regression_evaluation_task
+        dataset_id = request.data.get('dataset_id')
+        limit = request.data.get('limit')
+
+        kwargs = {}
+        if dataset_id:
+            try:
+                kwargs['dataset_id'] = int(dataset_id)
+            except (ValueError, TypeError):
+                return Response({'detail': 'dataset_id 必须为整数'}, status=400)
+        if limit:
+            try:
+                kwargs['limit'] = int(limit)
+            except (ValueError, TypeError):
+                return Response({'detail': 'limit 必须为整数'}, status=400)
+
+        # 异步派发:全链路评估耗时取决于问题数,200 条可能 30+ 分钟
+        run_regression_evaluation_task.delay(**kwargs)
+        return Response({
+            'ok': True, 'queued': True,
+            'message': '评估已派发,全链路评估耗时较长,请稍后刷新查看 pass_count 变化',
+        })
 
 
 # ============================================================================
@@ -1451,8 +1535,7 @@ class CoverageReportDetailView(APIView):
             return Response({'detail': '报告不存在'}, status=404)
         report.delete()
         logger.info(
-            'coverage_report_deleted report_id=%s date=%s user=%s',
-            report_id, report.report_date, request.user.username
+            f'coverage_report_deleted report_id={report_id} date={report.report_date} user={request.user.username}'
         )
         return Response({'ok': True})
 
@@ -1577,8 +1660,7 @@ class CoverageReportExportView(APIView):
         )
         response['Content-Disposition'] = f'attachment; filename="{filename}"'
         logger.info(
-            'coverage_report_exported report_id=%s user=%s',
-            report_id, request.user.username
+            f'coverage_report_exported report_id={report_id} user={request.user.username}'
         )
         return response
 

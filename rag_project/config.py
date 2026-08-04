@@ -57,10 +57,6 @@ class LLMConfig:
         return os.getenv('LLM_API_KEY', '')
 
     @staticmethod
-    def base_url() -> str:
-        return os.getenv('LLM_BASE_URL', 'https://api.deepseek.com')
-
-    @staticmethod
     def default_model() -> str:
         """默认模型（基础模型，用于简单任务）"""
         return os.getenv('LLM_BASE_MODEL', 'deepseek-v4-flash')
@@ -81,10 +77,6 @@ class EmbeddingConfig:
     @staticmethod
     def api_key() -> str:
         return os.getenv('EMBEDDING_API_KEY', '')
-
-    @staticmethod
-    def base_url() -> str:
-        return os.getenv('EMBEDDING_BASE_URL', 'https://api.siliconflow.cn/v1')
 
     @staticmethod
     def model() -> str:
@@ -340,3 +332,43 @@ class AnalyticsConfig:
     def queue_monitor_enabled() -> bool:
         """是否启用队列深度监控（生产故障时可临时关闭）"""
         return AnalyticsConfig._parse_bool('QUEUE_MONITOR_ENABLED', 'true')
+
+    # --- 低分回归测试集 ---
+    # 从生产低分对话沉淀为回归测试集,防止已知 bad case 在迭代中退化。
+    # 通过阈值(均分 ≥ 视为通过)与连续通过次数(pass_count)控制移除流程,
+    # 最终移除决策由人工 review,pass_count 仅作辅助提示。
+
+    @staticmethod
+    def low_score_regression_enabled() -> bool:
+        """是否启用低分回归测试集(沉淀 + 定时评估,默认开启)
+        关闭后定时任务跳过,手动触发仍可用
+        """
+        return AnalyticsConfig._parse_bool('LOW_SCORE_REGRESSION_ENABLED', 'true')
+
+    @staticmethod
+    def low_score_regression_top_n() -> int:
+        """每次沉淀从低分对话中取的 top N 数量(默认 50)
+        按均分升序取最低分的前 N 条,作为回归测试集候选
+        """
+        return int(os.getenv('LOW_SCORE_REGRESSION_TOP_N', '50'))
+
+    @staticmethod
+    def low_score_regression_pass_threshold() -> float:
+        """回归评估通过阈值(默认 0.7)
+        全链路 12 维评估均分 ≥ 该值视为通过,pass_count += 1;否则重置为 0
+        """
+        return float(os.getenv('LOW_SCORE_REGRESSION_PASS_THRESHOLD', '0.7'))
+
+    @staticmethod
+    def low_score_regression_capacity() -> int:
+        """低分回归测试集容量上限(默认 200)
+        超出时按 pass_count 降序 + last_eval_at 升序淘汰(优先移除已多次通过的旧记录)
+        """
+        return int(os.getenv('LOW_SCORE_REGRESSION_CAPACITY', '200'))
+
+    @staticmethod
+    def low_score_regression_suggest_remove_passes() -> int:
+        """建议人工移除的连续通过次数阈值(默认 3)
+        pass_count 达到该值时前端高亮提示"建议 review 移除",但不自动删除
+        """
+        return int(os.getenv('LOW_SCORE_REGRESSION_SUGGEST_REMOVE_PASSES', '3'))

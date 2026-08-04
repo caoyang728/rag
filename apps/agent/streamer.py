@@ -37,7 +37,7 @@ def stream_response(generator: Iterator[dict]) -> StreamingHttpResponse:
             raise
         except _CLIENT_DISCONNECT_ERRORS as e:
             # 写入失败：客户端已断开，主动关闭底层生成器以停止 LLM 流
-            logger.info('SSE client disconnected: %s', e)
+            logger.info(f'SSE client disconnected: {e}')
             try:
                 generator.close()
             except Exception:

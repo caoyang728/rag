@@ -28,7 +28,7 @@ def _apply_ef_search(cursor, ef: int):
         # 参数化查询：ef 已在外层 int() 钳制为整数，此处用占位符防止 SQL 注入
         cursor.execute('SET LOCAL hnsw.ef_search = %s;', (int(ef),))
     except Exception as e:
-        logger.warning('[VectorStore] set hnsw.ef_search failed: %s', e)
+        logger.warning(f'[VectorStore] set hnsw.ef_search failed: {e}')
 
 
 def vector_search(query_vector: List[float],
@@ -76,7 +76,7 @@ def vector_search(query_vector: List[float],
             'score': score,
             'distance': distance,
         })
-    logger.info('[VectorStore] hit=%d latency=%dms', len(results), int((time.time() - t0) * 1000))
+    logger.info(f'[VectorStore] hit={len(results)} latency={int((time.time() - t0) * 1000)}ms')
     return results
 
 
@@ -132,5 +132,5 @@ def _extract_keywords(text: str, topk: int = 10) -> List[str]:
 def delete_by_document(document_id: int):
     """删除指定文档的所有向量"""
     deleted = DocumentVector.objects.filter(document_id=document_id).delete()
-    logger.info('[VectorStore] deleted %d vectors for document %d', deleted[0] if deleted else 0, document_id)
+    logger.info(f'[VectorStore] deleted {deleted[0] if deleted else 0} vectors for document {document_id}')
     return deleted

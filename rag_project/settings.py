@@ -108,8 +108,18 @@ ASGI_APPLICATION = 'rag_project.asgi.application'
 DATABASE_URL = DatabaseConfig.build_url()
 _conn_max_age = DatabaseConfig.conn_max_age()
 _pool_enabled = DatabaseConfig.pool_enabled()
+_pool_available = False
 
 if _pool_enabled:
+    # 检测 psycopg_pool 是否可用，不可用时自动降级到 Django 原生连接池
+    try:
+        import psycopg_pool
+        _pool_available = True
+    except ImportError:
+        logger.warning('psycopg_pool 未安装，自动降级为 Django 原生连接模式。'
+                       '如需使用连接池，请 pip install psycopg_pool。')
+
+if _pool_enabled and _pool_available:
     # 启用 psycopg_pool 连接池: 使用自定义后端封装池化连接
     # CONN_MAX_AGE 设为 0，由连接池的 max_lifetime 统一管理连接生命周期
     _pool_options = DatabaseConfig.get_pool_options()
@@ -124,7 +134,7 @@ if _pool_enabled:
         'connect_timeout': _pool_options.get('timeout', 30),
     }
 else:
-    # 未启用连接池: 回退到 Django 原生连接模式
+    # 未启用连接池或 psycopg_pool 不可用: 回退到 Django 原生连接模式
     DATABASES = {
         'default': dj_database_url.parse(DATABASE_URL, conn_max_age=_conn_max_age)
     }
@@ -136,7 +146,7 @@ else:
     }
 
 # --- 连接池清理（进程退出或 Django 关闭时关闭连接池）---
-if _pool_enabled:
+if _pool_enabled and _pool_available:
     from .db.pooled_postgresql import setup_pool_cleanup
     setup_pool_cleanup()
 

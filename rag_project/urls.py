@@ -10,6 +10,8 @@ Root URL Conf - 所有 apps 的路由聚合入口
 - /api/v1/analytics/*   看板
 - /api/v1/notification/* 订阅
 - /api/v1/system/*      健康检查/配置
+- /api/v1/wiki/*        Wiki 页面
+- /api/v1/graph/*       知识图谱可视化与实体检索
 - /                     前端静态 HTML（前后端分离）
 """
 import os
@@ -19,6 +21,7 @@ from django.conf.urls.static import static
 from django.contrib import admin
 from django.http import HttpResponse, JsonResponse
 from django.urls import include, path
+from django.views.generic.base import RedirectView
 
 
 def healthz(request):
@@ -72,9 +75,12 @@ api_v1 = [
     path("notification/", include("apps.notification.urls")),
     path("system/", include("apps.system.urls")),
     path("wiki/", include("apps.wiki.urls")),
+    path("graph/", include("apps.graph.urls")),
 ]
 
 urlpatterns = [
+    # favicon 兜底：301 永久重定向，浏览器记住后不再请求根路径，消除 404 告警
+    path("favicon.ico", RedirectView.as_view(url='/static/favicon.svg', permanent=True), name="favicon"),
     path("", _serve_frontend("index"), name="index"),
     path("login/", _serve_frontend("login"), name="login"),
     path("reset-password/", _serve_frontend("reset-password"), name="reset-password"),
@@ -92,6 +98,7 @@ urlpatterns = [
     path("admin-org/", _serve_frontend("admin-org"), name="admin-org"),
     path("admin-system-config/", _serve_frontend("admin-system-config"), name="admin-system-config"),
     path("wiki/", _serve_frontend("wiki"), name="wiki"),
+    path("graph/", _serve_frontend("graph"), name="graph"),
     path("admin/", admin.site.urls),
     path("api/v1/", include(api_v1)),
     path("healthz", healthz),

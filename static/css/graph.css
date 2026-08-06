@@ -1,0 +1,292 @@
+/* ==========================================================
+   知识图谱页面样式 (graph.css)
+   图谱浏览 / 社区列表两个 Tab 的页面专属样式
+   ========================================================== */
+
+/* ---- 共用工具栏 ---- */
+/* 工具栏容器：控制大小/位置（两个 Tab 的控件行共用，行显隐由 switchTab 切换）；
+   上下留白对称，与上方 Tab 栏、下方内容区间距一致 */
+.toolbar {
+	flex-shrink: 0;
+	margin: 12px 0;
+}
+
+/* 每个 Tab 的控件行：控制排列（单行 flex，窄屏可换行） */
+.toolbar-row {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	flex-wrap: wrap;
+}
+
+/* 右侧动作组：下拉框 + 按钮固定在行最右侧，保证切换 Tab 时按钮位置不跳动 */
+.toolbar-actions {
+	margin-left: auto;
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	flex-shrink: 0;
+}
+
+/* 工具栏内的下拉框覆盖 .select 的 width:100%，按内容自适应宽度（否则撑满整行破坏单行排列） */
+.toolbar-row .select {
+	width: auto;
+}
+
+/* 图谱/社区控件行：搜索框占满中间剩余空间，右侧动作组贴行尾 */
+.graph-search-input,
+.community-search-input {
+	flex: 1;
+	min-width: 240px;
+}
+
+#entityTypeFilter {
+	/* 类型下拉：默认至少 8 个汉字宽度（宽度自适应由 .toolbar-row .select 统一提供） */
+	min-width: 8em;
+	flex-shrink: 0;
+}
+
+/* ---- 共用内容区 ---- */
+/* 内容容器：控制大小（占满剩余高度）；滚动全部交给内部各面板，
+   overflow:hidden 强制子面板高度 = 容器高度，避免子面板随内容自适应而未撑满 */
+.content-body {
+	flex: 1;
+	min-height: 0;
+	display: flex;
+	flex-direction: column;
+	overflow: hidden;
+}
+
+/* Tab 面板：控制展示（显隐由 switchTab 切换 display） */
+.tab-panel {
+	flex: 1;
+	min-height: 0;
+	display: flex;
+	flex-direction: column;
+}
+
+/* 语义检索提示条：展示检索中/命中数/未找到/错误等状态反馈；
+   仅在确有内容时占位（不设 min-height），空提示条不占间距，保证与工具栏间隔恒定 */
+.graph-search-hint {
+	font-size: 12px;
+	color: var(--text-sub);
+	margin-bottom: 8px;
+	flex-shrink: 0;
+}
+
+.graph-search-hint:empty {
+	margin-bottom: 0;
+}
+
+/* 检索结果条：一次检索命中的实体，点击可切换中心实体（固定高度不随画布压缩） */
+.graph-search-results {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin-bottom: 12px;
+	flex-shrink: 0;
+}
+
+.gsr-item {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 4px 10px;
+	border: 1px solid var(--border);
+	border-radius: 16px;
+	font-size: 13px;
+	cursor: pointer;
+	background: var(--white);
+	transition: all 0.15s;
+}
+
+.gsr-item:hover {
+	border-color: var(--primary);
+	color: var(--primary);
+}
+
+.gsr-item .gsr-score {
+	font-size: 11px;
+	color: var(--text-sub);
+}
+
+/* ---- 图谱内容排列：画布 + 实体详情面板 ---- */
+.graph-layout {
+	flex: 1;
+	min-height: 0;
+	display: flex;
+	gap: 12px;
+	align-items: stretch;
+}
+
+.graph-canvas-wrap {
+	flex: 1;
+	min-width: 0;
+	display: flex;
+}
+
+#graphContainer {
+	flex: 1;
+	min-width: 0;
+	min-height: 0;
+	border: 1px solid var(--border);
+	border-radius: 8px;
+	background: var(--white);
+	/* 上下滑动在画布容器内，不触发页面整页滚动 */
+	overflow-y: auto;
+}
+
+/* 实体详情面板（右侧固定宽度，与画布等高，内容超高时面板内滚动） */
+.entity-panel {
+	width: 320px;
+	flex-shrink: 0;
+	border: 1px solid var(--border);
+	border-radius: 8px;
+	background: var(--white);
+	padding: 14px;
+	overflow-y: auto;
+}
+
+.entity-panel-title {
+	font-size: 16px;
+	font-weight: 600;
+	margin-bottom: 8px;
+	word-break: break-all;
+}
+
+.entity-panel .ep-meta {
+	font-size: 13px;
+	color: var(--text-sub);
+	margin-bottom: 10px;
+}
+
+.entity-panel .ep-section {
+	margin-bottom: 12px;
+}
+
+.entity-panel .ep-section-title {
+	font-size: 13px;
+	font-weight: 600;
+	color: var(--text-sub);
+	margin-bottom: 6px;
+}
+
+.entity-panel .ep-desc {
+	font-size: 13px;
+	line-height: 1.6;
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+.entity-panel .ep-docs {
+	list-style: none;
+	padding: 0;
+	margin: 0;
+}
+
+.entity-panel .ep-docs li {
+	font-size: 13px;
+	padding: 4px 0;
+	border-bottom: 1px dashed var(--border);
+	word-break: break-all;
+}
+
+/* ---- 社区内容排列：列表 + 分页 ---- */
+#communityList {
+	flex: 1;
+	min-height: 0;
+	overflow-y: auto;
+	border: 1px solid var(--border);
+	border-radius: 8px;
+	background: var(--white);
+	padding: 14px 16px;
+}
+
+#communityPagination {
+	flex-shrink: 0;
+	padding-top: 12px;
+}
+
+.community-card {
+	border: 1px solid var(--border);
+	border-radius: 8px;
+	background: var(--white);
+	padding: 14px 16px;
+	margin-bottom: 12px;
+	cursor: pointer;
+	transition: all 0.15s;
+}
+
+.community-card:hover {
+	border-color: var(--primary);
+	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+.community-card-head {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin-bottom: 8px;
+	flex-wrap: wrap;
+}
+
+.community-card-topic {
+	font-size: 15px;
+	font-weight: 600;
+}
+
+.community-card-summary {
+	font-size: 13px;
+	color: var(--text-sub);
+	line-height: 1.6;
+	margin-bottom: 8px;
+}
+
+.community-card-meta {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	flex-wrap: wrap;
+	font-size: 12px;
+	color: var(--text-sub);
+}
+
+/* 社区详情：社区内实体列表 */
+.community-entities {
+	margin-top: 10px;
+	border-top: 1px dashed var(--border);
+	padding-top: 10px;
+}
+
+.community-entities-title {
+	font-size: 13px;
+	font-weight: 600;
+	color: var(--text-sub);
+	margin-bottom: 8px;
+}
+
+.community-entity-item {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 4px 10px;
+	border: 1px solid var(--border);
+	border-radius: 16px;
+	font-size: 13px;
+	cursor: pointer;
+	margin: 0 6px 6px 0;
+	background: var(--white);
+	transition: all 0.15s;
+}
+
+.community-entity-item:hover {
+	border-color: var(--primary);
+	color: var(--primary);
+}
+
+/* 加载 / 空态 */
+.community-loading {
+	padding: 40px 0;
+	text-align: center;
+	color: var(--text-sub);
+}

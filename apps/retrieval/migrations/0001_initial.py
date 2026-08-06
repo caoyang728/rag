@@ -13,6 +13,9 @@ class Migration(migrations.Migration):
 
     dependencies = [
         ('knowledge', '0001_initial'),
+        # 依赖 pgvector 扩展安装迁移：DocumentVector 含 vector 字段，
+        # 必须先于 users.0007_install_pgvector 之后的表创建（否则新库建表失败）
+        ('users', '0007_install_pgvector'),
     ]
 
     operations = [

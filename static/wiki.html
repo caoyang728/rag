@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>Wiki 知识库 · 知库 Agent</title>
+	<link rel="stylesheet" href="/static/css/common.css">
+	<link rel="stylesheet" href="/static/css/layout.css">
+	<link rel="stylesheet" href="/static/css/wiki.css">
+</head>
+
+<body>
+	<div id="topnav-container"></div>
+
+	<div class="layout">
+		<div id="sidebar-container"></div>
+		<div class="main">
+			<!-- ============ 列表视图 ============ -->
+			<div id="wikiListView">
+				<div class="page-header">
+					<div class="flex items-baseline justify-between">
+						<div class="flex items-baseline gap-10">
+							<div class="page-title">Wiki 知识库</div>
+							<div class="page-subtitle">浏览 LLM 基于知识节点自动生成的 Wiki 页面，过期页面可一键刷新</div>
+						</div>
+						<div class="page-actions">
+							<button class="btn btn-primary" id="btnGenerateWiki" onclick="openGenerateModal()">＋ 生成 Wiki</button>
+						</div>
+					</div>
+				</div>
+
+				<div class="wiki-filter-bar">
+					<input class="input" id="wikiSearchInput" placeholder="🔍 搜索标题 / 摘要 / 标签" autocomplete="off"
+						onkeydown="if(event.key==='Enter') loadWikiList(1)">
+					<select class="select" id="wikiStatusFilter" onchange="loadWikiList(1)">
+						<option value="">全部状态</option>
+						<option value="published">已发布</option>
+						<option value="expired">已过期</option>
+						<option value="draft">草稿</option>
+					</select>
+					<select class="select" id="wikiRootTypeFilter" onchange="loadWikiList(1)">
+						<option value="">全部领域</option>
+					</select>
+					<button class="btn btn-sm btn-primary" onclick="loadWikiList(1)">查询</button>
+				</div>
+
+				<div class="wiki-list" id="wikiListContainer">
+					<div class="empty" style="padding:60px 0">
+						<div class="empty-icon" style="font-size:48px">📚</div>
+						<div>加载中...</div>
+					</div>
+				</div>
+				<div class="pagination wiki-pagination" id="wikiPagination"></div>
+			</div>
+
+			<!-- ============ 详情视图 ============ -->
+			<div id="wikiDetailView" style="display:none">
+				<div class="page-header">
+					<div class="flex items-baseline justify-between">
+						<button class="btn btn-sm" onclick="showWikiList()">← 返回列表</button>
+						<div class="page-actions" id="wikiDetailActions"></div>
+					</div>
+				</div>
+				<div id="wikiDetailBody"></div>
+			</div>
+		</div>
+	</div>
+
+	<!-- ============ 生成 Wiki 弹窗 ============ -->
+	<div class="modal" id="generateModal">
+		<div class="modal-content" style="max-width:560px">
+			<div class="modal-header">
+				<h3>生成 Wiki</h3>
+				<button class="modal-close" onclick="closeGenerateModal()">&times;</button>
+			</div>
+			<div class="modal-body">
+				<p class="text-sub" style="margin-bottom:12px">选择一个知识节点，系统将基于该节点下已发布的文档异步生成 Wiki 页面。</p>
+				<input class="input" id="generateNodeSearch" placeholder="🔍 搜索节点名称" autocomplete="off"
+					oninput="filterGenerateNodes()">
+				<div class="generate-node-list" id="generateNodeList">
+					<div class="text-sub text-center" style="padding:16px">加载中...</div>
+				</div>
+			</div>
+			<div class="modal-footer">
+				<button class="btn" onclick="closeGenerateModal()">取消</button>
+				<button class="btn btn-primary" id="btnConfirmGenerate" onclick="doGenerate()" disabled>开始生成</button>
+			</div>
+		</div>
+	</div>
+
+	<script src="/static/js/common.js"></script>
+	<script src="/static/js/api.js"></script>
+	<script src="/static/js/layout.js"></script>
+	<script src="/static/js/wiki.js"></script>
+</body>
+
+</html>

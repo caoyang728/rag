@@ -280,6 +280,8 @@ function getSidebarGroups() {
 	// 文档上传：只读角色隐藏；知识库：所有登录用户可见
 	if (!isReadonly) kbItems.push({ icon: '📤', name: '文档上传', page: 'upload', key: 'upload', desc: '上传 PDF / Word / MD，自动解析与向量化' });
 	kbItems.push({ icon: '🗂️', name: '知识库', page: 'admin-nodes', key: 'admin-nodes', desc: '知识库树形结构与文档维护' });
+	// Wiki 知识库：所有登录用户可见（浏览权限由后端按来源节点对齐判定）
+	kbItems.push({ icon: '📚', name: 'Wiki 知识库', page: 'wiki', key: 'wiki', desc: '浏览 LLM 自动生成的 Wiki 页面' });
 
 	const groups = [
 		{ group: '会话', icon: '💬', items: [{ icon: '💬', name: '智能聊天', page: 'chat', key: 'chat', desc: '基于 RAG 的多轮问答，支持多知识库检索' }] },

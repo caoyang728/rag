@@ -107,16 +107,38 @@ ASGI_APPLICATION = 'rag_project.asgi.application'
 # --- 数据库 ---
 DATABASE_URL = DatabaseConfig.build_url()
 _conn_max_age = DatabaseConfig.conn_max_age()
-DATABASES = {
-    'default': dj_database_url.parse(DATABASE_URL, conn_max_age=_conn_max_age)
-}
-# 使用 psycopg (v3) 驱动
-DATABASES['default']['ENGINE'] = 'django.db.backends.postgresql'
-DATABASES['default']['CONN_MAX_AGE'] = _conn_max_age
-DATABASES['default']['CONN_HEALTH_CHECKS'] = True  # 自动检测并关闭断开的连接
-DATABASES['default']['OPTIONS'] = {
-    'connect_timeout': 10,
-}
+_pool_enabled = DatabaseConfig.pool_enabled()
+
+if _pool_enabled:
+    # 启用 psycopg_pool 连接池: 使用自定义后端封装池化连接
+    # CONN_MAX_AGE 设为 0，由连接池的 max_lifetime 统一管理连接生命周期
+    _pool_options = DatabaseConfig.get_pool_options()
+    DATABASES = {
+        'default': dj_database_url.parse(DATABASE_URL, conn_max_age=0)
+    }
+    DATABASES['default']['ENGINE'] = 'rag_project.db.pooled_postgresql'
+    DATABASES['default']['CONN_MAX_AGE'] = 0  # 池化后禁用 Django 原生年龄控制
+    DATABASES['default']['CONN_HEALTH_CHECKS'] = True  # 保留健康检查语义，检测坏连接
+    DATABASES['default']['POOL_OPTIONS'] = _pool_options
+    DATABASES['default']['OPTIONS'] = {
+        'connect_timeout': _pool_options.get('timeout', 30),
+    }
+else:
+    # 未启用连接池: 回退到 Django 原生连接模式
+    DATABASES = {
+        'default': dj_database_url.parse(DATABASE_URL, conn_max_age=_conn_max_age)
+    }
+    DATABASES['default']['ENGINE'] = 'django.db.backends.postgresql'
+    DATABASES['default']['CONN_MAX_AGE'] = _conn_max_age
+    DATABASES['default']['CONN_HEALTH_CHECKS'] = True
+    DATABASES['default']['OPTIONS'] = {
+        'connect_timeout': 10,
+    }
+
+# --- 连接池清理（进程退出或 Django 关闭时关闭连接池）---
+if _pool_enabled:
+    from .db.pooled_postgresql import setup_pool_cleanup
+    setup_pool_cleanup()
 
 # --- 密码校验 ---
 AUTH_PASSWORD_VALIDATORS = [

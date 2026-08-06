@@ -33,7 +33,21 @@ def _get_db_config(key: str, default, value_type: str = 'string'):
 
 
 class DatabaseConfig:
-    """数据库配置（基础设施，仅从 env 读取）"""
+    """数据库配置（基础设施，仅从 env 读取）
+
+    连接池参数说明:
+    - pool_enabled: 是否启用 psycopg_pool 连接池（默认开启）
+    - pool_min_size: 池中最小空闲连接数（预热保持的常驻连接）
+    - pool_max_size: 池中最大连接数（峰值上限，超出后请求排队等待）
+    - pool_timeout: 从池获取连接的超时秒数（超时抛 PoolTimeout）
+    - pool_max_lifetime: 连接最大存活秒数（到期自动回收重建，防止长时间连接失效）
+    - pool_max_idle: 连接最大空闲秒数（空闲超时后回收）
+
+    注: 启用连接池后 CONN_MAX_AGE 自动失效，由池的 max_lifetime 统一管理连接生命周期。
+    web 与 celery 可通过不同环境变量配置不同池大小:
+    - PG_POOL_WEB_MIN/MAX: web 进程池配置（gunicorn/uwsgi worker）
+    - PG_POOL_CELERY_MIN/MAX: celery worker 池配置（可独立设置更小值）
+    """
 
     @staticmethod
     def build_url() -> str:
@@ -52,6 +66,77 @@ class DatabaseConfig:
     @staticmethod
     def conn_max_age() -> int:
         return int(os.getenv('PG_CONN_MAX_AGE', '60'))
+
+    # --- 连接池配置 ---
+
+    @staticmethod
+    def pool_enabled() -> bool:
+        """是否启用 psycopg_pool 连接池（默认开启）
+
+        关闭时回退到 Django 原生连接模式（每个请求新建连接）。
+        """
+        return os.getenv('PG_POOL_ENABLED', '1') == '1'
+
+    @staticmethod
+    def pool_min_size() -> int:
+        """池中最小空闲连接数（默认 2）
+
+        预热保持的常驻连接数，避免突发流量时全部需要现场建连。
+        web 建议 2~4，celery 建议 1~2。
+        """
+        return int(os.getenv('PG_POOL_MIN_SIZE', '2'))
+
+    @staticmethod
+    def pool_max_size() -> int:
+        """池中最大连接数（默认 20）
+
+        峰值上限，超出后新请求排队等待超时。
+        web 建议 10~30（gunicorn worker 数 × 2），celery 建议 3~8。
+        不应超过 PostgreSQL max_connections 配置。
+        """
+        return int(os.getenv('PG_POOL_MAX_SIZE', '20'))
+
+    @staticmethod
+    def pool_timeout() -> int:
+        """从池获取连接的超时秒数（默认 30）
+
+        当所有连接都忙时，新请求最多等待这么久，超时抛 PoolTimeout。
+        应大于后端最慢查询时间，否则会误杀长查询。
+        """
+        return int(os.getenv('PG_POOL_TIMEOUT', '30'))
+
+    @staticmethod
+    def pool_max_lifetime() -> int:
+        """连接最大存活秒数（默认 1800 = 30 分钟）
+
+        到期后连接被回收并重建，防止长时间运行的连接因
+        服务端重启/网络闪断而失效。设为 0 则永不过期。
+        """
+        return int(os.getenv('PG_POOL_MAX_LIFETIME', '1800'))
+
+    @staticmethod
+    def pool_max_idle() -> int:
+        """连接最大空闲秒数（默认 600 = 10 分钟）
+
+        空闲超时后连接被回收，节省数据库资源。
+        设为 0 则永不过期（仅受 max_lifetime 约束）。
+        """
+        return int(os.getenv('PG_POOL_MAX_IDLE', '600'))
+
+    @classmethod
+    def get_pool_options(cls) -> dict:
+        """组装连接池配置字典，供 DATABASES['default']['POOL_OPTIONS'] 使用
+
+        Returns:
+            dict: 包含所有池配置的字典
+        """
+        return {
+            'min_size': cls.pool_min_size(),
+            'max_size': cls.pool_max_size(),
+            'timeout': cls.pool_timeout(),
+            'max_lifetime': cls.pool_max_lifetime(),
+            'max_idle': cls.pool_max_idle(),
+        }
 
 
 class RedisConfig:

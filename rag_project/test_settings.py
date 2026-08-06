@@ -22,6 +22,8 @@ from .settings import *  # noqa: F401,F403,E402
 # 主数据库：rag_test（预先创建好，已安装 pgvector 扩展，用于手动调试）
 # Django 测试框架（含 pytest-django 的 django_db）会自动创建 rag_test_test 作为测试数据库
 # pgvector 扩展通过 retrieval app 的 0002 迁移自动安装
+# 测试环境默认使用原生后端（不用连接池），因为测试用例按序执行，无需池化；
+# 若需压测连接池行为，可将 ENGINE 改为 rag_project.db.pooled_postgresql 并配置 POOL_OPTIONS
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
@@ -32,8 +34,7 @@ DATABASES = {
         'PASSWORD': os.getenv('PG_DB_PASSWORD', 'password'),
         'HOST': os.getenv('PG_DB_HOST', 'localhost'),
         'PORT': os.getenv('PG_DB_PORT', '5432'),
-        # 连接池：复用连接避免每个测试都重新建连（PG 每连接要 fork/认证/读配置，
-        # 测试量大时会产生大量磁盘 IO 进而引爆 IOPS）；CONN_HEALTH_CHECKS 自动剔除坏连接
+        # CONN_MAX_AGE 在测试中不影响正确性，仅需保持连接不过期
         'CONN_MAX_AGE': 60,
         'CONN_HEALTH_CHECKS': True,
         'OPTIONS': {

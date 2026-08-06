@@ -226,6 +226,7 @@ const PAGE_MAP = {
 	'admin-org': '/admin-org/',
 	'admin-system-config': '/admin-system-config/',
 	'wiki': '/wiki/',
+	'graph': '/graph/',
 	'profile': '/profile/',
 	'login': '/login/',
 	'reset-password': '/reset-password/'
@@ -441,6 +442,14 @@ function authGuard() {
 /* ============ 页面初始化：注入顶栏 + 侧栏 ============ */
 document.addEventListener('DOMContentLoaded', () => {
 	authGuard();
+	// favicon：统一注入（幂等），避免浏览器请求 /favicon.ico 产生 404 告警
+	if (!document.querySelector('link[rel="icon"]')) {
+		const icon = document.createElement('link');
+		icon.rel = 'icon';
+		icon.type = 'image/svg+xml';
+		icon.href = '/static/favicon.svg';
+		document.head.appendChild(icon);
+	}
 	// 挂 mask 和 toast 容器（若 HTML 未提供也自动兜底）
 	if (!$('#mask')) {
 		const m = document.createElement('div');

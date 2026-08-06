@@ -70,6 +70,9 @@ INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
+    # 响应 gzip：vendor 静态大文件（如 echarts.min.js ~1MB）压缩后约 1/4，
+    # 开发环境（未走 collectstatic）也能受益；WhiteNoise 已压缩的响应不会重复压缩
+    'django.middleware.gzip.GZipMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -174,6 +177,11 @@ STORAGES = {
     'staticfiles': {'BACKEND': 'whitenoise.storage.CompressedManifestStaticFilesStorage'
                     if not DEBUG else 'django.contrib.staticfiles.storage.StaticFilesStorage'},
 }
+
+# WhiteNoise 静态缓存：长缓存一年，二次访问命中缓存不再下载。
+# 注意：写死的 /static/vendor/*.js URL 未带 hash 指纹，升级第三方库时应
+# 同时修改文件名与页面引用（见 graph.html 的 echarts 引用），避免浏览器缓存旧版
+WHITENOISE_MAX_AGE = 31536000
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 

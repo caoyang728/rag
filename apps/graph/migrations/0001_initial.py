@@ -12,6 +12,9 @@ class Migration(migrations.Migration):
     initial = True
 
     dependencies = [
+        # 依赖 pgvector 扩展安装迁移：graph_entity 含 vector 字段，
+        # 必须先于 users.0007_install_pgvector 之后的表创建（否则新库建表失败）
+        ('users', '0007_install_pgvector'),
     ]
 
     operations = [

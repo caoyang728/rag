@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>知识图谱 · 知库 Agent</title>
+	<link rel="stylesheet" href="/static/css/common.css">
+	<link rel="stylesheet" href="/static/css/layout.css">
+	<link rel="stylesheet" href="/static/css/graph.css">
+</head>
+
+<body>
+	<div id="topnav-container"></div>
+
+	<div class="layout">
+		<div id="sidebar-container"></div>
+		<div class="main main-flex">
+			<div class="page-header">
+				<div class="flex items-baseline justify-between">
+					<div class="flex items-baseline gap-10">
+						<div class="page-title">知识图谱</div>
+						<div class="page-subtitle">浏览实体-关系图谱，语义检索实体并扩展邻居，查看社区摘要</div>
+					</div>
+					<div class="page-actions">
+						<button class="btn" id="btnCommunityDetect" onclick="confirmDetect()" style="display:none">🔁 重新检测社区</button>
+					</div>
+				</div>
+			</div>
+
+			<!-- ============ Tab 切换 ============ -->
+			<div class="tabs">
+				<div class="tab-item active" data-tab="graph" onclick="switchTab('graph')">🕸️ 图谱浏览</div>
+				<div class="tab-item" data-tab="communities" onclick="switchTab('communities')">🗂️ 社区列表</div>
+			</div>
+
+			<!-- ============ 共用工具栏：两个 Tab 的控件行按显隐切换 ============ -->
+			<div class="toolbar">
+				<div class="toolbar-row" id="toolbar-graph">
+					<input class="input graph-search-input" id="entitySearchInput" placeholder="🔍 语义检索实体，如：公司年度目标" autocomplete="off"
+						onkeydown="if(event.key==='Enter') doEntitySearch()">
+					<div class="toolbar-actions">
+						<select class="select" id="entityTypeFilter" onchange="loadEntityList(1)">
+							<option value="">全部类型</option>
+							<option value="PERSON">人物</option>
+							<option value="ORG">组织</option>
+							<option value="CONCEPT">概念</option>
+							<option value="TERM">术语</option>
+							<option value="PRODUCT">产品</option>
+						</select>
+						<button class="btn btn-primary" onclick="doEntitySearch()">检索</button>
+						<button class="btn" onclick="resetGraph()">重置</button>
+					</div>
+				</div>
+				<div class="toolbar-row" id="toolbar-community" style="display:none">
+					<input class="input community-search-input" id="communitySearchInput" placeholder="🔍 按主题/关键词搜索社区" autocomplete="off"
+						onkeydown="if(event.key==='Enter') loadCommunities(1)">
+					<div class="toolbar-actions">
+						<select class="select" id="communityLevelFilter" onchange="loadCommunities(1)">
+							<option value="">全部粒度</option>
+							<option value="0">细粒度（L0）</option>
+							<option value="1">中粒度（L1）</option>
+							<option value="2">粗粒度（L2）</option>
+						</select>
+						<button class="btn btn-primary" onclick="loadCommunities(1)">查询</button>
+					</div>
+				</div>
+			</div>
+
+			<!-- ============ 共用内容区：两个 Tab 的面板按显隐切换 ============ -->
+			<div class="content-body">
+				<div class="tab-panel" id="tab-graph">
+					<div class="graph-search-hint" id="graphSearchHint"></div>
+					<div class="graph-search-results" id="graphSearchResults" style="display:none"></div>
+
+					<!-- 图谱内容排列：画布 + 实体详情面板 -->
+					<div class="graph-layout">
+						<div class="graph-canvas-wrap">
+							<div id="graphContainer">
+								<div class="empty" style="padding:80px 0">
+									<div class="empty-icon" style="font-size:48px">🕸️</div>
+									<div class="empty-text">输入关键词检索实体，或点击社区中的实体查看其关系子图</div>
+								</div>
+							</div>
+						</div>
+						<div class="entity-panel" id="entityPanel" style="display:none"></div>
+					</div>
+				</div>
+
+				<div class="tab-panel" id="tab-communities" style="display:none">
+					<!-- 社区内容排列：列表 + 分页 -->
+					<div id="communityList">
+						<div class="empty" style="padding:60px 0">
+							<div class="empty-icon" style="font-size:48px">🗂️</div>
+							<div>加载中...</div>
+						</div>
+					</div>
+					<div class="pagination" id="communityPagination"></div>
+				</div>
+			</div>
+		</div>
+	</div>
+
+	<!-- ECharts 本地化引入（防外网 CDN 被拦截）；defer 不阻塞首屏解析，
+	     vendor 大文件由 GZipMiddleware / WhiteNoise 压缩传输，缓存一年 -->
+	<script defer src="/static/vendor/echarts.min.js"></script>
+	<script src="/static/js/common.js"></script>
+	<script src="/static/js/api.js"></script>
+	<script src="/static/js/layout.js"></script>
+	<script src="/static/js/graph.js"></script>
+</body>
+
+</html>

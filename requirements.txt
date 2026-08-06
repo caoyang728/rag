@@ -40,6 +40,9 @@ rank_bm25==0.2.2
 jieba==0.42.1               # 中文分词（BM25 用）
 numpy==2.5.1               
 
+# --- 图谱（GraphRAG）---
+networkx>=3.0,<4.0
+
 # --- 文档解析 ---
 pymupdf==1.28.0            # PDF
 python-docx==1.2.0          # Word

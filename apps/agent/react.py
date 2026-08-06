@@ -177,7 +177,7 @@ def agent_ask(user, question: str, session, root_types: list = None,
     4. 最终 LLM 返回纯文本答案
     5. 收集引用 + 工具调用链
 
-    注意：本函数不落 QaRecord、不更新缓存，由 executor.ask 统一处理。
+    注意：本函数不落 QaRecord、不更新缓存，由 executor.ask_stream 统一处理。
 
     Returns:
         {'answer': str, 'citations': list, 'chunks': list,

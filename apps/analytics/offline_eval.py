@@ -542,6 +542,9 @@ def _generate_answer(question: str, context: str, model: str) -> str:
     Returns:
         生成的回答文本
     """
+    # 函数内导入：与模块内其他评估函数一致，便于测试在源模块层 mock
+    from apps.llm.factory import get_llm
+
     llm = get_llm(model=model)
 
     system_prompt = (
@@ -567,3 +570,125 @@ def _generate_answer(question: str, context: str, model: str) -> str:
     except Exception as e:
         logger.warning(f'[AnswerEval] Answer generation failed: {e}')
         return f'[回答生成失败] {str(e)[:100]}'
+
+
+# ============================================================================
+# 4. 三层路由对比评估（LLM Wiki / GraphRAG / RAG）
+# ============================================================================
+
+def evaluate_all_modes(test_questions: List[Dict], user=None, max_questions: int = 20) -> Dict:
+    """对同一组测试问题，在三种模式下分别评估（横向对比）
+
+    与单次路由决策（decide_route 只返回第一个命中的层）不同，本函数强制三个
+    检索层各自独立产出上下文并生成回答，便于对比 Wiki / GraphRAG / RAG
+    三种模式的质量与延迟。
+
+    Args:
+        test_questions: [{'question': str, ...}]
+        user: 执行检索的用户（透传给各检索层做权限过滤）
+        max_questions: 最多评估的问题数（限制 LLM 成本）
+
+    Returns:
+        {'wiki': {'avg_score': float, 'scores': [float], 'count': int,
+                  'avg_latency_ms': int},
+         'graphrag': {...}, 'rag': {...}}
+        每模式 score 取简单启发式：回答长度 >10 记 1.0，>0 记 0.5，否则 0.0
+    """
+    from apps.graph.retriever import graphrag_search
+    from apps.graph.router import _format_rag_context
+    from apps.llm.factory import get_llm
+    from apps.llm.prompts.qa import QA_USER_TEMPLATE, SYSTEM_PROMPT
+    from apps.retrieval.hybrid import hybrid_search
+    from apps.wiki.retriever import search_wiki
+
+    llm = get_llm()
+    results = {
+        'wiki': {'scores': [], 'latencies': [], 'count': 0},
+        'graphrag': {'scores': [], 'latencies': [], 'count': 0},
+        'rag': {'scores': [], 'latencies': [], 'count': 0},
+    }
+
+    for item in test_questions[:max_questions]:
+        question = (item.get('question') or '').strip()
+        if not question:
+            continue
+
+        # 三个检索层各自独立产出上下文（单层失败不影响其他层与其他题目）
+        contexts = {}
+        try:
+            wiki_pages = search_wiki(question, top_k=3, threshold=0.55)
+            contexts['wiki'] = '\n\n'.join(
+                f"# {p['title']}\n{p['content']}" for p in wiki_pages)
+        except Exception as e:
+            logger.warning(f'[AllModesEval] wiki 检索失败: {e}')
+
+        try:
+            gr = graphrag_search(question, user, mode='auto')
+            contexts['graphrag'] = gr.get('context', '')
+        except Exception as e:
+            logger.warning(f'[AllModesEval] graphrag 检索失败: {e}')
+
+        try:
+            rag_chunks = hybrid_search(question, user, do_rerank=True).get('chunks', [])
+            contexts['rag'] = _format_rag_context(rag_chunks)
+        except Exception as e:
+            logger.warning(f'[AllModesEval] rag 检索失败: {e}')
+
+        for mode, context in contexts.items():
+            if not context:
+                continue
+            t0 = time.time()
+            answer = _generate_route_answer(llm, question, context)
+            latency_ms = int((time.time() - t0) * 1000)
+
+            # 简单启发式评分：长度>10 记 1.0，>0 记 0.5，空回答 0.0
+            score = 1.0 if len(answer) > 10 else (0.5 if len(answer) > 0 else 0.0)
+            results[mode]['scores'].append(score)
+            results[mode]['latencies'].append(latency_ms)
+            results[mode]['count'] += 1
+
+    for mode in results:
+        scores = results[mode]['scores']
+        latencies = results[mode]['latencies']
+        results[mode]['avg_score'] = round(sum(scores) / len(scores), 4) if scores else 0.0
+        results[mode]['avg_latency_ms'] = (sum(latencies) // max(len(latencies), 1)
+                                           if latencies else 0)
+
+    logger.info(
+        f'[AllModesEval] 完成对比评估: '
+        + ' '.join(f'{m}={results[m]["count"]}题/均分{results[m]["avg_score"]}'
+                   for m in results))
+    return results
+
+
+def _generate_route_answer(llm, question: str, context: str) -> str:
+    """基于单层路由上下文生成回答（用于三模式对比评估）
+
+    路由层产出的是格式化文本 context（非 chunks），故直接注入 QA_USER_TEMPLATE，
+    与 executor._ask_stream_via_route 的构造方式保持一致。
+
+    Args:
+        llm: LLM 实例
+        question: 用户问题
+        context: 检索层产出的格式化上下文
+
+    Returns:
+        生成的回答文本
+    """
+    from apps.llm.prompts.qa import QA_USER_TEMPLATE, SYSTEM_PROMPT
+
+    user_content = QA_USER_TEMPLATE.format(
+        memory_block='（无历史记忆）',
+        context_block=context,
+        question=question,
+    )
+    messages = [
+        {'role': 'system', 'content': SYSTEM_PROMPT},
+        {'role': 'user', 'content': user_content},
+    ]
+    try:
+        resp = llm.chat(messages, temperature=0.1, max_tokens=1024)
+        return resp.get('content', '')
+    except Exception as e:
+        logger.warning(f'[AllModesEval] 回答生成失败: {e}')
+        return ''

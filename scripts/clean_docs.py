@@ -2,6 +2,9 @@
 """
 清理所有文档相关数据
 包括：Document, DocumentChunk, DocumentVector, CodeChunk, DocOperationLog
+
+注意：本脚本仅允许在开发环境执行，生产环境（DEBUG=False）禁止运行，
+     避免误清空生产知识库数据。
 """
 import os
 import sys
@@ -9,6 +12,13 @@ import django
 
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'rag_project.settings')
 django.setup()
+
+from django.conf import settings
+
+# 生产环境守卫：DEBUG=False 时直接退出，防止误删生产数据
+if not settings.DEBUG:
+    print("错误：clean_docs.py 仅允许在开发环境执行，生产环境禁止使用！")
+    sys.exit(1)
 
 from apps.knowledge.models import Document, DocumentChunk, CodeChunk, DocOperationLog
 from apps.retrieval.models import DocumentVector

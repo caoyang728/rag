@@ -135,7 +135,9 @@ def aggregate_system_metrics(report_date: Optional[date] = None) -> dict:
     from apps.chat.models import QaRecord
 
     if report_date is None:
-        report_date = (timezone.now() - timedelta(days=1)).date()
+        # 默认统计"昨天"必须是本地业务日期：timezone.now().date() 返回 UTC 日期，
+        # 在本地凌晨时段与 __date 查询的本地时区转换相差一天，导致统计错天
+        report_date = timezone.localdate() - timedelta(days=1)
 
     qs = QaRecord.objects.filter(created_at__date=report_date)
 
@@ -292,7 +294,8 @@ def aggregate_org_usage(report_date: Optional[date] = None) -> list:
     from apps.users.models import User
 
     if report_date is None:
-        report_date = (timezone.now() - timedelta(days=1)).date()
+        # 默认"昨天"用本地业务日期，避免 UTC 日期在凌晨时段错天（同 aggregate_system_metrics）
+        report_date = timezone.localdate() - timedelta(days=1)
 
     qs = QaRecord.objects.filter(created_at__date=report_date)
 

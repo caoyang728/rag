@@ -321,11 +321,16 @@ def _get_eval_user():
     优先 username='system',其次超管。这样评估的是"系统视角"的检索质量,
     若需评估特定用户视角的权限隔离效果,可扩展为传入指定 user_id。
     """
-    from apps.users.models import User
+    from apps.users.models import User, GrantStatus
     user = User.objects.filter(username='system').first()
     if user:
         return user
-    user = User.objects.filter(is_superuser=True).first()
+    # 自定义 User 无 is_superuser 字段，超管通过 super_admin 内置角色绑定判定
+    # （与 User.is_super_admin property 同一判定逻辑：role_key + ACTIVE）
+    user = User.objects.filter(
+        user_role_rels__role__role_key='super_admin',
+        user_role_rels__status=GrantStatus.ACTIVE,
+    ).first()
     if not user:
         raise ValueError('未找到 system 用户或超级管理员,无法执行评估')
     return user

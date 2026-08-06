@@ -21,7 +21,7 @@ answer_correctness 生产对话无标准答案,无法计算)。安全类不达�
 
 成本控制:12 维 = 12 次 LLM 调用/对话,单条约 ¥0.01~0.02;
 默认配置下日成本上限 ¥1(采样率 + 令牌桶 + 日限 + 成本限四重保护);
-可通过 PRODUCTION_EVAL_METRIC_GROUPS 选择性启用指标组进一步降本。
+可通过 EVAL_DISPLAY_DIMENSIONS 选择性启用维度进一步降本(评估=展示,未勾选的维度不评估也不展示)。
 """
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -149,110 +149,40 @@ def _build_geval_metrics(model) -> List[Tuple[str, Any]]:
 
 
 def build_production_metrics(model) -> List[Tuple[str, Any]]:
-    """构建生产对话评估指标集合(12 维,无 reference)
+    """构建生产对话评估指标集合(按维度控制,无 reference)
 
     返回 [(dimension_name, metric), ...],dimension_name 为落库用的标准化维度名。
     所有 metric 设 async_mode=False:在 Celery 同步任务中避免 event loop 问题,
     串行执行虽慢但稳定;生产采样已限速,延迟可接受。
+
+    评估维度由 SystemConfig.EVAL_DISPLAY_DIMENSIONS 控制(与看板展示强绑定:
+    评估什么就展示什么,未勾选的维度不评估也不展示)。
+    - 配置项不存在(老部署)→ 全部 12 维(向后兼容)
+    - 配置项存在但为空(用户主动清空)→ 返回空列表,评估任务跳过
+    - 配置项有值 → 仅构建勾选维度的 metric
 
     指标全集(12 维):
     - 预置(6):faithfulness / answer_relevancy / context_relevancy /
               hallucination / toxicity / bias
     - G-Eval 自定义(6):completeness / conciseness / clarity /
                       professionalism / helpfulness / actionability
-
-    分组与降本:
-    通过 PRODUCTION_EVAL_METRIC_GROUPS 环境变量选择启用哪些指标组,
-    默认 'all' 启用全部;可选 'core'(预置6维) / 'safety'(安全2维) /
-    'quality'(质量4维) / 'business'(业务3维),逗号分隔组合。
     """
     from rag_project.config import AnalyticsConfig
 
-    groups = AnalyticsConfig.production_eval_metric_groups()
-    # 'all' 或空配置 = 全部启用
-    if not groups or 'all' in groups:
-        return _build_preset_metrics(model) + _build_geval_metrics(model)
+    dims = AnalyticsConfig.eval_display_dimensions()
+    # 空列表 = 用户主动关闭所有评估,返回空 metrics 让调用方跳过评估
+    if not dims:
+        return []
 
-    metrics: List[Tuple[str, Any]] = []
-    if 'core' in groups:
-        # 核心质量(预置):忠实度 + 相关性
-        from deepeval.metrics import FaithfulnessMetric, AnswerRelevancyMetric
-        kwargs = dict(model=model, include_reason=True, async_mode=False)
-        metrics.extend([
-            ('faithfulness', FaithfulnessMetric(threshold=0.5, **kwargs)),
-            ('answer_relevancy', AnswerRelevancyMetric(threshold=0.5, **kwargs)),
-        ])
-    if 'retrieval' in groups:
-        # 检索质量:上下文相关性 + 幻觉
-        from deepeval.metrics import ContextualRelevancyMetric, HallucinationMetric
-        kwargs = dict(model=model, include_reason=True, async_mode=False)
-        metrics.extend([
-            ('context_relevancy', ContextualRelevancyMetric(threshold=0.5, **kwargs)),
-            ('hallucination', HallucinationMetric(threshold=0.5, **kwargs)),
-        ])
-    if 'safety' in groups:
-        # 安全性:毒性 + 偏见
-        from deepeval.metrics import ToxicityMetric, BiasMetric
-        kwargs = dict(model=model, include_reason=True, async_mode=False)
-        metrics.extend([
-            ('toxicity', ToxicityMetric(threshold=0.5, **kwargs)),
-            ('bias', BiasMetric(threshold=0.5, **kwargs)),
-        ])
-    if 'quality' in groups:
-        # 答案质量:完整性 + 简洁性 + 清晰度
-        from deepeval.metrics import GEval
-        from deepeval.test_case import SingleTurnParams
-        kwargs = dict(model=model, async_mode=False)
-        metrics.extend([
-            ('completeness', GEval(
-                name='Completeness',
-                criteria='判断回答是否完整覆盖了用户问题的所有关键方面,是否存在遗漏重要信息的情况。',
-                evaluation_params=[SingleTurnParams.INPUT, SingleTurnParams.ACTUAL_OUTPUT],
-                **kwargs,
-            )),
-            ('conciseness', GEval(
-                name='Conciseness',
-                criteria='判断回答是否简洁精炼,有无冗余重复、过度铺垫或与问题无关的内容。',
-                evaluation_params=[SingleTurnParams.INPUT, SingleTurnParams.ACTUAL_OUTPUT],
-                **kwargs,
-            )),
-            ('clarity', GEval(
-                name='Clarity',
-                criteria='判断回答是否清晰易懂、结构合理、表达无歧义。',
-                evaluation_params=[SingleTurnParams.INPUT, SingleTurnParams.ACTUAL_OUTPUT],
-                **kwargs,
-            )),
-        ])
-    if 'business' in groups:
-        # 业务体验:专业性 + 有用性 + 可操作性
-        from deepeval.metrics import GEval
-        from deepeval.test_case import SingleTurnParams
-        kwargs = dict(model=model, async_mode=False)
-        metrics.extend([
-            ('professionalism', GEval(
-                name='Professionalism',
-                criteria='判断回答是否专业、准确、符合企业知识库问答助手的身份,语气是否得体,术语使用是否正确。',
-                evaluation_params=[SingleTurnParams.INPUT, SingleTurnParams.ACTUAL_OUTPUT],
-                **kwargs,
-            )),
-            ('helpfulness', GEval(
-                name='Helpfulness',
-                criteria='判断回答是否真正解决了用户的问题,提供了有价值的信息或有效的解决方案。',
-                evaluation_params=[SingleTurnParams.INPUT, SingleTurnParams.ACTUAL_OUTPUT],
-                **kwargs,
-            )),
-            ('actionability', GEval(
-                name='Actionability',
-                criteria='判断回答是否提供了具体可执行的步骤、建议或操作指引,而非仅给出抽象结论。',
-                evaluation_params=[SingleTurnParams.INPUT, SingleTurnParams.ACTUAL_OUTPUT],
-                **kwargs,
-            )),
-        ])
+    # 构建全部 12 维 metric 并按维度名索引
+    # metric 构造是轻量对象创建(无 LLM 调用),全部构建后按需筛选更简洁
+    # 真正的 LLM 调用发生在 metric.measure() 阶段,仅对返回的 metrics 执行
+    all_metrics = {}
+    for name, metric in _build_preset_metrics(model) + _build_geval_metrics(model):
+        all_metrics[name] = metric
 
-    # 兜底:配置无效时退回全部(避免因配置错误导致无指标评估)
-    if not metrics:
-        return _build_preset_metrics(model) + _build_geval_metrics(model)
-    return metrics
+    # 按配置顺序返回,跳过未知维度名(防御性,eval_display_dimensions 已过滤非法值)
+    return [(d, all_metrics[d]) for d in dims if d in all_metrics]
 
 
 def evaluate_with_deepeval(

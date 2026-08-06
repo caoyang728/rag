@@ -540,6 +540,36 @@ const DIM_GROUPS = {
 // 所有 12 维按分组顺序展开(雷达图用)
 const ALL_DIMS_ORDERED = Object.values(DIM_GROUPS).flatMap(g => g.dims);
 
+// 展示维度白名单：由 SystemConfig.EVAL_DISPLAY_DIMENSIONS 控制
+// null = 未加载（首次加载前），空数组 = 用户主动清空（不展示任何维度），非空 = 仅展示勾选的维度
+let _displayDimensions = null;
+
+/** 判断维度是否允许展示（未加载白名单时默认全部允许，保持向后兼容） */
+function isDimVisible(dim) {
+	// null/undefined = 配置未加载，默认全部可见（首次渲染或老部署未初始化配置时兜底）
+	if (_displayDimensions === null) return true;
+	return _displayDimensions.includes(dim);
+}
+
+/** 获取按白名单过滤后的分组（用于 sparkline / 雷达图渲染）
+ * - 仅保留 dims 中所有 isDimVisible 的维度
+ * - 整组维度全部被过滤掉时，该组不返回（前端不渲染空分组） */
+function getVisibleDimGroups() {
+	const result = {};
+	for (const [groupKey, g] of Object.entries(DIM_GROUPS)) {
+		const visibleDims = g.dims.filter(d => isDimVisible(d));
+		if (visibleDims.length > 0) {
+			result[groupKey] = { label: g.label, dims: visibleDims };
+		}
+	}
+	return result;
+}
+
+/** 获取按白名单过滤后的维度顺序（雷达图用） */
+function getVisibleDimsOrdered() {
+	return ALL_DIMS_ORDERED.filter(d => isDimVisible(d));
+}
+
 function loadAnswerScores() {
 	loadDashboard();
 }
@@ -560,6 +590,9 @@ async function loadDashboard() {
 			api.getJson('/api/v1/analytics/eval-dashboard/overview/' + qs),
 			api.getJson('/api/v1/analytics/eval-dashboard/low-score-qa/' + qs + '&limit=20'),
 		]);
+		// 缓存展示维度白名单：后端返回 null/undefined 时保持 null（按全部展示兜底），
+		// 返回空数组时表示用户主动清空（不展示任何维度）
+		_displayDimensions = overview.display_dimensions ?? null;
 		renderOverview(overview);
 		// 传入 total_evaluated 以区分"无评估数据"和"有评估但无低分"两种空状态
 		renderLowScoreTable(lowScore.rows || [], overview.total_evaluated);
@@ -577,6 +610,15 @@ function renderOverview(data) {
 	$('#kpiLowScore').textContent = data.low_score_count || 0;
 	$('#kpiLowRate').textContent = `占比 ${fmtPct(data.low_score_rate)}`;
 	$('#kpiSafetyAlert').textContent = data.safety_alert_count || 0;
+
+	// 用户主动清空展示维度时（_displayDimensions 为空数组），提示并清空维度画像区域
+	// 与"无评估数据"区分，避免用户误以为系统故障
+	if (Array.isArray(_displayDimensions) && _displayDimensions.length === 0) {
+		$('#kpiOverallAvg').textContent = '--';
+		$('#evalDimSparklines').innerHTML = `<div class="empty-state"><div class="empty-state-icon">🚫</div>未选择任何展示维度，请在「系统配置 → 评估 → 评估维度」中勾选</div>`;
+		$('#evalRadar').innerHTML = `<text x="170" y="170" text-anchor="middle" fill="#9ca3af" font-size="13">未选择展示维度</text>`;
+		return;
+	}
 
 	// dimension_groups 为空对象时(后端无评估数据),整体均分显示 -- ,不渲染雷达图/sparkline
 	const groups = data.dimension_groups || {};
@@ -608,9 +650,11 @@ function renderDimSparklines(groups) {
 	// 收集每个维度的趋势数据,用于后续动态生成 sparkline
 	const sparkData = {};
 
-	// 按 DIM_GROUPS 顺序展开所有维度
+	// 按白名单过滤后的分组展开维度，未在白名单中的维度不再渲染
+	// getVisibleDimGroups 已自动剔除整组维度全部被过滤掉的分组
+	const visibleGroups = getVisibleDimGroups();
 	const rows = [];
-	for (const [groupKey, g] of Object.entries(DIM_GROUPS)) {
+	for (const [groupKey, g] of Object.entries(visibleGroups)) {
 		const gd = groups[groupKey] || { dimensions: [] };
 		for (const dimName of g.dims) {
 			const info = gd.dimensions.find(x => x.name === dimName);
@@ -654,14 +698,14 @@ function renderDimSparklines(groups) {
 	}
 
 	// 按分组渲染:每组一个小标题 + 组内维度行
-	// 先按 groupKey 分组,保持 DIM_GROUPS 顺序
+	// 先按 groupKey 分组,保持 visibleGroups 顺序（已按 DIM_GROUPS 原始顺序过滤）
 	const grouped = {};
 	for (const r of rows) {
 		if (!grouped[r.groupKey]) grouped[r.groupKey] = { label: r.groupLabel, rows: [] };
 		grouped[r.groupKey].rows.push(r);
 	}
 
-	const html = Object.keys(DIM_GROUPS).map(gk => {
+	const html = Object.keys(visibleGroups).map(gk => {
 		const g = grouped[gk];
 		if (!g) return '';
 		return `<div class="dim-group mb-12">
@@ -773,8 +817,14 @@ function renderRadarChart(groups) {
 	const svg = $('#evalRadar');
 	if (!svg) return;
 	const cx = 170, cy = 170, R = 130;
-	const dims = ALL_DIMS_ORDERED;
+	// 使用白名单过滤后的维度顺序：未勾选的维度不绘制到雷达图
+	const dims = getVisibleDimsOrdered();
 	const n = dims.length;
+	// 维度数量少于 3 时雷达图无法成型（至少需要三角形），给出空态提示
+	if (n < 3) {
+		svg.innerHTML = `<text x="${cx}" y="${cy}" text-anchor="middle" fill="#9ca3af" font-size="13">展示维度不足 3 个，无法绘制雷达图</text>`;
+		return;
+	}
 	const values = dims.map(d => {
 		// 找该维度在哪个组
 		for (const g of Object.values(groups)) {
@@ -873,26 +923,33 @@ async function showQaDetail(qaId) {
 			</div>
 		`;
 
-		// 12 维明细(按 4 大类分组)
-		html += '<div><strong>12 维评估明细</strong></div>';
-		Object.entries(DIM_GROUPS).forEach(([key, g]) => {
-			const groupScores = scores.filter(s => g.dims.includes(s.dimension));
-			if (!groupScores.length) return;
-			html += `<div class="mb-16">
+		// 12 维明细(按 4 大类分组) - 受展示维度白名单过滤
+		// 用户在「系统配置 → 评估 → 评估维度」中未勾选的维度不再展示
+		const visibleGroups = getVisibleDimGroups();
+		const visibleCount = Object.values(visibleGroups).reduce((s, g) => s + g.dims.length, 0);
+		if (visibleCount === 0) {
+			html += '<div class="text-sub">未选择任何展示维度</div>';
+		} else {
+			html += '<div><strong>评估明细</strong></div>';
+			Object.entries(visibleGroups).forEach(([key, g]) => {
+				const groupScores = scores.filter(s => g.dims.includes(s.dimension));
+				if (!groupScores.length) return;
+				html += `<div class="mb-16">
 				<div class="flex justify-between items-baseline mb-8">
 					<strong>${g.label}</strong>
 				</div>`;
-			groupScores.forEach(s => {
-				html += `<div style="padding:8px 0;border-bottom:1px solid #f3f4f6">
+				groupScores.forEach(s => {
+					html += `<div style="padding:8px 0;border-bottom:1px solid #f3f4f6">
 					<div class="flex justify-between items-baseline">
 						<span>${escapeHtml(DIM_LABEL[s.dimension] || s.dimension)}</span>
 						<span>${scorePill(s.score, fmtPct)} <span class="text-sub text-sm">${s.eval_latency_ms}ms</span></span>
 					</div>
 					<div class="text-sm text-sub" style="margin-top:4px">${escapeHtml(s.reason || '(无理由)')}</div>
 				</div>`;
+				});
+				html += '</div>';
 			});
-			html += '</div>';
-		});
+		}
 
 		$('#qaDetailBody').innerHTML = html;
 	} catch (e) {
@@ -945,7 +1002,7 @@ async function runManualEval() {
 }
 
 // 轮询单条 QA 评估结果,直到本次 batch_id 的维度数达标或超时
-// 评估维度数由后端 PRODUCTION_EVAL_METRIC_GROUPS 控制(默认 12),用 8 作为最低门槛
+// 评估维度数由后端 EVAL_DISPLAY_DIMENSIONS 控制(默认 12),用 8 作为最低门槛
 // 避免配置变更后前端硬编码 12 导致永远等不到
 // token:用于取消旧轮询——当用户切换 QA ID 时,evalToken 递增,旧 token 失效
 async function pollManualEvalResult(qaId, evalBatchId, token) {

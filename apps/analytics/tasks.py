@@ -49,7 +49,9 @@ def compute_system_metrics_daily():
     from apps.analytics.models import SystemMetricsReport
     from apps.analytics.utils import aggregate_system_metrics
 
-    report_date = (timezone.now() - timedelta(days=1)).date()
+    # 凌晨 02:00 定时执行：timezone.now().date() 返回 UTC 日期，
+    # 与 __date 查询的本地时区转换在凌晨时段相差一天，必须用本地业务日期
+    report_date = timezone.localdate() - timedelta(days=1)
     logger.info(f'[SystemMetrics] Start aggregating for {report_date}')
 
     try:
@@ -86,7 +88,8 @@ def compute_org_usage_daily():
     from apps.analytics.models import OrgUsageReport
     from apps.analytics.utils import aggregate_org_usage
 
-    report_date = (timezone.now() - timedelta(days=1)).date()
+    # 凌晨定时执行：用本地业务日期而非 UTC 日期，避免 __date 查询错天（同 SystemMetrics 任务）
+    report_date = timezone.localdate() - timedelta(days=1)
     logger.info(f'[OrgUsage] Start aggregating for {report_date}')
 
     try:
@@ -565,7 +568,7 @@ def periodic_retrieval_evaluation():
     """
     from apps.analytics.models import GoldenDataset
     from apps.analytics.offline_eval import run_retrieval_evaluation
-    from apps.users.models import User
+    from apps.users.models import User, GrantStatus
 
     datasets = GoldenDataset.objects.filter(
         status='active',
@@ -578,7 +581,11 @@ def periodic_retrieval_evaluation():
     # 使用系统用户执行评估
     sys_user = User.objects.filter(username='system').first()
     if not sys_user:
-        sys_user = User.objects.filter(is_superuser=True).first()
+        # 项目 User 模型无 is_superuser 字段，超管通过 super_admin 内置角色关联判定
+        sys_user = User.objects.filter(
+            user_role_rels__role__role_key='super_admin',
+            user_role_rels__status=GrantStatus.ACTIVE,
+        ).first()
     if not sys_user:
         return {'ok': False, 'error': 'no_user_for_eval'}
 

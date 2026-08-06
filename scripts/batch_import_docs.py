@@ -7,16 +7,16 @@
 使用方法：
     # 默认：私有可见，超级管理员上传
     python scripts/batch_import_docs.py
-    
+
     # 部门可见
     python scripts/batch_import_docs.py --visibility department --department-code R&D
-    
+
     # 部门可见，指定上传者
     python scripts/batch_import_docs.py --visibility department --department-code R&D --owner user1
-    
+
     # 团队可见
     python scripts/batch_import_docs.py --visibility team --team-code RAG-PROJ
-    
+
     # 所有人可见
     python scripts/batch_import_docs.py --visibility public
 
@@ -44,8 +44,9 @@ import uuid
 import shutil
 from pathlib import Path
 
-# 添加项目根目录到 Python 路径
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# 当前文件位于 scripts/batch_import_docs.py，需向上两级到项目根
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(_HERE))
 
 import django
 from django.conf import settings

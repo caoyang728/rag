@@ -1,0 +1,627 @@
+"""
+apps.users.views 权限工单补充测试 —— 申请 / 撤回 / 审批 / 驳回 / 查询全链路
+
+与 test_views.py 互补：AccessApplicationView / withdraw / pending-approvals /
+processed-tickets / my-tickets / all-tickets / approve / reject /
+assignable-roles / approval-chain-preview。
+"""
+import csv
+import io
+import json
+from unittest.mock import patch
+
+import pytest
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import Client
+from rest_framework_simplejwt.tokens import RefreshToken
+
+from apps.users.models import (
+    User, Role, Department, Team, Permission, RolePermissionRel,
+    UserRoleRel, UserDeptScopeRel, UserTeamScopeRel,
+    PermissionApprovalTicket, TicketStatus, TicketChangeType, ScopeType,
+    GrantStatus, RoleType, DataScope,
+)
+from apps.users.tests.test_views_base import (
+    _get_or_create_role, _create_user, _grant_permission, _grant_global_role,
+    _auth_headers, FakeRedis, UsersAPIExtraBase,
+)
+
+
+class TestAccessApplicationView(UsersAPIExtraBase):
+    """权限申请接口：字段校验 + 业务规则（超管不可自助申请 / ROLE_CHANGE 前置校验）"""
+
+    @pytest.mark.integration
+    def test_get_applications_empty_200(self):
+        """无工单时返回空列表 → 200"""
+        resp = self.client.get('/api/v1/auth/permissions/applications/', **self.normal_headers)
+        assert resp.status_code == 200
+        assert resp.json()['count'] == 0
+
+    @pytest.mark.integration
+    def test_get_applications_only_own_tickets(self):
+        """GET 只返回当前用户发起的工单（含 scope_name 与审批链序列化）"""
+        self._create_pending_ticket()  # normal_user 发起（跨团队 viewer → 前端组）
+        self._create_pending_ticket(applicant=self.team_leader)  # 他人工单不应出现
+        resp = self.client.get('/api/v1/auth/permissions/applications/', **self.normal_headers)
+        assert resp.status_code == 200
+        rows = resp.json()['rows']
+        assert len(rows) == 1
+        assert rows[0]['scope_name'] == '前端组'
+        assert 'approval_chain' in rows[0]
+
+    @pytest.mark.integration
+    def test_get_applications_approver_name_after_approval(self):
+        """已审批工单的返回中带审批人姓名与审批意见（approver_name/reviewer_comment）"""
+        _grant_global_role(self.super_admin, 'super_admin')
+        t = self._create_pending_ticket()
+        approve_ticket(t, self.super_admin, comment='同意')
+        resp = self.client.get('/api/v1/auth/permissions/applications/', **self.normal_headers)
+        row = resp.json()['rows'][0]
+        assert row['approver_name'] == 'admin'
+        assert row['reviewer_comment'] == '同意'
+
+    @pytest.mark.integration
+    def test_post_missing_role_key_400(self):
+        """缺少 role_key → 400"""
+        resp = self.client.post(
+            '/api/v1/auth/permissions/applications/',
+            data=json.dumps({'scope_type': 'TEAM', 'scope_id': self.team_b.id, 'reason': 'r'}),
+            content_type='application/json', **self.normal_headers,
+        )
+        assert resp.status_code == 400
+
+    @pytest.mark.integration
+    def test_post_invalid_scope_type_400(self):
+        """scope_type 取值非法 → 400"""
+        resp = self.client.post(
+            '/api/v1/auth/permissions/applications/',
+            data=json.dumps({'role_key': 'viewer', 'scope_type': 'XXX', 'reason': 'r'}),
+            content_type='application/json', **self.normal_headers,
+        )
+        assert resp.status_code == 400
+
+    @pytest.mark.integration
+    def test_post_invalid_change_type_400(self):
+        """change_type 取值非法 → 400"""
+        resp = self.client.post(
+            '/api/v1/auth/permissions/applications/',
+            data=json.dumps({'role_key': 'viewer', 'change_type': 'FOO', 'reason': 'r'}),
+            content_type='application/json', **self.normal_headers,
+        )
+        assert resp.status_code == 400
+
+    @pytest.mark.integration
+    def test_post_missing_reason_400(self):
+        """申请理由为空 → 400"""
+        resp = self.client.post(
+            '/api/v1/auth/permissions/applications/',
+            data=json.dumps({'role_key': 'viewer', 'scope_type': 'TEAM',
+                             'scope_id': self.team_b.id, 'reason': '  '}),
+            content_type='application/json', **self.normal_headers,
+        )
+        assert resp.status_code == 400
+
+    @pytest.mark.integration
+    def test_post_scope_id_required_400(self):
+        """scope_type=TEAM 时必须提供 scope_id → 400"""
+        resp = self.client.post(
+            '/api/v1/auth/permissions/applications/',
+            data=json.dumps({'role_key': 'viewer', 'scope_type': 'TEAM', 'reason': 'r'}),
+            content_type='application/json', **self.normal_headers,
+        )
+        assert resp.status_code == 400
+
+    @pytest.mark.integration
+    def test_post_role_not_found_400(self):
+        """申请不存在的角色 → 400"""
+        resp = self.client.post(
+            '/api/v1/auth/permissions/applications/',
+            data=json.dumps({'role_key': 'ghost_role', 'scope_type': 'NONE', 'reason': 'r'}),
+            content_type='application/json', **self.normal_headers,
+        )
+        assert resp.status_code == 400
+
+    @pytest.mark.integration
+    def test_post_super_admin_self_apply_403(self):
+        """super_admin 角色不可自助申请 → 403（只能由现有超管发起双人复核工单）"""
+        resp = self.client.post(
+            '/api/v1/auth/permissions/applications/',
+            data=json.dumps({'role_key': 'super_admin', 'scope_type': 'NONE', 'reason': 'r'}),
+            content_type='application/json', **self.normal_headers,
+        )
+        assert resp.status_code == 403
+
+    @pytest.mark.integration
+    def test_post_role_change_missing_previous_role_400(self):
+        """ROLE_CHANGE 必须提供 previous_role_id → 400"""
+        resp = self.client.post(
+            '/api/v1/auth/permissions/applications/',
+            data=json.dumps({'role_key': 'viewer', 'scope_type': 'TEAM',
+                             'scope_id': self.team_a.id, 'change_type': 'ROLE_CHANGE', 'reason': 'r'}),
+            content_type='application/json', **self.normal_headers,
+        )
+        assert resp.status_code == 400
+
+    @pytest.mark.integration
+    def test_post_role_change_previous_role_not_found_400(self):
+        """ROLE_CHANGE 的 previous_role_id 对应角色不存在 → 400"""
+        resp = self.client.post(
+            '/api/v1/auth/permissions/applications/',
+            data=json.dumps({'role_key': 'viewer', 'scope_type': 'TEAM',
+                             'scope_id': self.team_a.id, 'change_type': 'ROLE_CHANGE',
+                             'previous_role_id': 999999, 'reason': 'r'}),
+            content_type='application/json', **self.normal_headers,
+        )
+        assert resp.status_code == 400
+
+    @pytest.mark.integration
+    def test_post_create_ticket_201(self):
+        """正常提交跨团队 viewer 申请 → 201 且工单 PENDING（自助申请目标用户为自身）"""
+        resp = self.client.post(
+            '/api/v1/auth/permissions/applications/',
+            data=json.dumps({'role_key': 'viewer', 'scope_type': 'TEAM',
+                             'scope_id': self.team_b.id, 'reason': '需要查看前端组资料'}),
+            content_type='application/json', **self.normal_headers,
+        )
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data['status'] == 'PENDING'
+        ticket = PermissionApprovalTicket.objects.get(id=data['id'])
+        assert ticket.applicant_id == self.normal_user.id
+        assert ticket.target_user_id == self.normal_user.id  # 自助申请：被授权对象为申请人自身
+
+    @pytest.mark.integration
+    def test_post_create_ticket_value_error_400(self):
+        """create_ticket 抛业务异常（如超管配额不足）→ 400"""
+        Role.objects.create(role_key='user_admin', name='用户管理员')
+        resp = self.client.post(
+            '/api/v1/auth/permissions/applications/',
+            data=json.dumps({'role_key': 'user_admin', 'scope_type': 'NONE', 'reason': '申请用户管理员'}),
+            content_type='application/json', **self.normal_headers,
+        )
+        assert resp.status_code == 400
+
+    @pytest.mark.integration
+    def test_post_anonymous_401(self):
+        """匿名提交申请 → 401"""
+        resp = self.client.post('/api/v1/auth/permissions/applications/',
+                                data=json.dumps({}), content_type='application/json')
+        assert resp.status_code in (401, 403)
+
+
+# ============================================================================
+# AccessApplicationWithdrawView —— 撤回申请
+# ============================================================================
+
+class TestAccessApplicationWithdrawView(UsersAPIExtraBase):
+    """撤回申请：仅申请人可撤回 PENDING 工单"""
+
+    @pytest.mark.integration
+    def test_withdraw_not_found_404(self):
+        """撤回不存在的工单 → 404"""
+        resp = self.client.post('/api/v1/auth/permissions/applications/999999/withdraw/',
+                                **self.normal_headers)
+        assert resp.status_code == 404
+
+    @pytest.mark.integration
+    def test_withdraw_other_users_ticket_404(self):
+        """撤回他人工单 → 404（查询限定 applicant=当前用户，看不到即不存在）"""
+        t = self._create_pending_ticket(applicant=self.team_leader)
+        resp = self.client.post(f'/api/v1/auth/permissions/applications/{t.id}/withdraw/',
+                                **self.normal_headers)
+        assert resp.status_code == 404
+
+    @pytest.mark.integration
+    def test_withdraw_non_pending_400(self):
+        """非 PENDING 状态的工单不可撤回 → 400"""
+        t = self._create_pending_ticket()
+        t.status = TicketStatus.EXECUTED
+        t.save(update_fields=['status', 'updated_at'])
+        resp = self.client.post(f'/api/v1/auth/permissions/applications/{t.id}/withdraw/',
+                                **self.normal_headers)
+        assert resp.status_code == 400
+
+    @pytest.mark.integration
+    def test_withdraw_success(self):
+        """PENDING 工单撤回 → 200 且状态流转为 CANCELLED"""
+        t = self._create_pending_ticket()
+        resp = self.client.post(f'/api/v1/auth/permissions/applications/{t.id}/withdraw/',
+                                **self.normal_headers)
+        assert resp.status_code == 200
+        assert resp.json()['status'] == 'cancelled'
+        t.refresh_from_db()
+        assert t.status == TicketStatus.CANCELLED
+
+
+# ============================================================================
+# PendingApprovalTicketsView —— 待我审批（共享审批池）
+# ============================================================================
+
+class TestPendingApprovalTicketsView(UsersAPIExtraBase):
+    """待审批列表：入口权限 + 审批角色匹配（_can_approve_for_role）"""
+
+    def _grant_sa_role(self):
+        """给超管绑定 super_admin 角色（_can_approve_for_role 按角色反查，不认 is_super_admin 标志）"""
+        _grant_global_role(self.super_admin, 'super_admin')
+
+    @pytest.mark.integration
+    def test_normal_user_403(self):
+        """普通用户（非管理角色/非 leader）查看待审批 → 403"""
+        resp = self.client.get('/api/v1/auth/permissions/pending-approvals/', **self.normal_headers)
+        assert resp.status_code == 403
+
+    @pytest.mark.integration
+    def test_super_admin_sees_matching_ticket(self):
+        """超管可看到审批链节点为 SUPER_ADMIN 的待审批工单
+
+        _create_pending_ticket 的 viewer 跨团队申请在组长缺失时降级为超管单审，
+        需同时具备 super_admin 角色 rel 才能命中 _can_approve_for_role。
+        """
+        self._grant_sa_role()
+        self._create_pending_ticket()
+        resp = self.client.get('/api/v1/auth/permissions/pending-approvals/', **self.admin_headers)
+        assert resp.status_code == 200
+        rows = resp.json()['rows']
+        assert len(rows) == 1
+        assert rows[0]['approver_role'] == 'SUPER_ADMIN'
+        assert rows[0]['scope_name'] == '前端组'
+
+    @pytest.mark.integration
+    def test_team_leader_sees_own_team_ticket(self):
+        """团队组长可看到本团队节点（TEAM_LEADER）的待审批工单"""
+        create_ticket(
+            applicant=self.normal_user,
+            target_user=self.normal_user,
+            change_type=TicketChangeType.GRANT,
+            role=_get_or_create_role('contributor'),
+            scope_type=ScopeType.TEAM,
+            scope_id=self.team_a.id,
+            reason='本团队贡献者申请',
+        )
+        resp = self.client.get('/api/v1/auth/permissions/pending-approvals/', **self.leader_headers)
+        assert resp.status_code == 200
+        rows = resp.json()['rows']
+        assert len(rows) == 1
+        assert rows[0]['approver_role'] == 'TEAM_LEADER'
+        assert rows[0]['target_user_name'] == 'normal'
+
+    @pytest.mark.integration
+    def test_non_pending_ticket_not_in_list(self):
+        """非 PENDING 状态的工单不出现在待审批列表"""
+        self._grant_sa_role()
+        t = self._create_pending_ticket()
+        t.status = TicketStatus.APPROVED
+        t.save(update_fields=['status', 'updated_at'])
+        resp = self.client.get('/api/v1/auth/permissions/pending-approvals/', **self.admin_headers)
+        assert resp.json()['count'] == 0
+
+
+# ============================================================================
+# TicketApproveView —— 审批通过
+# ============================================================================
+
+class TestTicketApproveView(UsersAPIExtraBase):
+    """审批通过：404 / 状态机 / 权限 / 成功执行授权写入"""
+
+    def _grant_sa_role(self):
+        _grant_global_role(self.super_admin, 'super_admin')
+
+    @pytest.mark.integration
+    def test_approve_not_found_404(self):
+        """审批不存在的工单 → 404"""
+        resp = self.client.post(
+            '/api/v1/auth/permissions/tickets/999999/approve/',
+            data=json.dumps({}), content_type='application/json', **self.admin_headers,
+        )
+        assert resp.status_code == 404
+
+    @pytest.mark.integration
+    def test_approve_non_pending_400(self):
+        """审批非 PENDING 工单 → 400"""
+        self._grant_sa_role()
+        t = self._create_pending_ticket()
+        t.status = TicketStatus.CANCELLED
+        t.save(update_fields=['status', 'updated_at'])
+        resp = self.client.post(
+            f'/api/v1/auth/permissions/tickets/{t.id}/approve/',
+            data=json.dumps({}), content_type='application/json', **self.admin_headers,
+        )
+        assert resp.status_code == 400
+
+    @pytest.mark.integration
+    def test_approve_without_permission_403(self):
+        """无审批权限的用户审批 → 403（_can_approve_for_role 拒绝）"""
+        t = self._create_pending_ticket()
+        resp = self.client.post(
+            f'/api/v1/auth/permissions/tickets/{t.id}/approve/',
+            data=json.dumps({}), content_type='application/json', **self.normal_headers,
+        )
+        assert resp.status_code == 403
+
+    @pytest.mark.integration
+    def test_approve_success_executes_grant(self):
+        """超管审批通过 → 200，工单流转为 EXECUTED，目标用户获得团队 viewer 授权"""
+        self._grant_sa_role()
+        t = self._create_pending_ticket()
+        resp = self.client.post(
+            f'/api/v1/auth/permissions/tickets/{t.id}/approve/',
+            data=json.dumps({'comment': '同意'}), content_type='application/json', **self.admin_headers,
+        )
+        assert resp.status_code == 200
+        assert resp.json()['status'] == 'EXECUTED'
+        t.refresh_from_db()
+        assert t.status == TicketStatus.EXECUTED
+        assert UserTeamScopeRel.objects.filter(
+            user=t.target_user, role=t.role, team_id=self.team_b.id,
+            status=GrantStatus.ACTIVE,
+        ).exists()
+
+
+# ============================================================================
+# TicketRejectView —— 驳回
+# ============================================================================
+
+class TestTicketRejectView(UsersAPIExtraBase):
+    """驳回工单：理由必填 / 404 / 状态机 / 权限 / 成功驳回"""
+
+    def _grant_sa_role(self):
+        _grant_global_role(self.super_admin, 'super_admin')
+
+    @pytest.mark.integration
+    def test_reject_empty_comment_400(self):
+        """驳回理由为空 → 400（comment 必填）"""
+        self._grant_sa_role()
+        t = self._create_pending_ticket()
+        resp = self.client.post(
+            f'/api/v1/auth/permissions/tickets/{t.id}/reject/',
+            data=json.dumps({'comment': '   '}), content_type='application/json', **self.admin_headers,
+        )
+        assert resp.status_code == 400
+
+    @pytest.mark.integration
+    def test_reject_not_found_404(self):
+        """驳回不存在的工单 → 404"""
+        resp = self.client.post(
+            '/api/v1/auth/permissions/tickets/999999/reject/',
+            data=json.dumps({'comment': 'x'}), content_type='application/json', **self.admin_headers,
+        )
+        assert resp.status_code == 404
+
+    @pytest.mark.integration
+    def test_reject_non_pending_400(self):
+        """驳回非 PENDING 工单 → 400"""
+        self._grant_sa_role()
+        t = self._create_pending_ticket()
+        t.status = TicketStatus.APPROVED
+        t.save(update_fields=['status', 'updated_at'])
+        resp = self.client.post(
+            f'/api/v1/auth/permissions/tickets/{t.id}/reject/',
+            data=json.dumps({'comment': 'x'}), content_type='application/json', **self.admin_headers,
+        )
+        assert resp.status_code == 400
+
+    @pytest.mark.integration
+    def test_reject_without_permission_403(self):
+        """无审批权限的用户驳回 → 403"""
+        t = self._create_pending_ticket()
+        resp = self.client.post(
+            f'/api/v1/auth/permissions/tickets/{t.id}/reject/',
+            data=json.dumps({'comment': '驳回'}), content_type='application/json', **self.normal_headers,
+        )
+        assert resp.status_code == 403
+
+    @pytest.mark.integration
+    def test_reject_success(self):
+        """超管驳回 → 200，工单流转为 REJECTED（一票否决终态）"""
+        self._grant_sa_role()
+        t = self._create_pending_ticket()
+        resp = self.client.post(
+            f'/api/v1/auth/permissions/tickets/{t.id}/reject/',
+            data=json.dumps({'comment': '资料不全'}), content_type='application/json', **self.admin_headers,
+        )
+        assert resp.status_code == 200
+        assert resp.json()['status'] == 'REJECTED'
+        t.refresh_from_db()
+        assert t.status == TicketStatus.REJECTED
+
+
+# ============================================================================
+# MyTicketsView / ProcessedTicketsView / AllTicketsView —— 工单列表三视图
+# ============================================================================
+
+class TestMyTicketsView(UsersAPIExtraBase):
+    """我发起的工单列表"""
+
+    @pytest.mark.integration
+    def test_my_tickets_200(self):
+        """GET 返回当前用户发起的工单 → 200"""
+        self._create_pending_ticket()
+        resp = self.client.get('/api/v1/auth/permissions/my-tickets/', **self.normal_headers)
+        assert resp.status_code == 200
+        assert resp.json()['count'] == 1
+        assert resp.json()['rows'][0]['ticket_no']
+
+    @pytest.mark.integration
+    def test_my_tickets_only_mine(self):
+        """他人发起的工单不出现在我的列表"""
+        self._create_pending_ticket(applicant=self.team_leader)
+        resp = self.client.get('/api/v1/auth/permissions/my-tickets/', **self.normal_headers)
+        assert resp.json()['count'] == 0
+
+    @pytest.mark.integration
+    def test_my_tickets_anonymous_401(self):
+        """匿名访问 → 401"""
+        resp = self.client.get('/api/v1/auth/permissions/my-tickets/')
+        assert resp.status_code in (401, 403)
+
+class TestProcessedTicketsView(UsersAPIExtraBase):
+    """我已审批的工单列表（approval_chain 中 approver_id=当前用户的节点）"""
+
+    def _grant_sa_role(self):
+        _grant_global_role(self.super_admin, 'super_admin')
+
+    @pytest.mark.integration
+    def test_normal_user_403(self):
+        """普通用户（非管理角色/非 leader）→ 403"""
+        resp = self.client.get('/api/v1/auth/permissions/processed-tickets/', **self.normal_headers)
+        assert resp.status_code == 403
+
+    @pytest.mark.integration
+    def test_processed_tickets_shows_approved_by_me(self):
+        """审批过的工单出现在“我已审批”，并带我的审批角色与意见"""
+        self._grant_sa_role()
+        t = self._create_pending_ticket()
+        resp = self.client.post(
+            f'/api/v1/auth/permissions/tickets/{t.id}/approve/',
+            data=json.dumps({'comment': '同意'}), content_type='application/json', **self.admin_headers,
+        )
+        assert resp.status_code == 200
+        resp = self.client.get('/api/v1/auth/permissions/processed-tickets/', **self.admin_headers)
+        assert resp.status_code == 200
+        rows = resp.json()['rows']
+        assert len(rows) == 1
+        assert rows[0]['my_approver_role'] == 'SUPER_ADMIN'
+        assert rows[0]['my_comment'] == '同意'
+
+    @pytest.mark.integration
+    def test_pending_ticket_not_in_processed(self):
+        """PENDING 工单不计入“我已审批”"""
+        self._grant_sa_role()
+        self._create_pending_ticket()
+        resp = self.client.get('/api/v1/auth/permissions/processed-tickets/', **self.admin_headers)
+        assert resp.json()['count'] == 0
+
+class TestAllTicketsView(UsersAPIExtraBase):
+    """全部工单（审计视角，仅超管 / 合规管理员）"""
+
+    @pytest.mark.integration
+    def test_super_admin_200(self):
+        """超管查看全部工单 → 200"""
+        self._create_pending_ticket()
+        resp = self.client.get('/api/v1/auth/permissions/all-tickets/', **self.admin_headers)
+        assert resp.status_code == 200
+        assert resp.json()['count'] == 1
+
+    @pytest.mark.integration
+    def test_normal_user_403(self):
+        """普通用户查看全部工单 → 403"""
+        resp = self.client.get('/api/v1/auth/permissions/all-tickets/', **self.normal_headers)
+        assert resp.status_code == 403
+
+    @pytest.mark.integration
+    def test_status_filter(self):
+        """按 status 筛选工单"""
+        t = self._create_pending_ticket()
+        t.status = TicketStatus.EXECUTED
+        t.save(update_fields=['status', 'updated_at'])
+        resp = self.client.get(
+            '/api/v1/auth/permissions/all-tickets/?status=EXECUTED', **self.admin_headers)
+        assert resp.status_code == 200
+        assert resp.json()['count'] == 1
+        resp = self.client.get(
+            '/api/v1/auth/permissions/all-tickets/?status=PENDING', **self.admin_headers)
+        assert resp.json()['count'] == 0
+
+
+# ============================================================================
+# AssignableRolesView —— 可申请角色清单
+# ============================================================================
+
+class TestAssignableRolesView(UsersAPIExtraBase):
+    """可申请角色清单：按类别分组、排除 super_admin、scope_type 筛选"""
+
+    @pytest.mark.integration
+    def test_assignable_roles_200(self):
+        """GET 返回角色清单 → 200，排除 super_admin，按 rank 升序"""
+        resp = self.client.get('/api/v1/auth/permissions/assignable-roles/', **self.normal_headers)
+        assert resp.status_code == 200
+        rows = resp.json()['rows']
+        keys = {r['role_key'] for r in rows}
+        assert 'viewer' in keys and 'contributor' in keys and 'dept_manager' in keys
+        assert 'super_admin' not in keys  # 超管不可自助申请，不返回
+        ranks = [r['rank'] for r in rows]
+        assert ranks == sorted(ranks)
+
+    @pytest.mark.integration
+    def test_scope_type_filter(self):
+        """scope_type=TEAM 只返回团队类别角色"""
+        resp = self.client.get(
+            '/api/v1/auth/permissions/assignable-roles/?scope_type=TEAM', **self.normal_headers)
+        rows = resp.json()['rows']
+        assert rows and all(r['category'] == 'team' for r in rows)
+
+    @pytest.mark.integration
+    def test_anonymous_401(self):
+        """匿名访问 → 401"""
+        resp = self.client.get('/api/v1/auth/permissions/assignable-roles/')
+        assert resp.status_code in (401, 403)
+
+
+# ============================================================================
+# ApprovalChainPreviewView —— 审批链预览
+# ============================================================================
+
+class TestApprovalChainPreviewView(UsersAPIExtraBase):
+    """审批链预览：参数校验 + 降级链构造（不创建工单）"""
+
+    @pytest.mark.integration
+    def test_missing_role_key_400(self):
+        """缺少 role_key → 400"""
+        resp = self.client.get(
+            '/api/v1/auth/permissions/approval-chain-preview/?scope_type=TEAM&scope_id=1',
+            **self.normal_headers,
+        )
+        assert resp.status_code == 400
+
+    @pytest.mark.integration
+    def test_invalid_scope_type_400(self):
+        """scope_type 取值非法 → 400"""
+        resp = self.client.get(
+            f'/api/v1/auth/permissions/approval-chain-preview/'
+            f'?role_key=viewer&scope_type=XXX&scope_id={self.team_b.id}',
+            **self.normal_headers,
+        )
+        assert resp.status_code == 400
+
+    @pytest.mark.integration
+    def test_scope_id_required_400(self):
+        """scope_type=TEAM 时必须提供 scope_id → 400"""
+        resp = self.client.get(
+            '/api/v1/auth/permissions/approval-chain-preview/?role_key=viewer&scope_type=TEAM',
+            **self.normal_headers,
+        )
+        assert resp.status_code == 400
+
+    @pytest.mark.integration
+    def test_role_not_found_400(self):
+        """预览不存在的角色 → 400"""
+        resp = self.client.get(
+            f'/api/v1/auth/permissions/approval-chain-preview/'
+            f'?role_key=ghost&scope_type=TEAM&scope_id={self.team_b.id}',
+            **self.normal_headers,
+        )
+        assert resp.status_code == 400
+
+    @pytest.mark.integration
+    def test_invalid_scope_id_400(self):
+        """scope_id 非整数 → 400"""
+        resp = self.client.get(
+            '/api/v1/auth/permissions/approval-chain-preview/?role_key=viewer&scope_type=TEAM&scope_id=abc',
+            **self.normal_headers,
+        )
+        assert resp.status_code == 400
+
+    @pytest.mark.integration
+    def test_preview_success(self):
+        """viewer 跨团队预览 → 200，组长缺失时返回降级后的超管单审链"""
+        resp = self.client.get(
+            f'/api/v1/auth/permissions/approval-chain-preview/'
+            f'?role_key=viewer&scope_type=TEAM&scope_id={self.team_b.id}',
+            **self.normal_headers,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data['total_steps'] == 1
+        assert data['chain'][0]['approver_role'] == 'SUPER_ADMIN'  # 目标团队组长缺失 → 降级
+        assert data['scope_name'] == '前端组'
+

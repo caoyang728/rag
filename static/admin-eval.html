@@ -26,21 +26,31 @@
 					</div>
 				</div>
 				<div class="tabs" id="evalTabs">
-					<div class="tab-item active" data-tab="golden" onclick="switchEvalTab('golden')">📋 测试集管理</div>
-					<div class="tab-item" data-tab="retrieval" onclick="switchEvalTab('retrieval')">🔍 检索评估</div>
-					<div class="tab-item" data-tab="answer" onclick="switchEvalTab('answer')">💬 回答质量</div>
-					<div class="tab-item" data-tab="doc" onclick="switchEvalTab('doc')">📄 文档质量</div>
-					<div class="tab-item" data-tab="coverage" onclick="switchEvalTab('coverage')">📊 覆盖率</div>
-					<div class="tab-item" data-tab="feedback" onclick="switchEvalTab('feedback')">🔄 反馈闭环</div>
-					<div class="tab-item" data-tab="attribution" onclick="switchEvalTab('attribution')">🧪 低分归因</div>
+				<!-- 顺序按「生产监控优先 → 治理巡检 → 运营闭环 → 离线评估殿后」排列：
+				     回答质量/低分归因/路由分析是日常高频生产监控;
+				     测试集+检索评估是部署前离线评估,低频且依赖测试集,放最后 -->
+				<div class="tab-item active" data-tab="answer" onclick="switchEvalTab('answer')">💬 回答质量</div>
+				<div class="tab-item" data-tab="attribution" onclick="switchEvalTab('attribution')">🧪 低分归因</div>
+				<div class="tab-item" data-tab="route" onclick="switchEvalTab('route')">🗺️ 路由分析</div>
+				<div class="tab-item" data-tab="doc" onclick="switchEvalTab('doc')">📄 文档质量</div>
+				<div class="tab-item" data-tab="wiki" onclick="switchEvalTab('wiki')">📖 Wiki 质量</div>
+				<div class="tab-item" data-tab="coverage" onclick="switchEvalTab('coverage')">📊 覆盖率</div>
+				<div class="tab-item" data-tab="feedback" onclick="switchEvalTab('feedback')">🔄 反馈闭环</div>
+				<div class="tab-item" data-tab="golden" onclick="switchEvalTab('golden')">📋 测试集管理</div>
+				<div class="tab-item" data-tab="retrieval" onclick="switchEvalTab('retrieval')">🔍 检索评估</div>
+				<!-- 溢出折叠：窗口放不下的 tab 由 refreshEvalTabs 动态收进「⋯ 更多」下拉，避免后面的 tab 不可见 -->
+				<div class="tab-more" id="evalTabsMore" style="display:none">
+					<div class="tab-more-trigger" onclick="toggleEvalMore(event)">⋯ 更多<span class="tab-more-count" id="evalTabsMoreCount"></span></div>
+					<div class="tab-more-menu" id="evalTabsMoreMenu"></div>
 				</div>
+			</div>
 			</div>
 
 			<!-- 下方滚动区 -->
 			<div class="eval-scroll">
 
 				<!-- ===== Tab: 测试集管理 ===== -->
-				<div class="tab-panel active" data-panel="golden">
+				<div class="tab-panel" data-panel="golden">
 					<!-- 工具栏：操作按钮 + 摘要 -->
 					<div class="eval-toolbar mb-16">
 						<div class="panel-header">
@@ -137,7 +147,7 @@
 				</div>
 
 				<!-- ===== Tab: 回答质量 ===== -->
-				<div class="tab-panel" data-panel="answer">
+				<div class="tab-panel active" data-panel="answer">
 					<!-- 工具栏：筛选器(左) + 手动评估(右) -->
 					<div class="eval-toolbar mb-16">
 						<div class="panel-header" style="flex-wrap:nowrap">
@@ -195,7 +205,8 @@
 						</div>
 						<div class="panel-body flex gap-16 eval-portrait-body">
 							<div class="eval-radar-wrap">
-								<svg id="evalRadar" viewBox="0 0 340 340"></svg>
+								<!-- 画布 440x380：中心 (220,190)，左右留空间给长标签,上下余量充足,渲染比例接近正方形 -->
+								<svg id="evalRadar" viewBox="0 0 440 380"></svg>
 							</div>
 							<div class="eval-dim-wrap" id="evalDimSparklines"></div>
 						</div>
@@ -255,7 +266,7 @@
 					<div class="panel mb-16">
 						<div class="panel-header"><div class="panel-title">文档质量分布</div></div>
 						<div class="panel-body">
-							<svg id="docDistChart" width="100%" height="160" viewBox="0 0 400 160"></svg>
+							<svg id="docDistChart" width="100%" height="140" viewBox="0 0 400 140"></svg>
 						</div>
 					</div>
 
@@ -490,6 +501,152 @@
 				</div>
 			</div>
 
+			<!-- ===== Tab: 路由分析（四层路由命中率与质量对比） ===== -->
+			<div class="tab-panel" data-panel="route">
+				<!-- 工具栏：时间窗口 + 组织筛选(左) + 手动聚合(右) -->
+				<div class="eval-toolbar mb-16">
+					<div class="panel-header" style="flex-wrap:nowrap">
+						<div class="flex gap-4 items-center" style="flex:1;min-width:0">
+							<select class="select" id="routeDays" onchange="loadRouteAnalysis()" style="width:110px;flex-shrink:0">
+								<option value="7">最近 7 天</option>
+								<option value="30">最近 30 天</option>
+								<option value="90">最近 90 天</option>
+							</select>
+							<select class="select" id="routeDept" style="width:160px;flex-shrink:0">
+								<option value="">全部部门</option>
+							</select>
+							<select class="select" id="routeTeam" onchange="loadRouteAnalysis()" style="width:160px;flex-shrink:0">
+								<option value="">全部团队</option>
+							</select>
+							<button class="btn" onclick="loadRouteAnalysis()" style="flex-shrink:0">🔄 刷新</button>
+							<div class="text-sub text-sm" id="routeSummary" style="white-space:nowrap;flex-shrink:0;margin-left:8px"></div>
+						</div>
+						<div class="flex gap-4 items-center" style="flex-shrink:0">
+							<input type="date" id="routeReportDate" class="input" style="width:150px" title="可选：指定回补的业务日期(留空聚合昨天)">
+							<button class="btn btn-primary" onclick="runRouteAggregate()">🗃️ 聚合路由数据</button>
+						</div>
+					</div>
+				</div>
+
+				<!-- KPI 卡片：总量 + 四层命中数 -->
+				<div class="kpi-grid mb-16">
+					<div class="kpi-card"><div class="kpi-label">路由请求数</div><div class="kpi-value" id="routeKpiTotal">--</div></div>
+					<div class="kpi-card kpi-good"><div class="kpi-label">Wiki 直答</div><div class="kpi-value" id="routeKpiWiki">--</div></div>
+					<div class="kpi-card"><div class="kpi-label">GraphRAG 局部</div><div class="kpi-value" id="routeKpiLocal">--</div></div>
+					<div class="kpi-card kpi-highlight"><div class="kpi-label">GraphRAG 全局</div><div class="kpi-value" id="routeKpiGlobal">--</div></div>
+					<div class="kpi-card"><div class="kpi-label">RAG 兜底</div><div class="kpi-value" id="routeKpiRag">--</div></div>
+				</div>
+
+				<!-- 四层命中分布 -->
+				<div class="panel mb-16">
+					<div class="panel-header">
+						<div class="panel-title">四层路由命中分布</div>
+						<div class="text-sub text-sm">命中率 = 该层命中数 / 路由请求总数；质量分 = 该层已评估 QA 的 12 维均分</div>
+					</div>
+					<div class="panel-body">
+						<table class="table" id="routeCoverageTable">
+							<thead>
+								<tr>
+									<th>路由层级</th><th>命中数</th><th>命中率</th>
+									<th>平均置信度</th><th>平均延迟(ms)</th><th>平均质量分</th>
+								</tr>
+							</thead>
+							<tbody id="routeCoverageBody">
+								<tr><td colspan="6" class="text-center text-sub">加载中...</td></tr>
+							</tbody>
+						</table>
+					</div>
+				</div>
+
+				<!-- 按天命中趋势（堆叠条） -->
+				<div class="panel mb-16">
+					<div class="panel-header">
+						<div class="panel-title">按天命中趋势</div>
+						<div class="text-sub text-sm">每天各层命中数堆叠展示，观察路由分流随内容更新的变化</div>
+					</div>
+					<div class="panel-body" id="routeTrendBody">
+						<div class="text-sub">加载中...</div>
+					</div>
+				</div>
+
+				<!-- 各层质量对比 -->
+				<div class="panel">
+					<div class="panel-header">
+						<div class="panel-title">各层回答质量对比</div>
+						<div class="text-sub text-sm">12 维按 4 大类聚合；无评估数据的层显示 "-"</div>
+					</div>
+					<div class="panel-body">
+						<table class="table" id="routeQualityTable">
+							<thead>
+								<tr>
+									<th>路由层级</th><th>整体均分</th>
+									<th>检索</th><th>回答质量</th><th>安全</th><th>业务</th>
+								</tr>
+							</thead>
+							<tbody id="routeQualityBody">
+								<tr><td colspan="6" class="text-center text-sub">加载中...</td></tr>
+							</tbody>
+						</table>
+					</div>
+				</div>
+			</div>
+
+			<!-- ===== Tab: Wiki 页面质量（忠实度/完整性） ===== -->
+			<div class="tab-panel" data-panel="wiki">
+				<!-- 工具栏：筛选 + 批量评估 -->
+				<div class="eval-toolbar mb-16">
+					<div class="panel-header">
+						<div class="flex gap-4 items-center">
+							<select class="select" id="wikiDays" onchange="loadWikiQuality()" style="width:110px;flex-shrink:0">
+								<option value="7">最近 7 天</option>
+								<option value="30">最近 30 天</option>
+								<option value="90">最近 90 天</option>
+							</select>
+							<select class="select" id="wikiDim" onchange="loadWikiQuality()" style="width:130px;flex-shrink:0">
+								<option value="">全部维度</option>
+								<option value="faithfulness">忠实度</option>
+								<option value="completeness">完整性</option>
+							</select>
+							<select class="select" id="wikiStatus" onchange="loadWikiQuality()" style="width:120px;flex-shrink:0">
+								<option value="">全部状态</option>
+								<option value="completed">已完成</option>
+								<option value="failed">失败</option>
+							</select>
+							<button class="btn btn-primary" onclick="runWikiQualityEval()">🔍 批量评估</button>
+						</div>
+						<div class="text-sub text-sm" id="wikiSummary"></div>
+					</div>
+				</div>
+
+				<!-- KPI 卡片 -->
+				<div class="kpi-grid mb-16">
+					<div class="kpi-card"><div class="kpi-label">评估页面数</div><div class="kpi-value" id="wikiKpiPages">--</div></div>
+					<div class="kpi-card kpi-good"><div class="kpi-label">平均忠实度</div><div class="kpi-value" id="wikiKpiFaithfulness">--</div></div>
+					<div class="kpi-card kpi-highlight"><div class="kpi-label">平均完整性</div><div class="kpi-value" id="wikiKpiCompleteness">--</div></div>
+					<div class="kpi-card kpi-red"><div class="kpi-label">失败页面</div><div class="kpi-value" id="wikiKpiFailed">--</div></div>
+				</div>
+
+				<!-- 页面质量明细 -->
+				<div class="panel">
+					<div class="panel-header">
+						<div class="panel-title">Wiki 页面质量明细</div>
+						<div class="text-sub text-sm">忠实度 = 内容忠于源文档(无幻觉)；完整性 = 覆盖源文档关键要点；点击"查看理由"看评估依据</div>
+					</div>
+					<div class="panel-body">
+						<table class="table" id="wikiQualityTable">
+							<thead>
+								<tr>
+									<th>页面 ID</th><th>标题</th><th>忠实度</th><th>完整性</th><th>更新时间</th><th>操作</th>
+								</tr>
+							</thead>
+							<tbody id="wikiQualityBody">
+								<tr><td colspan="6" class="text-center text-sub">加载中...</td></tr>
+							</tbody>
+						</table>
+					</div>
+				</div>
+			</div>
+
 		</div><!-- /.eval-scroll -->
 		</div>
 	</div>
@@ -555,6 +712,19 @@
 			</div>
 			<div class="dialog-footer">
 				<button class="btn" onclick="closeDialog('attrDetailDialog')">关闭</button>
+			</div>
+		</div>
+	</div>
+
+	<!-- Dialog: Wiki 页面质量详情 -->
+	<div class="dialog-mask" id="wikiDetailDialog" style="display:none">
+		<div class="dialog dialog-lg">
+			<div class="dialog-title">Wiki 页面质量 · <span id="wikiDetailTitle">--</span></div>
+			<div class="dialog-body" id="wikiDetailBody">
+				<div class="text-sub">加载中...</div>
+			</div>
+			<div class="dialog-footer">
+				<button class="btn" onclick="closeDialog('wikiDetailDialog')">关闭</button>
 			</div>
 		</div>
 	</div>

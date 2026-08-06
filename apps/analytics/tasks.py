@@ -667,3 +667,87 @@ def run_regression_evaluation_task(dataset_id: int = None, limit: int = None):
     except Exception:
         logger.exception('[RegressionEval] 评估失败')
         return {'ok': False, 'error': 'eval_failed'}
+
+
+# ============================================================================
+# 14. 路由决策分析聚合（每日）+ Wiki 页面质量评估
+# ============================================================================
+
+@shared_task(name='analytics.aggregate_route_analysis_daily', queue='analytics')
+def aggregate_route_analysis_daily(report_date: str = None):
+    """每日聚合前一天带路由来源的 QaRecord → RouteAnalysis
+
+    把 QaRecord.route_source/route_trace 沉淀到 RouteAnalysis 表，
+    评估看板「路由分析」Tab 据此展示四层命中率/置信度/延迟/质量对比，
+    避免看板实时扫描大表 QaRecord。幂等：qa_record_id 唯一，重复执行覆盖。
+
+    Args:
+        report_date: 可选，指定业务日期(YYYY-MM-DD)；None 用昨天
+
+    Returns:
+        {'ok': True, 'report_date': str, 'total': int, 'created': int, 'updated': int}
+    """
+    from apps.analytics.utils import aggregate_route_analysis
+
+    target = None
+    if report_date:
+        try:
+            target = timezone.datetime.strptime(report_date, '%Y-%m-%d').date()
+        except ValueError:
+            logger.warning(f'[RouteAnalysis] 非法日期参数 {report_date}，回退默认昨天')
+    try:
+        result = aggregate_route_analysis(report_date=target)
+        logger.info(f'[RouteAnalysis] daily done: {result}')
+        return {'ok': True, **result}
+    except Exception:
+        logger.exception('[RouteAnalysis] daily aggregation failed')
+        return {'ok': False, 'error': 'aggregation_failed'}
+
+
+@shared_task(name='analytics.batch_evaluate_wiki_quality', queue='analytics')
+def batch_evaluate_wiki_quality(days: int = 7, limit: int = None):
+    """批量评估近期发布/刷新的 Wiki 页面质量（忠实度 + 完整性）
+
+    选取策略：node 挂载型已发布页面，优先取「从未评估」或「N 天内更新过」的，
+    避免每次全量重评估造成 LLM 成本浪费；limit 限制单次评估页面数。
+
+    Args:
+        days: 只重评估最近 N 天更新过的页面（默认 7）
+        limit: 单次最多评估的页面数；None 不限制
+
+    Returns:
+        {'ok': True, 'evaluated': int, 'failed': int, 'skipped': int}
+    """
+    from django.db.models import Q
+    from apps.analytics.wiki_eval import evaluate_wiki_page
+    from apps.wiki.models import WikiPage
+
+    since = timezone.now() - timedelta(days=days)
+    qs = WikiPage.objects.filter(
+        status='published', node__isnull=False,
+    ).filter(
+        # 从未评估（quality_scores 为空）或近期更新过，避免重复评估成本
+        Q(quality_scores__isnull=True) | Q(updated_at__gte=since),
+    ).distinct()
+    if limit:
+        qs = qs[:limit]
+
+    evaluated = failed = skipped = 0
+    for page in qs:
+        try:
+            result = evaluate_wiki_page(page.id)
+            if result.get('ok'):
+                evaluated += 1
+            elif result.get('skipped'):
+                # 无源切片/社区页/空内容等场景不算失败
+                skipped += 1
+            else:
+                failed += 1
+        except Exception:
+            logger.warning(f'[WikiEval] page_id={page.id} 评估异常')
+            failed += 1
+
+    logger.info(
+        f'[WikiEval] batch done: evaluated={evaluated}, failed={failed}, skipped={skipped}'
+    )
+    return {'ok': True, 'evaluated': evaluated, 'failed': failed, 'skipped': skipped}

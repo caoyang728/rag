@@ -67,6 +67,16 @@ urlpatterns = [
     path("eval-dashboard/trend/", views.EvalDashboardTrendView.as_view()),
     path("eval-dashboard/low-score-qa/", views.EvalDashboardLowScoreView.as_view()),
     path("eval-dashboard/qa-detail/", views.EvalDashboardQaDetailView.as_view()),
+    # 路由分析看板（四层命中率 + 各维均分对比，数据由每日聚合任务供数）
+    path("eval-dashboard/route-analysis/", views.RouteAnalysisDashboardView.as_view()),
+    # 手动触发路由分析聚合（可选 report_date 回补指定日期）
+    path("route-analysis/aggregate/", views.RouteAnalysisAggregateView.as_view()),
+
+    # ========================================================================
+    # RAG 质量评估 - Wiki 页面质量（忠实度/完整性）
+    # ========================================================================
+    path("wiki-quality/", views.WikiQualityListView.as_view()),
+    path("wiki-quality/evaluate/", views.WikiQualityEvaluateView.as_view()),
 
     # ========================================================================
     # RAG 质量评估 - 覆盖率 & 反馈闭环

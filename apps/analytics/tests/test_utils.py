@@ -430,3 +430,78 @@ class TestGetQueueDepthHistory:
 
         result = utils.get_queue_depth_history(hours=24)
         assert [r['queue_name'] for r in result] == ['parse', 'default']
+
+
+@pytest.mark.django_db
+class TestAggregateRouteAnalysis(UtilsDBTestBase):
+    """aggregate_route_analysis 路由决策分析按日聚合"""
+
+    def _create_routed_qa(self, route_source, trace=None, latency_ms=100, **kw):
+        """创建带路由来源的 QA 记录（默认单层 route_trace）"""
+        defaults = dict(
+            route_source=route_source,
+            route_trace=trace or [
+                {'layer': route_source, 'confidence': 0.8, 'latency_ms': 50}],
+            latency_total_ms=latency_ms,
+        )
+        defaults.update(kw)
+        return self._create_qa(**defaults)
+
+    def test_aggregates_route_row(self):
+        """正常路径：QA → RouteAnalysis，携带 source/置信度/延迟/质量分/提问时间"""
+        from apps.analytics.models import RouteAnalysis, MultiDimensionScore
+        qa = self._create_routed_qa('wiki', latency_ms=200)
+        # 该 QA 已有 12 维评估（仅 1 维，均分=0.9）
+        MultiDimensionScore.objects.create(
+            qa_record=qa, dimension='faithfulness', score=0.9,
+            reason='r', eval_model='deepseek-chat', status='completed')
+
+        result = utils.aggregate_route_analysis(report_date=self.report_date)
+
+        assert result['total'] == 1
+        assert result['created'] == 1
+        route = RouteAnalysis.objects.get(qa_record_id=qa.id)
+        assert route.route_source == 'wiki'
+        assert route.confidence == 0.8
+        assert route.latency_ms == 200
+        assert route.answer_quality == 0.9
+        assert route.qa_created_at == qa.created_at
+
+    def test_idempotent(self):
+        """重复执行 → 覆盖而非新增（qa_record_id 唯一，聚合任务幂等）"""
+        from apps.analytics.models import RouteAnalysis
+        self._create_routed_qa('rag')
+
+        first = utils.aggregate_route_analysis(report_date=self.report_date)
+        second = utils.aggregate_route_analysis(report_date=self.report_date)
+
+        assert first['created'] == 1 and first['updated'] == 0
+        assert second['created'] == 0 and second['updated'] == 1
+        assert RouteAnalysis.objects.count() == 1
+
+    def test_confidence_takes_last_trace_layer(self):
+        """confidence 取 route_trace 最后一层（路由按序尝试、命中即返回，末层即胜出层）"""
+        from apps.analytics.models import RouteAnalysis
+        trace = [
+            {'layer': 'wiki', 'confidence': 0.9, 'latency_ms': 10},
+            {'layer': 'rag', 'confidence': 0.3, 'latency_ms': 20},
+        ]
+        self._create_routed_qa('rag', trace=trace)
+
+        utils.aggregate_route_analysis(report_date=self.report_date)
+
+        route = RouteAnalysis.objects.get(route_source='rag')
+        assert route.confidence == 0.3
+
+    def test_excludes_qa_without_route(self):
+        """无路由来源(route_source 为空)的 QA 不进入路由分析表"""
+        self._create_qa(route_source='')  # 普通 RAG 问答，无路由决策
+        result = utils.aggregate_route_analysis(report_date=self.report_date)
+        assert result['total'] == 0
+
+    def test_default_report_date_is_yesterday(self):
+        """未传 report_date 时按昨天聚合（今天数据不落库）"""
+        from apps.analytics.models import RouteAnalysis
+        self._create_routed_qa('wiki')  # created_at = 今天
+        utils.aggregate_route_analysis()
+        assert RouteAnalysis.objects.count() == 0

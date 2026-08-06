@@ -95,6 +95,19 @@ app.conf.beat_schedule = {
         'task': 'apps.graph.tasks.community_detection_task',
         'schedule': crontab(hour=3, minute=0),
     },
+    # 每日 02:50 聚合前一天路由决策分析（四层命中率/置信度/延迟供看板，依赖 QaRecord 落库）
+    # 放在 02:00 系统指标聚合之后，避免同时扫 QaRecord 大表
+    'route-analysis-daily': {
+        'task': 'apps.analytics.tasks.aggregate_route_analysis_daily',
+        'schedule': crontab(hour=2, minute=50),
+    },
+    # 每日 04:45 批量评估 Wiki 页面质量（忠实度/完整性，LLM-as-Judge 成本高）
+    # 放在 04:00 wiki-refresh-expired 之后，优先评估刚刷新的页面；选取策略已按
+    # "从未评估或近期更新"过滤，日常执行基本空转，避免重复评估浪费
+    'wiki-quality-daily': {
+        'task': 'apps.analytics.tasks.batch_evaluate_wiki_quality',
+        'schedule': crontab(hour=4, minute=45),
+    },
     # 每日 04:00 刷新过期的 Wiki 页面（文档变更后被标记 expired，重新生成）
     'wiki-refresh-expired': {
         'task': 'apps.wiki.tasks.refresh_expired_wiki_pages',

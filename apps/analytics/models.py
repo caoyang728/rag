@@ -738,24 +738,77 @@ class LowScoreAnalysis(models.Model):
 # ============================================================================
 
 class RouteAnalysis(models.Model):
-    """路由决策分析 - 记录每次路由决策，支撑三层架构的命中率与质量对比
+    """路由决策分析 - 记录每次路由决策，支撑四层架构的命中率与质量对比
 
     - route_source: 最终命中的来源（wiki / graphrag_local / graphrag_global / rag）
-    - route_trace: 三层链路每层的置信度与耗时快照
-    - answer_quality: 可选，与生产评估/反馈关联后的质量分（0-1）
+    - route_trace: 路由链路每层的置信度与耗时快照
+    - answer_quality: 与生产评估/反馈关联后的质量分（0-1，12 维均分）
+    - qa_record_id: 来源 QaRecord.id（唯一），保证每日聚合任务 update_or_create 幂等
     """
 
     id = models.BigAutoField(primary_key=True)
+    # 来源 QA 记录（唯一键：同一条 QA 只保留一份路由分析，重复聚合不产生脏数据）
+    qa_record_id = models.BigIntegerField(unique=True, db_index=True, null=True, blank=True,
+                                          help_text='来源 QaRecord.id，聚合幂等键')
     question = models.TextField()
     route_source = models.CharField(max_length=32, db_index=True)
     confidence = models.FloatField(default=0.0)
     route_trace = models.JSONField(default=list, blank=True)
     latency_ms = models.IntegerField(default=0)
     answer_quality = models.FloatField(null=True, blank=True)
+    # 来源 QA 的提问时间（看板按天窗口按此过滤；created_at 是聚合时间不可覆盖）
+    qa_created_at = models.DateTimeField(null=True, blank=True, db_index=True,
+                                         help_text='来源 QaRecord.created_at，看板时间窗口过滤键')
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
     class Meta:
         db_table = 'analytics_route'
         indexes = [
             models.Index(fields=['route_source', 'created_at'], name='idx_ar_source_time'),
+            models.Index(fields=['created_at', 'route_source'], name='idx_ar_time_source'),
         ]
+
+
+class WikiPageQualityScore(models.Model):
+    """Wiki 页面质量评估 - 对发布的 WikiPage 按源文档 chunks 做 LLM-as-Judge
+
+    - faithfulness(忠实度): 页面内容是否忠于源文档切片（无幻觉）
+    - completeness(完整性): 页面是否完整覆盖源文档的关键要点
+
+    与 MultiDimensionScore 的关系：维度定义与 DeepEval 12 维语义一致，
+    但评估对象是 Wiki 页面而非对话，故独立建表（qa_record 关联不适用）。
+    """
+
+    DIMENSION_CHOICES = [
+        ('faithfulness', '忠实度'),
+        ('completeness', '完整性'),
+    ]
+    STATUS_CHOICES = [
+        ('completed', '已完成'),
+        ('failed', '失败'),
+    ]
+
+    id = models.BigAutoField(primary_key=True)
+    page = models.ForeignKey('wiki.WikiPage', on_delete=models.CASCADE,
+                             db_column='page_id', related_name='quality_scores')
+    dimension = models.CharField(max_length=32, choices=DIMENSION_CHOICES)
+    score = models.FloatField(default=0.0, help_text='0-1 分')
+    reason = models.TextField(default='', blank=True, help_text='评估理由')
+    eval_model = models.CharField(max_length=64, default='deepseek-chat')
+    eval_latency_ms = models.IntegerField(default=0)
+    status = models.CharField(max_length=16, default='completed', choices=STATUS_CHOICES)
+    error_message = models.TextField(default='', blank=True, help_text='失败原因(status=failed 时填充)')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'analytics_wiki_page_quality_score'
+        # 同页面同维度只保留一次最新评估（重新评估覆盖）
+        unique_together = [('page', 'dimension')]
+        indexes = [
+            models.Index(fields=['page', 'dimension'], name='idx_wpqs_page_dim'),
+            models.Index(fields=['-updated_at'], name='idx_wpqs_time'),
+        ]
+
+    def __str__(self):
+        return f'WikiScore<{self.page_id}>{self.dimension}={self.score}'

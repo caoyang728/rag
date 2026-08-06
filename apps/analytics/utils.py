@@ -526,3 +526,84 @@ def get_queue_depth_history(hours: int = 24) -> list:
         })
 
     return result
+
+
+# ============================================================================
+# 6. 路由决策分析聚合（QaRecord → RouteAnalysis）
+# ============================================================================
+
+def aggregate_route_analysis(report_date: Optional[date] = None) -> dict:
+    """按日聚合带路由来源的 QaRecord → RouteAnalysis
+
+    目的：把 QaRecord.route_source/route_trace 沉淀到独立的 RouteAnalysis 表，
+    供评估看板「路由分析」Tab 直接聚合四层命中率/置信度/延迟/质量分对比，
+    避免看板每次实时扫描大表 QaRecord。
+
+    - 幂等：RouteAnalysis.qa_record_id 唯一，重复执行 update_or_create 覆盖
+    - confidence：取 route_trace 最后一层（路由按序尝试、命中即返回，末层即胜出层）
+    - latency_ms：QaRecord.latency_total_ms
+    - answer_quality：该 QA 已有 12 维评估时填充均分，否则 None
+    - qa_created_at：透传 QA 提问时间，看板按天窗口按此过滤
+
+    Args:
+        report_date: 目标业务日期;None 用昨天
+
+    Returns:
+        {'report_date': str, 'total': int, 'created': int, 'updated': int}
+    """
+    # 局部导入：避免与 analytics 顶层 import 形成循环依赖（chat 依赖 analytics 模型）
+    from apps.analytics.models import RouteAnalysis, MultiDimensionScore
+    from apps.chat.models import QaRecord
+
+    target = report_date or (timezone.localdate() - timedelta(days=1))
+
+    qa_qs = QaRecord.objects.filter(
+        created_at__date=target,
+    ).exclude(route_source__isnull=True).exclude(route_source='')
+
+    qa_ids = list(qa_qs.values_list('id', flat=True))
+
+    # 批量取这些 QA 的 12 维均分（一次 GROUP BY，避免 N+1）
+    avg_map = {}
+    if qa_ids:
+        score_agg = MultiDimensionScore.objects.filter(
+            qa_record_id__in=qa_ids,
+        ).values('qa_record_id').annotate(avg_score=models.Avg('score'))
+        avg_map = {r['qa_record_id']: float(r['avg_score'] or 0) for r in score_agg}
+
+    created = updated = 0
+    for qa in qa_qs.only(
+        'id', 'question', 'route_source', 'route_trace', 'latency_total_ms', 'created_at'
+    ).iterator():
+        trace = qa.route_trace or []
+        confidence = 0.0
+        if trace:
+            last = trace[-1]
+            confidence = float(last.get('confidence', 0.0) or 0.0)
+        _, was_created = RouteAnalysis.objects.update_or_create(
+            qa_record_id=qa.id,
+            defaults={
+                'question': qa.question,
+                'route_source': qa.route_source,
+                'confidence': confidence,
+                'route_trace': trace,
+                'latency_ms': qa.latency_total_ms or 0,
+                'answer_quality': avg_map.get(qa.id),
+                'qa_created_at': qa.created_at,
+            },
+        )
+        if was_created:
+            created += 1
+        else:
+            updated += 1
+
+    logger.info(
+        f'[RouteAnalysis] aggregated {target}: total={len(qa_ids)}, '
+        f'created={created}, updated={updated}'
+    )
+    return {
+        'report_date': str(target),
+        'total': len(qa_ids),
+        'created': created,
+        'updated': updated,
+    }

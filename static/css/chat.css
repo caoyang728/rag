@@ -371,6 +371,28 @@
 	background: var(--danger-hover, #dc2626);
 }
 
+/* 发送中转圈状态：等待后端响应 */
+.chat-send-btn.sending {
+	background: var(--primary, #3b82f6);
+	opacity: 0.7;
+	cursor: wait;
+}
+
+/* 按钮内 spinner */
+.btn-spinner {
+	display: inline-block;
+	width: 16px;
+	height: 16px;
+	border: 2px solid rgba(255, 255, 255, 0.3);
+	border-top-color: #fff;
+	border-radius: 50%;
+	animation: btn-spin 0.6s linear infinite;
+}
+
+@keyframes btn-spin {
+	to { transform: rotate(360deg); }
+}
+
 /* 消息样式 */
 .msg-wrap {
 	display: flex;

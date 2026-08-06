@@ -226,6 +226,9 @@ def _read_config_from_db(key: str):
     """从 SystemConfig 表读取 value + value_type
 
     Returns: (value_str, value_type) ；DB 异常或未找到返回 (None, 'string')
+
+    启动期 Django apps 尚未加载，ORM 查询会抛 "Apps aren't loaded yet"，
+    此时降级为 DEBUG 日志（预期行为，非真正异常）；其他异常仍记录 WARNING。
     """
     try:
         from .models import SystemConfig
@@ -234,7 +237,11 @@ def _read_config_from_db(key: str):
             return None, 'string'
         return row.value, row.value_type
     except Exception as e:
-        logger.warning(f'[config_loader] 读 SystemConfig 失败 key={key}: {e}')
+        err_msg = str(e)
+        if 'Apps aren\'t loaded yet' in err_msg:
+            logger.debug(f'[config_loader] 启动期 Django apps 未就绪，跳过 DB 读取 key={key}: {e}')
+        else:
+            logger.warning(f'[config_loader] 读 SystemConfig 失败 key={key}: {e}')
         return None, 'string'
 
 
@@ -259,7 +266,10 @@ def _read_llm_model_from_db(model_name: str, model_type: Optional[str]) -> Optio
             'is_active': row.is_active,
         }
     except Exception as e:
-        logger.warning(f'[config_loader] 读 LLMModel 失败 model={model_name}: {e}')
+        if 'Apps aren\'t loaded yet' in str(e):
+            logger.debug(f'[config_loader] 启动期跳过 LLMModel 读取 model={model_name}: {e}')
+        else:
+            logger.warning(f'[config_loader] 读 LLMModel 失败 model={model_name}: {e}')
         return None
 
 

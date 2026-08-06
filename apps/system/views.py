@@ -7,9 +7,10 @@ system views
 - CRUD /api/v1/system/llm-models/  LLM/Embedding/Rerank 模型配置管理
 - /api/v1/system/config-tickets/  配置变更工单（创建/审批/驳回/撤回）
 """
-from loguru import logger
 import json
 import time
+
+from loguru import logger
 
 from django.db import connection, transaction
 from django.contrib.auth import get_user_model

@@ -12,7 +12,7 @@ services:
   #   environment:
   #     POSTGRES_DB: ${POSTGRES_DB:-rag_agent}
   #     POSTGRES_USER: ${POSTGRES_USER:-rag_user}
-  #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rag_pass_2026}
+  #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-please_set_in_env}
   #     TZ: Asia/Shanghai
   #   volumes:
   #     - postgres_data:/var/lib/postgresql/data

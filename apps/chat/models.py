@@ -74,6 +74,13 @@ class QaRecord(models.Model):
     is_task_split = models.BooleanField(default=False, help_text='是否触发复杂任务拆分')
     error_message = models.TextField(blank=True, default='')
 
+    # --- 路由来源（LLM Wiki / GraphRAG / RAG 三层路由）---
+    # 记录本次问答的路由决策链路，用于评估与监控各层命中率/置信度/延迟对比
+    route_source = models.CharField(max_length=32, null=True, blank=True,
+                                    help_text='路由来源: wiki/graphrag_local/graphrag_global/rag/agent')
+    route_trace = models.JSONField(null=True, blank=True,
+                                   help_text='路由决策追踪日志（每层置信度与耗时）')
+
     # --- 错误类型分类（结构化统计 LLM/Embedding 失败原因）---
     # 缓存命中时 error_type 为空字符串；LLM 调用失败时分类记录，
     # 用于统计 timeout_rate、rate_limit_rate、embedding_error_rate 等细分指标

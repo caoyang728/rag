@@ -90,6 +90,16 @@ app.conf.beat_schedule = {
         'task': 'apps.analytics.tasks.run_regression_evaluation_task',
         'schedule': crontab(hour=6, minute=0, day_of_week=1),
     },
+    # 每日 03:00 社区检测 + 摘要生成（低峰期，图谱增量后整体重建社区）
+    'graph-community-detection': {
+        'task': 'apps.graph.tasks.community_detection_task',
+        'schedule': crontab(hour=3, minute=0),
+    },
+    # 每日 04:00 刷新过期的 Wiki 页面（文档变更后被标记 expired，重新生成）
+    'wiki-refresh-expired': {
+        'task': 'apps.wiki.tasks.refresh_expired_wiki_pages',
+        'schedule': crontab(hour=4, minute=0),
+    },
 }
 
 

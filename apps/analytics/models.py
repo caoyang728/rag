@@ -731,3 +731,31 @@ class LowScoreAnalysis(models.Model):
             models.Index(fields=['root_cause_category', '-created_at'], name='idx_lsa_cat_time'),
             models.Index(fields=['status', '-created_at'], name='idx_lsa_status_time'),
         ]
+
+
+# ============================================================================
+# 三层路由评估（LLM Wiki / GraphRAG / RAG）
+# ============================================================================
+
+class RouteAnalysis(models.Model):
+    """路由决策分析 - 记录每次路由决策，支撑三层架构的命中率与质量对比
+
+    - route_source: 最终命中的来源（wiki / graphrag_local / graphrag_global / rag）
+    - route_trace: 三层链路每层的置信度与耗时快照
+    - answer_quality: 可选，与生产评估/反馈关联后的质量分（0-1）
+    """
+
+    id = models.BigAutoField(primary_key=True)
+    question = models.TextField()
+    route_source = models.CharField(max_length=32, db_index=True)
+    confidence = models.FloatField(default=0.0)
+    route_trace = models.JSONField(default=list, blank=True)
+    latency_ms = models.IntegerField(default=0)
+    answer_quality = models.FloatField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        db_table = 'analytics_route'
+        indexes = [
+            models.Index(fields=['route_source', 'created_at'], name='idx_ar_source_time'),
+        ]

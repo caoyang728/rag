@@ -243,6 +243,12 @@ def parse_document(document_id: int):
         doc.chunk_count = len(chunk_objs)
         doc.error_message = ''
         doc.save(update_fields=['status', 'chunk_count', 'error_message', 'updated_at'])
+
+        # 文档解析完成，触发图谱抽取 + Wiki 联动（异步，不阻塞解析流程）
+        from apps.graph.sync import on_document_done
+        from apps.wiki.sync import on_document_done_for_wiki
+        on_document_done(doc.id)
+        on_document_done_for_wiki(doc.id)
         
         if not getattr(settings, 'DOCUMENT_RETENTION_ENABLED', True):
             print(f"  清理原始文件...")

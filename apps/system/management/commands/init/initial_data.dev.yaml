@@ -1,0 +1,82 @@
+# ==========================================================================
+# 开发环境初始化数据（示例部门 & 团队）
+# 仅开发期间使用，生产环境不应加载
+# 由 init_system.py --with-org 时合并到主配置中
+# 角色 / 权限 / 系统配置等固定数据见同目录 initial_data.yaml
+# ==========================================================================
+
+# ------------------------------
+# 初始部门 & 团队（2 层扁平：部门 → 团队）
+# ------------------------------
+departments:
+  - name: 研发部
+    code: RD
+    sort_order: 10
+
+  - name: 产品部
+    code: PM
+    sort_order: 20
+
+  - name: 运营部
+    code: OP
+    sort_order: 30
+
+  - name: 行政人事部
+    code: HR
+    sort_order: 40
+
+teams:
+  - name: 后端开发组
+    code: RD-BE
+    description: 后端研发团队
+    department: 研发部
+
+  - name: 前端开发组
+    code: RD-FE
+    description: 前端研发团队
+    department: 研发部
+
+  - name: AI算法组
+    code: RD-AI
+    description: AI算法研发团队
+    department: 研发部
+
+  - name: 产品经理组
+    code: PM-MGR
+    description: 产品经理团队
+    department: 产品部
+
+  - name: UI设计组
+    code: PM-UI
+    description: UI/UX设计团队
+    department: 产品部
+
+  - name: 内容运营组
+    code: OP-CONTENT
+    description: 内容运营团队
+    department: 运营部
+
+  - name: 用户运营组
+    code: OP-USER
+    description: 用户运营团队
+    department: 运营部
+
+  - name: 招聘组
+    code: HR-REC
+    description: 招聘团队
+    department: 行政人事部
+
+  - name: 培训组
+    code: HR-TRN
+    description: 培训团队
+    department: 行政人事部
+
+  - name: RAG项目组
+    code: RAG-PROJ
+    description: RAG知识库平台项目组
+    department: 研发部
+
+  - name: 数据安全组
+    code: SEC-DATA
+    description: 数据安全与合规团队
+    department: 研发部

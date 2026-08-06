@@ -42,3 +42,21 @@ models/
 celerybeat-schedule*
 *.override.yml
 !docker-compose.override.yml.example
+
+# Scripts 临时目录（临时校验/测试脚本，不入 git，随时可删）
+scripts/tmp/
+
+# Scripts 上传目录（仅保留目录结构，内部文档不入 git）
+scripts/upload/*
+!scripts/upload/.gitkeep
+
+# 测试与评估生成物（不入 git）
+.pytest_cache/
+.deepeval/
+.coverage
+.coverage.*
+coverage_report/
+
+# Django 模板预留目录（保留结构，模板源码入 git）
+templates/*
+!templates/.gitkeep

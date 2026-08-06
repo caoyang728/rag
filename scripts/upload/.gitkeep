@@ -1,0 +1,2 @@
+# 此目录用于存放批量上传的文档，由 scripts/batch_import_docs.py 读取
+# 目录内部文档不入 git（见 .gitignore），仅保留目录结构

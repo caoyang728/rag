@@ -872,6 +872,12 @@ class DocumentViewSet(viewsets.ModelViewSet):
             delete_by_document(doc.id)
         except Exception:
             logger.exception("delete vector failed")
+        # 文档删除联动：清理该文档产生的图谱数据（失败不阻断删除流程）
+        try:
+            from apps.graph.sync import on_document_deleted
+            on_document_deleted(doc.id)
+        except Exception:
+            logger.exception("graph sync on document delete failed")
         return Response(status=204)
 
     @action(detail=True, methods=["post"])

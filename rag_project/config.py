@@ -45,7 +45,8 @@ class DatabaseConfig:
         port = os.getenv('PG_DB_PORT', '5432')
         db = os.getenv('PG_DB_DATABASE', 'rag_agent')
         user = os.getenv('PG_DB_USER', 'rag_user')
-        password = os.getenv('PG_DB_PASSWORD', 'rag_pass_2026')
+        # 密码仅从 env 读取，不保留默认口令（防止凭据硬编码进代码/镜像）
+        password = os.getenv('PG_DB_PASSWORD', '')
         return f'postgres://{user}:{password}@{host}:{port}/{db}'
 
     @staticmethod

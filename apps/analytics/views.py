@@ -183,7 +183,9 @@ class DailyReportView(APIView):
     def get(self, request):
         from django.db.models.functions import TruncDate
 
-        today = timezone.now().date()
+        # 本地业务日期而非 UTC 日期：timezone.now().date() 在凌晨时段与 PG
+        # __date/TruncDate 的本地时区转换相差一天，导致今日数据统计错天（与 Trend 视图一致）
+        today = timezone.localdate()
         yesterday = today - timedelta(days=1)
         root_type = request.query_params.get("root_type")
 
@@ -263,7 +265,7 @@ class TrendReportView(APIView):
                 return Response({"detail": "days 必须为整数"}, status=400)
             if days < 1 or days > 365:
                 return Response({"detail": "days 范围应为 1-365"}, status=400)
-            end_date = timezone.now().date()
+            end_date = timezone.localdate()
             start_date = end_date - timedelta(days=days - 1)
 
         # 构造 QaRecord 基础过滤 QS，先不要调用 values()，方便后续复用两次聚合

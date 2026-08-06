@@ -244,7 +244,9 @@ def increment_realtime_metrics(qa_record):
     - 指标用途：Dashboard 实时展示今日数据概览，精确 P50/P95 仍以 T+1 报表为准
     """
     r = _get_redis_safe()
-    today = timezone.now().date().isoformat()
+    # 实时指标 key 按"今日"业务日期生成：timezone.now().date() 返回 UTC 日期，
+    # 本地凌晨时段会落到前一天 key 上，导致 Dashboard 今日数据错位
+    today = timezone.localdate().isoformat()
     key = f'analytics:realtime:{today}'
 
     pipe = r.pipeline()
@@ -276,7 +278,7 @@ def get_realtime_snapshot():
     last_flush_at 用于 Dashboard 判断 Redis 数据是否新鲜（>10 分钟未刷新则降级）。
     """
     r = _get_redis_safe()
-    today = timezone.now().date().isoformat()
+    today = timezone.localdate().isoformat()
     key = f'analytics:realtime:{today}'
 
     data = r.hgetall(key)
@@ -303,7 +305,7 @@ def flush_realtime_metrics():
     - 不移动或删除数据，确保 Dashboard 始终可读取
     """
     r = _get_redis_safe()
-    today = timezone.now().date().isoformat()
+    today = timezone.localdate().isoformat()
     key = f'analytics:realtime:{today}'
 
     r.hset(key, 'last_flush_at', int(timezone.now().timestamp()))

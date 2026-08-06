@@ -1,22 +1,32 @@
 # RAG-Agent 企业级知识库平台
 
-> Django 5 + DRF + Celery + PostgreSQL(pgvector) + Redis + DeepSeek 全栈落地，一个面向企业内部的、可审计、可运维、可评估的 RAG 问答系统。
+> Django 5 + DRF + Celery + PostgreSQL(pgvector) + Redis + DeepSeek 全栈落地的 RAG 问答系统，以企业级知识库常见能力（审计、运维、权限、质量评估）为设计蓝本，适合研究学习使用。
+
+> **免责声明**：本项目为研究学习用途的示例项目，代码、业务场景与组织架构均为演示设计，不承诺生产环境适用性；请勿直接部署用于生产环境。
+
+> **混合架构（LLM Wiki + GraphRAG + RAG）**：问答检索采用三层路由编排，按置信度逐层降级：
+> 1. **LLM Wiki 快速命中**（置信度 ≥ 0.68）：直接返回基于知识节点文档或图谱社区自动生成的 Wiki 页面，延迟最低；
+> 2. **GraphRAG**（置信度 ≥ 0.45）：实体/关系局部检索（graphrag_local）+ Louvain 社区摘要全局检索（graphrag_global），回答结构化关系型问题；
+> 3. **RAG 兜底**：pgvector 向量 + BM25 + RRF 混合检索 + Rerank 重排，格式化 Top 5 片段作为上下文。
+> 每层路由的置信度与耗时记录到 `route_trace`，随问答记录落库，由 RouteAnalysis 持续评估各层命中率与回答质量对比。
 
 ---
 
 ## 一、项目特性
 
+- **三层混合架构（LLM Wiki + GraphRAG + RAG）**：问答按置信度逐层路由——Wiki 页面直接命中 → 图谱实体/关系与社区摘要 → 混合检索兜底，各层命中率与回答质量持续评估对比
 - **混合检索 + Rerank**：pgvector 向量检索 + BM25 关键词检索 + RRF 融合 + BGE-Reranker 重排序，二次权限过滤保证安全
-- **五层权限模型**：可见范围（TEAM_ONLY/DEPT_ONLY/PUBLIC）+ 主动共享（部门/团队/个人统一表）+ 黑名单（Deny Override 铁律）+ 双审流程 + 权限申请工单双轨制
 - **流式问答**：SSE 流式响应，TTFB/总延迟展示，AbortController 终止，断线自动保存部分回答
-- **文档全生命周期**：多格式解析（PDF/DOCX/Markdown/代码/表格/PPT）→ 语义感知切分 → 数据脱敏 → 向量化 → 版本管理 + 软删除
-- **PDF 深度解析**：PyMuPDF `find_tables()` 表格提取 + 跨页表格合并 + 图片提取（base64 + OSS 双存储）
-- **RAG 质量评估中心**：黄金测试集 + DeepEval 12 维 LLM-as-Judge + 生产对话自动评估（采样+分层限速）+ 低分回归测试集 + 低分对话归因分析 + 离线检索评估（Recall@K/MRR/NDCG）+ 文档质量量化 + 知识库覆盖率 + Ragas 部署前评估 + 反馈闭环
-- **系统监控**：P50/P95/P99 延迟百分位（预计算 + 直方图）、Celery 队列深度（5 分钟快照）、组织使用报表、实时指标（Redis 5 分钟刷新）
+- **四层记忆**：short/session/user/global 记忆分层管理，每晚提炼稳定用户偏好
+- **文档全生命周期**：多格式解析（PDF/DOCX/Markdown/代码/表格/PPT）→ 语义感知切分 → 数据脱敏 → 向量化 → 版本管理 + 软删除；PDF 深度解析支持 PyMuPDF `find_tables()` 表格提取、跨页合并与图片提取（base64 + OSS 双存储）
+- **知识图谱（Graph RAG）**：LLM 实体/关系抽取 + Louvain 社区检测与摘要，图谱增量同步 + 向量检索召回
+- **LLM Wiki**：基于知识节点文档或图谱社区摘要自动生成 Wiki 页面，文档变更后增量刷新
+- **五层权限模型**：可见范围（TEAM_ONLY/DEPT_ONLY/PUBLIC）+ 主动共享（部门/团队/个人统一表）+ 黑名单（Deny Override 铁律）+ 双审流程 + 权限申请工单双轨制
+- **权限缓存分层**：L1~L5 五层缓存（功能权限/部门范围/团队范围/数据等级/资源临时授权）+ 延迟双删防并发脏写
 - **审计可追溯**：哈希链防篡改审计日志、权限审计日志（只追加不删）、文档操作日志（15 种 action）、敏感词过滤、IP 黑白名单、登录锁定
 - **系统配置工单化**：SystemConfig KV 存储 + LLMModel 模型管理 + 配置/模型变更工单（高风险项超管复核）+ 风险等级分级
-- **权限缓存分层**：L1~L5 五层缓存（功能权限/部门范围/团队范围/数据等级/资源临时授权）+ 延迟双删防并发脏写
-- **四层记忆**：short/session/user/global 记忆，每晚提炼稳定用户偏好
+- **系统监控**：P50/P95/P99 延迟百分位（预计算 + 直方图）、Celery 队列深度快照、组织使用报表、实时指标（Redis 5 分钟刷新）
+- **RAG 质量评估中心**：黄金测试集 + DeepEval 12 维 LLM-as-Judge + 生产对话自动评估（采样 + 分层限速）+ 低分回归测试集 + 低分对话归因分析 + 离线检索评估（Recall@K/MRR/NDCG）+ 文档质量量化 + 知识库覆盖率 + Ragas 部署前评估 + 反馈闭环
 
 ---
 
@@ -35,7 +45,7 @@ docker compose up -d --build
 docker compose exec django python manage.py migrate
 
 # 4. 初始化系统数据（角色、权限、部门、团队、用户）
-docker compose exec django python scripts/init_system.py
+docker compose exec django python manage.py init_system
 ```
 
 启动完成后，默认通过 Django 直接对外提供服务（端口 8000）：
@@ -80,15 +90,20 @@ rag/
 │   │   ├── vector_store.py     # 向量检索封装（cosine 距离 + hnsw.ef_search 会话级调节）
 │   │   ├── bm25.py             # BM25 关键词检索（jieba 分词 + keyword_weight 加权）
 │   │   ├── permission.py       # build_permission_q() — 检索级权限过滤（黑/白名单）
-│   │   └── hybrid.py           # 混合检索 + 图片 base64 注入 chunk.extra
+│   │   ├── hybrid.py           # 混合检索 + 图片 base64 注入 chunk.extra
+│   │   └── rerank.py           # BGE-Reranker 重排序
 │   ├── llm/                    # DeepSeek Provider + 抽象工厂 + Prompt 模板
 │   ├── memory/                 # 四层记忆（short/session/user/global），每晚提炼用户偏好
 │   ├── agent/                  # 问答编排 + 任务拆分 + 流式回答 + 引用合并
+│   │   ├── executor.py         # 问答执行器（mode: auto/rag/agent/wiki/graphrag）
+│   │   ├── task_splitter.py    # 复杂任务拆分
+│   │   ├── streamer.py         # SSE 流式输出
+│   │   └── tools/              # Agent 工具（知识检索/图谱/Wiki/联网/Text2SQL/计算器）
 │   ├── chat/                   # 会话 / QA 记录（含 TTFB/Token 速率/错误类型） / 反馈 / 热点缓存
 │   ├── audit/                  # 审计日志（sha256 哈希链防篡改）
 │   ├── security/               # 验证码 / IP 黑白名单 / 登录失败锁定 / 敏感词
 │   ├── analytics/              # 关键词权重 / 准确率日报 / 趋势统计 / 系统监控 / RAG 质量评估
-│   │   ├── models.py           # 14 个模型：关键词权重/日报/系统指标/组织报表/队列深度 + 8 个质量评估模型 + LowScoreAnalysis
+│   │   ├── models.py           # 15 个模型：关键词权重/日报/系统指标/组织报表/队列深度 + 8 个质量评估模型 + LowScoreAnalysis + RouteAnalysis（三层路由评估）
 │   │   ├── deepeval_metrics.py # DeepEval 12 维 LLM-as-Judge 评估（检索1+答案6+安全2+业务3）
 │   │   ├── production_eval.py  # 生产对话自动评估（采样率 + 分层限速 + 日预算四重保护）
 │   │   ├── regression_eval.py  # 低分回归测试集（沉淀 + 全链路评估 + pass_count 淘汰）
@@ -102,20 +117,39 @@ rag/
 │   │   ├── views.py            # 监控 + 质量评估 + 评估看板 + 归因分析全套接口
 │   │   └── management/commands/ragas_eval.py  # Ragas 评估管理命令
 │   ├── notification/           # 邮件订阅 / 发送日志
-│   └── system/                 # 系统配置 / 模型管理 / 变更工单 / Celery 任务日志 / LLM 调用日志
-│       ├── models.py           # SystemConfig + LLMModel + ConfigChangeTicket + ModelChangeTicket + CeleryTaskLog + LlmCallLog + DataExportLog
-│       ├── config_loader.py    # 配置加载器（优先 DB，回退 .env）
-│       └── middleware.py       # 系统级中间件
+│   ├── system/                 # 系统配置 / 模型管理 / 变更工单 / Celery 任务日志 / LLM 调用日志
+│   │   ├── models.py           # SystemConfig + LLMModel + ConfigChangeTicket + ModelChangeTicket + CeleryTaskLog + LlmCallLog + DataExportLog
+│   │   ├── config_loader.py    # 配置加载器（优先 DB，回退 .env）
+│   │   ├── middleware.py       # 系统级中间件
+│   │   ├── views.py            # 配置/模型/工单/健康检查接口
+│   │   └── management/commands/init_system.py  # 初始化系统数据（角色/权限/配置默认值）
+│   ├── graph/                  # 知识图谱（实体抽取/关系/社区检测/向量检索，Graph RAG）
+│   │   ├── models.py           # GraphEntity + GraphRelation + GraphCommunity（Louvain 社区 + 摘要）
+│   │   ├── extractor.py        # LLM 实体/关系抽取与去重合并
+│   │   ├── community.py        # 社区检测与社区摘要生成
+│   │   ├── sync.py             # 文档变更 → 图谱增量同步
+│   │   ├── retriever.py        # 图谱检索（实体向量匹配 + 社区摘要召回）
+│   │   ├── router.py           # 三层路由编排（Wiki → GraphRAG → RAG 兜底）
+│   │   ├── vector_search.py    # 图谱实体向量检索
+│   │   ├── embedding.py        # 实体/关系 embedding 生成
+│   │   └── tasks.py            # Celery 任务（每日社区检测 + 摘要）
+│   └── wiki/                   # LLM Wiki（基于知识节点文档或图谱社区自动生成 Wiki 页面）
+│       ├── models.py           # WikiPage + WikiSection + WikiLink（自动链接）
+│       ├── generator.py        # LLM 生成 Wiki 页面
+│       ├── sync.py             # 文档/社区变更 → Wiki 增量更新
+│       ├── retriever.py        # Wiki 页面检索
+│       └── tasks.py            # Celery 任务（每日刷新过期 Wiki 页面）
 ├── rag_project/                # Django 项目配置、根 URL、Celery、ASGI/WSGI
-│   └── celery.py               # 5 队列 + 14 个 Beat 定时任务
+│   ├── settings.py             # 主配置（数据库/缓存/队列/中间件/模型）
+│   ├── urls.py                 # 根路由
+│   ├── celery.py               # 5 队列 + 16 个 Beat 定时任务
+│   ├── asgi.py / wsgi.py       # ASGI/WSGI 入口
+│   └── test_settings.py        # 测试专用配置
 ├── docs/
 │   └── permission-design.md    # 权限体系设计文档（最终方案）
 ├── scripts/
-│   ├── init_system.py          # 系统初始化（角色/权限/部门/团队/用户）
-│   ├── initial_data.yaml       # 初始化数据配置
 │   ├── batch_import_docs.py    # 批量导入文档（双阶段异步导入）
-│   ├── clean_docs.py           # 清理文档相关数据（Document/Chunk/Vector/Log）
-│   └── test_analytics_runtime.py # Analytics API 端点运行时验证脚本
+│   └── clean_docs.py           # 清理文档相关数据（Document/Chunk/Vector/Log）
 ├── static/                     # 前端静态资源（开发源码）
 │   ├── css/                    # 公共 common.css + layout.css + 各页面 page.css
 │   ├── fonts/                  # 字体文件（验证码使用 DejaVuSans-Bold.ttf）
@@ -156,7 +190,9 @@ rag/
 │   ├── admin-eval.html         # 质量评估中心页
 │   ├── admin-system-config.html # 系统配置页
 │   └── admin-audit.html        # 审计日志页
-├── tests/                      # API 测试用例
+├── manage.py                   # Django 管理入口
+├── pytest.ini                  # pytest 配置（marker 分层 / DB 复用）
+├── conftest.py                 # pytest 公共 fixture
 ├── Dockerfile
 ├── docker-compose.yml
 ├── entrypoint.sh               # 容器启动脚本（等 DB → 迁移 → 收集静态 → 启动）
@@ -228,9 +264,18 @@ rag/
 | POST | `/api/v1/chat/feedback/` | 提交问答反馈 |
 | CRUD | `/api/v1/chat/sessions/` | 会话管理 |
 | GET | `/api/v1/chat/sessions/{id}/qa/` | 问答历史（按 turn_index 升序） |
+| GET | `/api/v1/chat/records/` | 问答记录列表 |
 | POST | `/api/v1/agent/task/plan/` | 复杂任务拆分预览 |
 | POST | `/api/v1/agent/task/run/` | 拆分并执行 |
 | POST | `/api/v1/retrieval/search/` | 检索调试接口 |
+
+### 记忆（memory）
+
+| Method | Path | 说明 |
+|--------|------|------|
+| GET | `/api/v1/memory/context/` | 记忆上下文调试（查看当前会话命中记忆） |
+| POST | `/api/v1/memory/refine/` | 手动触发用户记忆提炼 |
+| GET/PUT | `/api/v1/memory/user-memory/` | 用户长期记忆查看/管理 |
 
 ### 审计 & 安全 & 系统
 
@@ -256,6 +301,13 @@ rag/
 | POST | `/api/v1/system/model-tickets/{id}/approve/` | 模型工单通过（删除需超管复核） |
 | POST | `/api/v1/system/model-tickets/{id}/reject/` | 模型工单驳回 |
 | POST | `/api/v1/system/model-tickets/{id}/withdraw/` | 模型工单撤回 |
+
+### 通知（notification）
+
+| Method | Path | 说明 |
+|--------|------|------|
+| CRUD | `/api/v1/notification/subscriptions/` | 邮件订阅管理 |
+| GET | `/api/v1/notification/send-logs/` | 邮件发送日志 |
 
 ### 系统监控（analytics）
 
@@ -317,7 +369,10 @@ rag/
 | LLM | DeepSeek Chat/Reasoner | 成本可控；Provider 抽象保留切换空间 |
 | 嵌入 | BGE-M3 (SiliconFlow) | 高性能中文嵌入模型，1024 维 |
 | Rerank | BGE-Reranker-v2 (SiliconFlow) | 轻量级重排序模型 |
-| PDF 解析 | PyMuPDF | 原生支持 `find_tables()` 表格提取 + 跨页合并 + 图片提取 |
+| 检索 | rank_bm25 + jieba | BM25 中文分词关键词检索，与向量检索 RRF 融合 |
+| 图谱 | networkx | Louvain 社区检测 + 实体/关系图分析（GraphRAG） |
+| 评估 | DeepEval + Ragas | 生产 12 维 LLM-as-Judge 评估 + 部署前离线评估 |
+| 文档解析 | PyMuPDF + python-docx + openpyxl + python-pptx + markdown | 覆盖 PDF/Word/Excel/PPT/Markdown/代码/配置多格式 |
 | 前端 | 原生 JS + Hash 路由（极简 SPA） | 演示够用；生产可换 Vue/React |
 
 ---
@@ -378,6 +433,7 @@ rag/
 | RetrievalQualityReport | `analytics_retrieval_quality_report` | 检索质量报告（Recall@K/MRR/NDCG + 各阶段增益） |
 | CoverageReport | `analytics_coverage_report` | 知识库覆盖率报告（热门覆盖 + 知识空白 + 重复检测） |
 | LowScoreAnalysis | `analytics_low_score_analysis` | 低分对话归因分析（规则归因为主 + LLM 个性化建议 + 分层触发） |
+| RouteAnalysis | `analytics_route` | 三层路由决策分析（wiki / graphrag_local / graphrag_global / rag，命中率与质量对比） |
 
 ### 系统配置与日志（system）
 
@@ -395,7 +451,7 @@ rag/
 
 | 模型 | 表名 | 说明 |
 |------|------|------|
-| QaRecord | `chat_qa_record` | 问答记录（含 TTFB/Token 速率/错误类型/检索得分） |
+| QaRecord | `chat_qa_record` | 问答记录（含 TTFB/Token 速率/错误类型/检索得分 + 三层路由来源 route_source/route_trace） |
 | QaFeedback | `chat_feedback` | 问答反馈（好评/差评 + 原因） |
 | HotQaCache | `chat_hot_qa_cache` | 热点问答缓存（高频问题复用） |
 | TaskDecomposition | `chat_task_decomposition` | 任务拆分记录（Agentic RAG） |
@@ -430,6 +486,22 @@ rag/
 |------|------|------|
 | EmailSubscription | `notification_email_subscription` | 邮件订阅 |
 | EmailSendLog | `notification_email_send_log` | 邮件发送日志 |
+
+### 知识图谱（graph）
+
+| 模型 | 表名 | 说明 |
+|------|------|------|
+| GraphEntity | `graph_entity` | 图谱实体（人物/组织/概念/术语/产品，LLM 抽取 + 去重合并 + 语义向量） |
+| GraphRelation | `graph_relation` | 实体间关系（带类型与来源文档） |
+| GraphCommunity | `graph_community` | Louvain 社区检测结果 + LLM 社区摘要 |
+
+### LLM Wiki（wiki）
+
+| 模型 | 表名 | 说明 |
+|------|------|------|
+| WikiPage | `wiki_page` | Wiki 页面（挂载到知识节点或图谱社区，LLM 自动生成） |
+| WikiSection | `wiki_section` | 页面章节（预留，结构化章节） |
+| WikiLink | `wiki_link` | 页面间自动链接 |
 
 ### Agent（agent）
 
@@ -568,8 +640,10 @@ media/documents/
 | `system-metrics-daily` | 每日 02:00 | 聚合前一天 P50/P95/P99、缓存命中率、错误率 |
 | `org-usage-daily` | 每日 02:10 | 部门/团队对话、Token、费用聚合（UPSERT） |
 | `refine-user-memory` | 每日 02:30 | 提炼稳定的用户偏好到长期记忆 |
+| `graph-community-detection` | 每日 03:00 | 图谱社区检测 + 摘要生成（低峰期） |
 | `cleanup-old-analytics-data` | 每日 03:30 | 清理过期监控数据（低峰期） |
 | `doc-quality-daily` | 每日 04:00 | 批量评估文档质量（解析/切分/向量化） |
+| `wiki-refresh-expired` | 每日 04:00 | 刷新过期的 Wiki 页面（文档变更后重新生成） |
 | `coverage-report-daily` | 每日 04:30 | 生成知识库覆盖率报告 |
 | `siphon-low-score-regression` | 每日 05:30 | 从生产低分对话沉淀到回归测试集（低峰期） |
 | `multi-dim-evaluation` | 每 2 小时（30 分） | 多维度回答质量评估（DeepEval 12 维，回扫未覆盖项） |
@@ -583,6 +657,8 @@ media/documents/
 > 生产对话自动评估（`production_eval`）不走 Beat，由对话结束后按"采样率 + 分层限速 + 日预算"策略异步触发，与定时批量任务互补。
 
 队列划分：`default / parse / memory / email / analytics`，analytics 独立队列避免监控任务与业务问答争抢 Worker。
+
+> **TODO**：当前各任务调度时间写死在 [rag_project/celery.py](rag_project/celery.py) 的 `beat_schedule` 中；后续计划在管理端实现定时任务配置页面，将调度时间（cron 表达式）持久化到 SystemConfig，支持按需调整各任务的执行时间与启停状态，避免改代码重启 Worker。
 
 ```bash
 # 单 Worker（全队列）
@@ -634,6 +710,11 @@ LLM-as-Judge，12 维度评分（0-1），分四大类：
 - 支持原子级事实核查（atomic facts 逐一验证）
 - 自一致性：多次评估取平均降低随机性
 - 兼容自研历史维度（relevance/correctness/harmlessness/context_recall）
+
+> **TODO**：当前多维度评估主要覆盖 RAG 兜底链路的回答质量，后续计划将 LLM Wiki 与 GraphRAG 纳入评估体系：
+> 1. **LLM Wiki 页面质量评估**：对自动生成的 Wiki 页面做忠实度（是否基于源文档）、完整性、条理性评估；
+> 2. **GraphRAG 回答质量评估**：对图谱路由（graphrag_local / graphrag_global）命中的回答采用与 RAG 同口径的 12 维评分；
+> 3. **分层质量对比看板**：基于 RouteAnalysis 输出 wiki / graphrag_local / graphrag_global / rag 四层命中率 + 各维度均分对比，用于路由阈值调优。
 
 ### 10.4 生产对话自动评估
 对话结束后按"分层限速 → 采样 → 日预算"策略异步触发 DeepEval 12 维评估，四重成本保护：
@@ -811,7 +892,7 @@ TZ=Asia/Shanghai
 EMAIL_HOST_PASSWORD=your-smtp-password
 ```
 
-**业务参数（SystemConfig 数据库表）**：首次部署通过 `scripts/init_system.py` 写入默认值，后续通过 `admin-system-config.html` 页面修改（走工单审批）。包括：
+**业务参数（SystemConfig 数据库表）**：首次部署通过 `manage.py init_system` 写入默认值，后续通过 `admin-system-config.html` 页面修改（走工单审批）。包括：
 
 - LLM 模型与超时（LLM_BASE_MODEL / LLM_ADVANCED_MODEL / LLM_TIMEOUT）
 - Embedding & Rerank（EMBEDDING_MODEL / EMBEDDING_DIM / RERANK_MODEL / EMBEDDING_PROVIDER）
@@ -824,23 +905,26 @@ EMAIL_HOST_PASSWORD=your-smtp-password
 - Analytics（Redis DB / 队列监控）
 - 评估（EVAL_MODEL / 采样率 / 限速 / 日预算）
 
-完整变量列表见 `.env.example`，SystemConfig 配置项默认值详见 [scripts/initial_data.yaml](scripts/initial_data.yaml)（首次部署由 `scripts/init_system.py` 写入）。
+完整变量列表见 `.env.example`，SystemConfig 配置项默认值详见 [apps/system/management/commands/init/initial_data.yaml](apps/system/management/commands/init/initial_data.yaml)（首次部署由 `manage.py init_system` 写入）。
 
 ---
 
 ## 十四、测试
 
 ```bash
-# 运行时 API 烟雾测试（需先启动服务，基于 requests 直连 8000 端口）
-docker compose exec django python tests/test_api_simple.py
-
-# Django 标准单元测试（基于 TestCase，使用 tests/test_settings.py 独立配置）
-docker compose exec django python manage.py test tests.test_api --settings=tests.test_settings
+# 运行测试（统一使用 pytest，DJANGO_SETTINGS_MODULE 由 pytest.ini 指向 rag_project.test_settings）
+docker compose exec django pytest                          # 全量
+docker compose exec django pytest -m unit                  # 仅单元测试
+docker compose exec django pytest -m integration           # 仅集成测试
+docker compose exec django pytest -m smoke                 # 冒烟测试（CI 门禁用）
+docker compose exec django pytest apps/users/tests/        # 指定 app
 ```
 
 ---
 
 ## 十五、二次开发建议
+
+> **适用范围**：本项目仅适用于研究学习使用，不建议直接部署用于生产环境。以下建议供二次开发时参考。
 
 1. **检索向量库**：当前走 pgvector，可切换 Milvus/Qdrant，只改 `upsert_vector` / `vector_search`
 2. **Rerank**：已抽象签名 `rerank_docs`，可换 Cohere API
@@ -849,5 +933,5 @@ docker compose exec django python manage.py test tests.test_api --settings=tests
 5. **质量评估模块拆分**：当前在 analytics app 内通过多个独立 Python 文件（deepeval_metrics / production_eval / regression_eval / low_score_analyzer / ragas_pipeline / offline_eval / doc_quality / coverage）实现隔离；当模型数增长到 30+ 或代码量超过 3000 行时，可拆分为独立 app（只需 move 文件 + 改 INSTALLED_APPS，成本极低）
 6. **A/B 测试框架**：top_k / rrf_k / chunk_size 等参数可扩展为生产流量灰度对比
 7. **评估指标扩展**：DeepEval 12 维可通过 `EVAL_DISPLAY_DIMENSIONS` 选择性启用（评估=展示强绑定），新增维度只需在 `deepeval_metrics.py` 注册 metric 即可
-8. **权限缓存替换**：当前 `perm_cache.py` 基于 LocMemCache，生产环境可换 Redis 分布式缓存，接口契约不变
+8. **权限缓存后端**：`perm_cache.py` 统一走 Django cache 抽象层，[settings.py](rag_project/settings.py) 中已默认配置 Redis 后端（`django_redis`），仅在无 Redis 的开发环境自动降级为内存缓存（LocMemCache）；后续可扩展缓存命中率监控或按用户分片，接口契约不变
 9. **配置热更新**：`SystemConfig` 已支持 DB 存储 + `config_loader.py` 读取，可扩展 Redis Pub/Sub 实现多 Worker 配置热更新

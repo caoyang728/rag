@@ -71,6 +71,7 @@ api_v1 = [
     path("security/", include("apps.security.urls")),
     path("notification/", include("apps.notification.urls")),
     path("system/", include("apps.system.urls")),
+    path("wiki/", include("apps.wiki.urls")),
 ]
 
 urlpatterns = [
@@ -90,6 +91,7 @@ urlpatterns = [
     path("admin-rbac/", _serve_frontend("admin-rbac"), name="admin-rbac"),
     path("admin-org/", _serve_frontend("admin-org"), name="admin-org"),
     path("admin-system-config/", _serve_frontend("admin-system-config"), name="admin-system-config"),
+    path("wiki/", _serve_frontend("wiki"), name="wiki"),
     path("admin/", admin.site.urls),
     path("api/v1/", include(api_v1)),
     path("healthz", healthz),

@@ -225,6 +225,7 @@ const PAGE_MAP = {
 	'admin-rbac': '/admin-rbac/',
 	'admin-org': '/admin-org/',
 	'admin-system-config': '/admin-system-config/',
+	'wiki': '/wiki/',
 	'profile': '/profile/',
 	'login': '/login/',
 	'reset-password': '/reset-password/'

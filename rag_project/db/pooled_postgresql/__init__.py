@@ -22,6 +22,12 @@ psycopg 3.3.x 兼容性:
 - psycopg 3.3 将 TimestamptzLoader.timezone 改名为 _timezone
 - Django 5.2 的 create_cursor 仍访问 .timezone，导致 AttributeError
 - 本模块在 create_cursor 中捕获该异常并手动处理 timezone 注册
+
+JSONB 兼容性:
+- psycopg3 默认将 JSONB 列自动反序列化为 Python 对象（list/dict）
+- Django 5.2.0 的 JSONField.from_db_value 期望收到原始字符串再自行 json.loads
+- 对已反序列化的 Python 对象调用 json.loads 会抛 TypeError
+- 修复：通过连接池 configure 回调覆盖 JSONB loader，返回原始字符串
 """
 import atexit
 import logging
@@ -45,6 +51,8 @@ class DatabaseWrapper(PostgreSQLDatabaseWrapper):
     _pool_config = {}
     # atexit 是否已注册
     _atexit_registered = False
+    # JSONB OID（PostgreSQL 固定值）
+    _JSONB_OID = 3802
 
     def get_connection_params(self):
         """提取连接参数和池配置
@@ -132,6 +140,8 @@ class DatabaseWrapper(PostgreSQLDatabaseWrapper):
                 timeout=pool_options.get('timeout', 30),
                 max_lifetime=pool_options.get('max_lifetime', 1800),
                 max_idle=pool_options.get('max_idle', 600),
+                # 每个新连接创建后执行配置回调
+                configure=DatabaseWrapper._configure_pooled_connection,
             )
             DatabaseWrapper._pool_initialized = True
             DatabaseWrapper._pool_config = {
@@ -155,6 +165,26 @@ class DatabaseWrapper(PostgreSQLDatabaseWrapper):
         except Exception as e:
             logger.error(f'连接池初始化失败: {e}')
             raise
+
+    @classmethod
+    def _configure_pooled_connection(cls, conn):
+        """池化连接创建后的配置回调
+
+        覆盖 JSONB loader 使其返回原始字符串而非 Python 对象。
+        psycopg3 默认自动反序列化 JSONB → Python list/dict，
+        但 Django 5.2.0 的 JSONField.from_db_value 期望字符串再自行 json.loads，
+        对 Python 对象调用 json.loads 会抛 TypeError。
+        """
+        from psycopg.types.json import _JsonLoader
+
+        class RawJsonLoader(_JsonLoader):
+            """返回 JSONB 原始字符串，由 Django JSONField 负责反序列化"""
+            def load(self, data):
+                if isinstance(data, memoryview):
+                    data = bytes(data)
+                return data.decode('utf-8') if isinstance(data, bytes) else data
+
+        conn.adapters.register_loader(cls._JSONB_OID, RawJsonLoader)
 
     @staticmethod
     def _build_conninfo(conn_params):

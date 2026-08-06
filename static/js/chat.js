@@ -22,6 +22,11 @@ function elemFromTpl(id, fillFn) {
 /* ---- 知识库范围选择器状态 ---- */
 const SCOPE_STORAGE_KEY = 'rag_chat_scope';
 const MODE_STORAGE_KEY = 'rag_chat_mode';  // 问答模式持久化 key
+const DRAFT_KEY = 'rag_chat_draft';  // 输入草稿 key（sessionStorage，标签页关闭即失效）
+// 会话详情缓存：localStorage 存储，key 格式 rag_session_cache_{id}
+const SESSION_CACHE_PREFIX = 'rag_session_cache_';
+const MAX_CACHED_SESSIONS = 20;       // 只缓存最近 20 条会话
+const MAX_SESSION_CACHE_SIZE = 51200; // 单条缓存上限 50KB，超长对话不缓存
 let scopeOpen = false;
 let allScopeIds = [];
 let selectedScopeIds = new Set();  // 统一存储字符串 ID，避免与 API 数字 ID 混淆
@@ -30,8 +35,6 @@ let currentSessionId = null;
 let isSending = false;
 let currentAbortController = null;  // 当前流式请求的 AbortController，供 stopChat 中断
 let userAborted = false;  // 标记是否用户主动终止（区分超时中断）
-let heartbeatTimer = null;
-let isOnline = true;
 // 问答模式：auto（LLM 自主决定是否调用工具）/ rag（传统 RAG）/ agent（强制 Agent）
 let currentMode = 'auto';
 
@@ -40,6 +43,7 @@ document.addEventListener('DOMContentLoaded', () => {
 	initScopePicker();
 	initSessionList();
 	initModeSwitcher();
+	initDraftRestore();
 	const wrap = $('#scopeNavWrap');
 	if (wrap) wrap.style.display = '';
 	document.addEventListener('click', (e) => {
@@ -47,8 +51,42 @@ document.addEventListener('DOMContentLoaded', () => {
 			closeScopePicker();
 		}
 	});
-	startHeartbeat();
 });
+
+/* ---- 输入草稿恢复 ----
+ * 页面加载时从 sessionStorage 恢复未发送的输入内容；
+ * 输入时实时保存（防抖 300ms），发送成功后清除。
+ * 用 sessionStorage 而非 localStorage：标签页关闭即失效，避免跨会话污染。
+ */
+let draftSaveTimer = null;
+function initDraftRestore() {
+	const inp = $('#chatInput');
+	if (!inp) return;
+	// 恢复草稿
+	try {
+		const raw = sessionStorage.getItem(DRAFT_KEY);
+		if (raw) {
+			inp.value = raw;
+			// 光标移到末尾
+			inp.focus();
+			inp.setSelectionRange(inp.value.length, inp.value.length);
+		}
+	} catch (e) { /* sessionStorage 不可用时静默降级 */ }
+	// 输入时防抖保存
+	inp.addEventListener('input', () => {
+		if (draftSaveTimer) clearTimeout(draftSaveTimer);
+		draftSaveTimer = setTimeout(() => {
+			try {
+				const val = inp.value.trim();
+				if (val) {
+					sessionStorage.setItem(DRAFT_KEY, val);
+				} else {
+					sessionStorage.removeItem(DRAFT_KEY);
+				}
+			} catch (e) { /* ignore */ }
+		}, 300);
+	});
+}
 
 /* ---- 问答模式切换器初始化 ----
  * 从 localStorage 恢复上次选择的模式，默认 auto。
@@ -87,39 +125,6 @@ function setChatMode(mode) {
 	toast('已切换为 ' + label + ' 模式', 'success');
 }
 
-function startHeartbeat() {
-	if (heartbeatTimer) clearInterval(heartbeatTimer);
-	heartbeatTimer = setInterval(async () => {
-		try {
-			const res = await api.get('/healthz', { cache: 'no-cache' });
-			if (res.ok) {
-				if (!isOnline) {
-					isOnline = true;
-					toast('连接已恢复', 'success');
-				}
-			} else {
-				handleHeartbeatFailure();
-			}
-		} catch (e) {
-			handleHeartbeatFailure();
-		}
-	}, 30000);
-}
-
-function handleHeartbeatFailure() {
-	if (isOnline) {
-		isOnline = false;
-		toast('连接已断开，正在尝试重新连接...', 'error');
-	}
-}
-
-function stopHeartbeat() {
-	if (heartbeatTimer) {
-		clearInterval(heartbeatTimer);
-		heartbeatTimer = null;
-	}
-}
-
 function initChatPage() {
 	const msgs = $('#chatMessages');
 	if (msgs) msgs.innerHTML = renderEmptyState();
@@ -131,6 +136,46 @@ function renderEmptyState() {
 
 /* ---- 知识库范围选择器 ---- */
 let scopeTreeData = [];
+// 节点树 localStorage 缓存：TTL 2 小时，节点树变更频率低
+const NODES_CACHE_KEY = 'rag_nodes_tree_cache';
+const NODES_CACHE_TTL = 2 * 60 * 60 * 1000;  // 2 小时
+
+/* 从 localStorage 读取节点树缓存，过期返回 null */
+function getNodesCache() {
+	try {
+		const raw = localStorage.getItem(NODES_CACHE_KEY);
+		if (!raw) return null;
+		const data = JSON.parse(raw);
+		if (Date.now() - data.timestamp > NODES_CACHE_TTL) return null;
+		return data.tree || [];
+	} catch (e) { return null; }
+}
+
+/* 写入节点树缓存到 localStorage */
+function setNodesCache(tree) {
+	try {
+		localStorage.setItem(NODES_CACHE_KEY, JSON.stringify({
+			timestamp: Date.now(),
+			tree: tree,
+		}));
+	} catch (e) { /* localStorage 满或不可用，静默降级 */ }
+}
+
+/* 应用节点树数据：扁平化 + 渲染 + 初始化选中状态 */
+function applyScopeData(tree) {
+	scopeTreeData = tree;
+	scopeFlatList = flattenScopeNodes(scopeTreeData, 0);
+	allScopeIds = scopeFlatList.map(n => String(n.id));
+
+	const saved = localStorage.getItem(SCOPE_STORAGE_KEY);
+	if (!saved || selectedScopeIds.size === 0) {
+		selectedScopeIds = new Set(allScopeIds);
+		saveScopeState();
+	}
+
+	renderScopeList(scopeFlatList);
+	updateScopeBadge();
+}
 
 async function initScopePicker() {
 	const saved = localStorage.getItem(SCOPE_STORAGE_KEY);
@@ -138,20 +183,27 @@ async function initScopePicker() {
 		try { selectedScopeIds = new Set(JSON.parse(saved).map(String)); } catch (e) { selectedScopeIds = new Set(); }
 	}
 
+	// 优先用缓存立即渲染，再后台静默刷新
+	const cachedTree = getNodesCache();
+	if (cachedTree && cachedTree.length > 0) {
+		applyScopeData(cachedTree);
+		// 后台静默刷新：不阻塞页面渲染
+		api.getJson('/api/v1/knowledge/nodes/tree/').then(data => {
+			const freshTree = data.tree || [];
+			if (freshTree.length > 0) {
+				setNodesCache(freshTree);
+				applyScopeData(freshTree);
+			}
+		}).catch(() => { /* 静默失败，保留缓存数据 */ });
+		return;
+	}
+
+	// 无缓存或已过期：正常请求
 	try {
 		const data = await api.getJson('/api/v1/knowledge/nodes/tree/');
-		scopeTreeData = data.tree || [];
-		// 扁平化并构建 ID->节点映射，同时收集父子关系
-		scopeFlatList = flattenScopeNodes(scopeTreeData, 0);
-		allScopeIds = scopeFlatList.map(n => String(n.id));
-
-		if (!saved || selectedScopeIds.size === 0) {
-			selectedScopeIds = new Set(allScopeIds);
-			saveScopeState();
-		}
-
-		renderScopeList(scopeFlatList);
-		updateScopeBadge();
+		const tree = data.tree || [];
+		applyScopeData(tree);
+		if (tree.length > 0) setNodesCache(tree);
 	} catch (e) {
 		console.error('load nodes failed:', e);
 	}
@@ -412,17 +464,26 @@ function buildThinkingAreaHtml(toolTraces) {
 	});
 }
 
-/* 切换发送按钮状态：idle=发送，stopping=终止 */
+/* 切换发送按钮状态：idle=发送，sending=转圈等待后端响应，stopping=可终止 */
 function setSendButtonState(state) {
 	const btn = $('#chatSendBtn');
 	if (!btn) return;
-	if (state === 'stopping') {
+	if (state === 'sending') {
+		btn.innerHTML = '<span class="btn-spinner"></span>';
+		btn.classList.add('sending');
+		btn.classList.remove('stopping');
+		btn.setAttribute('onclick', '');
+		btn.disabled = true;
+	} else if (state === 'stopping') {
 		btn.textContent = '⏹ 终止';
 		btn.classList.add('stopping');
+		btn.classList.remove('sending');
+		btn.disabled = false;
 		btn.setAttribute('onclick', 'stopChat()');
 	} else {
 		btn.textContent = '发送 ↵';
-		btn.classList.remove('stopping');
+		btn.classList.remove('stopping', 'sending');
+		btn.disabled = false;
 		btn.setAttribute('onclick', 'sendChat()');
 	}
 }
@@ -457,6 +518,7 @@ async function sendChat() {
 	const uMsg = renderUserMessageElement(text, time);
 	msgs.appendChild(uMsg);
 	inp.value = '';
+	sessionStorage.removeItem(DRAFT_KEY);
 	scrollChatBottom();
 
 	const mid = 'm' + Date.now();
@@ -547,8 +609,8 @@ async function sendChat() {
 	// 声明在 try 外部，确保 catch/finally 可访问（否则块级作用域导致 ReferenceError）
 	const abortController = new AbortController();
 	currentAbortController = abortController;
-	// 发送中按钮切换为"终止"
-	setSendButtonState('stopping');
+	// 发送中按钮先显示转圈，等后端响应后再切换为"终止"
+	setSendButtonState('sending');
 	// 流式可能持续较久，放宽到 120s（超时自动中断）
 	const timeoutId = setTimeout(() => abortController.abort(), 120000);
 
@@ -566,10 +628,11 @@ async function sendChat() {
 			if (!chunk.type) return;
 			switch (chunk.type) {
 				case 'start': {
+					// 后端已响应：按钮从转圈切换为"终止"
+					setSendButtonState('stopping');
 					// 切换"思考中"占位 → 回答骨架
 					if (chunk.session_id) {
 						currentSessionId = chunk.session_id;
-						localStorage.setItem('rag_current_session', currentSessionId);
 						const chatTitle = $('#chatTitle');
 						if (chatTitle && !chatTitle.dataset.hasTitle) {
 							const title = text.slice(0, 30) + (text.length > 30 ? '...' : '');
@@ -731,7 +794,26 @@ async function sendChat() {
 						}
 					}
 					scrollChatBottom();
-					initSessionList(true);
+					// 增量更新会话列表（预览+时间+置顶），不重新请求后端
+					if (currentSessionId) {
+						updateSessionInCache(currentSessionId, text.slice(0, 50), text);
+						// 同步更新会话详情缓存：追加本轮 QaRecord
+						const newRecord = {
+							id: messageId,
+							question: text,
+							answer: answerText,
+							citations: citations,
+							latency_total_ms: totalMs,
+							latency_ttfb_ms: ttfbMs,
+							created_at: new Date().toISOString(),
+							tool_traces: [],
+						};
+						const cache = getSessionCache(currentSessionId);
+						if (cache && cache.records) {
+							cache.records.push(newRecord);
+							setSessionCache(currentSessionId, cache.records, new Date().toISOString());
+						}
+					}
 					break;
 				}
 				case 'content_filtered': {
@@ -1092,18 +1174,129 @@ async function submitFilterFalsePositive(qaId, category, comment, card) {
 	}
 }
 
-async function loadSessionMessages(id) {
+/* ---- 会话详情 localStorage 缓存 ----
+ * 进入页面时根据会话列表校验缓存（纯本地，零请求）：
+ *   - last_active_at 一致 → 保留
+ *   - last_active_at 不一致 → 删除（等用户查看时再请求）
+ *   - 会话列表中已不存在 → 删除
+ *   - 超出 20 条上限 → 按时间排序清理多余的
+ * 切换会话时：有缓存先渲染，无缓存才请求后端。
+ */
+
+/* 读取单个会话缓存 */
+function getSessionCache(sessionId) {
+	try {
+		const raw = localStorage.getItem(SESSION_CACHE_PREFIX + sessionId);
+		if (!raw) return null;
+		return JSON.parse(raw);
+	} catch (e) { return null; }
+}
+
+/* 写入单个会话缓存（超 50KB 跳过） */
+function setSessionCache(sessionId, records, lastActiveAt) {
+	try {
+		const data = { records, last_active_at: lastActiveAt };
+		const raw = JSON.stringify(data);
+		if (raw.length > MAX_SESSION_CACHE_SIZE) return;
+		localStorage.setItem(SESSION_CACHE_PREFIX + sessionId, raw);
+	} catch (e) { /* localStorage 满或不可用，静默降级 */ }
+}
+
+/* 删除单个会话缓存 */
+function removeSessionCache(sessionId) {
+	try { localStorage.removeItem(SESSION_CACHE_PREFIX + sessionId); } catch (e) { }
+}
+
+/* 校验和清理会话缓存：进入页面时调用，纯本地操作不请求后端 */
+function cleanupSessionCache(sessionList) {
+	// 收集所有缓存 key
+	const cachedIds = [];
+	for (let i = 0; i < localStorage.length; i++) {
+		const key = localStorage.key(i);
+		if (key && key.startsWith(SESSION_CACHE_PREFIX)) {
+			cachedIds.push(key.slice(SESSION_CACHE_PREFIX.length));
+		}
+	}
+
+	// 构建会话列表 lookup：id → last_active_at
+	const sessionMap = {};
+	for (const s of sessionList) {
+		sessionMap[String(s.id)] = s.last_active_at || s.created_at;
+	}
+
+	// 校验每个缓存项
+	const validCaches = [];  // [{ id, last_active_at }]
+	for (const id of cachedIds) {
+		const cache = getSessionCache(id);
+		if (!cache) {
+			removeSessionCache(id);
+			continue;
+		}
+		// 会话列表中已不存在 → 删除
+		if (!(id in sessionMap)) {
+			removeSessionCache(id);
+			continue;
+		}
+		// last_active_at 不一致 → 删除（等用户查看时再请求）
+		if (cache.last_active_at !== sessionMap[id]) {
+			removeSessionCache(id);
+			continue;
+		}
+		validCaches.push({ id, last_active_at: cache.last_active_at });
+	}
+
+	// 按 last_active_at 降序排序，只保留最近 20 条
+	validCaches.sort((a, b) => new Date(b.last_active_at) - new Date(a.last_active_at));
+	const keepIds = new Set(validCaches.slice(0, MAX_CACHED_SESSIONS).map(c => c.id));
+	for (const c of validCaches) {
+		if (!keepIds.has(c.id)) {
+			removeSessionCache(c.id);
+		}
+	}
+}
+
+/*
+ * 统一的会话消息加载方法
+ * - 缓存命中：直接渲染，零请求
+ * - 缓存未命中：先显示"加载中"，请求后端后渲染并写入缓存
+ * @param id - 会话 ID
+ * @param options.skipToast - 初始加载时不显示 toast（默认 false）
+ */
+async function switchToSession(id, options = {}) {
+	const msgs = $('#chatMessages');
+
+	// 先尝试缓存命中
+	const cache = getSessionCache(id);
+	if (cache && cache.records) {
+		if (msgs) {
+			msgs.innerHTML = renderMessagesFromRecords(cache.records);
+			scrollChatBottom();
+		}
+		if (!options.skipToast) toast('已切换会话', 'success');
+		return;
+	}
+
+	// 缓存未命中：先显示加载中
+	if (msgs) {
+		msgs.innerHTML = '<div class="msg-wrap"><div class="empty-state" style="text-align:center;padding:60px 20px"><div class="spinner" style="margin:0 auto 12px"></div><div style="color:var(--text-sub)">加载会话记录中...</div></div></div>';
+	}
+
+	// 请求后端
 	try {
 		const data = await api.getJson('/api/v1/chat/sessions/' + id + '/qa/');
 		const records = Array.isArray(data) ? data : (data.records || []);
-
-		const msgs = $('#chatMessages');
 		if (msgs) {
 			msgs.innerHTML = renderMessagesFromRecords(records);
 			scrollChatBottom();
 		}
+		// 写入缓存
+		const session = sessionCache.find(s => s.id == id);
+		setSessionCache(id, records, session ? (session.last_active_at || session.created_at) : null);
+		if (!options.skipToast) toast('已切换会话', 'success');
 	} catch (e) {
 		console.error('load records failed:', e);
+		if (msgs) msgs.innerHTML = renderEmptyState();
+		if (!options.skipToast) toast('加载会话记录失败', 'error');
 	}
 }
 
@@ -1118,6 +1311,80 @@ async function updateSessionTitle(sessionId, title) {
 /* ---- 历史会话 ---- */
 let currentSearchKeyword = '';
 let searchDebounceTimer = null;
+// 会话列表内存缓存：避免发送消息后重新拉取整个列表，改为增量更新
+let sessionCache = [];
+
+/* 从内存缓存渲染会话列表（不请求后端） */
+function renderSessionList() {
+	const el = $('#sessionList');
+	if (!el) return;
+	const sessions = sessionCache;
+
+	const grouped = sessions.reduce((acc, s) => {
+		const date = new Date(s.last_active_at || s.created_at);
+		const now = new Date();
+		const diff = now.getTime() - date.getTime();
+		let group = '更早';
+		if (diff < 24 * 60 * 60 * 1000) group = '今天';
+		else if (diff < 48 * 60 * 60 * 1000) group = '昨天';
+		else if (diff < 7 * 24 * 60 * 60 * 1000) group = '本周';
+		if (!acc[group]) acc[group] = [];
+		acc[group].push(s);
+		return acc;
+	}, {});
+
+	el.innerHTML = Object.entries(grouped).map(([group, items]) => {
+		return htmlFromTpl('tmpl-session-group', (frag) => {
+			frag.querySelector('.session-group-title').textContent = group;
+			const itemsWrap = frag.querySelector('.session-items-wrap');
+			itemsWrap.innerHTML = items.map(s => {
+				return htmlFromTpl('tmpl-session-item', (itemFrag) => {
+					const item = itemFrag.querySelector('.session-item');
+					item.dataset.id = s.id;
+					if (s.id == currentSessionId) item.classList.add('active');
+					item.setAttribute('onclick', 'switchSession(' + s.id + ',this)');
+					const titleEl = itemFrag.querySelector('.session-title');
+					titleEl.id = 'sessionTitle-' + s.id;
+					titleEl.setAttribute('onblur', 'saveSessionTitle(' + s.id + ', this)');
+					titleEl.setAttribute('onkeydown', "if(event.key==='Enter'){this.blur();event.preventDefault()}");
+					titleEl.textContent = s.title;
+					itemFrag.querySelector('.session-preview').textContent = s.preview || '';
+					itemFrag.querySelector('.session-time').textContent = formatSessionTime(s.last_active_at || s.created_at);
+					itemFrag.querySelector('.icon-edit').setAttribute('onclick', 'event.stopPropagation();editSessionTitle(' + s.id + ')');
+					itemFrag.querySelector('.icon-del').setAttribute('onclick', 'event.stopPropagation();delSession(this,' + s.id + ')');
+				});
+			}).join('');
+		});
+	}).join('');
+}
+
+/* 增量更新会话缓存：发送消息后更新预览和时间，移到列表顶部，不请求后端
+ * 如果是新会话（后端自动创建，缓存中不存在），则添加到列表顶部 */
+function updateSessionInCache(sessionId, preview, questionText) {
+	const idx = sessionCache.findIndex(s => s.id == sessionId);
+	if (idx === -1) {
+		// 新会话：构造最小 session 对象添加到列表顶部
+		const now = new Date().toISOString();
+		sessionCache.unshift({
+			id: sessionId,
+			title: questionText ? questionText.slice(0, 32) : '新会话',
+			preview: preview || '',
+			last_active_at: now,
+			created_at: now,
+			turn_count: 1,
+			is_archived: false,
+		});
+		renderSessionList();
+		return;
+	}
+	const s = sessionCache[idx];
+	s.preview = preview;
+	s.last_active_at = new Date().toISOString();
+	// 移到列表顶部（最近活跃在前）
+	sessionCache.splice(idx, 1);
+	sessionCache.unshift(s);
+	renderSessionList();
+}
 
 async function initSessionList(skipLoadMessages = false) {
 	const el = $('#sessionList');
@@ -1129,52 +1396,15 @@ async function initSessionList(skipLoadMessages = false) {
 			url += '?search=' + encodeURIComponent(currentSearchKeyword);
 		}
 		const data = await api.getJson(url);
-		const sessions = data.results || data;
+		sessionCache = data.results || data;
 
-		const currentSession = localStorage.getItem('rag_current_session');
-		currentSessionId = currentSessionId || currentSession;
+		// 以会话列表为准：有则选最近一条，无则留空（发送时后端自动创建）
+		currentSessionId = sessionCache.length > 0 ? sessionCache[0].id : null;
 
-		if (!currentSessionId && sessions.length > 0) {
-			currentSessionId = sessions[0].id;
-			localStorage.setItem('rag_current_session', currentSessionId);
-		}
+		// 校验和清理会话详情缓存（纯本地操作，零请求）
+		cleanupSessionCache(sessionCache);
 
-		const grouped = sessions.reduce((acc, s) => {
-			const date = new Date(s.last_active_at || s.created_at);
-			const now = new Date();
-			const diff = now.getTime() - date.getTime();
-			let group = '更早';
-			if (diff < 24 * 60 * 60 * 1000) group = '今天';
-			else if (diff < 48 * 60 * 60 * 1000) group = '昨天';
-			else if (diff < 7 * 24 * 60 * 60 * 1000) group = '本周';
-			if (!acc[group]) acc[group] = [];
-			acc[group].push(s);
-			return acc;
-		}, {});
-
-		el.innerHTML = Object.entries(grouped).map(([group, items]) => {
-			return htmlFromTpl('tmpl-session-group', (frag) => {
-				frag.querySelector('.session-group-title').textContent = group;
-				const itemsWrap = frag.querySelector('.session-items-wrap');
-				itemsWrap.innerHTML = items.map(s => {
-					return htmlFromTpl('tmpl-session-item', (itemFrag) => {
-						const item = itemFrag.querySelector('.session-item');
-						item.dataset.id = s.id;
-						if (s.id == currentSessionId) item.classList.add('active');
-						item.setAttribute('onclick', 'switchSession(' + s.id + ',this)');
-						const titleEl = itemFrag.querySelector('.session-title');
-						titleEl.id = 'sessionTitle-' + s.id;
-						titleEl.setAttribute('onblur', 'saveSessionTitle(' + s.id + ', this)');
-						titleEl.setAttribute('onkeydown', "if(event.key==='Enter'){this.blur();event.preventDefault()}");
-						titleEl.textContent = s.title;
-						itemFrag.querySelector('.session-preview').textContent = s.preview || '';
-						itemFrag.querySelector('.session-time').textContent = formatSessionTime(s.last_active_at || s.created_at);
-						itemFrag.querySelector('.icon-edit').setAttribute('onclick', 'event.stopPropagation();editSessionTitle(' + s.id + ')');
-						itemFrag.querySelector('.icon-del').setAttribute('onclick', 'event.stopPropagation();delSession(this,' + s.id + ')');
-					});
-				}).join('');
-			});
-		}).join('');
+		renderSessionList();
 
 		if (currentSessionId) {
 			const activeItem = el.querySelector('.session-item[data-id="' + currentSessionId + '"]');
@@ -1186,7 +1416,7 @@ async function initSessionList(skipLoadMessages = false) {
 					chatTitle.classList.remove('hidden');
 				}
 				if (!skipLoadMessages) {
-					loadSessionMessages(currentSessionId);
+					switchToSession(currentSessionId, { skipToast: true });
 				}
 			}
 		}
@@ -1257,7 +1487,6 @@ async function switchSession(id, elm) {
 	$$('.session-item').forEach(s => s.classList.remove('active'));
 	elm.classList.add('active');
 	currentSessionId = id;
-	localStorage.setItem('rag_current_session', id);
 
 	const chatTitle = $('#chatTitle');
 	if (chatTitle) {
@@ -1267,20 +1496,8 @@ async function switchSession(id, elm) {
 		delete chatTitle.dataset.hasTitle;
 	}
 
-	try {
-		const data = await api.getJson('/api/v1/chat/sessions/' + id + '/qa/');
-		const records = Array.isArray(data) ? data : (data.records || []);
-
-		const msgs = $('#chatMessages');
-		if (msgs) {
-			msgs.innerHTML = renderMessagesFromRecords(records);
-			scrollChatBottom();
-		}
-		toast('已切换会话', 'success');
-	} catch (e) {
-		console.error('load records failed:', e);
-		toast('加载会话记录失败', 'error');
-	}
+	// 统一调用 switchToSession：缓存命中零请求，未命中显示加载中再请求
+	await switchToSession(id);
 }
 
 function renderMessagesFromRecords(records) {
@@ -1306,11 +1523,12 @@ async function delSession(icon, id) {
 
 	try {
 		await api.deleteJson('/api/v1/chat/sessions/' + id + '/');
-		icon.closest('.session-item').remove();
+		// 同步清理内存缓存并重新渲染
+		sessionCache = sessionCache.filter(s => s.id != id);
+		renderSessionList();
 		toast('会话已删除', 'success');
 		if (currentSessionId == id) {
 			currentSessionId = null;
-			localStorage.removeItem('rag_current_session');
 			const msgs = $('#chatMessages');
 			if (msgs) msgs.innerHTML = renderEmptyState();
 		}
@@ -1323,7 +1541,6 @@ async function newSession() {
 	try {
 		const data = await api.postJson('/api/v1/chat/sessions/', { title: '新会话' });
 		currentSessionId = data.id;
-		localStorage.setItem('rag_current_session', currentSessionId);
 
 		const msgs = $('#chatMessages');
 		if (msgs) msgs.innerHTML = renderEmptyState();

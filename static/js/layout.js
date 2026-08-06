@@ -156,10 +156,13 @@ document.addEventListener('click', () => { $$('.dropdown-menu.show').forEach(m =
 
 function doLogout() {
 	const refresh = localStorage.getItem('rag_refresh');
+	const access = localStorage.getItem('rag_access');
 	if (refresh) {
+		const headers = { 'Content-Type': 'application/json' };
+		if (access) headers['Authorization'] = 'Bearer ' + access;
 		fetch('/api/v1/auth/logout/', {
 			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
+			headers: headers,
 			body: JSON.stringify({ refresh })
 		}).catch(() => { });
 	}

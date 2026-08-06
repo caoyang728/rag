@@ -225,7 +225,9 @@ function isSystemMaintainer() {
 	return hasAnyRole('super_admin', 'system_maintainer');
 }
 
-function renderSidebar(active) {
+function getSidebarGroups() {
+	// 返回按业务场景分组的菜单（会话/知识库/账户/管理）
+	// 侧边栏与首页功能入口共用，保证两处可见性一致
 	// 非 contributor 且无管理角色 = viewer 只读准入，隐藏上传
 	// 管理角色（team_leader/dept_manager/*_admin）即使 viewer 兜底也可操作上传
 	const isReadonly = !hasAnyRole('contributor', 'super_admin', 'kb_admin', 'user_admin', 'dept_manager', 'team_leader');
@@ -239,75 +241,105 @@ function renderSidebar(active) {
 	// 用户与角色、反馈与报表、审计与安全：仅管理角色可见
 	if (isManagerRole) {
 		adminItems.push(
-			{ icon: '✅', name: '权限审批', page: 'admin-approvals', key: 'admin-approvals' },
-			{ icon: '📄', name: '文档审核', page: 'admin-docs', key: 'admin-docs' },
-			{ icon: '👥', name: '用户与角色', page: 'admin-users', key: 'admin-users' },
+			{ icon: '✅', name: '权限审批', page: 'admin-approvals', key: 'admin-approvals', desc: '权限配置变更审批与超管复核' },
+			{ icon: '📄', name: '文档审核', page: 'admin-docs', key: 'admin-docs', desc: '文档发布双审与合规复核' },
+			{ icon: '👥', name: '用户与角色', page: 'admin-users', key: 'admin-users', desc: '管理用户、角色与 RBAC 权限' },
 		);
 	} else if (isComplianceOnly) {
 		// 合规管理员仅可见"权限审批"（审计视角，查看全部工单）
 		adminItems.push(
-			{ icon: '✅', name: '权限审批', page: 'admin-approvals', key: 'admin-approvals' },
+			{ icon: '✅', name: '权限审批', page: 'admin-approvals', key: 'admin-approvals', desc: '权限配置变更审批与超管复核' },
 		);
 	}
-	// 知识库：所有登录用户可浏览文档；节点增删改仅管理员可用（页面内控制）
-	adminItems.push({ icon: '🗂️', name: '知识库', page: 'admin-nodes', key: 'admin-nodes' });
 	if (isManagerRole) {
 		adminItems.push(
-			{ icon: '📊', name: '反馈与报表', page: 'admin-analytics', key: 'admin-analytics' },
-			{ icon: '🎯', name: '质量评估', page: 'admin-eval', key: 'admin-eval' },
-			{ icon: '🛡️', name: '审计与安全', page: 'admin-audit', key: 'admin-audit' },
+			{ icon: '📊', name: '反馈与报表', page: 'admin-analytics', key: 'admin-analytics', desc: '用户反馈收集与准确率分析' },
+			{ icon: '🎯', name: '质量评估', page: 'admin-eval', key: 'admin-eval', desc: 'RAG 质量评估与回归分析' },
+			{ icon: '🛡️', name: '审计与安全', page: 'admin-audit', key: 'admin-audit', desc: '操作审计日志与安全策略' },
 		);
 	}
 	// 组织架构 & RBAC 权限配置：仅超级管理员和文档管理员可见
 	if (isAdminOrOps()) {
 		adminItems.push(
-			{ icon: '🏢', name: '组织架构', page: 'admin-org', key: 'admin-org' },
-			{ icon: '&#9881;&#65039;', name: 'RBAC 权限配置', page: 'admin-rbac', key: 'admin-rbac' },
+			{ icon: '🏢', name: '组织架构', page: 'admin-org', key: 'admin-org', desc: '部门与团队结构管理' },
+			{ icon: '&#9881;&#65039;', name: 'RBAC 权限配置', page: 'admin-rbac', key: 'admin-rbac', desc: '角色权限矩阵配置' },
 		);
 	}
 	// 系统配置：超级管理员 / 维护管理员可见（运行期 KV 配置项管理）
 	if (isSystemMaintainer()) {
 		adminItems.push(
-			{ icon: '🔧', name: '系统配置', page: 'admin-system-config', key: 'admin-system-config' },
+			{ icon: '🔧', name: '系统配置', page: 'admin-system-config', key: 'admin-system-config', desc: '系统运行参数与模型管理' },
 		);
 	}
-	const items = [
-		{
-			group: '工作台', items: [
-				{ icon: '💬', name: '智能聊天', page: 'chat', key: 'chat' },
-				...(isReadonly ? [] : [{ icon: '📤', name: '文档上传', page: 'upload', key: 'upload' }])
-			]
-		},
-		{
-			group: '个人', items: [
-				{ icon: '👤', name: '个人资料', page: 'profile', key: 'profile' },
-			]
-		},
-		{ group: '管理后台', items: adminItems }
+
+	// 按业务场景分组（去掉原"工作台/个人/管理后台"命名，仅影响命名与布局，各角色可见项不变）
+	const kbItems = [];
+	// 文档上传：只读角色隐藏；知识库：所有登录用户可见
+	if (!isReadonly) kbItems.push({ icon: '📤', name: '文档上传', page: 'upload', key: 'upload', desc: '上传 PDF / Word / MD，自动解析与向量化' });
+	kbItems.push({ icon: '🗂️', name: '知识库', page: 'admin-nodes', key: 'admin-nodes', desc: '知识库树形结构与文档维护' });
+
+	const groups = [
+		{ group: '会话', icon: '💬', items: [{ icon: '💬', name: '智能聊天', page: 'chat', key: 'chat', desc: '基于 RAG 的多轮问答，支持多知识库检索' }] },
+		{ group: '知识库', icon: '🗂️', items: kbItems },
+		{ group: '账户', icon: '👤', items: [{ icon: '👤', name: '个人资料', page: 'profile', key: 'profile', desc: '查看与维护个人账号信息' }] },
 	];
+	// 管理分组仅在存在可见项时渲染（权限判定逻辑与重构前一致）
+	if (adminItems.length) groups.push({ group: '管理', icon: '⚙️', items: adminItems });
+
+	return groups;
+}
+
+function renderSidebar(active) {
+	// 复用 getSidebarGroups，确保侧边栏与首页功能入口的可见性一致
+	const groups = getSidebarGroups();
+	const collapsed = isSidebarCollapsed();
 	return `
   <aside class="sidebar">
-    ${items.map(g => `
-      <div class="sidebar-group">
-        <div class="sidebar-group-title">${g.group}</div>
-        ${g.items.map(it => {
+    <div class="sidebar-head">
+      <button type="button" class="sidebar-collapse-btn" id="sidebarCollapseBtn"
+        onclick="toggleSidebarCollapse()" title="${collapsed ? '展开侧栏' : '折叠侧栏'}">${collapsed ? '▶' : '◀'}</button>
+    </div>
+    <nav class="sidebar-nav">
+      ${groups.map(g => `
+        <div class="sidebar-group">
+          <div class="sidebar-group-title">${g.group}</div>
+          ${g.items.map(it => {
 		if (it.page) {
 			return `
-              <a class="sidebar-item ${it.key === active ? 'active' : ''}" href="${PAGE_MAP[it.page]}">
+              <a class="sidebar-item ${it.key === active ? 'active' : ''}" href="${PAGE_MAP[it.page]}" data-tip="${escapeHtml(it.name)}">
                 <span class="sidebar-item-icon">${it.icon}</span>
-                <span>${it.name}</span>
+                <span class="sidebar-item-text">${it.name}</span>
               </a>`;
 		}
 		return `
-              <div class="sidebar-item sidebar-item-placeholder" style="cursor:not-allowed;opacity:0.5" title="功能预留，即将上线">
+              <div class="sidebar-item sidebar-item-placeholder" style="cursor:not-allowed;opacity:0.5" title="功能预留，即将上线" data-tip="${escapeHtml(it.name)}">
                 <span class="sidebar-item-icon">${it.icon}</span>
-                <span>${it.name}</span>
-                <span style="margin-left:auto;font-size:10px;color:var(--text-sub);padding:2px 8px;border:1px solid #e5e7eb;border-radius:10px">即将上线</span>
+                <span class="sidebar-item-text">${it.name}</span>
+                <span class="sidebar-item-badge" style="margin-left:auto;font-size:10px;color:var(--text-sub);padding:2px 8px;border:1px solid #e5e7eb;border-radius:10px">即将上线</span>
               </div>`;
 	}).join('')}
-      </div>
-    `).join('')}
+        </div>
+      `).join('')}
+    </nav>
   </aside>`;
+}
+
+/* ============ 侧栏折叠 ============ */
+function isSidebarCollapsed() {
+	// 折叠状态持久化到 localStorage，所有带壳页面统一生效
+	return localStorage.getItem('rag_sidebar_collapsed') === '1';
+}
+
+function toggleSidebarCollapse() {
+	// 切换折叠：仅显示图标、宽度变窄，hover 显示悬浮提示；刷新后保持，各页一致生效
+	const collapsed = !isSidebarCollapsed();
+	localStorage.setItem('rag_sidebar_collapsed', collapsed ? '1' : '0');
+	document.body.classList.toggle('sidebar-collapsed', collapsed);
+	const btn = document.getElementById('sidebarCollapseBtn');
+	if (btn) {
+		btn.textContent = collapsed ? '▶' : '◀';
+		btn.title = collapsed ? '展开侧栏' : '折叠侧栏';
+	}
 }
 
 /* ============ 页面初始化：注入顶栏 + 侧栏 ============ */
@@ -321,7 +353,11 @@ document.addEventListener('DOMContentLoaded', () => {
 	if (topnavEl) topnavEl.innerHTML = renderTopNav(currentPage);
 
 	const sidebarEl = document.getElementById('sidebar-container');
-	if (sidebarEl) sidebarEl.innerHTML = renderSidebar(currentPage);
+	if (sidebarEl) {
+		sidebarEl.innerHTML = renderSidebar(currentPage);
+		// 恢复侧栏折叠状态（刷新后保持）
+		if (isSidebarCollapsed()) document.body.classList.add('sidebar-collapsed');
+	}
 
 	// 初始化全局搜索（顶栏）
 	initGlobalSearch();

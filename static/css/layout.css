@@ -319,11 +319,73 @@
 
 .sidebar {
 	width: var(--sidebar-w);
+	/* 高度约束到布局容器，使内部 .sidebar-nav 可独立上下滚动 */
+	height: 100%;
 	background: var(--white);
 	border-right: 1px solid var(--border);
-	padding: 16px 0;
-	overflow-y: auto;
 	flex-shrink: 0;
+	display: flex;
+	flex-direction: column;
+	overflow: hidden;
+	transition: width 0.2s ease;
+}
+
+/* 侧栏头部：折叠按钮 */
+.sidebar-head {
+	display: flex;
+	align-items: center;
+	justify-content: flex-end;
+	padding: 8px 12px;
+	border-bottom: 1px solid var(--border);
+	flex-shrink: 0;
+}
+
+.sidebar-collapse-btn {
+	width: 28px;
+	height: 28px;
+	border: 1px solid var(--border);
+	border-radius: var(--radius-sm);
+	background: var(--bg);
+	color: var(--text-sub);
+	font-size: 12px;
+	line-height: 1;
+	cursor: pointer;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	transition: all 0.15s;
+}
+
+.sidebar-collapse-btn:hover {
+	background: var(--hover);
+	color: var(--text);
+	border-color: var(--border-strong);
+}
+
+/* 侧栏导航：内容过多时上下滚动 + 适度滚动条 */
+.sidebar-nav {
+	flex: 1;
+	overflow-y: auto;
+	padding: 8px 0 16px;
+	scrollbar-width: thin;
+	scrollbar-color: var(--border-strong) transparent;
+}
+
+.sidebar-nav::-webkit-scrollbar {
+	width: 6px;
+}
+
+.sidebar-nav::-webkit-scrollbar-thumb {
+	background: var(--border-strong);
+	border-radius: 3px;
+}
+
+.sidebar-nav::-webkit-scrollbar-thumb:hover {
+	background: var(--text-placeholder);
+}
+
+.sidebar-nav::-webkit-scrollbar-track {
+	background: transparent;
 }
 
 .sidebar-group {
@@ -335,7 +397,12 @@
 	font-size: 11px;
 	color: var(--text-sub);
 	letter-spacing: 0.05em;
-	text-transform: uppercase
+	text-transform: uppercase;
+	/* 滚动时分组标题吸顶，便于识别当前所在分组 */
+	position: sticky;
+	top: 0;
+	background: var(--white);
+	z-index: 1;
 }
 
 .sidebar-item {
@@ -364,7 +431,62 @@
 .sidebar-item-icon {
 	font-size: 16px;
 	width: 20px;
-	text-align: center
+	text-align: center;
+	flex-shrink: 0;
+}
+
+/* ============ 折叠态：仅图标 + hover 悬浮提示 ============ */
+body.sidebar-collapsed .sidebar {
+	width: 56px;
+}
+
+body.sidebar-collapsed .sidebar-head {
+	justify-content: center;
+	padding: 8px 0;
+}
+
+body.sidebar-collapsed .sidebar-group {
+	margin-bottom: 4px;
+}
+
+body.sidebar-collapsed .sidebar-item {
+	padding: 10px 0;
+	justify-content: center;
+	position: relative;
+}
+
+body.sidebar-collapsed .sidebar-item-text,
+body.sidebar-collapsed .sidebar-item-badge {
+	display: none;
+}
+
+/* 分组标题折叠后退化为细分隔线 */
+body.sidebar-collapsed .sidebar-group-title {
+	margin: 8px 12px;
+	padding: 0;
+	height: 1px;
+	background: var(--border);
+	overflow: hidden;
+	text-indent: -999px;
+}
+
+/* 折叠态悬浮提示（data-tip 取自菜单名） */
+body.sidebar-collapsed .sidebar-item:hover::after {
+	content: attr(data-tip);
+	position: absolute;
+	left: calc(100% + 10px);
+	top: 50%;
+	transform: translateY(-50%);
+	background: var(--text);
+	color: #fff;
+	font-size: 12px;
+	line-height: 1.4;
+	padding: 4px 10px;
+	border-radius: var(--radius-sm);
+	white-space: nowrap;
+	z-index: 1200;
+	pointer-events: none;
+	box-shadow: var(--shadow-lg);
 }
 
 .main {

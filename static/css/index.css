@@ -2,7 +2,8 @@
 
 .home-grid {
 	display: grid;
-	grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+	/* auto-fit：单卡片分组不拉伸满行，多卡片自动换行 */
+	grid-template-columns: repeat(auto-fit, minmax(240px, 320px));
 	gap: 16px;
 	padding: 24px 0
 }

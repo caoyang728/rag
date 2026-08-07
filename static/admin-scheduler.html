@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>定时任务 · 知库 Agent</title>
+	<link rel="stylesheet" href="/static/css/common.css">
+	<link rel="stylesheet" href="/static/css/layout.css">
+	<link rel="stylesheet" href="/static/css/admin-scheduler.css">
+</head>
+
+<body>
+	<div id="topnav-container"></div>
+	<div class="layout">
+		<div id="sidebar-container"></div>
+		<div class="main main-flex">
+			<div class="page-header page-header-row">
+				<div class="flex items-baseline gap-10">
+					<div class="page-title">定时任务</div>
+					<div class="page-subtitle">Celery Beat 调度配置（修改需提交工单，高风险项需超管复核，审批通过后热生效）</div>
+				</div>
+				<!-- 顶部操作入口：工单列表（仅调度类工单） -->
+				<div class="page-header-actions">
+					<button class="btn btn-sm btn-outline" onclick="openTicketModal()">📋 工单列表</button>
+				</div>
+			</div>
+
+			<!-- ===== 页签：任务调度 / 忙闲视图 ===== -->
+			<div class="sheet-tabs">
+				<button class="sheet-tab active" data-sheet="tasks" onclick="switchSheet('tasks')">任务调度</button>
+				<button class="sheet-tab" data-sheet="busy" onclick="switchSheet('busy')">忙闲视图</button>
+			</div>
+
+			<!-- ===== 任务调度 sheet：任务卡片列表 ===== -->
+			<div id="sheet-tasks" class="card flex flex-col overflow-hidden" style="flex:1;min-height:0">
+				<div class="flex items-center justify-between mb-16 shrink-0">
+					<div class="card-title mb-0">
+						<span>任务调度</span>
+						<span id="taskCount" class="text-sub text-sm" style="font-weight:400;margin-left:8px"></span>
+					</div>
+					<div class="text-sub text-sm">cron 格式：分 时 日 月 周（周 0-6，0=周日）</div>
+				</div>
+				<div id="taskList" class="card-scroll">
+					<div class="empty">
+						<div class="empty-icon">⏳</div>
+						<div class="empty-text">加载中...</div>
+					</div>
+				</div>
+			</div>
+
+			<!-- ===== 忙闲视图 sheet：Outlook 风格日程（周视图 / 日视图） =====
+			     基于各任务 cron + estimated_minutes（含 20% 缓冲）在日历上按时间段摆放任务块，
+			     颜色按任务固定区分；重叠时段并排展示，便于错峰调整调度时间。
+			     全天运行类任务（步长/每小时）与每月/每年固定日期任务不纳入。 -->
+			<div id="sheet-busy" class="card flex flex-col hidden" style="flex:1;min-height:0">
+				<div class="flex items-center justify-between mb-16 shrink-0">
+					<div class="card-title mb-0">
+						<span>忙闲视图</span>
+						<span class="text-sub text-sm" style="font-weight:400;margin-left:8px">预估工时已含 20% 缓冲，同色 = 同一任务</span>
+					</div>
+					<div class="busy-tabs">
+						<button class="busy-tab active" data-view="week" onclick="switchBusyView('week')">周视图</button>
+						<button class="busy-tab" data-view="day" onclick="switchBusyView('day')">日视图</button>
+					</div>
+				</div>
+				<div id="busyWeekView" style="flex:1;min-height:0;overflow:auto"></div>
+				<div id="busyDayView" class="hidden" style="flex:1;min-height:0;overflow:auto"></div>
+			</div>
+		</div>
+	</div>
+
+	<div id="mask" class="mask"></div>
+	<div id="toast-wrap" class="toast-wrap"></div>
+
+	<!-- ===== 编辑定时任务弹窗（common.js 弹窗框架：.modal + showModal/closeModal） =====
+	     内容：cron 分字段输入 + 实时中文解释/表达式错误提示 + 启停开关 + 变更原因。
+	     表达式不合法或值未变化时提交按钮禁用，校验通过才允许提交工单。 -->
+	<div class="modal" id="editTaskModal" style="width:680px;max-width:95vw">
+		<div class="modal-header">
+			<div class="modal-title">编辑定时任务 · <span id="editTaskLabel"></span></div>
+			<button class="modal-close" onclick="closeEditModal()">&times;</button>
+		</div>
+		<div class="modal-body" style="padding:12px 20px">
+			<div class="confirm-banner confirm-banner-info">
+				<span class="confirm-banner-icon">⏰</span>
+				<span id="editTaskBanner"></span>
+			</div>
+			<div class="form-item" style="margin-top:12px">
+				<label class="form-label">cron 表达式（分 时 日 月 周，支持 * / 逗号 / 区间 / 步长）</label>
+				<div class="cron-form-row" id="cronFieldsRow"></div>
+				<div class="cron-preview">当前表达式：<code id="cronPreviewText"></code></div>
+				<div class="cron-explain" id="cronExplainText"></div>
+			</div>
+			<div class="form-item">
+				<label class="form-label">启用状态</label>
+				<label class="switch"><input type="checkbox" id="cron-enabled"><span class="slider"></span></label>
+				<span class="cron-enabled-hint" id="cronEnabledHint"></span>
+			</div>
+			<div class="form-item">
+				<label class="form-label">变更原因 <span class="required">*</span></label>
+				<textarea id="ticketReasonInput" class="input" rows="3" placeholder="请说明本次调度变更的原因（如：评估任务成本控制、错峰避开高峰期），便于审批人判断" style="max-width:100%"></textarea>
+			</div>
+			<div class="field-error hidden" id="editTaskErr"></div>
+		</div>
+		<div class="modal-footer">
+			<button class="btn-cancel" onclick="closeEditModal()">取消</button>
+			<button class="btn-save" id="editSubmitBtn" onclick="submitEditTicket()">提交工单</button>
+		</div>
+	</div>
+
+	<!-- ===== 调度变更工单列表弹窗 =====
+	     仅展示调度类（SCHEDULE_*）工单，支持状态筛选（待审核/我的工单/已通过/已驳回/已撤回），
+	     点击工单展开详情 + 审批操作。审批通过后由 beat 热更新生效。 -->
+	<div class="modal" id="ticketListModal" style="width:960px;max-width:95vw">
+		<div class="modal-header">
+			<div class="modal-title">调度变更工单</div>
+			<button class="modal-close" onclick="closeTicketModal()">&times;</button>
+		</div>
+		<div class="modal-body" style="padding:12px 20px;overflow:hidden;display:flex;flex-direction:column">
+			<!-- 状态筛选 tab -->
+			<div class="ticket-tabs" id="ticketTabs">
+				<button class="ticket-tab active" data-status="pending,first_approved" onclick="switchTicketTab('pending,first_approved')">待审核</button>
+				<button class="ticket-tab" data-status="mine" onclick="switchTicketTab('mine')">我的工单</button>
+				<button class="ticket-tab" data-status="approved" onclick="switchTicketTab('approved')">已通过</button>
+				<button class="ticket-tab" data-status="rejected" onclick="switchTicketTab('rejected')">已驳回</button>
+				<button class="ticket-tab" data-status="withdrawn" onclick="switchTicketTab('withdrawn')">已撤回</button>
+			</div>
+			<div id="ticketListBody" class="ticket-list-body">
+				<div class="ticket-empty">加载中...</div>
+			</div>
+		</div>
+		<div class="modal-footer">
+			<div class="ticket-pagination"></div>
+		</div>
+	</div>
+
+	<!-- ===== 无权限模板 ===== -->
+	<template id="tmpl-no-permission">
+		<div class="flex items-center justify-center flex-col" style="height:100vh;color:var(--text-sub)">
+			<div style="font-size:48px;margin-bottom:16px">&#128274;</div>
+			<div style="font-size:16px">仅超级管理员或维护管理员可访问此页面</div>
+			<a href="/chat/" style="margin-top:16px;color:var(--primary)">返回首页</a>
+		</div>
+	</template>
+
+	<!-- ===== 任务卡片模板 ===== -->
+	<template id="tmpl-task-item">
+		<div class="task-item" data-key="__KEY_ATTR__">
+			<div class="task-item-head">
+				<div class="task-item-label">__LABEL__
+					<span class="config-badge config-badge-risk" title="高风险项，工单需超管复核">⚠️ 高风险</span>
+					__PENDING_BADGE__
+				</div>
+				<div class="task-item-actions">
+					<button class="btn btn-sm btn-outline" onclick="openEditModal('__NAME_ATTR__')">✏️ 编辑</button>
+				</div>
+			</div>
+			<div class="task-item-desc">__DESC__</div>
+			<div class="task-item-meta">
+				<div class="task-cron">
+					__CRON_HTML__
+					<span class="task-humanized">__HUMANIZED__</span>
+				</div>
+				<div class="task-status __STATUS_CLASS__">__STATUS_TEXT__</div>
+			</div>
+			<div class="task-item-key">__KEY_ESC__</div>
+		</div>
+	</template>
+
+	<script src="/static/js/common.js"></script>
+	<script src="/static/js/api.js"></script>
+	<script src="/static/js/layout.js"></script>
+	<script src="/static/js/admin-scheduler.js"></script>
+</body>
+
+</html>

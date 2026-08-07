@@ -133,3 +133,81 @@ def create_system_configs(config, dry_run=False, force=False):
 
     logger.info(f'  总计: 新增 {created} 个，覆盖 {updated} 个，保留 {skipped} 个')
     return created
+
+
+def create_schedule_configs(dry_run=False, force=False):
+    """初始化定时任务调度配置项（SCHEDULE_*）
+
+    任务清单与默认调度时间来自 apps.system.scheduler_registry.SCHEDULED_TASKS
+    （单一数据源），不写入 yaml，避免两处维护不一致。
+    所有调度项统一标记为高风险：修改调度时间 / 启停需走"审核 + 超管复核"工单，
+    与"修改定时任务时间需审批"的要求一致（定时任务影响生产批量作业与成本）。
+
+    Args:
+        dry_run: 仅预览不写库
+        force: 强制覆盖已存在项的 value（默认 False，仅更新元数据）
+    """
+    logger.info('\n=== 创建定时任务调度配置 ===')
+    from apps.system.models import SystemConfig
+    from apps.system.scheduler_registry import (
+        SCHEDULED_TASKS,
+        SCHEDULE_CATEGORY,
+        SCHEDULE_RISK_LEVEL,
+        schedule_key,
+        serialize_schedule,
+    )
+    created = 0
+    updated = 0
+    skipped = 0
+
+    for task in SCHEDULED_TASKS:
+        key = schedule_key(task['name'])
+        value = serialize_schedule(task['cron'], task.get('enabled', True))
+        label = task['label']
+        description = task['description']
+        try:
+            obj = SystemConfig.objects.filter(key=key).first()
+            if obj is None:
+                # 新增：首次部署或后续新增调度任务
+                if not dry_run:
+                    SystemConfig.objects.create(
+                        key=key, value=value, value_type='json',
+                        label=label, description=description,
+                        category=SCHEDULE_CATEGORY, is_secret=False,
+                        is_readonly=False, risk_level=SCHEDULE_RISK_LEVEL,
+                    )
+                logger.info(f'  ✅ 新增调度配置: {key} = {value}')
+                created += 1
+            elif force:
+                # 强制覆盖：重置为用户之前的默认值（含 value）
+                if not dry_run:
+                    obj.value = value
+                    obj.value_type = 'json'
+                    obj.label = label
+                    obj.description = description
+                    obj.category = SCHEDULE_CATEGORY
+                    obj.is_secret = False
+                    obj.is_readonly = False
+                    obj.risk_level = SCHEDULE_RISK_LEVEL
+                    obj.save()
+                logger.info(f'  🔄 强制覆盖调度配置: {key} = {value}')
+                updated += 1
+            else:
+                # 已存在：仅更新元数据，保留用户在管理端调整的 value
+                skipped += 1
+                if not dry_run:
+                    obj.value_type = 'json'
+                    obj.label = label
+                    obj.description = description
+                    obj.category = SCHEDULE_CATEGORY
+                    obj.is_secret = False
+                    obj.is_readonly = False
+                    obj.risk_level = SCHEDULE_RISK_LEVEL
+                    obj.save()
+                logger.info(f'  ⏭️  调度配置 "{key}" 已存在，保留用户 value，仅更新元数据')
+        except Exception as e:
+            logger.info(f'  ❌ 调度配置 "{key}" 初始化失败: {e}')
+            traceback.print_exc()
+
+    logger.info(f'  调度配置总计: 新增 {created} 个，覆盖 {updated} 个，保留 {skipped} 个')
+    return created

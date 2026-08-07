@@ -139,6 +139,8 @@ class Command(BaseCommand):
                 logger.info('⚠️ 检测到系统已初始化，仅更新系统配置元数据')
                 logger.info('   如需完全重新初始化，请使用 --force 参数')
                 system_configs.create_system_configs(config, dry_run, False)
+                # 定时任务调度配置：增量补齐缺失项，已存在的保留用户在管理端调整的值
+                system_configs.create_schedule_configs(dry_run, False)
                 # 模型配置同样走增量：补齐缺失条目，已存在的保留用户在前端调整的值
                 models.create_llm_models(config, dry_run, False)
                 logger.info('\n' + '=' * 60)
@@ -169,6 +171,8 @@ class Command(BaseCommand):
         global_memories.create_global_memories(config, dry_run)
         # 系统配置：--force 时覆盖 value，否则仅创建缺失项 + 更新元数据
         system_configs.create_system_configs(config, dry_run, force)
+        # 定时任务调度配置：--force 时重置默认调度时间，否则仅创建缺失项 + 更新元数据
+        system_configs.create_schedule_configs(dry_run, force)
         # 模型配置：首次部署创建预置模型，--force 时覆盖已存在项字段
         models.create_llm_models(config, dry_run, force)
 

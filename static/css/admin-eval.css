@@ -89,6 +89,7 @@
 	white-space: nowrap;
 	border-radius: 6px 6px 0 0;
 	position: relative;
+	flex-shrink: 0; /* 折叠测量按自然宽度计算,不允许被 flex 压缩导致测量失真 */
 }
 
 .tab-item:hover {
@@ -113,6 +114,85 @@
 	height: 4px;
 	border-radius: 50%;
 	background: var(--primary);
+}
+
+/* ===== Tab 溢出折叠「⋯ 更多」（Ant Design More 模式） ===== */
+/* 窗口放不下时 refreshEvalTabs 把溢出的 tab 收进右侧下拉，避免后面的 tab 不可见 */
+.tab-more {
+	position: relative;
+	flex-shrink: 0;
+	margin-left: 4px;
+	align-items: center;
+}
+
+.tab-more-trigger {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	padding: 10px 12px;
+	cursor: pointer;
+	font-size: 13px;
+	color: var(--text-sub);
+	border-radius: 6px 6px 0 0;
+	user-select: none;
+	white-space: nowrap;
+	transition: color .2s, background .2s;
+}
+
+.tab-more-trigger:hover {
+	color: var(--text);
+	background: var(--hover);
+}
+
+/* 折叠数量徽标：让用户一眼看出「还有 N 个 tab」 */
+.tab-more-count {
+	min-width: 16px;
+	height: 16px;
+	line-height: 16px;
+	text-align: center;
+	font-size: 11px;
+	color: #fff;
+	background: var(--primary);
+	border-radius: 8px;
+	padding: 0 5px;
+}
+
+/* 下拉菜单：fixed 相对视口定位,可避开 .tabs 的 overflow 裁剪;
+   实际坐标由 JS 打开时按触发块位置计算(见 openEvalMore) */
+.tab-more-menu {
+	display: none;
+	position: fixed;
+	min-width: 168px;
+	background: var(--white);
+	border: 1px solid var(--border);
+	border-radius: 8px;
+	box-shadow: 0 8px 24px rgba(0, 0, 0, .14);
+	padding: 6px;
+	z-index: 120;
+}
+
+.tab-more.open .tab-more-menu {
+	display: block;
+	animation: fadeIn .18s ease;
+}
+
+/* 下拉内 tab 项：改列表形态，去掉主栏的下划线指示，用背景高亮激活态 */
+.tab-more-menu .tab-item {
+	display: block;
+	width: 100%;
+	padding: 9px 12px;
+	border-bottom: none;
+	border-radius: 6px;
+	text-align: left;
+}
+
+.tab-more-menu .tab-item.active {
+	background: var(--hover);
+	font-weight: 500;
+}
+
+.tab-more-menu .tab-item.active::before {
+	display: none;
 }
 
 /* ===== Tab 面板 ===== */
@@ -502,8 +582,8 @@
 }
 
 .eval-radar-wrap {
-	flex: 0 0 36%;
-	max-width: 500px;
+	flex: 0 0 46%;
+	max-width: 560px;
 	min-width: 340px;
 }
 
@@ -934,4 +1014,75 @@ svg {
 	background: #fef3c7;
 	color: #92400e;
 	border: 1px solid #fcd34d;
+}
+
+/* ===== 路由分析：按天命中趋势堆叠条 ===== */
+.route-legend {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 14px;
+	font-size: 12px;
+	color: var(--text-sub);
+}
+
+.route-legend-item {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+}
+
+.route-legend-dot {
+	width: 10px;
+	height: 10px;
+	border-radius: 2px;
+	flex-shrink: 0;
+}
+
+.route-trend-list {
+	max-height: 360px;
+	overflow-y: auto;
+}
+
+.route-trend-row {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	padding: 5px 0;
+	font-size: 12px;
+}
+
+.route-trend-row:not(:last-child) {
+	border-bottom: 1px dashed var(--border);
+}
+
+.route-trend-date {
+	flex-shrink: 0;
+	width: 88px;
+	color: var(--text-sub);
+	font-variant-numeric: tabular-nums;
+}
+
+.route-trend-bar {
+	flex: 1;
+	display: flex;
+	height: 20px;
+	border-radius: 4px;
+	overflow: hidden;
+	background: var(--bg-muted, #f3f4f6);
+}
+
+.route-trend-seg {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	color: #fff;
+	font-size: 11px;
+	font-weight: 600;
+	white-space: nowrap;
+	min-width: 18px;
+	transition: filter .15s;
+}
+
+.route-trend-seg:hover {
+	filter: brightness(1.1);
 }

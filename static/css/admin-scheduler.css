@@ -1,0 +1,910 @@
+/* ==========================================================
+   定时任务调度配置页面样式 (admin-scheduler.css)
+   布局：任务卡片列表（名称/描述/cron 分字段/状态/操作）
+   ========================================================== */
+
+/* ===== 页面整体 ===== */
+.page-header {
+	margin-bottom: 16px;
+}
+
+.page-header-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+}
+
+.page-header-actions {
+	flex-shrink: 0;
+	display: flex;
+	gap: 8px;
+}
+
+/* ===== 任务卡片 ===== */
+.task-item {
+	padding: 14px 18px;
+	border-bottom: 1px solid var(--border-light, #f0f0f0);
+	transition: background 0.15s;
+}
+
+.task-item:hover {
+	background: var(--bg-hover, #fafbfc);
+}
+
+.task-item:last-child {
+	border-bottom: none;
+}
+
+.task-item-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+}
+
+.task-item-label {
+	font-size: 14px;
+	font-weight: 600;
+	color: var(--text-main, #1a1a2e);
+	line-height: 1.4;
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	flex-wrap: wrap;
+}
+
+.task-item-actions {
+	display: flex;
+	gap: 6px;
+	flex-shrink: 0;
+	align-items: center;
+}
+
+.task-item-desc {
+	font-size: 12px;
+	color: var(--text-sub, #888);
+	line-height: 1.5;
+	margin-top: 6px;
+	max-width: 720px;
+}
+
+.task-item-meta {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	margin-top: 10px;
+	flex-wrap: wrap;
+}
+
+/* cron 分字段展示：每段一个灰底小框 */
+.task-cron {
+	display: flex;
+	gap: 6px;
+	flex-wrap: wrap;
+	align-items: center;
+}
+
+.cron-field {
+	display: inline-flex;
+	align-items: baseline;
+	gap: 4px;
+	font-size: 12px;
+	font-family: 'SF Mono', 'Consolas', monospace;
+	background: var(--bg-tag, #f0f0f0);
+	padding: 2px 8px;
+	border-radius: 4px;
+	color: var(--text-main, #333);
+}
+
+.cron-field em {
+	font-style: normal;
+	font-size: 10px;
+	color: var(--text-sub, #999);
+	font-family: inherit;
+}
+
+/* cron 中文解释（人性化）：紧随分字段框后展示，与描述区解耦 */
+.task-humanized {
+	font-size: 12px;
+	color: var(--primary, #4f46e5);
+	background: var(--primary-light, #eef2ff);
+	padding: 2px 8px;
+	border-radius: 4px;
+	font-weight: 500;
+}
+
+/* 编辑弹窗 cron 表达式解释行 */
+.cron-explain {
+	margin-top: 6px;
+	font-size: 13px;
+	color: var(--primary, #4f46e5);
+	font-weight: 500;
+}
+
+/* 启用状态徽标 */
+.task-status {
+	font-size: 11px;
+	padding: 2px 8px;
+	border-radius: 10px;
+	font-weight: 500;
+	white-space: nowrap;
+}
+
+.task-status-on {
+	background: #dcfce7;
+	color: #166534;
+}
+
+.task-status-off {
+	background: #f3f4f6;
+	color: #6b7280;
+}
+
+/* 待审批工单 badge */
+.task-pending-badge {
+	font-size: 11px;
+	padding: 1px 8px;
+	border-radius: 10px;
+	background: #dbeafe;
+	color: #1e40af;
+	cursor: pointer;
+	font-weight: 500;
+	white-space: nowrap;
+	transition: background 0.15s;
+}
+
+.task-pending-badge:hover {
+	background: #bfdbfe;
+}
+
+/* 调度键（灰色小字，mono 字体） */
+.task-item-key {
+	font-size: 10px;
+	color: var(--text-sub, #999);
+	font-family: 'SF Mono', 'Consolas', monospace;
+	margin-top: 6px;
+	opacity: 0.6;
+}
+
+/* ===== 标签（复用配置页风格） ===== */
+.config-badge {
+	font-size: 10px;
+	padding: 1px 7px;
+	border-radius: 4px;
+	font-weight: 400;
+	line-height: 1.5;
+	white-space: nowrap;
+}
+
+.config-badge-risk {
+	background: #fff3e0;
+	color: #e65100;
+	border: 1px solid #ffcc80;
+}
+
+/* ===== 编辑弹窗：cron 字段表单 ===== */
+.cron-form-row {
+	display: flex;
+	gap: 8px;
+	flex-wrap: wrap;
+}
+
+.cron-form-item {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	flex: 1;
+	min-width: 76px;
+}
+
+.cron-form-label {
+	font-size: 12px;
+	color: var(--text-main, #333);
+	display: flex;
+	align-items: center;
+	gap: 4px;
+}
+
+.cron-form-range {
+	font-size: 10px;
+	color: var(--text-sub, #999);
+	font-weight: 400;
+}
+
+.cron-form-input {
+	width: 100%;
+	text-align: center;
+	font-family: 'SF Mono', 'Consolas', monospace;
+	font-size: 13px;
+	border-radius: 6px;
+}
+
+.cron-preview {
+	margin-top: 10px;
+	font-size: 12px;
+	color: var(--text-sub, #888);
+}
+
+.cron-preview code {
+	background: var(--bg-tag, #f0f0f0);
+	padding: 2px 8px;
+	border-radius: 4px;
+	font-family: 'SF Mono', 'Consolas', monospace;
+	font-size: 12px;
+	color: var(--text-main, #333);
+}
+
+.cron-enabled-hint {
+	font-size: 12px;
+	color: var(--text-sub, #888);
+	margin-left: 8px;
+}
+
+/* ===== Switch 开关（启用状态，复用配置页样式） ===== */
+.switch {
+	position: relative;
+	display: inline-block;
+	width: 38px;
+	height: 22px;
+	flex-shrink: 0;
+	vertical-align: middle;
+}
+
+.switch input {
+	opacity: 0;
+	width: 0;
+	height: 0;
+}
+
+.switch .slider {
+	position: absolute;
+	cursor: pointer;
+	top: 0;
+	left: 0;
+	right: 0;
+	bottom: 0;
+	background: #d1d5db;
+	transition: 0.25s;
+	border-radius: 22px;
+}
+
+.switch .slider:before {
+	position: absolute;
+	content: "";
+	height: 16px;
+	width: 16px;
+	left: 3px;
+	bottom: 3px;
+	background: white;
+	transition: 0.25s;
+	border-radius: 50%;
+	box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+}
+
+.switch input:checked + .slider {
+	background: var(--primary, #4f46e5);
+}
+
+.switch input:checked + .slider:before {
+	transform: translateX(16px);
+}
+
+/* ==========================================================
+   调度变更工单列表样式（与配置页工单视觉一致）
+   ========================================================== */
+
+.ticket-tabs {
+	display: flex;
+	gap: 4px;
+	border-bottom: 1px solid var(--border-light, #eee);
+	margin-bottom: 12px;
+	flex-wrap: wrap;
+}
+
+.ticket-tab {
+	padding: 8px 14px;
+	border: none;
+	background: transparent;
+	cursor: pointer;
+	font-size: 13px;
+	color: var(--text-sub, #666);
+	border-bottom: 2px solid transparent;
+	transition: all 0.15s;
+	border-radius: 6px 6px 0 0;
+}
+
+.ticket-tab:hover {
+	background: var(--bg-hover, #f5f7fa);
+	color: var(--text-main, #333);
+}
+
+.ticket-tab.active {
+	color: var(--primary, #4f46e5);
+	border-bottom-color: var(--primary, #4f46e5);
+	font-weight: 600;
+}
+
+.ticket-list-body {
+	flex: 1;
+	min-height: 480px;
+	max-height: 480px;
+	overflow-y: auto;
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.ticket-empty {
+	text-align: center;
+	color: var(--text-sub, #999);
+	padding: 32px 12px;
+	font-size: 13px;
+}
+
+.ticket-pagination {
+	width: 100%;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 12px;
+}
+
+.pagination-info {
+	font-size: 13px;
+	color: var(--text-sub, #888);
+}
+
+/* 工单卡片 */
+.ticket-card {
+	border: 1px solid var(--border-light, #eee);
+	border-radius: 6px;
+	overflow: hidden;
+	transition: box-shadow 0.15s;
+}
+
+.ticket-card:hover {
+	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+}
+
+.ticket-card-header {
+	padding: 10px 14px;
+	cursor: pointer;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	background: var(--bg-sub, #fafbfc);
+	transition: background 0.15s;
+}
+
+.ticket-card-header:hover {
+	background: var(--bg-hover, #f5f7fa);
+}
+
+.ticket-card-title {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	flex-wrap: wrap;
+}
+
+.ticket-config-label {
+	font-size: 13px;
+	font-weight: 600;
+	color: var(--text-main, #1a1a2e);
+}
+
+.ticket-config-key {
+	font-size: 10px;
+	color: var(--text-sub, #888);
+	font-family: 'SF Mono', 'Consolas', monospace;
+	background: var(--bg-tag, #f0f0f0);
+	padding: 1px 6px;
+	border-radius: 4px;
+}
+
+.ticket-status {
+	font-size: 11px;
+	padding: 2px 8px;
+	border-radius: 10px;
+	font-weight: 500;
+	white-space: nowrap;
+}
+
+.ticket-status-pending {
+	background: #fff8e1;
+	color: #b45309;
+	border: 1px solid #fde68a;
+}
+
+.ticket-status-first {
+	background: #fce7f3;
+	color: #be185d;
+	border: 1px solid #fbcfe8;
+}
+
+.ticket-status-approved {
+	background: #dcfce7;
+	color: #166534;
+}
+
+.ticket-status-rejected {
+	background: #fee2e2;
+	color: #991b1b;
+}
+
+.ticket-status-withdrawn {
+	background: #f3f4f6;
+	color: #6b7280;
+}
+
+.ticket-card-meta {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	font-size: 11px;
+	color: var(--text-sub, #888);
+	flex-wrap: wrap;
+}
+
+.ticket-value-diff {
+	font-family: 'SF Mono', 'Consolas', monospace;
+	color: var(--text-main, #555);
+}
+
+.ticket-creator,
+.ticket-time {
+	white-space: nowrap;
+}
+
+/* diff 样式 */
+.diff-old {
+	color: #dc2626;
+	text-decoration: line-through;
+	text-decoration-color: rgba(220, 38, 38, 0.4);
+}
+
+.diff-new {
+	color: #2563eb;
+	font-weight: 500;
+}
+
+.diff-arrow {
+	color: var(--text-sub, #aaa);
+	margin: 0 4px;
+}
+
+/* 详情区（工单详情弹窗内） */
+.ticket-detail-content {
+	padding: 4px 0;
+}
+
+.ticket-detail-row {
+	display: flex;
+	gap: 8px;
+	font-size: 13px;
+	margin-bottom: 8px;
+	line-height: 1.5;
+}
+
+.ticket-detail-label {
+	color: var(--text-sub, #888);
+	flex-shrink: 0;
+	min-width: 80px;
+}
+
+.ticket-detail-value {
+	color: var(--text-main, #333);
+	flex: 1;
+	min-width: 0;
+	word-break: break-all;
+}
+
+.ticket-detail-multiline {
+	white-space: pre-wrap;
+}
+
+.ticket-detail-hint {
+	font-size: 12px;
+	color: var(--text-sub, #888);
+}
+
+/* ---- 调度变更块状 diff（参考 admin-system-config）---- */
+.ticket-diff-row {
+	display: flex;
+	align-items: stretch;
+	gap: 12px;
+	margin-bottom: 8px;
+}
+
+.ticket-diff-side {
+	flex: 1;
+	border-radius: 8px;
+	padding: 10px 12px;
+	border: 1px solid;
+}
+
+.ticket-diff-old {
+	background: #fef2f2;
+	border-color: #fecaca;
+}
+
+.ticket-diff-new {
+	background: #f0f9ff;
+	border-color: #bfdbfe;
+}
+
+.ticket-diff-side-label {
+	font-size: 11px;
+	font-weight: 600;
+	margin-bottom: 4px;
+}
+
+.ticket-diff-old .ticket-diff-side-label {
+	color: #dc2626;
+}
+
+.ticket-diff-new .ticket-diff-side-label {
+	color: #2563eb;
+}
+
+.ticket-diff-side-value {
+	font-size: 13px;
+	color: var(--text-main, #333);
+	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	word-break: break-all;
+	line-height: 1.5;
+}
+
+/* humanized 中文解释：放在值下方，区分新旧颜色 */
+.ticket-diff-side-hint {
+	font-size: 12px;
+	margin-top: 4px;
+	line-height: 1.4;
+}
+
+.ticket-diff-old .ticket-diff-side-hint {
+	color: #b91c1c;
+}
+
+.ticket-diff-new .ticket-diff-side-hint {
+	color: #1d4ed8;
+}
+
+.ticket-diff-arrow {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 20px;
+	color: var(--text-sub, #999);
+	font-weight: 300;
+	flex-shrink: 0;
+}
+
+/* ---- 内联 diff 中 humanized 文字区分新旧颜色（用于卡片摘要）---- */
+.diff-old-text {
+	color: #dc2626;
+}
+
+.diff-new-text {
+	color: #2563eb;
+}
+
+/* 工单详情弹窗内的状态徽章 */
+.ticket-status-badge {
+	display: inline-block;
+	padding: 2px 10px;
+	border-radius: 10px;
+	font-size: 12px;
+	font-weight: 500;
+}
+.ticket-status-badge.pending {
+	background: #fef3c7;
+	color: #b45309;
+}
+.ticket-status-badge.first_approved {
+	background: #dbeafe;
+	color: #1d4ed8;
+}
+.ticket-status-badge.approved {
+	background: #d1fae5;
+	color: #047857;
+}
+.ticket-status-badge.rejected {
+	background: #fee2e2;
+	color: #b91c1c;
+}
+.ticket-status-badge.withdrawn {
+	background: #f3f4f6;
+	color: #6b7280;
+}
+
+/* ===== 滚动条美化 ===== */
+.card-scroll::-webkit-scrollbar {
+	width: 6px;
+}
+
+.card-scroll::-webkit-scrollbar-track {
+	background: transparent;
+}
+
+.card-scroll::-webkit-scrollbar-thumb {
+	background: #d1d5db;
+	border-radius: 3px;
+}
+
+.card-scroll::-webkit-scrollbar-thumb:hover {
+	background: #9ca3af;
+}
+
+/* ==========================================================
+   页签：任务调度 / 忙闲视图
+   ========================================================== */
+.sheet-tabs {
+	display: flex;
+	gap: 4px;
+	border-bottom: 1px solid var(--border-light, #eee);
+	margin-bottom: 12px;
+	flex-wrap: wrap;
+}
+
+.sheet-tab {
+	padding: 8px 16px;
+	border: none;
+	background: transparent;
+	cursor: pointer;
+	font-size: 14px;
+	color: var(--text-sub, #666);
+	border-bottom: 2px solid transparent;
+	transition: all 0.15s;
+}
+
+.sheet-tab:hover {
+	color: var(--text-main, #333);
+}
+
+.sheet-tab.active {
+	color: var(--primary, #4f46e5);
+	border-bottom-color: var(--primary, #4f46e5);
+	font-weight: 600;
+}
+
+/* ==========================================================
+   忙闲视图：Outlook 风格日程（周视图 / 日视图）
+   ========================================================== */
+
+/* 周/日视图切换 tab */
+.busy-tabs {
+	display: flex;
+	gap: 4px;
+}
+
+.busy-tab {
+	padding: 6px 14px;
+	border: 1px solid var(--border-light, #eee);
+	background: transparent;
+	cursor: pointer;
+	font-size: 13px;
+	color: var(--text-sub, #666);
+	border-radius: 6px;
+	transition: all 0.15s;
+}
+
+.busy-tab:hover {
+	background: var(--bg-hover, #f5f7fa);
+	color: var(--text-main, #333);
+}
+
+.busy-tab.active {
+	color: var(--primary, #4f46e5);
+	border-color: var(--primary, #4f46e5);
+	font-weight: 600;
+}
+
+/* 日历骨架：左侧时间轴 + 7 天列（日视图为单列）。
+   周视图：15 分钟一个格线（每小时 4 行共 96 行），行高 16px 使整体紧凑；
+   日视图：15 分钟一个格线（每小时 4 行共 96 行），整点行高 32px。
+   position:relative 作为 .cal-day-body 绝对定位的包含块；
+   .cal-day-body 不参与 grid 自动放置，避免与 200 个时间标签/格线争抢单元格，
+   否则自动放置项会被挤进时间列竖排、导致 03:00 之后坐标轴整体错位。 */
+.cal-week,
+.cal-day-grid {
+	display: grid;
+	grid-template-columns: 56px repeat(7, 1fr);
+	position: relative;
+	border: 1px solid var(--border-light, #eee);
+	border-radius: 8px;
+	overflow: hidden;
+	background: #fff;
+}
+
+/* 周视图：15 分钟格子，行高与日视图一致 */
+.cal-week {
+	grid-auto-rows: 32px;
+}
+
+/* 日视图：15 分钟格子，行高较大以便展示更多详情 */
+.cal-day-grid {
+	grid-template-columns: 56px 1fr;
+	grid-auto-rows: 32px;
+}
+
+.cal-corner {
+	border-right: 1px solid var(--border-light, #eee);
+	border-bottom: 1px solid var(--border-light, #eee);
+	background: var(--bg-sub, #fafbfc);
+	font-size: 11px;
+	color: var(--text-sub, #888);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.cal-day-head {
+	text-align: center;
+	font-size: 12px;
+	font-weight: 600;
+	color: var(--text-main, #333);
+	padding: 5px 0;
+	background: var(--bg-sub, #fafbfc);
+	border-right: 1px solid var(--border-light, #eee);
+	border-bottom: 1px solid var(--border-light, #eee);
+}
+
+.cal-time {
+	font-size: 10px;
+	color: var(--text-sub, #999);
+	padding: 1px 6px 0 4px;
+	text-align: right;
+	border-right: 1px solid var(--border-light, #eee);
+	border-top: 1px solid var(--bg-tag, #f5f5f5);
+}
+
+.cal-hour-cell {
+	border-right: 1px solid var(--border-light, #f0f0f0);
+	border-top: 1px solid var(--bg-tag, #f5f5f5);
+	background: #fff;
+}
+
+/* 15 分钟格线（日视图）：非整点行用虚线弱化，整点行保持实线 */
+.cal-hour-quarter,
+.cal-time-quarter {
+	border-top-style: dashed;
+	border-top-color: #f2f2f2;
+}
+
+/* 任务块叠加层：绝对定位覆盖在整块时间轴格线上（表头之下），不占 grid 单元格。
+   周视图在 JS 中直接计算 left/width；日视图独占整列。 */
+.cal-day-body {
+	position: absolute;
+	bottom: 0;
+	z-index: 1;
+}
+
+/* 周视图：JS 直接计算 left/width，不再依赖 --di 变量；表头行高 32px */
+.cal-week .cal-day-body {
+	top: 32px;
+}
+
+.cal-day-grid .cal-day-body {
+	top: 32px; /* 日视图表头行高（grid-auto-rows 32px） */
+	left: 56px;
+	width: calc(100% - 56px);
+}
+
+.cal-block {
+	position: absolute;
+	border-radius: 4px;
+	padding: 3px 4px;
+	font-size: 11px;
+	color: #fff;
+	line-height: 1.3;
+	overflow: hidden;
+	box-sizing: border-box;
+	border-left: 3px solid rgba(0, 0, 0, 0.15);
+	box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	text-align: center;
+}
+
+/* 任务名：加粗显示，居中 */
+.cal-block .cal-block-name {
+	font-weight: 600;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	max-width: 100%;
+}
+
+/* 预计时间：在任务名下方显示 */
+.cal-block .cal-block-duration {
+	font-size: 10px;
+	opacity: 0.85;
+	margin-top: 2px;
+}
+
+/* 日视图：星期选择 + 时段明细 */
+.busy-day-select {
+	display: flex;
+	gap: 6px;
+	margin-bottom: 10px;
+	flex-wrap: wrap;
+}
+
+.busy-day-btn {
+	padding: 5px 14px;
+	border: 1px solid var(--border-light, #eee);
+	background: transparent;
+	cursor: pointer;
+	font-size: 13px;
+	border-radius: 6px;
+	color: var(--text-sub, #666);
+	transition: all 0.15s;
+}
+
+.busy-day-btn:hover {
+	background: var(--bg-hover, #f5f7fa);
+}
+
+.busy-day-btn.active {
+	color: var(--primary, #4f46e5);
+	border-color: var(--primary, #4f46e5);
+	font-weight: 600;
+	background: var(--primary-light, #eef2ff);
+}
+
+.busy-day-empty {
+	margin-top: 12px;
+	color: var(--text-sub, #888);
+	font-size: 13px;
+}
+
+.busy-day-list {
+	margin-top: 12px;
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.busy-day-item {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	font-size: 13px;
+	padding: 6px 10px;
+	background: var(--bg-sub, #fafbfc);
+	border-radius: 6px;
+}
+
+/* 明细行左侧任务色块，与日历任务块颜色一致 */
+.busy-day-dot {
+	width: 10px;
+	height: 10px;
+	border-radius: 3px;
+	flex-shrink: 0;
+}
+
+.busy-day-time {
+	font-family: 'SF Mono', 'Consolas', monospace;
+	font-size: 12px;
+	color: var(--primary, #4f46e5);
+	min-width: 100px;
+}
+
+.busy-day-name {
+	color: var(--text-main, #333);
+}
+
+.busy-day-duration {
+	color: var(--text-sub, #888);
+	font-size: 12px;
+}
+
+/* ===== 编辑弹窗：cron 表达式错误（红色提示） ===== */
+.cron-explain-error {
+	color: #dc2626;
+}

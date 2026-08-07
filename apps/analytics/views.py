@@ -2283,3 +2283,320 @@ class LowScoreAnalysisStatsView(APIView):
                 'hybrid': by_method.get('hybrid', 0),
             },
         })
+
+
+# ============================================================================
+# 路由分析看板（LLM Wiki / GraphRAG / RAG 四层路由命中率与质量对比）
+# ============================================================================
+
+# 路由层级固定顺序：前端按此渲染堆叠图/柱状图，缺失的层补 0 而非跳过
+ROUTE_ORDER = ['wiki', 'graphrag_local', 'graphrag_global', 'rag']
+ROUTE_LABELS = {
+    'wiki': 'Wiki 直答',
+    'graphrag_local': 'GraphRAG 局部',
+    'graphrag_global': 'GraphRAG 全局',
+    'rag': 'RAG 兜底',
+}
+
+
+class RouteAnalysisDashboardView(APIView):
+    """GET /api/v1/analytics/eval-dashboard/route-analysis/?days=7&dept_id=&team_id=
+
+    路由分析看板：四层路由命中率 + 各维均分对比（由 aggregate_route_analysis_daily 任务供数）。
+
+    - coverage_by_route: 每层命中数/占比/平均置信度/平均延迟/平均质量分
+    - quality_by_route: 各层 12 维均分对比（按 4 大类分组，柱状/雷达图用）
+    - daily_trend: 按天各层命中数（命中趋势堆叠图用）
+
+    时间窗口按 qa_created_at（提问时间）过滤；组织筛选按提问用户归属子查询
+    （qa_record_id 为 BigInteger 非外键，无法直接 JOIN QaRecord，用子查询收敛）。
+    """
+    permission_classes = [IsAuthenticated, CanViewAnalytics]
+    required_perm = 'analytics.system.read'
+
+    def get(self, request):
+        from collections import defaultdict
+        from apps.analytics.models import RouteAnalysis, MultiDimensionScore
+
+        days = _parse_dashboard_days(request)
+        dept_id, team_id = _parse_org_scope(request)
+        since = timezone.now() - timedelta(days=days)
+
+        qs = RouteAnalysis.objects.filter(qa_created_at__gte=since)
+        if dept_id or team_id:
+            # 组织筛选走 QaRecord.user 归属：子查询把命中 qa 收敛到组织内
+            qa_ids_qs = _apply_org_filter_on_qa(QaRecord.objects.all(), dept_id, team_id)
+            qs = qs.filter(qa_record_id__in=qa_ids_qs.values('id'))
+
+        total = qs.count()
+        if total == 0:
+            return Response({
+                'days': days,
+                'dept_id': dept_id,
+                'team_id': team_id,
+                'total': 0,
+                'route_order': ROUTE_ORDER,
+                'route_labels': ROUTE_LABELS,
+                'coverage_by_route': [],
+                'quality_by_route': {},
+                'daily_trend': [],
+            })
+
+        # 1. 每层命中统计（一次 GROUP BY 拿全）
+        route_agg = qs.values('route_source').annotate(
+            count=models.Count('id'),
+            avg_confidence=models.Avg('confidence'),
+            avg_latency=models.Avg('latency_ms'),
+            avg_quality=models.Avg('answer_quality'),
+        ).order_by('-count')
+        coverage_by_route = [
+            {
+                'route': r['route_source'],
+                'count': r['count'],
+                'share': round(r['count'] / total, 4),
+                'avg_confidence': round(float(r['avg_confidence'] or 0), 4),
+                'avg_latency_ms': round(float(r['avg_latency'] or 0), 1),
+                'avg_answer_quality': round(float(r['avg_quality'] or 0), 4),
+            }
+            for r in route_agg
+        ]
+
+        # 2. 各层 12 维均分对比
+        # 用子查询避免把窗口内 route_qa 全部拉进内存；再取 (qa_record_id -> route) 映射关联
+        score_qs = MultiDimensionScore.objects.filter(
+            qa_record_id__in=qs.values('qa_record_id'),
+        )
+        route_qa_map = dict(qs.values_list('qa_record_id', 'route_source'))
+
+        dim_agg = score_qs.values('qa_record_id', 'dimension').annotate(
+            avg_score=models.Avg('score'),
+        )
+        route_dim_avg = defaultdict(dict)  # route -> {dimension: avg}
+        for r in dim_agg:
+            route = route_qa_map.get(r['qa_record_id'])
+            if route:
+                route_dim_avg[route][r['dimension']] = round(float(r['avg_score'] or 0), 4)
+
+        quality_by_route = {}
+        for route in ROUTE_ORDER:
+            dim_map = route_dim_avg.get(route, {})
+            if not dim_map:
+                quality_by_route[route] = {'overall': None, 'groups': {}, 'dimensions': {}}
+                continue
+            groups = {}
+            for group_name, dims in _DIMENSION_GROUPS.items():
+                group_avg = [dim_map[d] for d in dims if d in dim_map]
+                if group_avg:
+                    groups[group_name] = round(sum(group_avg) / len(group_avg), 4)
+            # overall = 该层所有已评估维度均分的算术平均（与 4 大类组均一致）
+            all_dims = list(dim_map.values())
+            quality_by_route[route] = {
+                'overall': round(sum(all_dims) / len(all_dims), 4) if all_dims else None,
+                'groups': groups,
+                'dimensions': dim_map,
+            }
+
+        # 3. 按天命中趋势（堆叠图数据）
+        daily_qs = qs.annotate(
+            _date=models.functions.TruncDate('qa_created_at'),
+        ).values('_date', 'route_source').annotate(
+            cnt=models.Count('id'),
+        ).order_by('_date')
+        trend_map = {}
+        for r in daily_qs:
+            date_str = r['_date'].isoformat()
+            trend_map.setdefault(date_str, {})[r['route_source']] = r['cnt']
+        daily_trend = []
+        for date_str in sorted(trend_map.keys()):
+            row = {'date': date_str}
+            for route in ROUTE_ORDER:
+                row[route] = trend_map[date_str].get(route, 0)
+            daily_trend.append(row)
+
+        return Response({
+            'days': days,
+            'dept_id': dept_id,
+            'team_id': team_id,
+            'total': total,
+            'route_order': ROUTE_ORDER,
+            'route_labels': ROUTE_LABELS,
+            'coverage_by_route': coverage_by_route,
+            'quality_by_route': quality_by_route,
+            'daily_trend': daily_trend,
+        })
+
+
+class RouteAnalysisAggregateView(APIView):
+    """POST /api/v1/analytics/route-analysis/aggregate/ - 手动触发路由分析聚合
+
+    body: {report_date: 'YYYY-MM-DD'} 可选；缺省聚合昨天。
+    异步执行：POST 派发 Celery 任务立即返回，前端轮询看板数据刷新。
+    用途：每日 beat 任务之外，运营改完路由配置后可立即重跑某天数据。
+    """
+    permission_classes = [IsAuthenticated, CanViewAnalytics]
+    required_perm = 'analytics.system.write'
+
+    def post(self, request):
+        from apps.analytics.tasks import aggregate_route_analysis_daily
+
+        report_date = (request.data.get('report_date') or '').strip() or None
+        if report_date:
+            try:
+                timezone.datetime.strptime(report_date, '%Y-%m-%d')
+            except ValueError:
+                return Response({'detail': 'report_date 格式须为 YYYY-MM-DD'}, status=400)
+
+        aggregate_route_analysis_daily.delay(report_date)
+        logger.info(
+            f'[RouteAnalysis] 手动触发聚合 report_date={report_date or "yesterday"} '
+            f'user={request.user.username}'
+        )
+        return Response({
+            'ok': True,
+            'queued': True,
+            'report_date': report_date or 'yesterday',
+            'message': '聚合已派发，稍后刷新看板即可看到结果',
+        })
+
+
+# ============================================================================
+# Wiki 页面质量评估（忠实度 / 完整性 LLM-as-Judge）
+# ============================================================================
+
+class WikiQualityListView(APIView):
+    """GET /api/v1/analytics/wiki-quality/?days=7&dimension=&status=&limit=&offset=&page_id=
+
+    Wiki 页面质量评估结果列表：
+    - summary: 统计（评估页数 / 失败页数 / 各维均分）
+    - rows: 页面粒度明细（每页两个维度的 score + status + reason 截断）
+    dimension 可选 faithfulness/completeness；status 可选 completed/failed；
+    days 按评估更新时间窗口过滤；page_id 精确查某页（详情弹窗用，忽略窗口）。
+    """
+    permission_classes = [IsAuthenticated, CanViewAnalytics]
+    required_perm = 'analytics.system.read'
+
+    def get(self, request):
+        from apps.analytics.models import WikiPageQualityScore
+
+        try:
+            days = int(request.query_params.get('days', 7))
+        except (ValueError, TypeError):
+            days = 7
+        days = max(1, min(days, 90))
+        dimension = (request.query_params.get('dimension') or '').strip()
+        status = (request.query_params.get('status') or '').strip()
+        try:
+            limit = int(request.query_params.get('limit', 50))
+        except (ValueError, TypeError):
+            limit = 50
+        limit = max(1, min(limit, 200))
+        try:
+            offset = int(request.query_params.get('offset', 0))
+        except (ValueError, TypeError):
+            offset = 0
+        offset = max(0, offset)
+
+        since = timezone.now() - timedelta(days=days)
+        qs = WikiPageQualityScore.objects.select_related('page').filter(updated_at__gte=since)
+        if dimension:
+            qs = qs.filter(dimension=dimension)
+        if status:
+            qs = qs.filter(status=status)
+        # 精确查某页详情时(前端详情弹窗),忽略 days 窗口直接返回该页
+        page_id = request.query_params.get('page_id', '').strip()
+        if page_id:
+            try:
+                qs = qs.filter(page_id=int(page_id))
+            except (ValueError, TypeError):
+                return Response({'detail': 'page_id 必须为整数'}, status=400)
+
+        # summary：各维均分 + 评估/失败页数（一次分组 + 两次 distinct 计数）
+        dim_agg = qs.values('dimension').annotate(
+            avg_score=models.Avg('score'),
+            cnt=models.Count('id'),
+        )
+        summary = {'pages_evaluated': qs.values('page_id').distinct().count()}
+        for r in dim_agg:
+            summary[f'avg_{r["dimension"]}'] = round(float(r['avg_score'] or 0), 4)
+            summary[f'count_{r["dimension"]}'] = r['cnt']
+        summary['failed_pages'] = (
+            qs.filter(status='failed').values('page_id').distinct().count()
+        )
+
+        # 明细：取窗口内 page_id 分页，再整批取每页两维分数（避免逐页 N+1）
+        page_ids = list(
+            qs.order_by('-updated_at').values_list('page_id', flat=True).distinct()[offset:offset + limit]
+        )
+        page_rows = {}
+        if page_ids:
+            score_rows = WikiPageQualityScore.objects.select_related('page').filter(
+                page_id__in=page_ids,
+            ).order_by('-updated_at')
+            for s in score_rows:
+                pm = page_rows.setdefault(s.page_id, {
+                    'page_id': s.page_id,
+                    'title': s.page.title,
+                    'node_id': s.page.node_id,
+                    'scores': {},
+                })
+                pm['scores'][s.dimension] = {
+                    'score': round(float(s.score or 0), 4),
+                    'status': s.status,
+                    'reason': s.reason[:200],
+                    'error_message': s.error_message[:200],
+                    'updated_at': s.updated_at.isoformat(),
+                }
+        rows = list(page_rows.values())
+
+        return Response({
+            'days': days,
+            'dimension': dimension or 'all',
+            'status': status or 'all',
+            'total': len(rows),
+            'offset': offset,
+            'limit': limit,
+            'summary': summary,
+            'rows': rows,
+        })
+
+
+class WikiQualityEvaluateView(APIView):
+    """POST /api/v1/analytics/wiki-quality/evaluate/ - 手动触发 Wiki 页面质量批量评估
+
+    body: {days: 7, limit: N} 可选；days 控制只重评估近期更新页面，limit 限制单次页面数。
+    异步执行：POST 派发 Celery 任务立即返回，前端轮询 wiki-quality 列表查结果。
+    目的：发布新 Wiki 或更新源文档后可手动触发，不必等每日 beat 任务。
+    """
+    permission_classes = [IsAuthenticated, CanViewAnalytics]
+    required_perm = 'analytics.system.write'
+
+    def post(self, request):
+        from apps.analytics.tasks import batch_evaluate_wiki_quality
+
+        days = 7
+        if request.data.get('days') is not None:
+            try:
+                days = int(request.data.get('days'))
+            except (ValueError, TypeError):
+                return Response({'detail': 'days 必须为整数'}, status=400)
+            days = max(1, min(days, 90))
+
+        limit = None
+        if request.data.get('limit') is not None:
+            try:
+                limit = int(request.data.get('limit'))
+            except (ValueError, TypeError):
+                return Response({'detail': 'limit 必须为整数'}, status=400)
+            limit = max(1, min(limit, 500))
+
+        batch_evaluate_wiki_quality.delay(days=days, limit=limit)
+        logger.info(
+            f'[WikiEval] 手动触发批量评估 days={days} limit={limit} user={request.user.username}'
+        )
+        return Response({
+            'ok': True,
+            'queued': True,
+            'days': days,
+            'limit': limit,
+            'message': '评估已派发，稍后刷新列表即可看到结果',
+        })

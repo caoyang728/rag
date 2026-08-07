@@ -28,11 +28,22 @@ from loguru import logger
 
 
 def _build_context_list(qa_record) -> List[str]:
-    """从 QaRecord.retrieval_scores 取检索切片内容,返回 list[str]
+    """从 QaRecord 构建 DeepEval 评估用的检索上下文，返回 list[str]
+
+    按路由来源分流（三层路由回答的 retrieval_scores 为空，需按来源重建上下文）：
+    - route_source='wiki'：重新检索 Wiki 页面，取页面正文
+    - route_source 以 'graphrag' 开头：重跑图谱检索，取图谱上下文
+    - 其他（rag/无路由）：取 retrieval_scores 里的切片内容（Top5，每片截断 500 字）
 
     DeepEval 的 FaithfulnessMetric/ContextualRelevancyMetric 需要 retrieval_context
-    为 list[str](每片独立),取 Top5 切片,每片截断 500 字控制 token 成本。
+    为 list[str](每片独立)。
     """
+    route_source = getattr(qa_record, 'route_source', None) or ''
+    if route_source == 'wiki':
+        return _build_wiki_route_context(qa_record.question)
+    if route_source.startswith('graphrag'):
+        return _build_graphrag_route_context(qa_record.question, qa_record.user_id)
+
     from apps.knowledge.models import DocumentChunk
 
     chunk_ids = [
@@ -49,6 +60,59 @@ def _build_context_list(qa_record) -> List[str]:
         for cid in chunk_ids
         if cid in chunk_map and chunk_map[cid].content
     ]
+
+
+def _build_wiki_route_context(question: str) -> List[str]:
+    """Wiki 路由回答的评估上下文：按问题重新检索 Wiki 页面
+
+    路由回答未落 retrieval_scores（wiki 层 chunks 为空），评估时按问题
+    重新检索命中页面，用页面正文作为 retrieval_context。
+    检索阈值与路由参与阈值(0.55)对齐，低于该值视为重建失败。
+    """
+    from apps.wiki.retriever import search_wiki
+
+    try:
+        results = search_wiki(question, top_k=1, threshold=0.55)
+    except Exception as e:
+        logger.warning(f'[ProdEval] wiki 上下文重建失败: {e}')
+        return []
+    if not results:
+        return []
+    content = (results[0].get('content', '') or '').strip()
+    if not content:
+        return []
+    return [content[:500]]
+
+
+def _build_graphrag_route_context(question: str, user_id: int) -> List[str]:
+    """GraphRAG 路由回答的评估上下文：重跑图谱检索取上下文
+
+    graphrag_search 需要 user 做权限过滤；原提问用户已删除时回退系统用户，
+    检索失败或无上下文返回空列表（评估任务会跳过该 QA）。
+    """
+    from apps.graph.retriever import graphrag_search
+    from apps.users.models import User
+
+    user = None
+    if user_id:
+        try:
+            user = User.objects.filter(id=user_id).first()
+        except Exception:
+            user = None
+    if user is None:
+        # 兜底用系统用户（评估只看内容相关性，不涉及具体权限边界）
+        user = User.objects.filter(username='system').first()
+    if user is None:
+        return []
+    try:
+        result = graphrag_search(question, user, mode='auto')
+    except Exception as e:
+        logger.warning(f'[ProdEval] graphrag 上下文重建失败: {e}')
+        return []
+    context = (result.get('context', '') or '').strip()
+    if not context:
+        return []
+    return [context[:500]]
 
 
 def _get_redis():

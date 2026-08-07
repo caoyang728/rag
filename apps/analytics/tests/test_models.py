@@ -24,6 +24,7 @@ from apps.analytics.models import (
     QueueDepthLog, GoldenDataset, GoldenQuestion, GoldenRelevantDoc,
     GoldenReferenceAnswer, MultiDimensionScore, DocumentQualityReport,
     RetrievalQualityReport, CoverageReport, LowScoreAnalysis, RouteAnalysis,
+    WikiPageQualityScore,
 )
 
 
@@ -340,3 +341,39 @@ class TestRouteAnalysis:
         assert route.latency_ms == 0
         assert route.answer_quality is None
         assert route.answer_quality is None or isinstance(route.answer_quality, float)
+
+
+@pytest.mark.django_db
+class TestWikiPageQualityScore:
+    """Wiki 页面质量评估：默认值 + (page, dimension) 唯一约束"""
+
+    @staticmethod
+    def _make_page():
+        """创建测试 Wiki 页面（node 可空，仅测模型约束时不需要挂载节点）"""
+        from apps.wiki.models import WikiPage
+        return WikiPage.objects.create(title='测试Wiki页', status='published', content='正文')
+
+    @pytest.mark.integration
+    def test_defaults(self):
+        """默认值：status=completed / reason 与 error_message 为空 / eval_model 默认"""
+        page = self._make_page()
+        score = WikiPageQualityScore.objects.create(
+            page=page, dimension='faithfulness', score=0.9)
+        assert score.status == 'completed'
+        assert score.reason == ''
+        assert score.error_message == ''
+        assert score.eval_model == 'deepseek-chat'
+        assert score.eval_latency_ms == 0
+
+    @pytest.mark.integration
+    def test_unique_page_dimension(self):
+        """同页面同维度唯一：重复插入触发 IntegrityError（重新评估走 update_or_create）"""
+        page = self._make_page()
+        WikiPageQualityScore.objects.create(page=page, dimension='faithfulness', score=0.9)
+        with pytest.raises(IntegrityError):
+            with transaction.atomic():
+                WikiPageQualityScore.objects.create(
+                    page=page, dimension='faithfulness', score=0.5)
+        # 不同维度可共存
+        WikiPageQualityScore.objects.create(page=page, dimension='completeness', score=0.8)
+        assert WikiPageQualityScore.objects.filter(page=page).count() == 2

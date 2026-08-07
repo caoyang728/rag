@@ -665,3 +665,134 @@ class TestRegressionTasks:
                    side_effect=RuntimeError('x')):
             result = tasks.run_regression_evaluation_task()
         assert result == {'ok': False, 'error': 'eval_failed'}
+
+
+# ============================================================================
+# 14. 路由决策分析聚合 + Wiki 页面质量评估
+# ============================================================================
+@pytest.mark.django_db
+class TestAggregateRouteAnalysisDaily:
+    """aggregate_route_analysis_daily 每日聚合任务"""
+
+    def _make_routed_qa(self, user, session, route_source='wiki'):
+        """创建带路由来源的 QA（created_at 为今天，聚合昨天时需回改日期）"""
+        qa = QaRecord.objects.create(
+            session=session, user=user, question='路由问题', answer='路由回答',
+            answer_type='rag', root_type='test_root',
+            route_source=route_source,
+            route_trace=[{'layer': route_source, 'confidence': 0.8, 'latency_ms': 10}],
+            latency_total_ms=150,
+        )
+        return qa
+
+    @pytest.mark.unit
+    def test_aggregates_yesterday(self):
+        """传 report_date 字符串 → 聚合该日期并返回统计"""
+        from apps.analytics.models import RouteAnalysis
+
+        user = User.objects.create_user(
+            username='route_u', password='pass12345', email='route@test.com')
+        session = Session.objects.create(user=user, root_type='test_root', title='R')
+        qa = self._make_routed_qa(user, session)
+        # 改写 created_at 到昨天（auto_now_add 需 update 绕过）
+        QaRecord.objects.filter(pk=qa.pk).update(
+            created_at=timezone.now() - timedelta(days=1))
+
+        result = tasks.aggregate_route_analysis_daily(report_date=str(_yesterday()))
+
+        assert result['ok'] is True
+        assert result['total'] == 1
+        assert result['created'] == 1
+        assert RouteAnalysis.objects.get(qa_record_id=qa.id).route_source == 'wiki'
+
+    @pytest.mark.unit
+    def test_invalid_date_falls_back_to_yesterday(self):
+        """非法日期字符串 → 回退昨天聚合，不抛异常"""
+        from apps.analytics.models import RouteAnalysis
+        user = User.objects.create_user(
+            username='route_u2', password='pass12345', email='route2@test.com')
+        session = Session.objects.create(user=user, root_type='test_root', title='R')
+        qa = self._make_routed_qa(user, session)
+        QaRecord.objects.filter(pk=qa.pk).update(
+            created_at=timezone.now() - timedelta(days=1))
+
+        result = tasks.aggregate_route_analysis_daily(report_date='not-a-date')
+
+        assert result['ok'] is True
+        assert RouteAnalysis.objects.filter(qa_record_id=qa.id).count() == 1
+
+    @pytest.mark.unit
+    def test_aggregation_exception(self):
+        """聚合异常 → {'ok': False, 'error': 'aggregation_failed'}"""
+        with patch('apps.analytics.utils.aggregate_route_analysis',
+                   side_effect=RuntimeError('db down')):
+            result = tasks.aggregate_route_analysis_daily()
+        assert result == {'ok': False, 'error': 'aggregation_failed'}
+
+
+@pytest.mark.django_db
+class TestBatchEvaluateWikiQuality:
+    """batch_evaluate_wiki_quality 批量评估任务"""
+
+    def _make_published_page(self, title='测试页', node=None):
+        """创建已发布 Wiki 页面（node 传 None 时为社区页）"""
+        from apps.wiki.models import WikiPage
+        return WikiPage.objects.create(
+            title=title, node=node, status='published', content='Wiki 正文内容')
+
+    def test_evaluates_published_node_pages(self):
+        """仅评估 node 挂载型已发布页面，返回分类计数"""
+        from apps.knowledge.models import KnowledgeNode
+        from apps.users.models import User
+        user = User.objects.create_user(
+            username='wiki_u', password='pass12345', email='wiki@test.com')
+        node = KnowledgeNode.objects.create(
+            name='node', node_type='folder', root_type='test_root', created_by=user)
+        self._make_published_page(node=node)
+        self._make_published_page(node=node)
+
+        with patch('apps.analytics.wiki_eval.evaluate_wiki_page',
+                   return_value={'ok': True, 'evaluated': ['faithfulness', 'completeness']}):
+            result = tasks.batch_evaluate_wiki_quality()
+
+        assert result['ok'] is True
+        assert result['evaluated'] == 2
+        assert result['failed'] == 0
+
+    def test_skipped_pages_not_failed(self):
+        """评估器返回 skipped(无源切片等) → 计入 skipped 而非 failed"""
+        from apps.knowledge.models import KnowledgeNode
+        from apps.users.models import User
+        user = User.objects.create_user(
+            username='wiki_u2', password='pass12345', email='wiki2@test.com')
+        # node 挂载型页面（通过任务查询），但评估器判定无源切片跳过
+        node = KnowledgeNode.objects.create(
+            name='node2', node_type='folder', root_type='test_root', created_by=user)
+        self._make_published_page(title='无源切片页', node=node)
+
+        with patch('apps.analytics.wiki_eval.evaluate_wiki_page',
+                   return_value={'ok': False, 'skipped': 'no_source_chunks'}):
+            result = tasks.batch_evaluate_wiki_quality()
+
+        assert result['ok'] is True
+        assert result['evaluated'] == 0
+        assert result['skipped'] == 1
+        assert result['failed'] == 0
+
+    def test_limit_restricts_page_count(self):
+        """limit 限制单次评估页面数"""
+        from apps.knowledge.models import KnowledgeNode
+        from apps.users.models import User
+        user = User.objects.create_user(
+            username='wiki_u3', password='pass12345', email='wiki3@test.com')
+        node = KnowledgeNode.objects.create(
+            name='node3', node_type='folder', root_type='test_root', created_by=user)
+        self._make_published_page(title='p1', node=node)
+        self._make_published_page(title='p2', node=node)
+
+        with patch('apps.analytics.wiki_eval.evaluate_wiki_page',
+                   return_value={'ok': True, 'evaluated': []}):
+            result = tasks.batch_evaluate_wiki_quality(limit=1)
+
+        assert result['ok'] is True
+        assert result['evaluated'] == 1

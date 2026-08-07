@@ -264,6 +264,11 @@ CELERY_TASK_TRACK_STARTED = True
 CELERY_TASK_TIME_LIMIT = 600
 CELERY_TASK_SOFT_TIME_LIMIT = 540
 CELERY_TASK_DEFAULT_QUEUE = 'default'
+# 定时任务调度器：从 SystemConfig 动态读取调度配置（管理端"定时任务"页维护），
+# 工单审批通过后无需重启 beat 即生效（见 apps/system/schedulers.py）
+CELERY_BEAT_SCHEDULER = 'apps.system.schedulers:SystemConfigScheduler'
+# beat 轮询上限：调度配置变更后最多 30s 内被热更新，权衡实时性与 DB 开销
+CELERY_BEAT_MAX_LOOP_INTERVAL = 30
 CELERY_TASK_QUEUES = {
     'default': {},
     'parse': {},     # 文档解析

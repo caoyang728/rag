@@ -38,7 +38,7 @@ from apps.analytics.models import (
     KeywordWeight, SystemMetricsReport, OrgUsageReport, QueueDepthLog,
     GoldenDataset, GoldenQuestion, GoldenReferenceAnswer,
     MultiDimensionScore, DocumentQualityReport, RetrievalQualityReport,
-    CoverageReport, LowScoreAnalysis,
+    CoverageReport, LowScoreAnalysis, RouteAnalysis, WikiPageQualityScore,
 )
 
 
@@ -711,4 +711,234 @@ class TestLowScoreAnalysisAPI(AnalyticsViewsBase):
     def test_anonymous_401(self):
         resp = self.client.get('/api/v1/analytics/low-score-analysis/',
                                **self.anon_headers)
+        assert resp.status_code in [401, 403]
+
+
+# ============================================================================
+# 路由分析看板（四层命中率 + 各维均分对比）
+# ============================================================================
+class TestRouteAnalysisDashboardAPI(AnalyticsViewsBase):
+    """RouteAnalysisDashboardView 测试"""
+
+    def _make_route(self, qa, route_source, confidence=0.8, latency=150,
+                    answer_quality=None):
+        """创建一条 RouteAnalysis（qa_created_at 默认当前时间，落在窗口内）"""
+        return RouteAnalysis.objects.create(
+            qa_record_id=qa.id,
+            question=qa.question,
+            route_source=route_source,
+            confidence=confidence,
+            route_trace=[{'layer': route_source, 'confidence': confidence, 'latency_ms': 10}],
+            latency_ms=latency,
+            answer_quality=answer_quality,
+            qa_created_at=timezone.now(),
+        )
+
+    def test_empty_200(self):
+        """无数据 → 200 空结构（coverage/quality 为空,前端渲染空态）"""
+        resp = self.client.get('/api/v1/analytics/eval-dashboard/route-analysis/',
+                               **self.reader_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data['total'] == 0
+        assert data['coverage_by_route'] == []
+        assert data['quality_by_route'] == {}
+        assert data['daily_trend'] == []
+        assert data['route_order'] == ['wiki', 'graphrag_local', 'graphrag_global', 'rag']
+
+    def test_coverage_and_quality(self):
+        """有数据 → 四层命中率 + 各层 12 维均分对比"""
+        qa_wiki = self._make_qa(question='wiki 问题')
+        qa_rag = self._make_qa(question='rag 问题')
+        self._make_route(qa_wiki, 'wiki', confidence=0.9, answer_quality=0.8)
+        self._make_route(qa_rag, 'rag', confidence=0.5, answer_quality=0.6)
+        # wiki 层该 QA 已有评估分（影响 quality_by_route）
+        self._make_score(qa_wiki, 'faithfulness', 0.9)
+        self._make_score(qa_wiki, 'toxicity', 0.7)
+
+        resp = self.client.get('/api/v1/analytics/eval-dashboard/route-analysis/',
+                               **self.reader_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data['total'] == 2
+
+        cov = {r['route']: r for r in data['coverage_by_route']}
+        assert cov['wiki']['count'] == 1
+        assert cov['wiki']['avg_confidence'] == 0.9
+        assert cov['wiki']['avg_answer_quality'] == 0.8
+        assert cov['rag']['count'] == 1
+        # 命中率各占一半
+        assert cov['wiki']['share'] == 0.5
+
+        # 仅 wiki 层有评估分 → rag 层为空结构
+        qb = data['quality_by_route']
+        assert qb['wiki']['overall'] == 0.8  # (0.9+0.7)/2
+        assert qb['wiki']['groups']['quality'] == 0.9
+        assert qb['rag']['overall'] is None
+
+        # 按天趋势含今天一行,wiki/rag 各 1
+        assert data['daily_trend'] and data['daily_trend'][-1]['wiki'] == 1
+        assert data['daily_trend'][-1]['rag'] == 1
+
+    def test_days_window_filters_by_qa_created_at(self):
+        """时间窗口按 qa_created_at(提问时间)过滤,聚合时间不影响窗口"""
+        qa_old = self._make_qa(question='老问题')
+        self._make_route(qa_old, 'rag')
+        # 改写到 8 天前 → 超出 7 天窗口
+        RouteAnalysis.objects.filter(qa_record_id=qa_old.id).update(
+            qa_created_at=timezone.now() - timedelta(days=8))
+
+        resp = self.client.get('/api/v1/analytics/eval-dashboard/route-analysis/?days=7',
+                               **self.reader_headers)
+        assert resp.status_code == 200
+        assert resp.json()['total'] == 0
+
+    def test_org_filter(self):
+        """组织筛选：按提问用户归属过滤命中"""
+        qa_a = self._make_qa(user=self.normal_user)  # normal_user 无部门
+        # 为 normal_user 挂部门后,部门筛选项应命中
+        self.normal_user.department = self.dept_a
+        self.normal_user.save()
+        self._make_route(qa_a, 'wiki')
+
+        resp = self.client.get(
+            f'/api/v1/analytics/eval-dashboard/route-analysis/?dept_id={self.dept_a.id}',
+            **self.reader_headers)
+        assert resp.status_code == 200
+        assert resp.json()['total'] == 1
+
+    def test_anonymous_401(self):
+        resp = self.client.get('/api/v1/analytics/eval-dashboard/route-analysis/',
+                               **self.anon_headers)
+        assert resp.status_code in [401, 403]
+
+
+class TestRouteAnalysisAggregateAPI(AnalyticsViewsBase):
+    """RouteAnalysisAggregateView 手动触发聚合"""
+
+    def test_post_queued_200(self):
+        """正常派发 → 200 queued,透传 report_date"""
+        with patch('apps.analytics.tasks.aggregate_route_analysis_daily') as m:
+            resp = self.client.post(
+                '/api/v1/analytics/route-analysis/aggregate/',
+                data=json.dumps({'report_date': '2026-08-06'}),
+                content_type='application/json', **self.writer_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data['queued'] is True
+        assert data['report_date'] == '2026-08-06'
+        m.delay.assert_called_once_with('2026-08-06')
+
+    def test_post_no_date_aggregates_yesterday(self):
+        """不传日期 → 聚合昨天"""
+        with patch('apps.analytics.tasks.aggregate_route_analysis_daily') as m:
+            resp = self.client.post('/api/v1/analytics/route-analysis/aggregate/',
+                                    data=json.dumps({}),
+                                    content_type='application/json', **self.writer_headers)
+        assert resp.status_code == 200
+        assert resp.json()['report_date'] == 'yesterday'
+        m.delay.assert_called_once_with(None)
+
+    def test_post_invalid_date_400(self):
+        """非法日期格式 → 400 不派发"""
+        with patch('apps.analytics.tasks.aggregate_route_analysis_daily') as m:
+            resp = self.client.post(
+                '/api/v1/analytics/route-analysis/aggregate/',
+                data=json.dumps({'report_date': '2026/08/06'}),
+                content_type='application/json', **self.writer_headers)
+        assert resp.status_code == 400
+        m.delay.assert_not_called()
+
+    def test_post_read_only_403(self):
+        """只读权限无写入权限 → 403"""
+        resp = self.client.post('/api/v1/analytics/route-analysis/aggregate/',
+                                data=json.dumps({}),
+                                content_type='application/json', **self.reader_headers)
+        assert resp.status_code == 403
+
+
+# ============================================================================
+# Wiki 页面质量（忠实度/完整性评估结果）
+# ============================================================================
+class TestWikiQualityAPI(AnalyticsViewsBase):
+    """WikiQualityListView / WikiQualityEvaluateView 测试"""
+
+    def _make_page(self, title='测试Wiki页'):
+        """创建已发布 Wiki 页面"""
+        from apps.wiki.models import WikiPage
+        return WikiPage.objects.create(
+            title=title, node=self.root_node, status='published', content='正文')
+
+    def _make_score(self, page, dimension='faithfulness', score=0.9, **kw):
+        """创建一条 WikiPageQualityScore"""
+        defaults = dict(page=page, dimension=dimension, score=score,
+                        status='completed', reason='评估理由')
+        defaults.update(kw)
+        return WikiPageQualityScore.objects.create(**defaults)
+
+    def test_list_empty_200(self):
+        resp = self.client.get('/api/v1/analytics/wiki-quality/', **self.reader_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data['total'] == 0
+        assert data['summary']['pages_evaluated'] == 0
+
+    def test_list_with_data(self):
+        """列表：summary 均分 + 页面粒度两维分数"""
+        page = self._make_page(title='页面A')
+        self._make_score(page, 'faithfulness', 0.9)
+        self._make_score(page, 'completeness', 0.7)
+
+        resp = self.client.get('/api/v1/analytics/wiki-quality/', **self.reader_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data['total'] == 1
+        assert data['summary']['pages_evaluated'] == 1
+        assert data['summary']['avg_faithfulness'] == 0.9
+        assert data['summary']['avg_completeness'] == 0.7
+        row = data['rows'][0]
+        assert row['title'] == '页面A'
+        assert row['scores']['faithfulness']['score'] == 0.9
+        assert row['scores']['completeness']['score'] == 0.7
+
+    def test_list_failed_status(self):
+        """失败记录计入 failed_pages,按 status 过滤生效"""
+        page = self._make_page(title='失败页')
+        self._make_score(page, 'faithfulness', status='failed', error_message='llm err')
+        self._make_score(page, 'completeness', 0.8)
+
+        resp = self.client.get('/api/v1/analytics/wiki-quality/?status=failed',
+                               **self.reader_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data['summary']['failed_pages'] == 1
+        assert data['rows'][0]['scores']['faithfulness']['status'] == 'failed'
+
+    def test_list_page_id_detail(self):
+        """page_id 精确查询（详情弹窗用,不受分页影响）"""
+        page = self._make_page(title='详情页')
+        self._make_score(page, 'faithfulness', 0.85)
+        resp = self.client.get(f'/api/v1/analytics/wiki-quality/?page_id={page.id}',
+                               **self.reader_headers)
+        assert resp.status_code == 200
+        assert resp.json()['total'] == 1
+
+    def test_evaluate_queued_200(self):
+        """手动触发批量评估 → 200 queued"""
+        with patch('apps.analytics.tasks.batch_evaluate_wiki_quality') as m:
+            resp = self.client.post('/api/v1/analytics/wiki-quality/evaluate/',
+                                    data=json.dumps({'days': 3, 'limit': 5}),
+                                    content_type='application/json', **self.writer_headers)
+        assert resp.status_code == 200
+        assert resp.json()['queued'] is True
+        m.delay.assert_called_once_with(days=3, limit=5)
+
+    def test_evaluate_read_only_403(self):
+        resp = self.client.post('/api/v1/analytics/wiki-quality/evaluate/',
+                                data=json.dumps({}),
+                                content_type='application/json', **self.reader_headers)
+        assert resp.status_code == 403
+
+    def test_anonymous_401(self):
+        resp = self.client.get('/api/v1/analytics/wiki-quality/', **self.anon_headers)
         assert resp.status_code in [401, 403]

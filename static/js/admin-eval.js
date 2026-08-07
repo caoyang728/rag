@@ -66,6 +66,7 @@ function initOrgFilters() {
 	OrgFilter.init('evalDept', 'evalTeam', () => loadDashboard());
 	OrgFilter.init('docDept',  'docTeam',  () => loadDocQuality());
 	OrgFilter.init('attrDept', 'attrTeam', () => loadAttribution());
+	OrgFilter.init('routeDept', 'routeTeam', () => loadRouteAnalysis());
 }
 
 function switchEvalTab(name) {
@@ -81,7 +82,120 @@ function switchEvalTab(name) {
 		}
 	});
 	loadTabData(name);
+	// 切换后重新计算折叠(激活 tab 可能随之换位),并收起「更多」下拉
+	closeEvalMore();
+	refreshEvalTabs();
 }
+
+// ============ Tab 溢出折叠（Ant Design More 模式） ============
+// 窗口放不下时把溢出的 tab 收进右侧「⋯ 更多」下拉,避免"后面的 tab 消失";
+// 折叠数量带徽标提示,并保证当前激活 tab 始终留在主栏可见。
+function refreshEvalTabs() {
+	const tabs = $('#evalTabs');
+	const more = $('#evalTabsMore');
+	if (!tabs || !more) return;
+	// 只取主栏直接子级的 tab 项(排除「更多」菜单内部动态渲染的项)
+	const items = Array.from(tabs.children).filter(el => el.classList.contains('tab-item'));
+	// 先全部恢复显示再重新测量:隐藏项 offsetWidth=0 会污染宽度计算
+	items.forEach(it => {
+		it.style.display = '';
+		it.dataset.overflowed = '';
+	});
+	more.style.display = 'flex';
+	const gap = 2; // 与 .tabs 的 gap 一致
+	const avail = tabs.clientWidth - more.offsetWidth - 8;
+	const kept = [];
+	const overflow = [];
+	let used = 0;
+	items.forEach(it => {
+		const w = it.offsetWidth + gap;
+		if (used + w <= avail) {
+			used += w;
+			kept.push(it);
+		} else {
+			overflow.push(it);
+		}
+	});
+	// 若激活 tab 被折叠,与主栏最后一个非激活项交换(校验宽度,换不回则保持折叠)
+	const active = items.find(it => it.classList.contains('active'));
+	if (active && overflow.includes(active)) {
+		for (let j = kept.length - 1; j >= 0; j--) {
+			const cand = kept[j];
+			if (cand === active) continue;
+			const swappedUsed = used - (cand.offsetWidth + gap) + (active.offsetWidth + gap);
+			if (swappedUsed <= avail + 1) {
+				kept[j] = active;
+				overflow[overflow.indexOf(active)] = cand;
+				used = swappedUsed;
+			}
+			break;
+		}
+	}
+	overflow.forEach(it => {
+		it.style.display = 'none';
+		it.dataset.overflowed = '1';
+	});
+	// 渲染「更多」菜单项并同步激活态
+	const menu = $('#evalTabsMoreMenu');
+	const count = $('#evalTabsMoreCount');
+	if (overflow.length) {
+		menu.innerHTML = overflow.map(it => {
+			const name = it.dataset.tab;
+			const cls = it.classList.contains('active') ? ' active' : '';
+			return `<div class="tab-item${cls}" data-tab="${name}" onclick="switchEvalTab('${name}')">${escapeHtml(it.textContent.trim())}</div>`;
+		}).join('');
+		count.textContent = overflow.length;
+		more.style.display = 'flex';
+	} else {
+		more.style.display = 'none';
+		menu.innerHTML = '';
+		count.textContent = '';
+		closeEvalMore();
+	}
+}
+
+// 切换「⋯ 更多」下拉展开/收起(阻止冒泡,避免触发外层 document 点击关闭)
+function toggleEvalMore(e) {
+	e.stopPropagation();
+	const more = $('#evalTabsMore');
+	if (!more) return;
+	if (more.classList.contains('open')) {
+		closeEvalMore();
+	} else {
+		openEvalMore();
+	}
+}
+
+// 展开下拉：菜单 fixed 相对视口定位,避开 .tabs 的 overflow 裁剪,
+// 坐标按触发块当前位置计算,并保证不超出视口右缘
+function openEvalMore() {
+	const more = $('#evalTabsMore');
+	const menu = $('#evalTabsMoreMenu');
+	const trigger = more && more.querySelector('.tab-more-trigger');
+	if (!more || !menu || !trigger) return;
+	const r = trigger.getBoundingClientRect();
+	// 临时显示以测量真实宽度(同一帧内不可见,无闪烁),再按宽度 clamp 左边界防超出视口右缘
+	menu.style.display = 'block';
+	const menuWidth = menu.offsetWidth;
+	menu.style.top = (r.bottom + 4) + 'px';
+	menu.style.left = Math.min(r.left, window.innerWidth - menuWidth - 8) + 'px';
+	menu.style.display = '';
+	more.classList.add('open');
+}
+
+function closeEvalMore() {
+	const more = $('#evalTabsMore');
+	if (more) more.classList.remove('open');
+}
+
+// 点击页面其他区域或任何滚动(外层滚动容器)都自动收起下拉,避免菜单位置错位
+document.addEventListener('click', (e) => {
+	const more = $('#evalTabsMore');
+	if (more && more.classList.contains('open') && !more.contains(e.target)) {
+		closeEvalMore();
+	}
+});
+document.addEventListener('scroll', closeEvalMore, true);
 
 function loadTabData(name) {
 	switch (name) {
@@ -92,6 +206,8 @@ function loadTabData(name) {
 		case 'coverage': loadCoverage(); break;
 		case 'feedback': break;
 		case 'attribution': loadAttribution(); break;
+		case 'route': loadRouteAnalysis(); break;
+		case 'wiki': loadWikiQuality(); break;
 	}
 }
 
@@ -616,7 +732,7 @@ function renderOverview(data) {
 	if (Array.isArray(_displayDimensions) && _displayDimensions.length === 0) {
 		$('#kpiOverallAvg').textContent = '--';
 		$('#evalDimSparklines').innerHTML = `<div class="empty-state"><div class="empty-state-icon">🚫</div>未选择任何展示维度，请在「系统配置 → 评估 → 评估维度」中勾选</div>`;
-		$('#evalRadar').innerHTML = `<text x="170" y="170" text-anchor="middle" fill="#9ca3af" font-size="13">未选择展示维度</text>`;
+		$('#evalRadar').innerHTML = `<text x="220" y="190" text-anchor="middle" fill="#9ca3af" font-size="13">未选择展示维度</text>`;
 		return;
 	}
 
@@ -626,7 +742,7 @@ function renderOverview(data) {
 	if (!hasData) {
 		$('#kpiOverallAvg').textContent = '--';
 		$('#evalDimSparklines').innerHTML = `<div class="empty-state"><div class="empty-state-icon">📊</div>暂无评估数据</div>`;
-		$('#evalRadar').innerHTML = `<text x="170" y="170" text-anchor="middle" fill="#9ca3af" font-size="13">暂无评估数据</text>`;
+		$('#evalRadar').innerHTML = `<text x="220" y="190" text-anchor="middle" fill="#9ca3af" font-size="13">暂无评估数据</text>`;
 		return;
 	}
 
@@ -816,7 +932,8 @@ function buildSparkline(values, width) {
 function renderRadarChart(groups) {
 	const svg = $('#evalRadar');
 	if (!svg) return;
-	const cx = 170, cy = 170, R = 130;
+	// 画布 440x380,中心 (220,190)：左右各留 50px 给长标签(如「回答相关性」),上下余量充足
+	const cx = 220, cy = 190, R = 130;
 	// 使用白名单过滤后的维度顺序：未勾选的维度不绘制到雷达图
 	const dims = getVisibleDimsOrdered();
 	const n = dims.length;
@@ -1123,7 +1240,8 @@ function drawDocDistChart(dist) {
 		{ label: '及格', value: num(dist.fair), color: '#f59e0b' },
 		{ label: '待改进', value: num(dist.poor), color: '#ef4444' },
 	];
-	const w = 400, h = 160, padBottom = 30, padTop = 10;
+	// 紧凑布局:h=140、padTop=20、padBottom=24(柱顶文字最小 y=16,顶部边界 5>0 不被裁剪)
+	const w = 400, h = 140, padBottom = 24, padTop = 20;
 	const total = data.reduce((s, d) => s + d.value, 0) || 1;
 	const barW = (w - 40) / data.length - 10;
 
@@ -1696,6 +1814,248 @@ async function showAttrDetail(qaId) {
 	}
 }
 
+/* ============ 路由分析（四层命中率 + 质量对比） ============ */
+
+// 路由层级固定顺序与后端 ROUTE_ORDER 对齐,前端据此渲染,缺失的层补 0
+const ROUTE_ORDER = ['wiki', 'graphrag_local', 'graphrag_global', 'rag'];
+const ROUTE_LABEL = {
+	wiki: 'Wiki 直答',
+	graphrag_local: 'GraphRAG 局部',
+	graphrag_global: 'GraphRAG 全局',
+	rag: 'RAG 兜底',
+};
+// 每层固定配色(堆叠条/命中分布用),顺序与 ROUTE_ORDER 一致
+const ROUTE_COLOR = ['#10b981', '#3b82f6', '#8b5cf6', '#f59e0b'];
+
+async function loadRouteAnalysis() {
+	try {
+		const days = $('#routeDays') ? $('#routeDays').value : 7;
+		const deptId = OrgFilter.getDeptId('routeDept');
+		const teamId = OrgFilter.getTeamId('routeTeam');
+		const params = new URLSearchParams();
+		params.set('days', days);
+		if (deptId) params.set('dept_id', deptId);
+		if (teamId) params.set('team_id', teamId);
+		const qs = '?' + params.toString();
+
+		const data = await api.getJson('/api/v1/analytics/eval-dashboard/route-analysis/' + qs);
+		renderRouteKpi(data);
+		renderRouteCoverage(data);
+		renderRouteTrend(data);
+		renderRouteQuality(data);
+		const scopeText = OrgFilter.describeScope(data.dept_id ?? deptId, data.team_id ?? teamId);
+		$('#routeSummary').textContent = `窗口 ${data.days} 天 · 范围 ${scopeText} · 路由请求 ${data.total || 0}`;
+	} catch (e) {
+		toast('路由分析加载失败: ' + (e.message || e), 'error');
+	}
+}
+
+// KPI:总量 + 四层命中数(缺失层补 0)
+function renderRouteKpi(data) {
+	const byRoute = {};
+	(data.coverage_by_route || []).forEach(r => byRoute[r.route] = r.count);
+	const total = data.total || 0;
+	$('#routeKpiTotal').textContent = total;
+	$('#routeKpiWiki').textContent = byRoute.wiki || 0;
+	$('#routeKpiLocal').textContent = byRoute.graphrag_local || 0;
+	$('#routeKpiGlobal').textContent = byRoute.graphrag_global || 0;
+	$('#routeKpiRag').textContent = byRoute.rag || 0;
+}
+
+// 命中分布表:层级 | 命中数 | 命中率 | 平均置信度 | 平均延迟 | 平均质量分
+function renderRouteCoverage(data) {
+	const tbody = $('#routeCoverageBody');
+	const rows = data.coverage_by_route || [];
+	if (!rows.length) {
+		tbody.innerHTML = `<tr><td colspan="6" class="text-center text-sub">暂无数据,请先在上方点击"聚合路由数据"(或等待每日定时聚合)</td></tr>`;
+		return;
+	}
+	tbody.innerHTML = rows.map(r => `
+		<tr>
+			<td><span class="tag" style="background:${ROUTE_COLOR[ROUTE_ORDER.indexOf(r.route)] || '#6b7280'}22;color:${ROUTE_COLOR[ROUTE_ORDER.indexOf(r.route)] || '#6b7280'}">${escapeHtml(ROUTE_LABEL[r.route] || r.route)}</span></td>
+			<td>${r.count}</td>
+			<td>${fmtPct(r.share)}</td>
+			<td>${(r.avg_confidence * 100).toFixed(1)}%</td>
+			<td>${r.avg_latency_ms}</td>
+			<td>${r.avg_answer_quality !== null && r.avg_answer_quality !== undefined && r.avg_answer_quality > 0 ? scorePill(r.avg_answer_quality, fmtPct) : '<span class="text-sub">--</span>'}</td>
+		</tr>`).join('');
+}
+
+// 按天命中趋势:纯 div 堆叠条,避免引入图表库依赖
+function renderRouteTrend(data) {
+	const el = $('#routeTrendBody');
+	const trend = data.daily_trend || [];
+	if (!trend.length) {
+		el.innerHTML = `<div class="text-sub">暂无按天数据</div>`;
+		return;
+	}
+	// 堆叠条总宽 100%,每层占比 = 该层当日命中 / 当日总命中
+	const html = trend.map(d => {
+		const dayTotal = ROUTE_ORDER.reduce((s, r) => s + (d[r] || 0), 0);
+		if (!dayTotal) return `<div class="route-trend-row"><span class="route-trend-date">${escapeHtml(d.date)}</span><div class="text-sub text-sm">0</div></div>`;
+		const segments = ROUTE_ORDER.map((r, i) => {
+			const cnt = d[r] || 0;
+			if (!cnt) return '';
+			return `<span class="route-trend-seg" style="width:${(cnt / dayTotal * 100).toFixed(2)}%;background:${ROUTE_COLOR[i]}" title="${escapeHtml(ROUTE_LABEL[r])} ${cnt}">${cnt}</span>`;
+		}).join('');
+		return `<div class="route-trend-row"><span class="route-trend-date">${escapeHtml(d.date)}</span><div class="route-trend-bar">${segments}</div></div>`;
+	}).join('');
+
+	// 图例
+	const legend = ROUTE_ORDER.map((r, i) =>
+		`<span class="route-legend-item"><span class="route-legend-dot" style="background:${ROUTE_COLOR[i]}"></span>${escapeHtml(ROUTE_LABEL[r])}</span>`
+	).join('');
+
+	el.innerHTML = `<div class="route-legend mb-8">${legend}</div><div class="route-trend-list">${html}</div>`;
+}
+
+// 各层回答质量对比:层级 | 整体均分 | 4 大类均分
+function renderRouteQuality(data) {
+	const tbody = $('#routeQualityBody');
+	const qb = data.quality_by_route || {};
+	const order = data.route_order || ROUTE_ORDER;
+	// 只展示有质量数据的层,避免空层占位
+	const rows = order.filter(r => qb[r] && (qb[r].overall !== null && qb[r].overall !== undefined));
+	if (!rows.length) {
+		tbody.innerHTML = `<tr><td colspan="6" class="text-center text-sub">暂无评估数据,在「回答质量」Tab 评估后此处展示各层质量对比</td></tr>`;
+		return;
+	}
+	tbody.innerHTML = rows.map(r => {
+		const q = qb[r];
+		const cells = ['retrieval', 'quality', 'safety', 'business'].map(g => {
+			const v = q.groups && q.groups[g];
+			return v !== undefined && v !== null ? `<td>${scorePill(v, fmtPct)}</td>` : '<td class="text-sub">--</td>';
+		}).join('');
+		return `<tr>
+			<td><span class="tag" style="background:${ROUTE_COLOR[order.indexOf(r)] || '#6b7280'}22;color:${ROUTE_COLOR[order.indexOf(r)] || '#6b7280'}">${escapeHtml(ROUTE_LABEL[r] || r)}</span></td>
+			<td>${q.overall !== null && q.overall !== undefined ? scorePill(q.overall, fmtPct) : '<span class="text-sub">--</span>'}</td>
+			${cells}
+		</tr>`;
+	}).join('');
+}
+
+// 手动触发路由数据聚合(可指定回补日期,留空聚合昨天)
+async function runRouteAggregate() {
+	const reportDate = $('#routeReportDate').value || null;
+	const body = reportDate ? { report_date: reportDate } : {};
+	toast(reportDate ? `正在聚合 ${reportDate} 的路由数据...` : '正在聚合昨天的路由数据...', 'info');
+	try {
+		await api.postJson('/api/v1/analytics/route-analysis/aggregate/', body);
+		toast('聚合已派发,稍后点击刷新查看结果', 'success');
+		setTimeout(() => loadRouteAnalysis(), 3000);
+	} catch (e) {
+		toast('聚合派发失败: ' + (e.message || e), 'error');
+	}
+}
+
+/* ============ Wiki 页面质量（忠实度/完整性） ============ */
+
+const WIKI_DIM_LABEL = { faithfulness: '忠实度', completeness: '完整性' };
+
+async function loadWikiQuality() {
+	try {
+		const days = $('#wikiDays').value;
+		const dim = $('#wikiDim').value;
+		const status = $('#wikiStatus').value;
+		const params = new URLSearchParams();
+		params.set('days', days);
+		if (dim) params.set('dimension', dim);
+		if (status) params.set('status', status);
+		const qs = '?' + params.toString();
+
+		const data = await api.getJson('/api/v1/analytics/wiki-quality/' + qs);
+		renderWikiQuality(data);
+	} catch (e) {
+		toast('Wiki 质量加载失败: ' + (e.message || e), 'error');
+	}
+}
+
+function renderWikiQuality(data) {
+	const s = data.summary || {};
+	$('#wikiKpiPages').textContent = s.pages_evaluated || 0;
+	$('#wikiKpiFaithfulness').textContent = s.avg_faithfulness !== undefined ? fmtPct(s.avg_faithfulness) : '--';
+	$('#wikiKpiCompleteness').textContent = s.avg_completeness !== undefined ? fmtPct(s.avg_completeness) : '--';
+	$('#wikiKpiFailed').textContent = s.failed_pages || 0;
+	$('#wikiSummary').textContent = `窗口 ${data.days} 天 · 维度 ${data.dimension === 'all' ? '全部' : (WIKI_DIM_LABEL[data.dimension] || data.dimension)} · 状态 ${data.status === 'all' ? '全部' : (data.status === 'completed' ? '已完成' : '失败')} · 共 ${data.total} 页`;
+
+	const tbody = $('#wikiQualityBody');
+	const rows = data.rows || [];
+	if (!rows.length) {
+		tbody.innerHTML = `<tr><td colspan="6" class="text-center text-sub">暂无评估数据,点击右上角"批量评估"或等待每日定时评估</td></tr>`;
+		return;
+	}
+	tbody.innerHTML = rows.map(r => {
+		const fa = r.scores && r.scores.faithfulness;
+		const co = r.scores && r.scores.completeness;
+		// 失败维度显示红色"失败"标签;完成维度显示分数
+		const cell = (d) => {
+			if (!d) return '<td class="text-sub">--</td>';
+			if (d.status === 'failed') return `<td><span class="tag tag-danger">失败</span></td>`;
+			return `<td>${scorePill(d.score, fmtPct)}</td>`;
+		};
+		// 更新时间取两个维度中较新的
+		const updatedAt = Math.max(
+			fa && fa.updated_at ? new Date(fa.updated_at).getTime() : 0,
+			co && co.updated_at ? new Date(co.updated_at).getTime() : 0
+		);
+		return `<tr>
+			<td>${r.page_id}</td>
+			<td>${escapeHtml(r.title)}</td>
+			${cell(fa)}
+			${cell(co)}
+			<td>${updatedAt ? formatDate(new Date(updatedAt).toISOString()) : '--'}</td>
+			<td><button class="btn btn-sm" onclick="showWikiDetail(${r.page_id}, '${encodeURIComponent(r.title)}')">查看理由</button></td>
+		</tr>`;
+	}).join('');
+}
+
+// 展示单页两个维度的评估理由/错误信息
+async function showWikiDetail(pageId, title) {
+	$('#wikiDetailTitle').textContent = decodeURIComponent(title);
+	$('#wikiDetailBody').innerHTML = '<div class="text-sub">加载中...</div>';
+	$('#wikiDetailDialog').style.display = 'flex';
+	try {
+		// 详情按 page_id 精确查询该页两个维度的完整评估记录
+		const params = new URLSearchParams();
+		params.set('days', '90');
+		params.set('page_id', pageId);
+		const data = await api.getJson('/api/v1/analytics/wiki-quality/?' + params.toString());
+		const row = (data.rows || [])[0];
+		if (!row) {
+			$('#wikiDetailBody').innerHTML = '<div class="text-sub">未找到该页面的评估记录</div>';
+			return;
+		}
+		const dims = ['faithfulness', 'completeness'];
+		$('#wikiDetailBody').innerHTML = dims.map(d => {
+			const info = row.scores && row.scores[d];
+			if (!info) return `<div class="attr-section"><div class="attr-section-title">${WIKI_DIM_LABEL[d] || d}</div><div class="text-sub">未评估</div></div>`;
+			const reasonHtml = info.status === 'failed'
+				? `<div class="text-sm" style="color:#dc2626">${escapeHtml(info.error_message || '评估失败')}</div>`
+				: `<div class="text-sm text-sub">${escapeHtml(info.reason || '无理由')}</div>`;
+			return `<div class="attr-section">
+				<div class="attr-section-title">${WIKI_DIM_LABEL[d] || d} · ${info.status === 'failed' ? '<span class="tag tag-danger">失败</span>' : scorePill(info.score, fmtPct)}</div>
+				${reasonHtml}
+				<div class="text-sm text-sub mt-8">更新时间 ${formatDate(info.updated_at)}</div>
+			</div>`;
+		}).join('');
+	} catch (e) {
+		$('#wikiDetailBody').innerHTML = `<div class="text-sub">加载失败: ${escapeHtml(e.message || String(e))}</div>`;
+	}
+}
+
+// 手动触发 Wiki 页面批量评估(异步,提交后提示等待,前端轮询列表)
+async function runWikiQualityEval() {
+	toast('评估已派发,正在后台批量评估页面质量,请稍后刷新...', 'info');
+	try {
+		await api.postJson('/api/v1/analytics/wiki-quality/evaluate/', {});
+		toast('评估已派发', 'success');
+		// LLM 评估耗时较长,间隔轮询刷新列表直到出现新数据
+		setTimeout(() => loadWikiQuality(), 5000);
+	} catch (e) {
+		toast('评估派发失败: ' + (e.message || e), 'error');
+	}
+}
+
 /* ============ 工具函数 ============ */
 function fmtPct(v) {
 	if (v === null || v === undefined || isNaN(v)) return '--';
@@ -1706,5 +2066,9 @@ function fmtPct(v) {
 document.addEventListener('DOMContentLoaded', () => {
 	// 初始化 3 个 Tab 的组织架构级联下拉(内部异步加载数据,不阻塞 Tab 切换)
 	initOrgFilters();
-	switchEvalTab('golden');
+	// 默认落在「回答质量」(生产监控最高频),离线评估/治理类 Tab 按需切换
+	switchEvalTab('answer');
+	// 首次计算 Tab 折叠(窗口过窄时收进「⋯ 更多」),窗口尺寸变化时重算
+	refreshEvalTabs();
+	window.addEventListener('resize', refreshEvalTabs);
 });

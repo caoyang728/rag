@@ -243,7 +243,8 @@ class ResetPasswordView(APIView):
             return Response({"detail": "旧密码错误"}, status=400)
         request.user.set_password(new)
         request.user.password_changed_at = timezone.now()
-        request.user.save()
+        # 仅更新密码相关字段，避免 save() 全字段触发 last_login_ip（IPv4Address）类型报错
+        request.user.save(update_fields=['password', 'password_changed_at'])
         return Response({"ok": True})
 
 
@@ -352,7 +353,7 @@ class PasswordResetConfirmView(APIView):
             return Response({"detail": "账号不存在"}, status=400)
         user.set_password(new_password)
         user.password_changed_at = timezone.now()
-        user.save()
+        user.save(update_fields=['password', 'password_changed_at'])
         logger.info(f"PasswordResetConfirm - password reset for user={user.username}")
         return Response({"ok": True, "message": "密码已重置，请使用新密码登录"})
 
@@ -707,7 +708,7 @@ class UserViewSet(viewsets.ModelViewSet):
             if department_id is not None:
                 user.department_id = department_id
             user.set_password(pwd)
-            user.save()
+            user.save(update_fields=['password'])
             # 批量创建角色关联
             if role_ids:
                 objs = [UserRoleRel(user=user, role_id=rid, status='ACTIVE', granted_by=u) for rid in role_ids]
@@ -1244,7 +1245,7 @@ class UserViewSet(viewsets.ModelViewSet):
                                 status=status_val,
                             )
                             user.set_password(pwd)
-                            user.save()
+                            user.save(update_fields=['password'])
                             # 导入用户默认 viewer 角色
                             if viewer_role:
                                 UserRoleRel.objects.create(

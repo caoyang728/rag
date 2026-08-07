@@ -22,6 +22,11 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.system.models import SystemConfig, LLMModel, ConfigChangeTicket, ModelChangeTicket
+from apps.system.scheduler_registry import (
+    compute_schedule_change_summary,
+    is_schedule_key,
+    normalize_schedule_value,
+)
 
 User = get_user_model()
 
@@ -90,8 +95,10 @@ class SystemConfigView(APIView):
                 return Response({"detail": "not found"}, status=404)
             return Response(self._ser(c))
         # 列表按 category 分组返回，方便前端按 tab 渲染
+        # 调度类配置（SCHEDULE_*）由独立"定时任务"页面管理，不出现在通用配置列表，
+        # 避免以 JSON 文本形式暴露在配置页造成重复入口与误编辑
         rows = [r for r in SystemConfig.objects.all().order_by("category", "key")
-                if r.key not in DEPRECATED_CONFIG_KEYS]
+                if r.key not in DEPRECATED_CONFIG_KEYS and not is_schedule_key(r.key)]
 
         # 模型 options 一次查出全部启用模型，按 model_type 预分组，避免 5 次独立 DB 查询
         llm_options_map = self._get_llm_model_options_map()
@@ -158,6 +165,14 @@ class SystemConfigView(APIView):
         except ValueError as e:
             logger.warning(f"SystemConfig.put normalize failed key={key}: {e}")
             return Response({"detail": str(e)}, status=400)
+        # 调度类配置（SCHEDULE_*）：额外校验 cron 语法并规范化为统一存储格式，
+        # 保证固定键序，避免同一调度因 JSON 键序差异被误判为新变更
+        if is_schedule_key(obj.key):
+            try:
+                new_value = normalize_schedule_value(new_value)
+            except ValueError as e:
+                logger.warning(f"SystemConfig.put schedule validate failed key={key}: {e}")
+                return Response({"detail": str(e)}, status=400)
         # 新值与原值一致则无需创建工单，避免无效审批占位
         if new_value == old_value:
             return Response({"detail": "新值与当前值一致，无需提交工单"}, status=400)
@@ -198,6 +213,9 @@ class SystemConfigView(APIView):
         - removed: 旧值中存在但新值中不存在的项
         审批人据此快速识别本次变更点，无需逐项对比新旧完整列表
         """
+        # 调度类配置：单独计算 cron/启停的变更摘要，便于审批人识别改了什么
+        if is_schedule_key(config_key):
+            return compute_schedule_change_summary(old_value, new_value)
         # 仅多值类配置计算差异；单值配置（如 LLM_TIMEOUT）返回空，避免噪声
         # EVAL_DISPLAY_DIMENSIONS 也按多值处理，便于审批人快速识别新增/移除了哪些维度
         multi_value_keys = {'BUSINESS_DB_TABLES', 'EVAL_DISPLAY_DIMENSIONS'}
@@ -432,6 +450,25 @@ class SystemConfigView(APIView):
                 "risk_level": c.risk_level,
                 "category": c.category,
                 "updated_at": c.updated_at.isoformat() if c.updated_at else None}
+
+
+class SchedulerTaskView(APIView):
+    """GET /api/v1/system/scheduler/tasks/  定时任务调度配置列表
+
+    返回任务清单 + 当前调度值（cron 分字段 + 启停状态）+ 待审批工单数，
+    供管理端"定时任务"页面渲染。
+    修改调度时间 / 启停统一走 PUT /configs/<key>/ 工单审批流程（高风险需复核），
+    审批通过后由 SystemConfigScheduler 热更新，无需重启 beat。
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        # 查看需 system.config.read 权限（维护管理员 / 超管），与配置页对齐
+        if not request.user.has_perm('system.config.read'):
+            return Response({"detail": "无权限查看定时任务配置"}, status=status.HTTP_403_FORBIDDEN)
+        from .scheduler_registry import get_tasks_meta
+        tasks = get_tasks_meta()
+        return Response({"tasks": tasks, "total": len(tasks)})
 
 
 class LLMModelViewSet(viewsets.ModelViewSet):
@@ -989,6 +1026,13 @@ class ConfigChangeTicketViewSet(viewsets.ViewSet):
             return denied
         qs = ConfigChangeTicket.objects.all()
 
+        # 按配置 key 过滤（定时任务页只展示调度类工单）：支持逗号分隔多个 key
+        config_key_filter = (request.query_params.get('config_key') or '').strip()
+        if config_key_filter:
+            keys = [k.strip() for k in config_key_filter.split(',') if k.strip()]
+            if keys:
+                qs = qs.filter(config_key__in=keys)
+
         # "我的工单"：按创建人筛选，展示自己创建的工单（所有状态）
         creator_filter = (request.query_params.get('creator') or '').strip()
         if creator_filter == 'me':
@@ -1002,8 +1046,9 @@ class ConfigChangeTicketViewSet(viewsets.ViewSet):
                     qs = qs.filter(status=statuses[0])
                 elif len(statuses) > 1:
                     qs = qs.filter(status__in=statuses)
-            # 过滤：创建人不能审批自己的工单
-            qs = qs.exclude(creator=request.user)
+            # 过滤：创建人不能审批自己的工单（仅对待审核/待复核状态生效，
+            # 已通过/已驳回/已撤回等历史状态不排除，便于查看完整流转记录）
+            qs = qs.exclude(status__in=['pending', 'first_approved'], creator=request.user)
             # 过滤：复核阶段的工单，审核人不可见（防止审核+复核由同一人完成）
             qs = qs.exclude(status='first_approved', reviewer=request.user)
 
@@ -1059,6 +1104,13 @@ class ConfigChangeTicketViewSet(viewsets.ViewSet):
         except ValueError as e:
             logger.warning(f"ConfigTicketView.put normalize failed key={config_key}: {e}")
             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        # 调度类配置：校验 cron 语法并规范化为统一存储格式（与 SystemConfigView.put 一致）
+        if is_schedule_key(obj.key):
+            try:
+                normalized = normalize_schedule_value(normalized)
+            except ValueError as e:
+                logger.warning(f"ConfigTicketView.put schedule validate failed key={config_key}: {e}")
+                return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
         if normalized == obj.value:
             return Response({"detail": "新值与当前值一致，无需提交工单"}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -1411,8 +1463,9 @@ class ModelChangeTicketViewSet(viewsets.ViewSet):
             op_filter = (request.query_params.get('operation') or '').strip()
             if op_filter and op_filter != 'all':
                 qs = qs.filter(operation=op_filter)
-            # 过滤：创建人不能审批自己的工单
-            qs = qs.exclude(creator=request.user)
+            # 过滤：创建人不能审批自己的工单（仅对待审核/待复核状态生效，
+            # 已通过/已驳回/已撤回等历史状态不排除，便于查看完整流转记录）
+            qs = qs.exclude(status__in=['pending', 'first_approved'], creator=request.user)
             # 过滤：复核阶段的工单，审核人不可见（防止审核+复核由同一人完成）
             qs = qs.exclude(status='first_approved', reviewer=request.user)
 

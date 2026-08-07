@@ -639,11 +639,13 @@ media/documents/
 |------|------|------|
 | `system-metrics-daily` | 每日 02:00 | 聚合前一天 P50/P95/P99、缓存命中率、错误率 |
 | `org-usage-daily` | 每日 02:10 | 部门/团队对话、Token、费用聚合（UPSERT） |
+| `route-analysis-daily` | 每日 02:50 | 路由决策分析日聚合（四层命中率/置信度/延迟） |
 | `refine-user-memory` | 每日 02:30 | 提炼稳定的用户偏好到长期记忆 |
 | `graph-community-detection` | 每日 03:00 | 图谱社区检测 + 摘要生成（低峰期） |
 | `cleanup-old-analytics-data` | 每日 03:30 | 清理过期监控数据（低峰期） |
 | `doc-quality-daily` | 每日 04:00 | 批量评估文档质量（解析/切分/向量化） |
 | `wiki-refresh-expired` | 每日 04:00 | 刷新过期的 Wiki 页面（文档变更后重新生成） |
+| `wiki-quality-daily` | 每日 04:45 | 批量评估 Wiki 页面质量（忠实度/完整性） |
 | `coverage-report-daily` | 每日 04:30 | 生成知识库覆盖率报告 |
 | `siphon-low-score-regression` | 每日 05:30 | 从生产低分对话沉淀到回归测试集（低峰期） |
 | `multi-dim-evaluation` | 每 2 小时（30 分） | 多维度回答质量评估（DeepEval 12 维，回扫未覆盖项） |
@@ -658,7 +660,7 @@ media/documents/
 
 队列划分：`default / parse / memory / email / analytics`，analytics 独立队列避免监控任务与业务问答争抢 Worker。
 
-> **TODO**：当前各任务调度时间写死在 [rag_project/celery.py](rag_project/celery.py) 的 `beat_schedule` 中；后续计划在管理端实现定时任务配置页面，将调度时间（cron 表达式）持久化到 SystemConfig，支持按需调整各任务的执行时间与启停状态，避免改代码重启 Worker。
+> 定时任务调度时间可在管理端「定时任务」页配置（`/admin-scheduler/`）：任务清单与默认 cron 收敛在 [apps/system/scheduler_registry.py](apps/system/scheduler_registry.py)（单一数据源），运行期由 `SystemConfigScheduler`（[apps/system/schedulers.py](apps/system/schedulers.py)）从 SystemConfig 热更新调度，修改调度时间 / 启停需提交工单（高风险项走"审核 + 超管复核"双审批），审批通过后 ≤30s 生效，无需改代码或重启 Beat。
 
 ```bash
 # 单 Worker（全队列）

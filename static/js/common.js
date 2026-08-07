@@ -176,9 +176,8 @@ function showConfirmDialog(opts) {
 		}
 	};
 
-	// 关闭按钮 & 点击遮罩关闭
+	// 关闭按钮关闭；不允许点击背景遮罩关闭（避免误触丢失输入内容）
 	closeBtn.onclick = () => ctx.close();
-	overlay.onclick = (e) => { if (e.target === overlay) ctx.close(); };
 
 	overlay.classList.add('show');
 	if (typeof opts.onShow === 'function') opts.onShow(ctx);
@@ -225,6 +224,7 @@ const PAGE_MAP = {
 	'admin-rbac': '/admin-rbac/',
 	'admin-org': '/admin-org/',
 	'admin-system-config': '/admin-system-config/',
+	'admin-scheduler': '/admin-scheduler/',
 	'wiki': '/wiki/',
 	'graph': '/graph/',
 	'profile': '/profile/',

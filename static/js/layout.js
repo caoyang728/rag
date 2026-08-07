@@ -272,6 +272,7 @@ function getSidebarGroups() {
 	if (isSystemMaintainer()) {
 		adminItems.push(
 			{ icon: '🔧', name: '系统配置', page: 'admin-system-config', key: 'admin-system-config', desc: '系统运行参数与模型管理' },
+			{ icon: '⏰', name: '定时任务', page: 'admin-scheduler', key: 'admin-scheduler', desc: 'Beat 调度时间与启停配置（需审批）' },
 		);
 	}
 

@@ -6,6 +6,8 @@ urlpatterns = [
     path("health/", views.HealthView.as_view()),
     path("configs/", views.SystemConfigView.as_view()),
     path("configs/<str:key>/", views.SystemConfigView.as_view()),
+    # 定时任务调度配置列表（修改走 configs/<key>/ 工单审批流程）
+    path("scheduler/tasks/", views.SchedulerTaskView.as_view()),
     # 模型管理 CRUD：显式 as_view 映射，避免引入 DRF router 与现有 path 风格不一致
     path("llm-models/", views.LLMModelViewSet.as_view({'get': 'list', 'post': 'create'})),
     path("llm-models/<int:pk>/", views.LLMModelViewSet.as_view({

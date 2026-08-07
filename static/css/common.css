@@ -81,21 +81,29 @@ ol {
 	list-style: none
 }
 
-/* ============ 通用组件 ============ */
-.btn {
+/* ============ 通用组件 ============
+ * 所有按钮统一 height:32px、min-width:4.5em（约2个中文字），
+ * 宽度根据内容自动扩宽
+ */
+.btn,
+.btn-save,
+.btn-cancel,
+.btn-delete,
+.btn-edit,
+.btn-reject {
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
 	gap: 6px;
-	padding: 8px 16px;
+	height: 32px;
+	min-width: 4.5em;
+	padding: 0 16px;
 	border-radius: var(--radius);
-	background: var(--white);
-	color: var(--text);
-	border: 1px solid var(--border);
-	font-size: 14px;
+	font-size: 13px;
 	font-weight: 500;
 	transition: all 0.15s ease;
 	white-space: nowrap;
+	border: 1px solid var(--border)
 }
 
 .btn:hover {
@@ -125,25 +133,7 @@ ol {
 	border-color: var(--danger)
 }
 
-/* ---- 语义化按钮（固定高度，最小2中文字宽） ---- */
-.btn-save,
-.btn-cancel,
-.btn-delete,
-.btn-edit {
-	display: inline-flex;
-	align-items: center;
-	justify-content: center;
-	gap: 6px;
-	height: 32px;
-	min-width: 4.5em;
-	padding: 0 16px;
-	border-radius: var(--radius);
-	font-size: 13px;
-	font-weight: 500;
-	transition: all 0.15s ease;
-	white-space: nowrap;
-	border: 1px solid var(--border)
-}
+/* ---- 语义化按钮：颜色变体（尺寸继承 .btn 统一规则） ---- */
 
 .btn-save {
 	background: var(--primary);
@@ -187,12 +177,16 @@ ol {
 }
 
 .btn-sm {
-	padding: 4px 10px;
+	height: 28px;
+	min-width: 3.5em;
+	padding: 0 10px;
 	font-size: 12px
 }
 
 .btn-lg {
-	padding: 10px 20px;
+	height: 40px;
+	min-width: 6em;
+	padding: 0 20px;
 	font-size: 15px
 }
 
@@ -702,7 +696,7 @@ ol {
 	gap: 10px;
 }
 
-/* 确认横幅:success=绿色,danger=红色,info=蓝色 */
+/* 确认横幅:success=绿色,danger=红色,info=蓝色,warning=黄色 */
 .confirm-banner {
 	display: flex;
 	align-items: flex-start;
@@ -724,6 +718,10 @@ ol {
 .confirm-banner-info {
 	background: var(--primary-light);
 	border: 1px solid var(--primary-lighter)
+}
+.confirm-banner-warning {
+	background: #fffbeb;
+	border: 1px solid #fde68a
 }
 .confirm-banner-icon {
 	width: 22px;
@@ -749,6 +747,10 @@ ol {
 	background: var(--primary);
 	color: #fff
 }
+.confirm-banner-warning .confirm-banner-icon {
+	background: #f59e0b;
+	color: #fff
+}
 
 /* 选填标签内联提示 */
 .form-hint-inline {
@@ -762,8 +764,7 @@ ol {
 .btn-reject {
 	background: var(--danger);
 	border-color: var(--danger);
-	color: #fff;
-	min-width: 80px
+	color: #fff
 }
 .btn-reject:hover {
 	background: #dc2626;

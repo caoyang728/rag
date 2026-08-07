@@ -12,20 +12,11 @@ urlpatterns = [
     path("llm-models/", views.LLMModelViewSet.as_view({'get': 'list', 'post': 'create'})),
     path("llm-models/<int:pk>/", views.LLMModelViewSet.as_view({
         'get': 'retrieve', 'put': 'update', 'patch': 'partial_update', 'delete': 'destroy'})),
-    # 配置变更工单：创建/列表/详情/审批/驳回/撤回
-    # create_ticket 是工单提交主入口（POST），与 PUT /configs/<key>/ 行为一致
-    path("config-tickets/", views.ConfigChangeTicketViewSet.as_view({
-        'get': 'list', 'post': 'create_ticket'})),
-    path("config-tickets/<int:pk>/", views.ConfigChangeTicketViewSet.as_view({'get': 'retrieve'})),
-    path("config-tickets/<int:pk>/approve/", views.ConfigChangeTicketViewSet.as_view({'post': 'approve'})),
-    path("config-tickets/<int:pk>/reject/", views.ConfigChangeTicketViewSet.as_view({'post': 'reject'})),
-    path("config-tickets/<int:pk>/withdraw/", views.ConfigChangeTicketViewSet.as_view({'post': 'withdraw'})),
-    # 模型变更工单：列表/详情/审批/驳回/撤回
-    path("model-tickets/", views.ModelChangeTicketViewSet.as_view({'get': 'list'})),
-    path("model-tickets/<int:pk>/", views.ModelChangeTicketViewSet.as_view({'get': 'retrieve'})),
-    path("model-tickets/<int:pk>/approve/", views.ModelChangeTicketViewSet.as_view({'post': 'approve'})),
-    path("model-tickets/<int:pk>/reject/", views.ModelChangeTicketViewSet.as_view({'post': 'reject'})),
-    path("model-tickets/<int:pk>/withdraw/", views.ModelChangeTicketViewSet.as_view({'post': 'withdraw'})),
+    # 统一工单列表+创建+操作：合并配置变更/定时任务/模型变更工单
+    path("tickets/", views.TicketViewSet.as_view(), name='ticket-list-create'),
+    path("tickets/<int:pk>/approve/", views.ApproveTicketView.as_view(), name='ticket-approve'),
+    path("tickets/<int:pk>/reject/", views.RejectTicketView.as_view(), name='ticket-reject'),
+    path("tickets/<int:pk>/withdraw/", views.WithdrawTicketView.as_view(), name='ticket-withdraw'),
     path("stats/", views.StatsView.as_view()),
     path("search/", views.GlobalSearchView.as_view()),
 ]

@@ -18,5 +18,4 @@ urlpatterns = [
     path("tickets/<int:pk>/reject/", views.RejectTicketView.as_view(), name='ticket-reject'),
     path("tickets/<int:pk>/withdraw/", views.WithdrawTicketView.as_view(), name='ticket-withdraw'),
     path("stats/", views.StatsView.as_view()),
-    path("search/", views.GlobalSearchView.as_view()),
 ]

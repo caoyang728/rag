@@ -1,6 +1,6 @@
 /* ==========================================================
    知库 Agent · 应用壳布局 (layout.js)
-   包含：顶栏渲染、侧栏渲染、全局搜索、用户菜单、登出、通知、角色判断
+   包含：顶栏渲染、侧栏渲染、用户菜单、登出、通知、角色判断
    依赖：common.js（STATE/$/$$/toast/escapeHtml/formatDate/PAGE_MAP/goto）、api.js
    需在 common.js、api.js 之后，页面 js 之前加载
    仅带顶栏/侧栏的页面引入；login / reset-password 不引入
@@ -13,10 +13,6 @@ function renderTopNav(active) {
     <div class="topnav-logo">
       <div class="topnav-logo-icon">知</div>
       <span>知库 Agent</span>
-    </div>
-    <div class="topnav-search" id="topnavSearchWrap">
-      <input type="text" id="globalSearchInput" placeholder="全局搜索：文档、代码、会话…（Ctrl+K）" autocomplete="off">
-      <div class="topnav-search-dropdown" id="globalSearchDropdown"></div>
     </div>
     <div id="scopeNavWrap" class="topnav-scope-wrap" style="display:none">
       <button class="topnav-scope-btn" id="scopeTrigger" onclick="toggleScopePicker()">
@@ -41,108 +37,6 @@ function renderTopNav(active) {
       </div>
     </div>
   </nav>`;
-}
-
-/* ---- 全局搜索 ---- */
-let _globalSearchTimer = null;
-function initGlobalSearch() {
-	const input = document.getElementById('globalSearchInput');
-	if (!input) return;
-	const dropdown = document.getElementById('globalSearchDropdown');
-
-	input.addEventListener('input', () => {
-		if (_globalSearchTimer) clearTimeout(_globalSearchTimer);
-		_globalSearchTimer = setTimeout(() => doGlobalSearch(), 280);
-	});
-	input.addEventListener('focus', () => {
-		if (input.value.trim()) doGlobalSearch();
-	});
-	input.addEventListener('keydown', (e) => {
-		if (e.key === 'Escape') { input.blur(); hideGlobalSearchDropdown(); }
-		if (e.key === 'Enter') {
-			const first = dropdown?.querySelector('.gs-item');
-			if (first) first.click();
-		}
-	});
-
-	// 点击外部关闭下拉
-	document.addEventListener('click', (e) => {
-		if (!e.target.closest('#topnavSearchWrap')) hideGlobalSearchDropdown();
-	});
-
-	// Ctrl+K 快捷键
-	document.addEventListener('keydown', (e) => {
-		if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
-			e.preventDefault();
-			input.focus();
-			input.select();
-		}
-	});
-}
-
-async function doGlobalSearch() {
-	const input = document.getElementById('globalSearchInput');
-	const dropdown = document.getElementById('globalSearchDropdown');
-	if (!input || !dropdown) return;
-	const q = input.value.trim();
-	if (!q) { hideGlobalSearchDropdown(); return; }
-
-	dropdown.innerHTML = '<div class="gs-loading">🔍 搜索中...</div>';
-	dropdown.classList.add('show');
-
-	try {
-		const data = await api.getJson(`/api/v1/system/search/?q=${encodeURIComponent(q)}`);
-		renderGlobalSearchResults(data, q);
-	} catch (e) {
-		console.error('global search failed:', e);
-		dropdown.innerHTML = '<div class="gs-empty">搜索失败，请重试</div>';
-	}
-}
-
-function renderGlobalSearchResults(data, q) {
-	const dropdown = document.getElementById('globalSearchDropdown');
-	if (!dropdown) return;
-	const groups = data.groups || {};
-	const docs = groups.documents || [];
-	const sessions = groups.sessions || [];
-	const nodes = groups.nodes || [];
-	const total = data.total || 0;
-
-	if (total === 0) {
-		dropdown.innerHTML = `<div class="gs-empty">无匹配结果："<b>${escapeHtml(q)}</b>"</div>`;
-		return;
-	}
-
-	const groupHtml = (title, icon, items) => items.length === 0 ? '' : `
-    <div class="gs-group">
-      <div class="gs-group-title">${icon} ${title} <span class="gs-count">${items.length}</span></div>
-      ${items.map(it => `
-        <a class="gs-item" href="${it.url}" data-type="${it.type}">
-          <span class="gs-item-icon">${it.icon}</span>
-          <div class="gs-item-body">
-            <div class="gs-item-title">${highlightKeyword(it.title, q)}</div>
-            <div class="gs-item-sub">${escapeHtml(it.subtitle || '')}</div>
-          </div>
-        </a>
-      `).join('')}
-    </div>`;
-
-	dropdown.innerHTML =
-		groupHtml('文档', '📄', docs) +
-		groupHtml('会话', '💬', sessions) +
-		groupHtml('知识节点', '🗂️', nodes);
-}
-
-function hideGlobalSearchDropdown() {
-	const dropdown = document.getElementById('globalSearchDropdown');
-	if (dropdown) dropdown.classList.remove('show');
-}
-
-function highlightKeyword(text, q) {
-	if (!text || !q) return escapeHtml(text);
-	const escaped = escapeHtml(text);
-	const qEscaped = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-	return escaped.replace(new RegExp(qEscaped, 'gi'), m => `<mark>${m}</mark>`);
 }
 
 /* ============ 用户菜单 / 登出 / 通知 ============ */
@@ -366,7 +260,4 @@ document.addEventListener('DOMContentLoaded', () => {
 		// 恢复侧栏折叠状态（刷新后保持）
 		if (isSidebarCollapsed()) document.body.classList.add('sidebar-collapsed');
 	}
-
-	// 初始化全局搜索（顶栏）
-	initGlobalSearch();
 });

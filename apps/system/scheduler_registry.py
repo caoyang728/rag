@@ -541,12 +541,13 @@ def get_tasks_meta() -> List[dict]:
     snapshot = load_schedule_snapshot()
     pending_count = {}
     try:
-        from .models import SystemConfig, ConfigChangeTicket
+        from .models import SystemConfig, Ticket
         keys = [schedule_key(t['name']) for t in SCHEDULED_TASKS]
         from django.db.models import Count
-        qs = ConfigChangeTicket.objects.filter(
+        qs = Ticket.objects.filter(
+            ticket_type__in=('config', 'schedule'),
             config_key__in=keys,
-            status__in=['pending', 'first_approved'],
+            status__in=['pending', 'pending_review'],
         ).values('config_key').annotate(cnt=Count('id'))
         pending_count = {r['config_key']: r['cnt'] for r in qs}
     except Exception as e:

@@ -156,7 +156,9 @@ function showConfirmDialog(opts) {
 	buttons.forEach(btn => {
 		const b = document.createElement('button');
 		b.textContent = btn.text;
-		if (btn.type === 'primary') b.className = 'btn-save';
+		if (btn.className) {
+			b.className = btn.className;
+		} else if (btn.type === 'primary') b.className = 'btn-save';
 		else if (btn.type === 'danger') b.className = 'btn btn-reject';
 		else b.className = 'btn-cancel';
 		b.onclick = () => { if (typeof btn.onClick === 'function') btn.onClick(ctx); };

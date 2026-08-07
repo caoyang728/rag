@@ -234,7 +234,7 @@ function renderConfigList(cat) {
 			: '';
 		// 高风险项标识：变更需超管复核
 		const badgeRisk = c.risk_level === 'high'
-			? '<span class="config-badge config-badge-risk" title="高风险项，工单需超管复核">⚠️ 高风险</span>'
+			? '<span class="config-badge config-badge-risk" title="高风险项，工单需复核">⚠️ 高风险</span>'
 			: '';
 
 		// __KEY_ESC__ 用于 HTML 文本/属性值，__KEY_ATTR__ 用于 id/data-key 属性
@@ -499,7 +499,7 @@ async function submitTicket(key) {
 		title: '提交配置变更工单',
 		bannerType: 'info',
 		bannerIcon: '📝',
-		bannerText: `配置项：${config.label || key}（${key}）${config.risk_level === 'high' ? '，⚠️ 高风险项需超管复核' : ''}`,
+		bannerText: `配置项：${config.label || key}（${key}）${config.risk_level === 'high' ? '，⚠️ 高风险项需复核' : ''}`,
 		bodyHtml: `<div class="form-item" style="margin-top:12px">
 			<label class="form-label">变更原因 <span class="required">*</span></label>
 			<textarea id="ticketReasonInput" class="input" rows="3" placeholder="请说明本次配置变更的原因，便于审批人判断" style="max-width:100%"></textarea>
@@ -517,8 +517,9 @@ async function submitTicket(key) {
 					}
 					try {
 						_saving = true;
-						// 提交工单：POST /api/v1/system/config-tickets/
-						const ticket = await api.postJson('/api/v1/system/config-tickets/', {
+						// 提交工单：POST /api/v1/system/tickets/
+						const ticket = await api.postJson('/api/v1/system/tickets/', {
+							ticket_type: 'config',
 							config_key: key,
 							new_value: currentValue,
 							reason: reason,
@@ -833,7 +834,7 @@ function deleteModel(id) {
 	// 删除需填写变更原因，并提交审批（超管复核）
 	const formHtml = `
 		<div style="margin-bottom:8px;color:var(--text-sub);font-size:13px;">
-			此操作需超管复核，审批通过后才能删除。
+			此操作需复核，审批通过后才能删除。
 		</div>
 		<div class="form-item">
 			<label class="form-label">删除原因 <span class="required">*</span></label>
@@ -842,7 +843,7 @@ function deleteModel(id) {
 
 	showConfirmDialog({
 		title: '删除模型',
-		bannerText: `确认删除模型「${m.name}」吗？此操作需超管复核。`,
+		bannerText: `确认删除模型「${m.name}」吗？此操作需复核。`,
 		bannerType: 'danger',
 		bodyHtml: formHtml,
 		buttons: [
@@ -866,7 +867,7 @@ function deleteModel(id) {
 							throw new Error(data.detail || '提交失败');
 						}
 						ctx.close();
-						toast('删除申请已提交，等待超管复核', 'warning');
+						toast('删除申请已提交，等待复核', 'warning');
 					} catch (e) {
 						ctx.setError(`提交失败：${e.message}`);
 					}
@@ -874,659 +875,6 @@ function deleteModel(id) {
 			}
 		]
 	});
-}
-
-/* ==========================================================
-   配置变更工单列表
-   - openTicketModal()    打开工单列表弹窗并加载
-   - closeTicketModal()   关闭弹窗
-   - switchTicketTab(s)   切换状态筛选 tab
-   - loadTickets()        拉取后端工单列表（带状态筛选）
-   - renderTicketList()   渲染工单卡片
-   - openTicketDetailModal(id)  打开工单详情二级弹窗 + 审批操作
-   - approveTicket(id)    审批通过
-   - rejectTicket(id)     驳回
-   - withdrawTicket(id)   撤回
-   ========================================================== */
-
-// 工单状态中文名映射，用于 tab 与卡片状态徽标
-const TICKET_STATUS_LABELS = {
-	pending: '待审核',
-	first_approved: '待复核',
-	approved: '已通过',
-	rejected: '已驳回',
-	withdrawn: '已撤回',
-};
-
-// 工单列表弹窗状态
-let _ticketType = 'config';   // config=配置工单, model=模型工单
-let _ticketStatus = 'pending,first_approved'; // 默认展示待审核（含待审核+待复核）
-let _tickets = [];           // 当前加载的工单列表
-let _ticketPage = 1;         // 当前页码（分页展示）
-
-/* ============ 打开工单列表弹窗 ============ */
-async function openTicketModal() {
-	$$('.ticket-tab').forEach(btn => {
-		if (btn.dataset.type) {
-			btn.classList.toggle('active', btn.dataset.type === 'config');
-		} else if (btn.dataset.status === 'pending,first_approved') {
-			btn.classList.add('active');
-		} else {
-			btn.classList.remove('active');
-		}
-	});
-	showModal('ticketListModal');
-	_ticketType = 'config';
-	_ticketStatus = 'pending,first_approved';
-	_ticketPage = 1;
-	await loadTickets();
-}
-
-/* ============ 关闭工单列表弹窗 ============ */
-function closeTicketModal() {
-	closeModal('ticketListModal');
-	const overlay = document.getElementById('confirmOverlay');
-	if (overlay) overlay.classList.remove('show');
-}
-
-/* ============ 切换工单类型 ============ */
-function switchTicketType(type) {
-	_ticketType = type;
-	_ticketStatus = 'pending,first_approved';
-	_ticketPage = 1;
-	$$('.ticket-tab').forEach(btn => {
-		if (btn.dataset.type) {
-			btn.classList.toggle('active', btn.dataset.type === type);
-		}
-	});
-	$$('#ticketTabs .ticket-tab').forEach(btn => {
-		btn.classList.toggle('active', btn.dataset.status === 'pending,first_approved');
-	});
-	loadTickets();
-}
-
-/* ============ 切换状态筛选 tab ============ */
-function switchTicketTab(status) {
-	_ticketStatus = status;
-	_ticketPage = 1;
-	$$('#ticketTabs .ticket-tab').forEach(btn => {
-		btn.classList.toggle('active', btn.dataset.status === status);
-	});
-	loadTickets();
-}
-
-/* ============ 加载工单列表 ============ */
-async function loadTickets() {
-	const body = $('#ticketListBody');
-	if (!body) return;
-	body.innerHTML = '<div class="ticket-empty">加载中...</div>';
-	$('#ticketPagination').innerHTML = '';
-	try {
-		const apiPath = _ticketType === 'model' ? 'model-tickets' : 'config-tickets';
-		let url = `/api/v1/system/${apiPath}/`;
-		const params = [];
-		// "我的工单"：按创建人筛选，展示自己创建的工单（所有状态）
-		if (_ticketStatus === 'mine') {
-			params.push('creator=me');
-		} else if (_ticketStatus && _ticketStatus !== 'all') {
-			params.push(`status=${_ticketStatus}`);
-		}
-		if (params.length > 0) {
-			url += '?' + params.join('&');
-		}
-		const data = await api.getJson(url);
-		_tickets = data.tickets || [];
-		renderTicketList();
-	} catch (e) {
-		body.innerHTML = `<div class="ticket-empty">加载失败：${escapeHtml(e.message)}</div>`;
-	}
-}
-
-/* ============ 渲染工单列表（分页）============ */
-const _TICKET_PAGE_SIZE = 10; // 每页展示 10 条工单
-
-function renderTicketList() {
-	const body = $('#ticketListBody');
-	if (!body) return;
-	// 按当前 tab 状态过滤（安全兜底，主要依赖后端筛选）
-	// "我的工单"(mine) 不做客户端状态过滤，展示所有状态
-	let filtered = _tickets;
-	if (_ticketStatus && _ticketStatus !== 'all' && _ticketStatus !== 'mine') {
-		const statusList = _ticketStatus.split(',').map(s => s.trim());
-		filtered = _tickets.filter(t => statusList.includes(t.status));
-	}
-	if (filtered.length === 0) {
-		body.innerHTML = '<div class="ticket-empty">暂无工单</div>';
-		$('#ticketPagination').innerHTML = '';
-		return;
-	}
-	const totalPages = Math.ceil(filtered.length / _TICKET_PAGE_SIZE);
-	if (_ticketPage > totalPages) _ticketPage = 1;
-	const start = (_ticketPage - 1) * _TICKET_PAGE_SIZE;
-	const pageItems = filtered.slice(start, start + _TICKET_PAGE_SIZE);
-	const currentUsername = getCurrentUsername();
-	body.innerHTML = pageItems.map(t => renderTicketCard(t, currentUsername)).join('');
-	renderTicketPagination(filtered.length, totalPages);
-}
-
-/* ============ 渲染分页控件 ============ */
-function renderTicketPagination(totalItems, totalPages) {
-	const el = $('#ticketPagination');
-	if (!el) return;
-	if (totalPages <= 1) {
-		el.innerHTML = `<span class="pagination-info">共 ${totalItems} 条</span>`;
-		return;
-	}
-	const prevDisabled = _ticketPage <= 1 ? 'disabled' : '';
-	const nextDisabled = _ticketPage >= totalPages ? 'disabled' : '';
-	el.innerHTML = `
-		<button class="btn btn-sm btn-outline" ${prevDisabled} onclick="goTicketPage(${_ticketPage - 1})">上一页</button>
-		<span class="pagination-info">第 ${_ticketPage} / ${totalPages} 页（共 ${totalItems} 条）</span>
-		<button class="btn btn-sm btn-outline" ${nextDisabled} onclick="goTicketPage(${_ticketPage + 1})">下一页</button>
-	`;
-}
-
-/* ============ 跳转到指定页 ============ */
-function goTicketPage(page) {
-	_ticketPage = page;
-	renderTicketList();
-	// 滚动到列表顶部
-	const body = $('#ticketListBody');
-	if (body) body.scrollTop = 0;
-}
-
-/* ============ 渲染单个工单卡片（紧凑模式，点击打开详情弹窗）============ */
-function renderTicketCard(t, currentUsername) {
-	const statusLabel = TICKET_STATUS_LABELS[t.status] || t.status;
-	const statusClass = {
-		pending: 'ticket-status-pending',
-		first_approved: 'ticket-status-first',
-		approved: 'ticket-status-approved',
-		rejected: 'ticket-status-rejected',
-		withdrawn: 'ticket-status-withdrawn',
-	}[t.status] || '';
-
-	if (_ticketType === 'model') {
-		// 模型工单：展示模型名 + 操作类型 + 变更字段
-		const actionLabels = { update_normal: '修改', deactivate: '停用', delete: '删除' };
-		const actionLabel = actionLabels[t.action] || t.action;
-		const modelBadge = `<span class="ticket-badge">${escapeHtml(actionLabel)}</span>`;
-		const snapshot = t.snapshot_data || {};
-		let fieldsHtml = '';
-		if (t.action === 'delete') {
-			// 删除：展示当前模型关键信息
-			const parts = [];
-			if (snapshot.name) parts.push(escapeHtml(snapshot.name));
-			if (snapshot.model_name) parts.push(escapeHtml(snapshot.model_name));
-			if (snapshot.model_type) parts.push(escapeHtml(snapshot.model_type));
-			if (snapshot.base_url) parts.push(escapeHtml(snapshot.base_url));
-			fieldsHtml = parts.length
-				? `<span style="color:var(--text-sub);font-size:12px">${parts.join(' | ')}</span>`
-				: '';
-		} else if (t.action === 'deactivate') {
-			fieldsHtml = '<span style="color:var(--text-sub);font-size:12px">状态：启用 → 停用</span>';
-		} else if (t.changed_fields && t.changed_fields.length) {
-			const fieldLabels = { base_url: 'Base URL', timeout: '超时', model_name: '模型名', display_name: '显示名', api_key: 'API Key', name: '名称', model_type: '类型' };
-			fieldsHtml = t.changed_fields.map(f => {
-				const label = fieldLabels[f] || f;
-				return `<span style="color:var(--text-sub);font-size:12px">${escapeHtml(label)}</span>`;
-			}).join(' → ');
-		}
-		return `<div class="ticket-card ticket-card-clickable" id="ticket-card-${t.id}" onclick="openTicketDetailModal(${t.id})">
-			<div class="ticket-card-header">
-				<div class="ticket-card-title">
-					<span class="ticket-config-label">${escapeHtml(t.model_name || '-')}</span>
-					${modelBadge}
-					<span class="ticket-status ${statusClass}">${escapeHtml(statusLabel)}</span>
-				</div>
-				<div class="ticket-card-meta">
-					${fieldsHtml ? `<span class="ticket-value-diff">${fieldsHtml}</span>` : ''}
-					<span class="ticket-creator">${escapeHtml(t.creator || '-')}</span>
-					<span class="ticket-time">${formatDate(t.created_at)}</span>
-				</div>
-			</div>
-			<span class="ticket-toggle">👁 查看详情</span>
-		</div>`;
-	}
-
-	// 配置工单
-	const riskBadge = t.risk_level === 'high'
-		? '<span class="ticket-badge ticket-badge-risk">⚠️ 高风险</span>'
-		: '';
-	return `<div class="ticket-card ticket-card-clickable" id="ticket-card-${t.id}" onclick="openTicketDetailModal(${t.id})">
-		<div class="ticket-card-header">
-			<div class="ticket-card-title">
-				<span class="ticket-config-label">${escapeHtml(t.config_label || t.config_key)}</span>
-				<span class="ticket-config-key">${escapeHtml(t.config_key)}</span>
-				${riskBadge}
-				<span class="ticket-status ${statusClass}">${escapeHtml(statusLabel)}</span>
-			</div>
-			<div class="ticket-card-meta">
-				<span class="ticket-value-diff"><span class="diff-old">${escapeHtml(t.old_value)}</span> <span class="diff-arrow">→</span> <span class="diff-new">${escapeHtml(t.new_value)}</span></span>
-				<span class="ticket-creator">${escapeHtml(t.creator || '-')}</span>
-				<span class="ticket-time">${formatDate(t.created_at)}</span>
-			</div>
-		</div>
-		<span class="ticket-toggle">👁 查看详情</span>
-	</div>`;
-}
-
-/* ============ 打开工单详情弹窗（使用 common.js showConfirmDialog 二级弹窗）============ */
-function openTicketDetailModal(ticketId) {
-	const t = _tickets.find(x => x.id === ticketId);
-	if (!t) return;
-	const currentUsername = getCurrentUsername();
-	const isCreator = t.creator && t.creator === currentUsername;
-	const isSuperAdmin = isSuperAdminRole();
-	const canApprove = (t.status === 'pending' || t.status === 'first_approved') && !isCreator;
-	const canSuperReview = t.status === 'first_approved' && isSuperAdmin && !isCreator;
-	const canWithdraw = isCreator && (t.status === 'pending' || t.status === 'first_approved');
-
-	const statusLabel = TICKET_STATUS_LABELS[t.status] || t.status;
-	const statusClass = {
-		pending: 'ticket-status-pending',
-		first_approved: 'ticket-status-first',
-		approved: 'ticket-status-approved',
-		rejected: 'ticket-status-rejected',
-		withdrawn: 'ticket-status-withdrawn',
-	}[t.status] || '';
-
-	const isModel = _ticketType === 'model';
-	const actionLabels = { update_normal: '修改', deactivate: '停用', delete: '删除' };
-
-	// 构建弹窗 body
-	let bodyHtml = '';
-	if (isModel) {
-		bodyHtml = renderModelTicketDetail(t, statusLabel, statusClass, actionLabels);
-	} else {
-		bodyHtml = renderConfigTicketDetail(t, statusLabel, statusClass);
-	}
-
-	// 构建底部按钮
-	const buttons = [];
-	if (canApprove || canSuperReview) {
-		buttons.push({
-			text: '审批通过', type: 'primary',
-			onClick: (ctx) => { ctx.close(); approveTicket(t.id); },
-		});
-		buttons.push({
-			text: '驳回', type: 'danger',
-			onClick: (ctx) => { ctx.close(); rejectTicket(t.id); },
-		});
-	}
-	if (canWithdraw) {
-		buttons.push({
-			text: '撤回', type: 'cancel',
-			onClick: (ctx) => { ctx.close(); withdrawTicket(t.id); },
-		});
-	}
-	buttons.push({ text: '关闭', type: 'cancel', onClick: (ctx) => ctx.close() });
-
-	showConfirmDialog({
-		title: isModel ? '模型工单详情' : '工单详情',
-		bodyHtml: bodyHtml,
-		buttons: buttons,
-		onShow: (ctx) => {
-			ctx.el.style.width = '840px';
-			ctx.el.style.maxWidth = '95vw';
-		},
-	});
-}
-
-/* ============ 渲染模型工单详情 ============ */
-function renderModelTicketDetail(t, statusLabel, statusClass, actionLabels) {
-	const fieldLabels = { base_url: 'Base URL', timeout: '超时时间', model_name: '模型名称', display_name: '显示名', api_key: 'API Key', name: '名称', model_type: '模型类型', is_active: '状态', provider: '服务商' };
-	const actionLabel = actionLabels[t.action] || t.action;
-	const riskNote = t.action === 'delete'
-		? '<span class="ticket-badge ticket-badge-risk">⚠️ 需超管复核</span>'
-		: (t.action === 'deactivate' ? '<span class="ticket-badge">⚠️ 普通审批</span>' : '');
-
-	const snapshot = t.snapshot_data || {};
-	const isDelete = t.action === 'delete';
-	const isDeactivate = t.action === 'deactivate';
-
-	let fieldsDetail = '';
-	if (isDelete) {
-		// 删除：用信息列表展示模型当前值，不再用 diff 对比
-		const fields = [
-			{ key: 'name', label: '名称', value: snapshot.name },
-			{ key: 'model_name', label: '模型名称', value: snapshot.model_name },
-			{ key: 'model_type', label: '模型类型', value: snapshot.model_type },
-			{ key: 'provider', label: '服务商', value: snapshot.provider },
-			{ key: 'base_url', label: 'Base URL', value: snapshot.base_url },
-			{ key: 'timeout', label: '超时时间', value: snapshot.timeout ? `${snapshot.timeout}s` : '-' },
-		];
-		fieldsDetail = `<div class="ticket-delete-warning">
-			<div class="ticket-delete-warning-icon">🗑️</div>
-			<div class="ticket-delete-warning-text">
-				<strong>确认删除此模型？</strong>
-				删除后该模型将不可恢复，且引用该模型的配置项将失效。
-			</div>
-		</div>
-		<div class="ticket-delete-info-card">
-			<div class="ticket-delete-info-title">模型当前信息</div>
-			<div class="ticket-delete-info-list">
-				${fields.filter(f => f.value !== undefined && f.value !== null && f.value !== '').map(f => `
-					<div class="ticket-delete-info-row">
-						<span class="ticket-delete-info-label">${escapeHtml(f.label)}</span>
-						<span class="ticket-delete-info-value">${escapeHtml(String(f.value))}</span>
-					</div>
-				`).join('')}
-			</div>
-		</div>`;
-	} else if (isDeactivate) {
-		// 停用：展示启用 → 停用
-		fieldsDetail = `<div class="ticket-deactivate-notice">
-			<div class="ticket-deactivate-icon">⏸️</div>
-			<div class="ticket-deactivate-text">
-				<strong>停用后该模型将不可用</strong>，引用该模型的配置项将受影响。
-			</div>
-		</div>
-		<div class="ticket-info-grid">
-			<div class="ticket-info-item">
-				<div class="ticket-info-label">当前状态</div>
-				<div class="ticket-info-value"><span style="color:#16a34a">● 启用中</span></div>
-			</div>
-			<div class="ticket-info-item">
-				<div class="ticket-info-label">变更为</div>
-				<div class="ticket-info-value"><span style="color:#dc2626">● 已停用</span></div>
-			</div>
-		</div>`;
-	} else if (t.changed_fields && t.changed_fields.length) {
-		// 修改操作：保持 diff 对比布局
-		fieldsDetail = t.changed_fields.map(f => {
-			const label = fieldLabels[f] || f;
-			let oldV = '-', newV = '-';
-			if (t.change_data && t.change_data[f]) {
-				oldV = t.change_data[f].old ?? '-';
-				newV = t.change_data[f].new ?? '-';
-			}
-			if (oldV === true) oldV = '启用';
-			if (oldV === false) oldV = '停用';
-			if (newV === true) newV = '启用';
-			if (newV === false) newV = '停用';
-			if (oldV === null || oldV === undefined) oldV = '-';
-			if (newV === null || newV === undefined) newV = '-';
-			return `<div class="ticket-diff-row">
-				<div class="ticket-diff-side ticket-diff-old">
-					<div class="ticket-diff-side-label">${escapeHtml(label)} 原值</div>
-					<div class="ticket-diff-side-value">${escapeHtml(String(oldV))}</div>
-				</div>
-				<div class="ticket-diff-arrow">→</div>
-				<div class="ticket-diff-side ticket-diff-new">
-					<div class="ticket-diff-side-label">${escapeHtml(label)} 新值</div>
-					<div class="ticket-diff-side-value">${escapeHtml(String(newV))}</div>
-				</div>
-			</div>`;
-		}).join('');
-	}
-
-	// 依赖引用信息（删除/停用时展示）
-	let depInfo = '';
-	if (t.dependency_refs && t.dependency_refs.length) {
-		depInfo = `<div class="ticket-detail-card">
-			<div class="ticket-detail-reason" style="background:#fef2f2;border-color:#fecaca">
-				<span class="ticket-detail-reason-label" style="color:#dc2626">⚠️ 依赖引用</span>
-				<span class="ticket-detail-reason-value" style="color:#991b1b">${escapeHtml(t.dependency_refs.join(', '))}</span>
-			</div>
-		</div>`;
-	}
-
-	return `
-		<div class="ticket-detail-card">
-			<div class="ticket-detail-header-row">
-				<span class="ticket-detail-config-label">${escapeHtml(t.model_name || '-')}</span>
-				<span class="ticket-badge">${escapeHtml(actionLabel)}</span>
-				${riskNote}
-				<span class="ticket-status ${statusClass}">${escapeHtml(statusLabel)}</span>
-			</div>
-			<div class="ticket-detail-meta-row">
-				<span>模型 ID：${t.model_id || '-'}</span>
-				<span>提交人：${escapeHtml(t.creator || '-')}</span>
-				<span>提交时间：${formatDate(t.created_at)}</span>
-			</div>
-		</div>
-		${fieldsDetail ? `
-		<div class="ticket-detail-card">
-			<div class="ticket-diff-label">${isDelete ? '模型信息' : isDeactivate ? '停用信息' : '变更详情'}</div>
-			${isDelete || isDeactivate ? fieldsDetail : `<div class="ticket-diff-box">${fieldsDetail}</div>`}
-		</div>` : ''}
-		${depInfo}
-		<div class="ticket-detail-card">
-			<div class="ticket-detail-reason">
-				<span class="ticket-detail-reason-label">变更原因</span>
-				<span class="ticket-detail-reason-value">${formatMultiline(t.reason)}</span>
-			</div>
-		</div>
-		${renderApprovalHistory(t)}
-	`;
-}
-
-/* ============ 渲染审批历史（有内容时才输出card） ============ */
-function renderApprovalHistory(t) {
-	const rows = [];
-	if (t.review_comment) rows.push(`<div class="ticket-detail-row"><span class="ticket-detail-label">审核意见</span><span class="ticket-detail-value ticket-detail-multiline">${formatMultiline(t.review_comment)}</span></div>`);
-	if (t.reviewer) rows.push(`<div class="ticket-detail-row"><span class="ticket-detail-label">审核人</span><span class="ticket-detail-value">${escapeHtml(t.reviewer)} · ${formatDate(t.reviewed_at)}</span></div>`);
-	if (t.super_admin_comment) rows.push(`<div class="ticket-detail-row"><span class="ticket-detail-label">复核意见</span><span class="ticket-detail-value ticket-detail-multiline">${formatMultiline(t.super_admin_comment)}</span></div>`);
-	if (t.super_admin_reviewer) rows.push(`<div class="ticket-detail-row"><span class="ticket-detail-label">复核人</span><span class="ticket-detail-value">${escapeHtml(t.super_admin_reviewer)} · ${formatDate(t.super_admin_reviewed_at)}</span></div>`);
-	if (t.applied_at) rows.push(`<div class="ticket-detail-row"><span class="ticket-detail-label">生效时间</span><span class="ticket-detail-value">${formatDate(t.applied_at)}</span></div>`);
-	if (rows.length === 0) return '';
-	return `<div class="ticket-detail-card">${rows.join('')}</div>`;
-}
-function renderConfigTicketDetail(t, statusLabel, statusClass) {
-	return `
-		<div class="ticket-detail-card">
-			<div class="ticket-detail-header-row">
-				<span class="ticket-detail-config-label">${escapeHtml(t.config_label || t.config_key)}</span>
-				<span class="ticket-detail-config-key">${escapeHtml(t.config_key)}</span>
-				${t.risk_level === 'high' ? '<span class="ticket-badge ticket-badge-risk">⚠️ 高风险</span>' : ''}
-				<span class="ticket-status ${statusClass}">${escapeHtml(statusLabel)}</span>
-			</div>
-			<div class="ticket-detail-meta-row">
-				<span>提交人：${escapeHtml(t.creator || '-')}</span>
-				<span>提交时间：${formatDate(t.created_at)}</span>
-			</div>
-		</div>
-		<div class="ticket-detail-card">
-			<div class="ticket-diff-label">变更对比</div>
-			<div class="ticket-diff-box">
-				<div class="ticket-diff-row">
-					<div class="ticket-diff-side ticket-diff-old">
-						<div class="ticket-diff-side-label">原值</div>
-						<div class="ticket-diff-side-value">${escapeHtml(t.old_value)}</div>
-					</div>
-					<div class="ticket-diff-arrow">→</div>
-					<div class="ticket-diff-side ticket-diff-new">
-						<div class="ticket-diff-side-label">新值</div>
-						<div class="ticket-diff-side-value">${escapeHtml(t.new_value)}</div>
-					</div>
-				</div>
-			</div>
-		</div>
-		<div class="ticket-detail-card">
-			<div class="ticket-detail-reason">
-				<span class="ticket-detail-reason-label">变更原因</span>
-				<span class="ticket-detail-reason-value">${formatMultiline(t.reason)}</span>
-			</div>
-		</div>
-		${renderConfigApprovalHistory(t)}
-	`;
-}
-
-/* ============ 渲染配置工单审批历史（含变更摘要，有内容时才输出card） ============ */
-function renderConfigApprovalHistory(t) {
-	const rows = [];
-	const summary = renderChangeSummary(t.change_summary);
-	if (summary) rows.push(summary);
-	if (t.review_comment) rows.push(`<div class="ticket-detail-row"><span class="ticket-detail-label">审核意见</span><span class="ticket-detail-value ticket-detail-multiline">${formatMultiline(t.review_comment)}</span></div>`);
-	if (t.reviewer) rows.push(`<div class="ticket-detail-row"><span class="ticket-detail-label">审核人</span><span class="ticket-detail-value">${escapeHtml(t.reviewer)} · ${formatDate(t.reviewed_at)}</span></div>`);
-	if (t.super_admin_comment) rows.push(`<div class="ticket-detail-row"><span class="ticket-detail-label">复核意见</span><span class="ticket-detail-value ticket-detail-multiline">${formatMultiline(t.super_admin_comment)}</span></div>`);
-	if (t.super_admin_reviewer) rows.push(`<div class="ticket-detail-row"><span class="ticket-detail-label">复核人</span><span class="ticket-detail-value">${escapeHtml(t.super_admin_reviewer)} · ${formatDate(t.super_admin_reviewed_at)}</span></div>`);
-	if (t.applied_at) rows.push(`<div class="ticket-detail-row"><span class="ticket-detail-label">生效时间</span><span class="ticket-detail-value">${formatDate(t.applied_at)}</span></div>`);
-	if (rows.length === 0) return '';
-	return `<div class="ticket-detail-card">${rows.join('')}</div>`;
-}
-
-/* ============ 渲染变更摘要（多值类配置的差异）============
- * 仅 BUSINESS_DB_TABLES 等多值配置工单携带 change_summary {added:[], removed:[]}
- * 单值配置 change_summary 为 null，不渲染该行，避免噪声
- */
-function renderChangeSummary(summary) {
-	if (!summary || (!summary.added?.length && !summary.removed?.length)) return '';
-	const addedHtml = summary.added?.length
-		? `<div class="change-summary-item change-summary-added">+ 新增：${summary.added.map(v => `<code>${escapeHtml(v)}</code>`).join(' ')}</div>`
-		: '';
-	const removedHtml = summary.removed?.length
-		? `<div class="change-summary-item change-summary-removed">- 移除：${summary.removed.map(v => `<code>${escapeHtml(v)}</code>`).join(' ')}</div>`
-		: '';
-	return `<div class="ticket-detail-row ticket-change-summary">
-		<span class="ticket-detail-label">变更摘要：</span>
-		<span class="ticket-detail-value">${addedHtml}${removedHtml}</span>
-	</div>`;
-}
-
-/* ============ 获取工单 API 前缀 ============ */
-function _ticketApiPath() {
-	return _ticketType === 'model' ? '/api/v1/system/model-tickets' : '/api/v1/system/config-tickets';
-}
-
-/* ============ 审批通过 ============ */
-function approveTicket(id) {
-	const t = _tickets.find(x => x.id === id);
-	if (!t) return;
-	const isModel = _ticketType === 'model';
-	const title = isModel ? (t.model_name || '-') : (t.config_label || t.config_key);
-	const actionLabel = { update: '修改', deactivate: '停用', delete: '删除' }[t.action] || '';
-	// 复核预检
-	if (t.status === 'first_approved' && !isSuperAdminRole()) {
-		toast(isModel ? '删除操作复核仅超级管理员可操作' : '高风险项复核仅超级管理员可操作', 'error');
-		return;
-	}
-	const bannerText = t.status === 'first_approved'
-		? (isModel ? `确认通过${actionLabel}工单 #${id}（${title}）？该复核通过后将立即生效。` : `确认通过工单 #${id}（${title}）？该高风险项复核通过后配置将立即生效。`)
-		: `确认通过工单 #${id}（${title}）？通过后${isModel ? '操作将立即生效' : '配置将立即生效'}。`;
-	showConfirmDialog({
-		title: '审批通过',
-		bannerType: 'success',
-		bannerIcon: '✓',
-		bannerText: bannerText,
-		bodyHtml: `<div class="form-item" style="margin-top:12px">
-			<label class="form-label">审批意见（可选）</label>
-			<textarea id="approveCommentInput" class="input" rows="2" placeholder="填写审批意见" style="max-width:100%"></textarea>
-		</div>`,
-		buttons: [
-			{ text: '取消', type: 'cancel', onClick: (ctx) => ctx.close() },
-			{
-				text: '确认通过',
-				type: 'primary',
-				onClick: async (ctx) => {
-					try {
-						const comment = $('#approveCommentInput').value.trim();
-						await api.postJson(`${_ticketApiPath()}/${id}/approve/`, { comment });
-						ctx.close();
-						toast('审批通过', 'success');
-						await loadTickets();
-						if (!isModel) await loadConfigs();
-					} catch (e) {
-						ctx.setError(`审批失败：${e.message}`);
-					}
-				}
-			}
-		]
-	});
-}
-
-/* ============ 驳回 ============ */
-function rejectTicket(id) {
-	const t = _tickets.find(x => x.id === id);
-	if (!t) return;
-	const isModel = _ticketType === 'model';
-	const title = isModel ? (t.model_name || '-') : (t.config_label || t.config_key);
-	if (t.status === 'first_approved' && !isSuperAdminRole()) {
-		toast(isModel ? '删除操作复核仅超级管理员可操作' : '高风险项复核仅超级管理员可操作', 'error');
-		return;
-	}
-	showConfirmDialog({
-		title: '驳回工单',
-		bannerType: 'danger',
-		bannerIcon: '⚠',
-		bannerText: `确认驳回工单 #${id}（${title}）？`,
-		bodyHtml: `<div class="form-item" style="margin-top:12px">
-			<label class="form-label">驳回原因 <span class="required">*</span></label>
-			<textarea id="rejectCommentInput" class="input" rows="2" placeholder="请填写驳回原因" style="max-width:100%"></textarea>
-		</div>`,
-		buttons: [
-			{ text: '取消', type: 'cancel', onClick: (ctx) => ctx.close() },
-			{
-				text: '确认驳回',
-				type: 'danger',
-				onClick: async (ctx) => {
-					const comment = $('#rejectCommentInput').value.trim();
-					if (!comment) {
-						ctx.setError('请填写驳回原因');
-						return;
-					}
-					try {
-						await api.postJson(`${_ticketApiPath()}/${id}/reject/`, { comment });
-						ctx.close();
-						toast('已驳回', 'success');
-						await loadTickets();
-					} catch (e) {
-						ctx.setError(`驳回失败：${e.message}`);
-					}
-				}
-			}
-		]
-	});
-}
-
-/* ============ 撤回（仅创建人）============ */
-function withdrawTicket(id) {
-	const t = _tickets.find(x => x.id === id);
-	const title = t ? (_ticketType === 'model' ? (t.model_name || '-') : (t.config_label || t.config_key)) : '';
-	showConfirmDialog({
-		title: '撤回工单',
-		bannerType: 'info',
-		bannerIcon: '↩',
-		bannerText: `确认撤回工单 #${id}（${title}）？撤回后该工单将作废。`,
-		bodyHtml: `<div class="form-item" style="margin-top:12px">
-			<label class="form-label">撤回原因（可选）</label>
-			<textarea id="withdrawCommentInput" class="input" rows="2" placeholder="填写撤回原因" style="max-width:100%"></textarea>
-		</div>`,
-		buttons: [
-			{ text: '取消', type: 'cancel', onClick: (ctx) => ctx.close() },
-			{
-				text: '确认撤回',
-				type: 'primary',
-				onClick: async (ctx) => {
-					try {
-						const comment = $('#withdrawCommentInput').value.trim();
-						await api.postJson(`${_ticketApiPath()}/${id}/withdraw/`, { comment });
-						ctx.close();
-						toast('已撤回', 'success');
-						await loadTickets();
-					} catch (e) {
-						ctx.setError(`撤回失败：${e.message}`);
-					}
-				}
-			}
-		]
-	});
-}
-
-/* ============ 获取当前登录用户名 ============ */
-function getCurrentUsername() {
-	try {
-		const u = JSON.parse(localStorage.getItem('rag_user') || '{}');
-		return u.username || '';
-	} catch (e) {
-		return '';
-	}
-}
-
-/* ============ 判断当前用户是否为超管（用于待复核工单的审批按钮可见性）============ */
-function isSuperAdminRole() {
-	return hasAnyRole('super_admin');
 }
 
 /* ==========================================================
@@ -1563,7 +911,7 @@ async function loadHistoryRecords() {
 	body.innerHTML = '<div class="ticket-empty">加载中...</div>';
 	try {
 		// 只加载已通过的工单，展示实际生效的变更
-		const data = await api.getJson('/api/v1/system/config-tickets/?status=approved');
+		const data = await api.getJson('/api/v1/system/tickets/?status=approved&ticket_type=config');
 		_historyRecords = data.tickets || [];
 		renderHistoryList();
 	} catch (e) {
@@ -1652,8 +1000,8 @@ function renderHistoryCard(r) {
 	const appliedTime = r.applied_at ? formatDate(r.applied_at) : '-';
 	// 审批人信息：审核人 + 复核人（如果有）
 	const approverInfo = [
-		r.reviewer ? `审核：${escapeHtml(r.reviewer)}` : '',
-		r.super_admin_reviewer ? `复核：${escapeHtml(r.super_admin_reviewer)}` : '',
+		r.auditor ? `审核：${escapeHtml(r.auditor)}` : '',
+		r.reviewer ? `复核：${escapeHtml(r.reviewer)}` : '',
 	].filter(Boolean).join(' / ') || '-';
 
 	return `<div class="history-card">

@@ -244,14 +244,14 @@ function getSidebarGroups() {
 	// 用户与角色、反馈与报表、审计与安全：仅管理角色可见
 	if (isManagerRole) {
 		adminItems.push(
-			{ icon: '✅', name: '权限审批', page: 'admin-approvals', key: 'admin-approvals', desc: '权限配置变更审批与超管复核' },
+			{ icon: '✅', name: '权限审批', page: 'admin-approvals', key: 'admin-approvals', desc: '权限配置变更审批与复核' },
 			{ icon: '📄', name: '文档审核', page: 'admin-docs', key: 'admin-docs', desc: '文档发布双审与合规复核' },
 			{ icon: '👥', name: '用户与角色', page: 'admin-users', key: 'admin-users', desc: '管理用户、角色与 RBAC 权限' },
 		);
 	} else if (isComplianceOnly) {
 		// 合规管理员仅可见"权限审批"（审计视角，查看全部工单）
 		adminItems.push(
-			{ icon: '✅', name: '权限审批', page: 'admin-approvals', key: 'admin-approvals', desc: '权限配置变更审批与超管复核' },
+			{ icon: '✅', name: '权限审批', page: 'admin-approvals', key: 'admin-approvals', desc: '权限配置变更审批与复核' },
 		);
 	}
 	if (isManagerRole) {

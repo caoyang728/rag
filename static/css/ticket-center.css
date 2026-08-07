@@ -1,0 +1,840 @@
+/* ==========================================================
+   知库 Agent · 工单中心公共组件样式 (ticket-center.css)
+   供任意页面复用（admin-system-config / admin-scheduler / 未来独立页）
+   统一前缀 tc-，避免与页面自有样式冲突。
+   视觉基调：
+   - 工具栏：类型下拉 + 筛选 tab 同行排列，紧凑单行
+   - 列表：浅色卡片 + 固定两行网格布局（标题行 + meta行），hover 高亮 + 左侧主题色条
+   - 状态：dot + label 胶囊，淡化底色强化可扫性
+   - 详情：垂直时间线展示流转进度 + 变更 diff 对比
+   ========================================================== */
+
+/* ---- 筛选工具栏：类型下拉 + 筛选 tab 同行排列（单行紧凑） ---- */
+.tc-toolbar {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	flex-wrap: nowrap;
+	margin-bottom: 12px;
+	padding-bottom: 10px;
+	border-bottom: 1px solid var(--border, #e5e7eb);
+}
+
+.tc-type-select {
+	flex-shrink: 0;
+	padding: 5px 10px;
+	border: 1px solid var(--border, #e5e7eb);
+	border-radius: 6px;
+	font-size: 13px;
+	background: var(--white, #fff);
+	color: var(--text, #1f2937);
+	cursor: pointer;
+	height: 30px;
+}
+
+.tc-type-select:focus {
+	outline: none;
+	border-color: var(--primary, #2563eb);
+}
+
+/* ---- 搜索框 ---- */
+.tc-search {
+	height: 30px;
+	width: 200px;
+	padding: 0 10px;
+	border: 1px solid var(--border, #e5e7eb);
+	border-radius: var(--radius, 6px);
+	font-size: 12px;
+	background: var(--white, #fff);
+	color: var(--text, #1f2937);
+	transition: border-color 0.15s;
+	flex-shrink: 0;
+}
+
+.tc-search:focus {
+	outline: none;
+	border-color: var(--primary, #2563eb);
+	box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+}
+
+.tc-search::placeholder {
+	color: var(--text-placeholder, #9ca3af);
+}
+
+/* ---- 筛选 tab（沿用项目下划线风格，带红色待办计数） ---- */
+.tc-filter-tabs {
+	display: flex;
+	align-items: center;
+	flex: 1;
+	min-width: 0;
+}
+
+/* 左侧 tab 组：可横向滚动，占剩余空间 */
+.tc-filter-left {
+	display: flex;
+	gap: 2px;
+	overflow-x: auto;
+	flex: 1;
+	min-width: 0;
+}
+
+.tc-filter-left::-webkit-scrollbar { height: 0; }
+
+/* "我的工单"固定在最右侧，不参与左侧滚动 */
+.tc-filter-tab-mine {
+	flex-shrink: 0;
+	margin-left: 12px;
+}
+
+.tc-filter-tab {
+	padding: 6px 12px;
+	border: none;
+	background: transparent;
+	cursor: pointer;
+	font-size: 13px;
+	color: var(--text-sub, #6b7280);
+	border-bottom: 2px solid transparent;
+	transition: all 0.15s;
+	white-space: nowrap;
+	flex-shrink: 0;
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+}
+
+.tc-filter-tab:hover {
+	color: var(--text, #1f2937);
+}
+
+.tc-filter-tab.active {
+	color: var(--primary, #2563eb);
+	border-bottom-color: var(--primary, #2563eb);
+	font-weight: 600;
+}
+
+/* ---- 待办计数（红色气泡，嵌在"待我处理"tab 内） ---- */
+.tc-todo-count {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	min-width: 16px;
+	height: 16px;
+	padding: 0 4px;
+	border-radius: 8px;
+	background: var(--danger, #ef4444);
+	color: #fff;
+	font-size: 11px;
+	font-weight: 600;
+	line-height: 1;
+	flex-shrink: 0;
+}
+
+/* ---- 工单列表容器：占满弹窗剩余空间，仅此区域滚动 ---- */
+.tc-list {
+	flex: 1;
+	min-height: 0;
+	overflow-y: auto;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	padding: 4px 0;
+}
+
+/* ---- 工单卡片（统一两行网格布局，浅色背景 + hover 高亮） ---- */
+.tc-item {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	padding: 10px 14px;
+	cursor: pointer;
+	border-left: 3px solid transparent;
+	transition: background 0.12s, border-color 0.12s;
+	border-radius: 8px;
+	background: var(--white, #fff);
+	box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+
+/* hover：淡灰底 + 左侧主题色条 */
+.tc-item:hover {
+	background: var(--primary-light, #eff6ff);
+	border-left-color: var(--primary, #2563eb);
+}
+
+/* 标题行：徽标 + 名称 + key + 风险 + 状态，两端分散排列 */
+.tc-item-title {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	flex-wrap: wrap;
+}
+
+/* 状态徽标始终推到标题行最右侧 */
+.tc-item-title .tc-status {
+	margin-left: auto;
+	flex-shrink: 0;
+}
+
+/* 名称占剩余空间，过长省略 */
+.tc-item-name {
+	font-size: 13px;
+	font-weight: 600;
+	color: var(--text, #1f2937);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	max-width: 240px;
+	flex-shrink: 1;
+}
+
+.tc-item-key {
+	font-size: 11px;
+	color: var(--text-sub, #6b7280);
+	font-family: 'SF Mono', 'Consolas', monospace;
+	background: var(--hover, #f3f4f6);
+	padding: 1px 6px;
+	border-radius: 4px;
+	white-space: nowrap;
+	flex-shrink: 0;
+}
+
+/* 高风险 / 需超管复核等警告标记（红色文字） */
+.tc-item-risk {
+	font-size: 11px;
+	color: #dc2626;
+	font-weight: 500;
+	white-space: nowrap;
+	flex-shrink: 0;
+}
+
+/* Meta 行：左侧（原因 + 操作摘要纵向排列）+ 右侧（创建人/时间底部对齐） */
+.tc-item-meta {
+	display: flex;
+	align-items: flex-end;
+	gap: 12px;
+	font-size: 12px;
+	color: var(--text-sub, #6b7280);
+	min-height: 36px;
+}
+
+/* 左侧：原因 + 操作摘要纵向排列，占剩余空间 */
+.tc-meta-left {
+	flex: 1;
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 1px;
+}
+
+.tc-meta-reason {
+	line-height: 17px;
+	max-height: 34px;
+	overflow: hidden;
+	color: var(--text-sub, #6b7280);
+	cursor: default;
+}
+
+.tc-item:hover .tc-meta-reason {
+	max-height: 85px;
+	overflow: hidden;
+	position: relative;
+	z-index: 10;
+}
+
+/* 右侧固定信息（创建人、时间），不缩不折，底部对齐 */
+.tc-meta-info {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	flex-shrink: 0;
+	white-space: nowrap;
+	text-align: right;
+}
+
+/* 操作动作标签：紧跟类型徽标后，按操作类型着色 */
+.tc-op-tag {
+	font-size: 11px;
+	padding: 1px 6px;
+	border-radius: 4px;
+	white-space: nowrap;
+	flex-shrink: 0;
+	font-weight: 500;
+}
+
+/* 修改：蓝色 */
+.tc-op-modify {
+	background: var(--primary-light, #eff6ff);
+	color: var(--primary, #2563eb);
+}
+
+/* 删除：红色 */
+.tc-op-delete {
+	background: #fef2f2;
+	color: #dc2626;
+}
+
+/* 停用：橙色 */
+.tc-op-deactivate {
+	background: #fff7ed;
+	color: #c2410c;
+}
+
+/* 操作摘要（修改了xxx / 停用了 / 删除了），位于 meta 区域备注下方 */
+.tc-action-label {
+	font-size: 12px;
+	color: var(--text-sub, #6b7280);
+	flex-shrink: 0;
+	padding-top: 2px;
+}
+
+/* ---- 类型徽标（配置/调度/模型） ---- */
+.tc-type-badge {
+	font-size: 11px;
+	padding: 1px 8px;
+	border-radius: 4px;
+	font-weight: 500;
+	white-space: nowrap;
+	flex-shrink: 0;
+}
+
+.tc-type-config {
+	background: var(--primary-light, #eff6ff);
+	color: var(--primary, #2563eb);
+	border: 1px solid var(--primary-lighter, #dbeafe);
+}
+
+.tc-type-schedule {
+	background: #fdf4ff;
+	color: #a21caf;
+	border: 1px solid #f5d0fe;
+}
+
+.tc-type-model {
+	background: #f0fdfa;
+	color: #0f766e;
+	border: 1px solid #ccfbf1;
+}
+
+/* ---- 状态胶囊：dot + label，淡化底色 ---- */
+.tc-status {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	font-size: 12px;
+	font-weight: 500;
+	white-space: nowrap;
+	flex-shrink: 0;
+}
+
+.tc-status::before {
+	content: '';
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+	background: currentColor;
+	flex-shrink: 0;
+}
+
+.tc-status-pending { color: #b45309; }
+.tc-status-first   { color: #be185d; }
+.tc-status-approved { color: #16a34a; }
+.tc-status-rejected { color: #dc2626; }
+.tc-status-withdrawn { color: #6b7280; }
+
+/* ---- 变更摘要（旧值 → 新值，红色删除线 / 蓝色新值） ---- */
+.tc-diff-old {
+	color: #dc2626;
+	text-decoration: line-through;
+	text-decoration-color: rgba(220, 38, 38, 0.4);
+}
+
+.tc-diff-new {
+	color: #2563eb;
+	font-weight: 500;
+}
+
+.tc-diff-arrow {
+	color: var(--text-placeholder, #9ca3af);
+	margin: 0 4px;
+	flex-shrink: 0;
+}
+
+/* ---- 空态 / 加载态 ---- */
+.tc-empty {
+	text-align: center;
+	color: var(--text-placeholder, #9ca3af);
+	padding: 40px 12px;
+	font-size: 13px;
+}
+
+/* ---- 分页 ---- */
+.tc-pagination {
+	width: 100%;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 12px;
+	padding: 0 20px;
+}
+
+/* ---- 撤回按钮：琥珀色，视觉上介于"关闭"和"驳回"之间 ---- */
+.btn-withdraw {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 6px;
+	height: 32px;
+	min-width: 4.5em;
+	padding: 0 16px;
+	border-radius: 6px;
+	font-size: 13px;
+	font-weight: 500;
+	white-space: nowrap;
+	background: #fffbeb;
+	color: #b45309;
+	border: 1px solid #fde68a;
+	cursor: pointer;
+	transition: all 0.15s;
+}
+
+.btn-withdraw:hover {
+	background: #fef3c7;
+	border-color: #fbbf24;
+}
+
+/* ==========================================================
+   详情弹窗（统一 840px 二级弹窗）
+   ========================================================== */
+
+/* ---- 详情区整体间距 + 微底色提升层次感 ---- */
+.confirm-dialog .modal-body {
+	padding: 16px 20px 12px;
+	background: #f8f9fb;
+}
+
+/* ---- 详情卡片：精简边框，微阴影在底色上浮起 ---- */
+.tc-detail-card {
+	background: var(--white, #fff);
+	border: 1px solid #e8ecf1;
+	border-radius: 10px;
+	padding: 14px 16px;
+	margin-bottom: 10px;
+	box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+}
+
+.tc-detail-card:last-child {
+	margin-bottom: 0;
+}
+
+.tc-detail-header {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	flex-wrap: wrap;
+	margin-bottom: 10px;
+}
+
+.tc-detail-title {
+	font-size: 15px;
+	font-weight: 600;
+	color: var(--text, #1f2937);
+}
+
+.tc-detail-meta {
+	display: flex;
+	gap: 20px;
+	font-size: 12px;
+	color: var(--text-sub, #6b7280);
+	flex-wrap: wrap;
+	padding-top: 2px;
+}
+
+/* ---- 变更对比区（diff-row 直接在 tc-detail-card 内） ---- */
+.tc-diff-label {
+	font-size: 12px;
+	font-weight: 600;
+	color: var(--text, #1f2937);
+	margin-bottom: 12px;
+	letter-spacing: 0.02em;
+}
+
+.tc-diff-row {
+	display: flex;
+	align-items: stretch;
+	gap: 14px;
+}
+
+.tc-diff-row + .tc-diff-row {
+	margin-top: 10px;
+}
+
+.tc-diff-side {
+	flex: 1;
+	border-radius: 10px;
+	padding: 12px 14px;
+	border: 1px solid;
+	min-width: 0;
+	transition: box-shadow 0.15s;
+}
+
+.tc-diff-side:hover {
+	box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+}
+
+.tc-diff-side-old {
+	background: linear-gradient(135deg, #fef2f2 0%, #fff5f5 100%);
+	border-color: #fecaca;
+}
+
+.tc-diff-side-new {
+	background: linear-gradient(135deg, #f0f9ff 0%, #f5f8ff 100%);
+	border-color: #bfdbfe;
+}
+
+.tc-diff-side-label {
+	font-size: 11px;
+	font-weight: 600;
+	margin-bottom: 6px;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+}
+
+.tc-diff-side-old .tc-diff-side-label { color: #dc2626; }
+.tc-diff-side-new .tc-diff-side-label { color: #2563eb; }
+
+.tc-diff-side-value {
+	font-size: 13px;
+	color: var(--text, #1f2937);
+	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	word-break: break-all;
+	line-height: 1.6;
+	max-height: 96px;
+	overflow-y: auto;
+}
+
+.tc-diff-side-hint {
+	font-size: 12px;
+	margin-top: 4px;
+	line-height: 1.4;
+}
+
+.tc-diff-side-old .tc-diff-side-hint { color: #b91c1c; }
+.tc-diff-side-new .tc-diff-side-hint { color: #1d4ed8; }
+
+.tc-diff-arrow {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 18px;
+	color: var(--text-placeholder, #9ca3af);
+	font-weight: 300;
+	flex-shrink: 0;
+	width: 32px;
+}
+
+/* ---- 变更原因：浅灰背景，与弹窗底色协调 ---- */
+.tc-reason {
+	background: #f8f9fb;
+	border: 1px solid #e5e7eb;
+	border-radius: 10px;
+	padding: 12px 14px;
+}
+
+.tc-reason-label {
+	font-size: 12px;
+	font-weight: 600;
+	color: var(--text-sub, #6b7280);
+	margin-bottom: 6px;
+}
+
+.tc-reason-value {
+	font-size: 13px;
+	color: var(--text, #1f2937);
+	line-height: 1.5;
+	word-break: break-all;
+	white-space: pre-wrap;
+}
+
+/* ---- 审批时间线（方案 B：提交→审核→复核→生效/驳回/撤回） ---- */
+.tc-timeline {
+	padding: 4px 0;
+}
+
+.tc-tl-item {
+	display: flex;
+	gap: 12px;
+	position: relative;
+	padding-bottom: 18px;
+}
+
+.tc-tl-item:last-child {
+	padding-bottom: 0;
+}
+
+.tc-tl-item:not(:last-child)::before {
+	content: '';
+	position: absolute;
+	left: 7px;
+	top: 18px;
+	bottom: 0;
+	width: 2px;
+	background: var(--border, #e5e7eb);
+}
+
+.tc-tl-dot {
+	width: 16px;
+	height: 16px;
+	border-radius: 50%;
+	flex-shrink: 0;
+	position: relative;
+	z-index: 1;
+	margin-top: 2px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.tc-tl-dot-current {
+	background: var(--primary, #2563eb);
+	box-shadow: 0 0 0 4px var(--primary-light, #eff6ff);
+}
+
+.tc-tl-dot-current::after {
+	content: '';
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: #fff;
+}
+
+.tc-tl-dot-done {
+	background: #10b981;
+}
+
+.tc-tl-dot-done::after {
+	content: '✓';
+	color: #fff;
+	font-size: 10px;
+	font-weight: 700;
+}
+
+.tc-tl-dot-rejected {
+	background: #ef4444;
+}
+
+.tc-tl-dot-rejected::after {
+	content: '✕';
+	color: #fff;
+	font-size: 10px;
+	font-weight: 700;
+}
+
+.tc-tl-dot-withdrawn {
+	background: #9ca3af;
+}
+
+.tc-tl-dot-withdrawn::after {
+	content: '↩';
+	color: #fff;
+	font-size: 10px;
+	font-weight: 700;
+}
+
+.tc-tl-body {
+	flex: 1;
+	min-width: 0;
+}
+
+.tc-tl-head {
+	display: flex;
+	align-items: baseline;
+	gap: 8px;
+	flex-wrap: wrap;
+}
+
+.tc-tl-title {
+	font-size: 13px;
+	font-weight: 600;
+	color: var(--text, #1f2937);
+}
+
+.tc-tl-actor {
+	font-size: 12px;
+	color: var(--text-sub, #6b7280);
+}
+
+.tc-tl-time {
+	font-size: 12px;
+	color: var(--text-placeholder, #9ca3af);
+	margin-left: auto;
+}
+
+.tc-tl-comment {
+	margin-top: 6px;
+	font-size: 13px;
+	color: var(--text, #1f2937);
+	background: var(--bg, #f5f7fa);
+	border-radius: 6px;
+	padding: 8px 10px;
+	white-space: pre-wrap;
+	word-break: break-all;
+	line-height: 1.5;
+}
+
+/* ---- 多值类配置变更摘要（added 绿 / removed 红） ---- */
+.tc-change-summary {
+	margin-top: 12px;
+	padding-top: 10px;
+	border-top: 1px dashed #e5e7eb;
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.tc-change-added { color: #16a34a; }
+.tc-change-removed { color: #dc2626; }
+
+.tc-change-added code,
+.tc-change-removed code {
+	display: inline-block;
+	padding: 1px 6px;
+	margin: 2px 4px 2px 0;
+	border-radius: 3px;
+	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	font-size: 12px;
+}
+
+.tc-change-added code {
+	background: #f0fdf4;
+	color: #166534;
+	border: 1px solid #bbf7d0;
+}
+
+.tc-change-removed code {
+	background: #fef2f2;
+	color: #991b1b;
+	border: 1px solid #fecaca;
+}
+
+/* ---- 模型工单删除/停用警示条 ---- */
+.tc-warning {
+	display: flex;
+	align-items: flex-start;
+	gap: 12px;
+	padding: 12px 14px;
+	border-radius: 8px;
+	margin-bottom: 14px;
+}
+
+.tc-warning-danger {
+	background: linear-gradient(135deg, #fef2f2 0%, #fff1f2 100%);
+	border: 1px solid #fecaca;
+}
+
+.tc-warning-warn {
+	background: linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%);
+	border: 1px solid #fde68a;
+}
+
+.tc-warning-icon {
+	font-size: 20px;
+	line-height: 1;
+	flex-shrink: 0;
+}
+
+.tc-warning-text {
+	font-size: 12px;
+	line-height: 1.6;
+}
+
+.tc-warning-danger .tc-warning-text { color: #991b1b; }
+.tc-warning-warn .tc-warning-text   { color: #92400e; }
+
+.tc-warning-text strong {
+	display: block;
+	font-size: 13px;
+	margin-bottom: 2px;
+}
+
+.tc-warning-danger .tc-warning-text strong { color: #dc2626; }
+.tc-warning-warn .tc-warning-text strong   { color: #b45309; }
+
+/* ---- 模型删除：信息列表卡 ---- */
+.tc-info-card {
+	border: 1px solid var(--border, #e5e7eb);
+	border-radius: 8px;
+	background: #f8fafc;
+	overflow: hidden;
+}
+
+.tc-info-title {
+	padding: 10px 14px;
+	font-size: 12px;
+	font-weight: 600;
+	color: #475569;
+	background: #f1f5f9;
+	border-bottom: 1px solid var(--border, #e5e7eb);
+}
+
+.tc-info-row {
+	display: flex;
+	align-items: center;
+	padding: 10px 14px;
+	border-bottom: 1px solid #e2e8f0;
+}
+
+.tc-info-row:last-child {
+	border-bottom: none;
+}
+
+.tc-info-label {
+	flex: 0 0 110px;
+	font-size: 12px;
+	color: #64748b;
+	font-weight: 500;
+}
+
+.tc-info-value {
+	flex: 1;
+	font-size: 13px;
+	color: #1e293b;
+	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	word-break: break-all;
+}
+
+/* ---- 模型停用：当前→变更 状态对照 ---- */
+.tc-state-grid {
+	display: flex;
+	gap: 12px;
+}
+
+.tc-state-item {
+	flex: 1;
+	border-radius: 8px;
+	padding: 12px 14px;
+	border: 1px solid;
+	background: var(--white, #fff);
+}
+
+.tc-state-old {
+	border-color: #fecaca;
+	background: #fef2f2;
+}
+
+.tc-state-new {
+	border-color: #bfdbfe;
+	background: #f0f9ff;
+}
+
+.tc-state-label {
+	font-size: 11px;
+	font-weight: 600;
+	margin-bottom: 4px;
+}
+
+.tc-state-old .tc-state-label { color: #dc2626; }
+.tc-state-new .tc-state-label { color: #2563eb; }
+
+.tc-state-value {
+	font-size: 13px;
+	font-weight: 500;
+}

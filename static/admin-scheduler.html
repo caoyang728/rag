@@ -8,6 +8,7 @@
 	<link rel="stylesheet" href="/static/css/common.css">
 	<link rel="stylesheet" href="/static/css/layout.css">
 	<link rel="stylesheet" href="/static/css/admin-scheduler.css">
+	<link rel="stylesheet" href="/static/css/ticket-center.css">
 </head>
 
 <body>
@@ -18,11 +19,11 @@
 			<div class="page-header page-header-row">
 				<div class="flex items-baseline gap-10">
 					<div class="page-title">定时任务</div>
-					<div class="page-subtitle">Celery Beat 调度配置（修改需提交工单，高风险项需超管复核，审批通过后热生效）</div>
+					<div class="page-subtitle">Celery Beat 调度配置（修改需提交工单，高风险项需复核，审批通过后热生效）</div>
 				</div>
-				<!-- 顶部操作入口：工单列表（仅调度类工单） -->
+				<!-- 顶部操作入口：工单中心（公共组件，默认待我处理视图） -->
 				<div class="page-header-actions">
-					<button class="btn btn-sm btn-outline" onclick="openTicketModal()">📋 工单列表</button>
+					<button class="btn btn-sm btn-outline" onclick="TicketCenter.open({ defaultView: 'todo' })">📋 工单列表</button>
 				</div>
 			</div>
 
@@ -109,31 +110,6 @@
 		</div>
 	</div>
 
-	<!-- ===== 调度变更工单列表弹窗 =====
-	     仅展示调度类（SCHEDULE_*）工单，支持状态筛选（待审核/我的工单/已通过/已驳回/已撤回），
-	     点击工单展开详情 + 审批操作。审批通过后由 beat 热更新生效。 -->
-	<div class="modal" id="ticketListModal" style="width:960px;max-width:95vw">
-		<div class="modal-header">
-			<div class="modal-title">调度变更工单</div>
-			<button class="modal-close" onclick="closeTicketModal()">&times;</button>
-		</div>
-		<div class="modal-body" style="padding:12px 20px;overflow:hidden;display:flex;flex-direction:column">
-			<!-- 状态筛选 tab -->
-			<div class="ticket-tabs" id="ticketTabs">
-				<button class="ticket-tab active" data-status="pending,first_approved" onclick="switchTicketTab('pending,first_approved')">待审核</button>
-				<button class="ticket-tab" data-status="mine" onclick="switchTicketTab('mine')">我的工单</button>
-				<button class="ticket-tab" data-status="approved" onclick="switchTicketTab('approved')">已通过</button>
-				<button class="ticket-tab" data-status="rejected" onclick="switchTicketTab('rejected')">已驳回</button>
-				<button class="ticket-tab" data-status="withdrawn" onclick="switchTicketTab('withdrawn')">已撤回</button>
-			</div>
-			<div id="ticketListBody" class="ticket-list-body">
-				<div class="ticket-empty">加载中...</div>
-			</div>
-		</div>
-		<div class="modal-footer">
-			<div class="ticket-pagination"></div>
-		</div>
-	</div>
 
 	<!-- ===== 无权限模板 ===== -->
 	<template id="tmpl-no-permission">
@@ -149,7 +125,7 @@
 		<div class="task-item" data-key="__KEY_ATTR__">
 			<div class="task-item-head">
 				<div class="task-item-label">__LABEL__
-					<span class="config-badge config-badge-risk" title="高风险项，工单需超管复核">⚠️ 高风险</span>
+					<span class="config-badge config-badge-risk" title="高风险项，工单需复核">⚠️ 高风险</span>
 					__PENDING_BADGE__
 				</div>
 				<div class="task-item-actions">
@@ -171,6 +147,7 @@
 	<script src="/static/js/common.js"></script>
 	<script src="/static/js/api.js"></script>
 	<script src="/static/js/layout.js"></script>
+	<script src="/static/js/ticket-center.js"></script>
 	<script src="/static/js/admin-scheduler.js"></script>
 </body>
 

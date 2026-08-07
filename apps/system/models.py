@@ -118,7 +118,7 @@ class LLMModel(models.Model):
     def __str__(self):
         return f'[{self.model_type}] {self.name} ({self.model_name})'
 
-
+# TODO backup, 模型已经合并到 Ticket
 class ConfigChangeTicket(models.Model):
     """系统配置变更工单
 
@@ -180,7 +180,7 @@ class ConfigChangeTicket(models.Model):
     applied_at = models.DateTimeField(null=True, blank=True, verbose_name='生效时间')
 
     class Meta:
-        db_table = 'system_config_ticket'
+        db_table = 'system_config_ticket_backup'
         ordering = ['-created_at']
         verbose_name = '配置变更工单'
         verbose_name_plural = verbose_name
@@ -188,7 +188,7 @@ class ConfigChangeTicket(models.Model):
     def __str__(self):
         return f'[{self.status}] {self.config_key}: {self.old_value} → {self.new_value}'
 
-
+# TODO backup, 模型已经合并到 Ticket
 class ModelChangeTicket(models.Model):
     """模型变更工单
 
@@ -246,13 +246,90 @@ class ModelChangeTicket(models.Model):
     applied_at = models.DateTimeField(null=True, blank=True, verbose_name='生效时间')
 
     class Meta:
-        db_table = 'system_model_ticket'
+        db_table = 'system_model_ticket_backup'
         ordering = ['-created_at']
         verbose_name = '模型变更工单'
         verbose_name_plural = verbose_name
 
     def __str__(self):
         return f'[{self.status}] {self.operation} model_id={self.target_model_id}'
+
+
+class Ticket(models.Model):
+    """统一工单表
+
+    合并配置变更、定时任务、模型变更为一张表。
+    公共字段（审批流程+人员+时间）全部保留，业务差异字段通过 detail JSON 存储。
+    config_key / target_model_id 作为独立列可建 B-tree 索引。
+    """
+    TYPE_CHOICES = [
+        ('config', '配置变更'),
+        ('schedule', '定时任务'),
+        ('model', '模型变更'),
+    ]
+    OPERATION_CHOICES = [
+        ('modify', '修改'),
+        ('update_normal', '修改模型'),
+        ('deactivate', '停用模型'),
+        ('delete', '删除模型'),
+    ]
+    STATUS_CHOICES = [
+        ('pending', '待审核'),
+        ('pending_review', '待复核'),
+        ('approved', '已通过'),
+        ('rejected', '已驳回'),
+        ('withdrawn', '已撤回'),
+    ]
+
+    id = models.BigAutoField(primary_key=True)
+    ticket_type = models.CharField(max_length=16, choices=TYPE_CHOICES, verbose_name='工单类型')
+    operation = models.CharField(max_length=20, choices=OPERATION_CHOICES, verbose_name='操作类型')
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default='pending', verbose_name='状态')
+    risk_level = models.CharField(max_length=8, choices=SystemConfig.RISK_LEVEL_CHOICES,
+                                   default='normal', verbose_name='风险等级')
+    reason = models.CharField(max_length=256, blank=True, default='', verbose_name='变更原因')
+
+    # 人员：creator 提交，auditor 审核，reviewer 复核（仅高风险工单）
+    creator = models.ForeignKey('users.User', on_delete=models.SET_NULL, null=True, blank=True,
+                                related_name='created_tickets', verbose_name='创建人')
+    auditor = models.ForeignKey('users.User', on_delete=models.SET_NULL, null=True, blank=True,
+                                related_name='audited_tickets', verbose_name='审核人')
+    reviewer = models.ForeignKey('users.User', on_delete=models.SET_NULL, null=True, blank=True,
+                                 related_name='reviewed_tickets', verbose_name='复核人')
+
+    # 审核意见
+    audit_comment = models.CharField(max_length=256, blank=True, default='', verbose_name='审核意见')
+    review_comment = models.CharField(max_length=256, blank=True, default='', verbose_name='复核意见')
+
+    # 时间
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
+    audited_at = models.DateTimeField(null=True, blank=True, verbose_name='审核时间')
+    reviewed_at = models.DateTimeField(null=True, blank=True, verbose_name='复核时间')
+    applied_at = models.DateTimeField(null=True, blank=True, verbose_name='生效时间')
+
+    # 业务标识（可索引，按类型填充）
+    config_key = models.CharField(max_length=64, null=True, blank=True, verbose_name='配置项')      # 用在系统配置页面
+    target_model_id = models.BigIntegerField(null=True, blank=True, verbose_name='目标模型ID')      # 用在模型管理中
+
+    # 业务详情（JSON，按类型存储不同结构）
+    # config/schedule: {config_label, old_value, new_value, change_summary}
+    # model: {target_model_snapshot, changed_fields, dependency_refs}
+    detail = models.JSONField(default=dict, verbose_name='业务详情')
+
+    class Meta:
+        db_table = 'system_ticket'
+        ordering = ['-created_at']
+        verbose_name = '工单'
+        verbose_name_plural = verbose_name
+        indexes = [
+            models.Index(fields=['ticket_type', 'status']),
+            models.Index(fields=['creator', 'status']),
+            models.Index(fields=['config_key']),
+            models.Index(fields=['target_model_id']),
+        ]
+
+    def __str__(self):
+        return f'[{self.get_status_display()}] {self.get_ticket_type_display()} #{self.id}'
 
 
 class CeleryTaskLog(models.Model):

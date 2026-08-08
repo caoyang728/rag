@@ -135,6 +135,154 @@ def _normalize_visibility_level(value):
     return _LEGACY_SCOPE_MAP.get(value)
 
 
+def _resolve_node_visibility(node):
+    """从节点沿祖先链向上取最近非空可见范围（NULL=继承父级）
+
+    用于文档上传未显式指定可见范围时继承挂载文件夹的可见性，
+    保证"节点可见范围是文档可见性的默认值来源"这一语义：
+    - 文件夹设置了可见范围 → 取其值
+    - 文件夹未设置 → 继续向上取部门/团队节点
+    - 全部未设置 → root 兜底 PUBLIC
+    """
+    cur = node
+    seen = set()
+    while cur and cur.id not in seen:
+        seen.add(cur.id)
+        if cur.visibility_level:
+            return cur.visibility_level
+        cur = cur.parent
+    return VisibilityLevel.PUBLIC
+
+
+def _resolve_node_org(node):
+    """沿祖先链解析节点所属部门/团队的组织 ID（非节点 ID）
+
+    节点树分层：root(1) → 部门节点(2) → 团队节点(3) → 文件夹(4+)。
+    部门/团队节点由组织同步创建（node_kind=ORG 且带 ref_id 指向组织表记录），
+    因此沿祖先链向上匹配 node_kind=ORG 的节点即可还原节点归属。
+
+    返回 (dept_id, team_id)：
+    - 挂载在部门节点下的文件夹 → (dept_id, None)
+    - 挂载在团队节点下的文件夹 → (dept_id, team_id)
+    - root 下的纯公共文件夹（无 ORG 祖先）→ (None, None)
+
+    用途：可见范围变更工单按发起人角色动态指派审批链时，
+    需要知道目标节点的组织归属以定位审批人（部门经理等）。
+    """
+    cur = node
+    seen = set()
+    dept_id = None
+    team_id = None
+    while cur and cur.id not in seen:
+        seen.add(cur.id)
+        if cur.node_kind == 'ORG':
+            if cur.node_level == 2 and cur.ref_id:
+                dept_id = cur.ref_id
+            elif cur.node_level == 3 and cur.ref_id:
+                team_id = cur.ref_id
+        cur = cur.parent
+    return dept_id, team_id
+
+
+def _build_visibility_chain(applicant, node):
+    """按发起人角色 + 节点组织归属动态构建节点可见范围变更审批链
+
+    对齐 plan.md T1 验收"审批链按角色指派正确"：
+    - 团队级：团队组长发起（节点在其团队子树内）→ 部门经理审批
+    - 部门级：部门经理发起（节点在其部门子树内）→ 文档管理员/超管审批
+    - 超管/知识库管理员发起 → 双管理员复核（保留既有双层审批语义）
+
+    审批链节点结构兼容现有 approval_chain 消费逻辑
+    （step/approver_id/status/comment/approved_at），
+    并带 approver_role / approver_scope_id 供审批时按角色匹配审批人。
+    """
+    def _step(role, scope_id=None):
+        """构造单个审批链节点（step 序号由调用方回填）"""
+        return {
+            'step': 0,
+            'approver_role': role,
+            'approver_scope_id': scope_id,
+            'approver_id': None,
+            'status': 'pending',
+            'comment': '',
+            'approved_at': None,
+        }
+
+    role, _dept_id, _team_ids = _get_user_role(applicant)
+    node_dept_id, _node_team_id = _resolve_node_org(node)
+
+    if role == 'team_leader' and node_dept_id:
+        # 团队级：部门经理审批（scope 锁定节点所属部门）
+        chain = [_step('DEPT_LEADER', node_dept_id)]
+    elif role == 'dept_manager' and node_dept_id:
+        # 部门级：文档管理员/超管审批
+        chain = [_step('KB_ADMIN')]
+    else:
+        # 超管/知识库管理员发起或组织归属缺失：双管理员复核（保留既有语义）
+        chain = [_step('KB_ADMIN'), _step('KB_ADMIN')]
+    for i, n in enumerate(chain):
+        n['step'] = i
+    return chain
+
+
+def _get_dept_node_paths(user) -> list:
+    """用户有属地授权（管理/上传）的部门节点 path 列表（Level 2 ORG）
+
+    通过 get_user_managed_depts 获取部门 ID 后反查部门节点，
+    用于"节点是否在本部门子树内"的 path 前缀匹配判定（部门经理领地）。
+    权限判定与上传/写文件夹共用，避免各处重复查询。
+    """
+    from apps.users.models import get_user_managed_depts
+    dept_ids = get_user_managed_depts(user)
+    if not dept_ids:
+        return []
+    return list(KnowledgeNode.objects.filter(
+        node_level=2, ref_id__in=dept_ids, is_deleted=False,
+    ).values_list('path', flat=True))
+
+
+def _get_team_node_paths(team_ids) -> list:
+    """给定团队 ID 列表的团队节点 path 列表（Level 3 ORG）
+
+    用于"节点是否在本团队子树内"的 path 前缀匹配判定（团队组长领地）。
+    """
+    if not team_ids:
+        return []
+    return list(KnowledgeNode.objects.filter(
+        node_level=3, ref_id__in=team_ids, is_deleted=False,
+    ).values_list('path', flat=True))
+
+
+def _can_approve_node_visibility(user, node, current_step):
+    """判断用户是否有权审批节点可见范围工单的当前审批步骤
+
+    动态审批链（approver_role 非空）时按角色匹配审批人：
+    - DEPT_LEADER：节点所属部门的部门经理（user.manage + 属地授权含该部门），
+      超管/文档管理员兜底可审
+    - KB_ADMIN：文档管理员（kb.manage_all）或超管
+    - SUPER_ADMIN：仅超管
+    旧工单（无 approver_role，兼容固定管理员链）：
+    节点所有者 / 超管 / 文档管理员均可审。
+    """
+    approver_role = (current_step or {}).get('approver_role')
+    is_admin = bool(getattr(user, 'is_super_admin', False)
+                    or getattr(user, 'is_kb_admin', False))
+    if not approver_role:
+        return (node.owner_user_id == user.id or is_admin)
+    if approver_role == 'DEPT_LEADER':
+        if is_admin:
+            return True
+        dept_id = (current_step or {}).get('approver_scope_id')
+        if not dept_id or not has_permission(user, 'user.manage'):
+            return False
+        return dept_id in get_user_managed_depts(user)
+    if approver_role == 'KB_ADMIN':
+        return is_admin
+    if approver_role == 'SUPER_ADMIN':
+        return bool(getattr(user, 'is_super_admin', False))
+    return is_admin
+
+
 def _validate_visibility_level(user, visibility_level):
     """验证用户是否有权限设置指定的可见性层级
 
@@ -160,28 +308,30 @@ def _validate_visibility_level(user, visibility_level):
     return True, None
 
 
-def _encode_ticket_reason(doc_id, action, user_reason=''):
-    """将文档访问申请的目标信息编码到 PermissionApprovalTicket.reason 字段
+def _encode_ticket_reason(target_type, target_id, action, user_reason=''):
+    """将访问申请/可见范围变更的目标信息编码到 PermissionApprovalTicket.reason 字段
 
     PermissionApprovalTicket 无 target_type/target_id 字段（它是 RBAC 角色审批工单），
-    文档访问申请复用该表，通过 reason 前缀编码文档目标。
-    格式: [doc:{doc_id}:{action}] {user_reason}
+    文档/节点访问申请复用该表，通过 reason 前缀编码目标。
+    格式: [doc:{doc_id}:{action}] 或 [node:{node_id}:{action}] 后接用户申请理由
     """
-    return f"[doc:{doc_id}:{action}] {user_reason or ''}"
+    return f"[{target_type}:{target_id}:{action}] {user_reason or ''}"
 
 
 def _decode_ticket_reason(reason):
-    """从 PermissionApprovalTicket.reason 解析文档访问申请的目标信息
+    """从 PermissionApprovalTicket.reason 解析目标信息
 
-    返回 (doc_id, action, user_reason)；无法解析时返回 (None, None, reason)
+    返回 (target_type, target_id, action, user_reason)：
+    - target_type: 'doc' 文档工单 / 'node' 节点工单 / None 无法解析
+    无法解析时返回 (None, None, None, reason)
     """
     if not reason:
-        return None, None, ''
+        return None, None, None, ''
     import re as _re
-    m = _re.match(r'^\[doc:(\d+):(\w+)\]\s*(.*)$', reason, _re.DOTALL)
+    m = _re.match(r'^\[(doc|node):(\d+):(\w+)\]\s*(.*)$', reason, _re.DOTALL)
     if m:
-        return int(m.group(1)), m.group(2), m.group(3)
-    return None, None, reason
+        return m.group(1), int(m.group(2)), m.group(3), m.group(4)
+    return None, None, None, reason
 
 
 def _extract_last_comment(approval_chain):
@@ -412,7 +562,7 @@ class NodeTreeView(APIView):
             ),
         )
         nodes = qs.order_by("depth", "order_no", "id").values(
-            "id", "parent_id", "root_type", "node_type", "name", "depth",
+            "id", "parent_id", "root_type", "node_type", "node_kind", "name", "depth",
             "node_level", "document_count", "ref_id", "path",
         )
         data = list(nodes)
@@ -476,19 +626,6 @@ class KnowledgeNodeViewSet(viewsets.ModelViewSet):
 
     # ── 团队组长权限辅助方法 ────────────
 
-    def _is_team_leader(self, user):
-        """用户是否为团队组长 —— 通过 Team.leader 反查（user.team 为单团队 FK）
-
-        判定依据：用户是否是某个活跃团队的 leader。
-        """
-        if not user or not user.is_authenticated:
-            return False
-        try:
-            from apps.users.models import Team
-            return Team.objects.filter(leader=user, is_deleted=False).exists()
-        except Exception:
-            return False
-
     def _get_team_leader_paths(self, user):
         """获取团队组长管理的团队节点 path 列表
 
@@ -502,11 +639,7 @@ class KnowledgeNodeViewSet(viewsets.ModelViewSet):
             ).values_list('id', flat=True))
         except Exception:
             team_ids = []
-        if not team_ids:
-            return []
-        return list(KnowledgeNode.objects.filter(
-            node_level=3, ref_id__in=team_ids, is_deleted=False,
-        ).values_list('path', flat=True))
+        return _get_team_node_paths(team_ids)
 
     def _check_team_node_write(self, node, user):
         """检查团队组长是否有权操作该节点（节点必须在组长团队子树内）"""
@@ -524,6 +657,24 @@ class KnowledgeNodeViewSet(viewsets.ModelViewSet):
         except Exception:
             return False
 
+    def _check_dept_node_write(self, node, user):
+        """部门经理只能在本部门节点及其文件夹后代下创建/操作文件夹
+
+        允许挂载：本部门节点本身（node_level=2 的 ORG，与部门节点同级挂文件夹）或
+        本部门节点下的任意文件夹（path 前缀匹配）；
+        拒绝：团队节点（组长领地）、其他部门节点、root 及越界文件夹。
+        """
+        if node.node_kind == 'ORG':
+            # ORG 节点中只有本部门节点本身允许挂载文件夹（团队节点归组长管理）
+            from apps.users.models import get_user_managed_depts
+            if node.node_level == 2 and node.ref_id in get_user_managed_depts(user):
+                return
+            raise PermissionDenied("您只能在自己部门下创建文件夹")
+        for dp in _get_dept_node_paths(user):
+            if node.path == dp or node.path.startswith(dp):
+                return
+        raise PermissionDenied("您只能在自己部门下创建文件夹")
+
     # ── 权限 ────────────
 
     def get_permissions(self):
@@ -535,21 +686,14 @@ class KnowledgeNodeViewSet(viewsets.ModelViewSet):
             return [IsAuthenticated()]
         return [IsAdminOrOps()]
 
-    # ── Level 保护：禁止直接 CRUD Level 1-3 节点 ────────────
-    _LEVEL_LABELS = {0: '根节点', 1: '部门节点', 2: '团队节点'}
-
-    def _check_level_writable(self, depth):
-        """depth <= 2 即 Level 1-3，禁止通过节点API直接操作"""
-        if depth is not None and depth <= 2:
-            label = self._LEVEL_LABELS.get(depth, '系统节点')
-            raise ValidationError(
-                {'parent': f'{label}不支持直接创建或修改，请通过部门/团队管理功能操作'}
-            )
+    # ── 节点保护：ROOT/ORG 节点禁止通过节点 API 直接 CRUD ────────────
+    # 根节点与组织节点（部门/团队）由系统自动创建，只有手动创建的文件夹（FOLDER）可被 CRUD
+    _MANAGED_LABELS = {'ROOT': '根节点', 'ORG': '组织节点'}
 
     def _check_node_not_managed(self, node):
-        """禁止通过节点API直接增删改 Level 1-3 节点"""
-        if node.node_level and node.node_level <= 3:
-            label = self._LEVEL_LABELS.get(node.node_level - 1, '系统节点')
+        """ROOT/ORG 节点由系统/组织架构同步管理，禁止通过节点 API 直接增删改"""
+        if node.node_kind and node.node_kind != 'FOLDER':
+            label = self._MANAGED_LABELS.get(node.node_kind, '系统节点')
             raise ValidationError(
                 {'detail': f'{label}不支持直接操作，请通过部门/团队管理功能操作'}
             )
@@ -570,68 +714,64 @@ class KnowledgeNodeViewSet(viewsets.ModelViewSet):
         return KnowledgeNodeSerializer
 
     def perform_create(self, serializer):
+        user = self.request.user
         parent = serializer.validated_data.get("parent")
         node_type = serializer.validated_data.get("node_type", "folder")
-        user = self.request.user
 
-        # 团队组长：只能在本团队下创建分类节点
-        if not self._is_admin_user(user):
-            if not parent:
-                raise PermissionDenied("您只能在自己团队下创建分类节点，必须选择上级节点")
-            if parent.node_level and parent.node_level < 3:
-                raise PermissionDenied("您只能在自己团队下创建分类节点")
+        # root 节点由系统自动创建（node_sync.get_or_create_kb_root），禁止手动创建
+        if node_type == "root":
+            raise ValidationError({"parent": "根节点由系统自动创建，不支持手动创建"})
+
+        # 节点（组织分支）只能由部门/团队同步创建；手动创建的一律是文件夹
+        if not parent:
+            raise ValidationError({"parent": "文件夹必须指定上级节点"})
+
+        role, _dept_id, _team_ids = _get_user_role(user)
+
+        if role in ('super_admin', 'kb_admin'):
+            # 超管/文档管理员：可在任意位置创建文件夹（含 root 下，与部门节点同级）
+            pass
+        elif role == 'dept_manager':
+            # 部门经理：只能在本部门节点及其文件夹后代下创建
+            self._check_dept_node_write(parent, user)
+        elif role == 'team_leader':
+            # 团队组长：只能在本团队节点及其文件夹后代下创建
             self._check_team_node_write(parent, user)
-
-        # 根节点不应有父节点
-        if node_type == "root" and parent:
-            raise ValidationError({"parent": "根节点不能指定上级节点"})
-
-        # root_type: 有父节点则继承，无父节点则强制 root 类型并从数据库获取默认值
-        if parent:
-            root_type = parent.root_type
         else:
-            node_type = "root"
-            root_type = serializer.validated_data.get("root_type")
-            if not root_type:
-                # 从数据库获取第一个根类型作为默认值
-                default_root = KnowledgeNode.objects.filter(
-                    node_type='root', is_deleted=False
-                ).first()
-                root_type = default_root.root_type if default_root else 'company_doc'
-        depth = (parent.depth + 1) if parent else 0
-        self._check_level_writable(depth)
-        obj = serializer.save(depth=depth, node_type=node_type, root_type=root_type, created_by=user)
+            raise PermissionDenied("您没有创建文件夹的权限")
+
+        root_type = parent.root_type
+        depth = parent.depth + 1
+        # node_level 按挂载位置动态计算：root 下=2（与部门节点同级）/部门下=3/团队下=4/嵌套依次递增
+        obj = serializer.save(depth=depth, node_level=parent.node_level + 1,
+                              node_type='folder', node_kind='FOLDER',
+                              root_type=root_type, created_by=user)
         # 更新 path（ID 零填充 4 位，确保按数值顺序排序）
         padded_id = f"{obj.id:04d}"
-        if parent:
-            obj.path = f"{parent.path}{padded_id}/"
-        else:
-            obj.path = f"/{padded_id}/"
+        obj.path = f"{parent.path}{padded_id}/"
         obj.save(update_fields=["path"])
         _log_operation(self.request, 'node_create', node=obj,
-                       detail={'name': obj.name, 'node_type': obj.node_type, 'root_type': obj.root_type})
+                       detail={'name': obj.name, 'node_type': obj.node_type,
+                               'node_kind': obj.node_kind, 'root_type': obj.root_type})
 
     def destroy(self, request, *args, **kwargs):
         node = self.get_object()
 
-        # 团队组长：只能删除本团队范围内的分类节点
+        # 非管理员：只能删除自己领地内的文件夹
         if not self._is_admin_user(request.user):
-            if node.node_level and node.node_level <= 3:
-                raise PermissionDenied("您只能删除自己团队下的分类节点")
-            self._check_team_node_write(node, request.user)
+            role, _dept_id, _team_ids = _get_user_role(request.user)
+            if role == 'dept_manager':
+                self._check_dept_node_write(node, request.user)
+            elif role == 'team_leader':
+                self._check_team_node_write(node, request.user)
+            else:
+                raise PermissionDenied("您没有删除文件夹的权限")
 
-        # Level 1-3 保护：禁止直接删除
-        if node.node_level and node.node_level <= 3:
-            label = self._LEVEL_LABELS.get(node.node_level - 1, '系统节点')
+        # ROOT/ORG 保护：禁止直接删除（由部门/团队生命周期管理）
+        if node.node_kind and node.node_kind != 'FOLDER':
+            label = self._MANAGED_LABELS.get(node.node_kind, '系统节点')
             return Response(
                 {"detail": f"{label}不支持直接删除，请通过部门/团队管理功能操作"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        # 禁止删除根节点
-        if node.node_type == "root":
-            return Response(
-                {"detail": "根节点不允许删除"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -658,17 +798,59 @@ class KnowledgeNodeViewSet(viewsets.ModelViewSet):
         node.is_deleted = True
         node.save(update_fields=["is_deleted"])
         _log_operation(request, 'node_delete', node=node,
-                       detail={'name': node.name, 'node_type': node.node_type})
+                       detail={'name': node.name, 'node_type': node.node_type,
+                               'node_kind': node.node_kind})
         return Response(status=204)
 
     def perform_update(self, serializer):
         old_obj = self.get_object()
 
-        # 团队组长：只能编辑本团队范围内的分类节点
-        if not self._is_admin_user(self.request.user):
-            self._check_team_node_write(old_obj, self.request.user)
-
+        # ROOT/ORG 节点禁止修改（由部门/团队生命周期管理）
         self._check_node_not_managed(old_obj)
+
+        # 非管理员：只能编辑自己领地内的文件夹
+        if not self._is_admin_user(self.request.user):
+            role, _dept_id, _team_ids = _get_user_role(self.request.user)
+            if role == 'dept_manager':
+                self._check_dept_node_write(old_obj, self.request.user)
+            elif role == 'team_leader':
+                self._check_team_node_write(old_obj, self.request.user)
+            else:
+                raise PermissionDenied("您没有修改文件夹的权限")
+
+        # 可见范围变更（visibility_level）必须走工单审批，不能直接修改
+        new_visibility_level = serializer.validated_data.get(
+            'visibility_level', old_obj.visibility_level
+        )
+        if new_visibility_level != old_obj.visibility_level:
+            user = self.request.user
+            if new_visibility_level is not None and new_visibility_level not in VisibilityLevel.values:
+                raise ValidationError({'visibility_level': '可见范围必须是 TEAM_ONLY/DEPT_ONLY/PUBLIC 之一'})
+            # 目标可见范围编码在 reason 的"目标值:"标记中，审批通过后由 approve_access_request 解析写回
+            old_desc = dict(VisibilityLevel.choices).get(old_obj.visibility_level, '继承父级')
+            new_desc = dict(VisibilityLevel.choices).get(
+                new_visibility_level, '继承父级') if new_visibility_level else '继承父级'
+            import uuid as _uuid
+            PermissionApprovalTicket.objects.create(
+                ticket_no=f'NODE-VIS-{_uuid.uuid4().hex[:12].upper()}',
+                applicant=user,
+                target_user=user,
+                change_type=TicketChangeType.SCOPE_CHANGE,
+                reason=_encode_ticket_reason(
+                    'node', old_obj.id, 'visibility_change',
+                    f"申请将节点可见范围从「{old_desc}」调整为「{new_desc}」 "
+                    f"目标值:{new_visibility_level or 'INHERIT'}"
+                ),
+                status=TicketStatus.PENDING,
+                # 审批链按发起人角色动态指派：团队级=部门经理，部门级=文档管理员/超管，
+                # 超管/文档管理员=双管理员复核（_build_visibility_chain）
+                approval_chain=_build_visibility_chain(user, old_obj),
+                current_step=0,
+            )
+            raise PermissionDenied(
+                "修改节点可见范围需要审批，已自动提交审批工单，审批通过后可见范围生效"
+            )
+
         old_data = {
             'name': old_obj.name,
             'description': old_obj.description,
@@ -820,7 +1002,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
                     target_user=user,
                     change_type=TicketChangeType.SCOPE_CHANGE,
                     reason=_encode_ticket_reason(
-                        old_obj.id, 'visibility_change',
+                        'doc', old_obj.id, 'visibility_change',
                         f"申请将文档可见性从「{old_obj.get_visibility_level_display()}」"
                         f"扩大为「{dict(VisibilityLevel.choices).get(new_visibility_level, new_visibility_level)}」"
                     ),
@@ -1085,7 +1267,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
             raise ValidationError({"action": "无效的申请类型"})
 
         user_reason = (request.data.get("reason") or "")[:1000]
-        encoded_reason = _encode_ticket_reason(doc.id, action, user_reason)
+        encoded_reason = _encode_ticket_reason('doc', doc.id, action, user_reason)
 
         # 已有相同 pending 申请则不重复创建（通过 reason 前缀匹配文档目标）
         exists = PermissionApprovalTicket.objects.filter(
@@ -1334,11 +1516,11 @@ class DocumentViewSet(viewsets.ModelViewSet):
         ).order_by("-created_at")[:100]
         data = []
         for ticket in qs:
-            doc_id, action, user_reason = _decode_ticket_reason(ticket.reason)
+            target_type, target_id, action, user_reason = _decode_ticket_reason(ticket.reason)
             data.append({
                 "id": ticket.id,
-                "target_type": 'doc' if doc_id else None,
-                "target_id": doc_id,
+                "target_type": target_type,
+                "target_id": target_id,
                 "action": action,
                 "reason": user_reason,
                 "status": ticket.status,
@@ -1379,13 +1561,13 @@ class DocumentViewSet(viewsets.ModelViewSet):
         qs = qs.order_by("-created_at")[:200]
         data = []
         for ticket in qs:
-            doc_id, action, user_reason = _decode_ticket_reason(ticket.reason)
+            target_type, target_id, action, user_reason = _decode_ticket_reason(ticket.reason)
             item = {
                 "id": ticket.id,
                 "applicant_id": ticket.applicant_id,
                 "applicant_name": ticket.applicant.username if ticket.applicant else '',
-                "target_type": 'doc' if doc_id else None,
-                "target_id": doc_id,
+                "target_type": target_type,
+                "target_id": target_id,
                 "action": action,
                 "reason": user_reason,
                 "status": ticket.status,
@@ -1411,13 +1593,25 @@ class DocumentViewSet(viewsets.ModelViewSet):
         except PermissionApprovalTicket.DoesNotExist:
             raise Http404("申请不存在或已处理")
 
-        # 从 reason 解析文档目标信息
-        doc_id, action, user_reason = _decode_ticket_reason(ticket.reason)
+        # 从 reason 解析目标信息（doc 文档工单 / node 节点可见范围工单）
+        target_type, target_id, action, user_reason = _decode_ticket_reason(ticket.reason)
 
         # 仅所有者/管理员可审批
         doc = None
-        if doc_id:
-            doc = Document.objects.filter(id=doc_id, is_deleted=False).first()
+        node = None
+        if target_type == 'node':
+            # 节点可见范围变更工单：审批人必须匹配审批链当前步骤的 approver_role
+            # （团队级=部门经理，部门级=文档管理员/超管），兼容旧工单的节点所有者审批
+            node = KnowledgeNode.objects.filter(id=target_id, is_deleted=False).first()
+            if not node:
+                raise Http404("目标节点不存在")
+            chain = list(ticket.approval_chain or [])
+            current_step = ticket.current_step or 0
+            step_info = chain[current_step] if current_step < len(chain) else {}
+            if not _can_approve_node_visibility(request.user, node, step_info):
+                raise PermissionDenied("无权审批此申请")
+        elif target_id:
+            doc = Document.objects.filter(id=target_id, is_deleted=False).first()
             a = resolve_doc_access(request.user, doc) if doc else None
             if not a or not (a["is_owner"] or a["is_manager"]):
                 raise PermissionDenied("无权审批此申请")
@@ -1476,25 +1670,39 @@ class DocumentViewSet(viewsets.ModelViewSet):
             ticket.save(update_fields=["approval_chain", "status", "approved_at"])
 
         # 审批通过后执行授权写入
-        if action == 'visibility_change' and doc:
-            # visibility_change 工单：修改文档可见性层级
+        if action == 'visibility_change' and (doc or node):
+            # visibility_change 工单：修改文档/节点可见性层级
             # 从 user_reason 中解析目标 visibility_level（创建工单时编码在 reason 文本中）
             # 兜底使用 PUBLIC（扩大审批通常目标就是全局公开）
             new_level = VisibilityLevel.PUBLIC
-            for level in VisibilityLevel.values:
-                if level in (user_reason or ''):
-                    new_level = level
-                    break
-            doc.visibility_level = new_level
-            doc.save(update_fields=['visibility_level', 'updated_at'])
-            _log_operation(request, 'doc_visibility_change', document=doc,
-                           detail={'ticket_id': ticket.id, 'applicant': ticket.applicant.username,
-                                   'new_visibility_level': new_level})
-        elif doc_id and doc:
+            m = re.search(r'目标值:(\w+)', user_reason or '')
+            if m:
+                # 显式编码的目标值（INHERIT 表示继承父级，写回 NULL）
+                new_level = m.group(1) if m.group(1) in VisibilityLevel.values else None
+            else:
+                # 兼容旧格式：从申请文本中匹配枚举值，未命中兜底 PUBLIC
+                for level in VisibilityLevel.values:
+                    if level in (user_reason or ''):
+                        new_level = level
+                        break
+            if node:
+                # 节点可见范围变更：写回节点（NULL=继承父级，工单目标通常为具体三档值）
+                node.visibility_level = new_level
+                node.save(update_fields=['visibility_level', 'updated_at'])
+                _log_operation(request, 'node_visibility_change', node=node,
+                               detail={'ticket_id': ticket.id, 'applicant': ticket.applicant.username,
+                                       'new_visibility_level': new_level})
+            else:
+                doc.visibility_level = new_level
+                doc.save(update_fields=['visibility_level', 'updated_at'])
+                _log_operation(request, 'doc_visibility_change', document=doc,
+                               detail={'ticket_id': ticket.id, 'applicant': ticket.applicant.username,
+                                       'new_visibility_level': new_level})
+        elif target_id and doc:
             # 文档访问申请：创建 ResourceShare 个人级共享
             ResourceShare.objects.get_or_create(
                 resource_type=ResourceType.DOCUMENT,
-                resource_id=doc_id,
+                resource_id=target_id,
                 share_scope_type=ShareScopeType.USER,
                 share_scope_id=ticket.applicant_id,
                 defaults={
@@ -1515,13 +1723,13 @@ class DocumentViewSet(viewsets.ModelViewSet):
         ticket.executed_at = timezone.now()
         ticket.save(update_fields=['status', 'executed_at'])
 
-        logger.info(f"[AccessRequest] approved id={ticket.id} applicant={ticket.applicant.username} doc={doc_id}")
+        logger.info(f"[AccessRequest] approved id={ticket.id} applicant={ticket.applicant.username} target={target_type}:{target_id}")
         return Response({
             "id": ticket.id,
             "status": ticket.status,
             "applicant_id": ticket.applicant_id,
-            "target_type": 'doc' if doc_id else None,
-            "target_id": doc_id,
+            "target_type": target_type,
+            "target_id": target_id,
             "action": action,
         })
 
@@ -1537,10 +1745,18 @@ class DocumentViewSet(viewsets.ModelViewSet):
             ticket = PermissionApprovalTicket.objects.get(id=req_id, status=TicketStatus.PENDING)
         except PermissionApprovalTicket.DoesNotExist:
             raise Http404("申请不存在或已处理")
-        doc_id, action, user_reason = _decode_ticket_reason(ticket.reason)
+        target_type, target_id, action, user_reason = _decode_ticket_reason(ticket.reason)
         doc = None
-        if doc_id:
-            doc = Document.objects.filter(id=doc_id, is_deleted=False).first()
+        node = None
+        if target_type == 'node':
+            # 节点可见范围变更工单：节点所有者或管理员可审批
+            node = KnowledgeNode.objects.filter(id=target_id, is_deleted=False).first()
+            if not (node and (node.owner_user_id == request.user.id
+                              or getattr(request.user, 'is_super_admin', False)
+                              or getattr(request.user, 'is_kb_admin', False))):
+                raise PermissionDenied("无权审批此申请")
+        elif target_id:
+            doc = Document.objects.filter(id=target_id, is_deleted=False).first()
             a = resolve_doc_access(request.user, doc) if doc else None
             if not a or not (a["is_owner"] or a["is_manager"]):
                 raise PermissionDenied("无权审批此申请")
@@ -1562,9 +1778,9 @@ class DocumentViewSet(viewsets.ModelViewSet):
         ticket.approval_chain = chain
         ticket.status = TicketStatus.REJECTED
         ticket.save(update_fields=["approval_chain", "status"])
-        _log_operation(request, 'doc_grant_reject', document=doc,
+        _log_operation(request, 'doc_grant_reject', document=doc, node=node,
                        detail={'ticket_id': ticket.id, 'applicant': ticket.applicant.username,
-                               'action': action, 'target_id': doc_id})
+                               'action': action, 'target_type': target_type, 'target_id': target_id})
         return Response({
             "id": ticket.id,
             "status": ticket.status,
@@ -1598,6 +1814,10 @@ class DocumentUploadView(APIView):
             node = KnowledgeNode.objects.get(id=node_id, is_deleted=False)
         except KnowledgeNode.DoesNotExist:
             return Response({"detail": "node 不存在"}, status=404)
+
+        # 文档只能上传到文件夹（FOLDER）；ROOT/ORG 节点只作分支，不可直接挂文档
+        if node.node_kind and node.node_kind != 'FOLDER':
+            return Response({"detail": "文档只能上传到文件夹中，请选择文件夹节点"}, status=400)
 
         if not self._check_node_upload_permission(request.user, node):
             return Response({"detail": "无权限向该节点上传文档"}, status=403)
@@ -1678,11 +1898,15 @@ class DocumentUploadView(APIView):
         # 和旧版 visible_scope（team/dept/public），统一归一化为 visibility_level
         raw_visibility = request.data.get("visibility_level") or request.data.get("visible_scope")
         visibility_level = _normalize_visibility_level(raw_visibility)
+        if raw_visibility and visibility_level is None:
+            # 显式指定了可见范围但值非法 → 400（区别于未指定时的继承语义）
+            return Response(
+                {"detail": "visibility_level 必须是 TEAM_ONLY/DEPT_ONLY/PUBLIC 之一"},
+                status=400,
+            )
         if visibility_level is None:
-            return Response({
-                "detail": "visibility_level 必须为 TEAM_ONLY/DEPT_ONLY/PUBLIC"
-                          "（或旧版 visible_scope: team/dept/public）"
-            }, status=400)
+            # 未显式指定可见范围：继承挂载文件夹的可见性（沿祖先链取最近非空，root 兜底 PUBLIC）
+            visibility_level = _resolve_node_visibility(node)
 
         # 上传时选择是否允许下载/分享（默认只读：仅预览/对话检索）
         allow_download = request.data.get("allow_download") in ("true", "True", "1", True)
@@ -1729,7 +1953,41 @@ class DocumentUploadView(APIView):
 
         title = request.data.get("title") or f.name
         file_type = _detect_file_type(f.name)
-        
+
+        # 从节点祖先链推导归属 dept_id/team_id（组织 ID，非节点 ID）
+        # Level 2 节点 ref_id = dept.id，Level 3 节点 ref_id = team.id
+        dept_id = None
+        team_id = None
+        if node.node_level >= 2:
+            ancestors = []
+            current = node
+            while current:
+                ancestors.append(current)
+                current = current.parent
+            ancestors.reverse()
+            for n in ancestors:
+                if n.node_level == 2 and n.ref_id:
+                    dept_id = n.ref_id
+                elif n.node_level == 3 and n.ref_id:
+                    team_id = n.ref_id
+
+        # 归属约束：team_id 或 dept_id 至少一个非空
+        # 若节点祖先链未推导出 dept_id，回退到上传者的主部门
+        if not dept_id:
+            dept_id = getattr(request.user, 'department_id', None)
+        # 若未推导出 team_id，回退到上传者的所属团队
+        if not team_id:
+            team_id = getattr(request.user, 'team_id', None)
+
+        # 归属约束校验：节点无组织祖先且上传者也无部门/团队归属时，
+        # 非 PUBLIC 可见性既无部门/团队可挂靠，也会违反 doc_owner_scope_required 约束。
+        # 不能静默降级为 PUBLIC（会造成越权公开），直接报错让用户改选节点或明确公开
+        if not dept_id and not team_id and visibility_level != VisibilityLevel.PUBLIC:
+            return Response({
+                "detail": "当前节点无组织归属，且您未加入任何部门/团队，"
+                          "仅支持上传为「全局公开」文档，请切换可见范围或选择其他节点"
+            }, status=400)
+
         file_path = None
         doc = None
 
@@ -1743,31 +2001,6 @@ class DocumentUploadView(APIView):
                     exist.is_deleted = True
                     exist.delete_time = timezone.now()
                     exist.save(update_fields=["is_deleted", "delete_time", "updated_at"])
-
-                # 从节点祖先链推导归属 dept_id/team_id（组织 ID，非节点 ID）
-                # Level 2 节点 ref_id = dept.id，Level 3 节点 ref_id = team.id
-                dept_id = None
-                team_id = None
-                if node.node_level >= 2:
-                    ancestors = []
-                    current = node
-                    while current:
-                        ancestors.append(current)
-                        current = current.parent
-                    ancestors.reverse()
-                    for n in ancestors:
-                        if n.node_level == 2 and n.ref_id:
-                            dept_id = n.ref_id
-                        elif n.node_level == 3 and n.ref_id:
-                            team_id = n.ref_id
-
-                # 归属约束：team_id 或 dept_id 至少一个非空
-                # 若节点祖先链未推导出 dept_id，回退到上传者的主部门
-                if not dept_id:
-                    dept_id = getattr(request.user, 'department_id', None)
-                # 若未推导出 team_id，回退到上传者的所属团队
-                if not team_id:
-                    team_id = getattr(request.user, 'team_id', None)
 
                 doc = Document.objects.create(
                     node=node,
@@ -1850,22 +2083,26 @@ class DocumentUploadView(APIView):
         }, status=201)
 
     def _check_node_upload_permission(self, user, node):
+        """校验用户是否有权向目标节点上传文档
+
+        超管/文档管理员：任意位置；
+        部门经理：本部门节点（ORG）及其所有后代文件夹（path 前缀匹配）；
+        团队组长/contributor：本团队节点（ORG）及其所有后代文件夹。
+        """
         if getattr(user, 'is_super_admin', False) or getattr(user, 'is_kb_admin', False):
             return True
 
-        role, dept_id, team_ids = _get_user_role(user)
+        role, _dept_id, team_ids = _get_user_role(user)
 
-        if role == 'dept_manager' and dept_id:
-            if node.node_level == 2 and node.ref_id == dept_id:
-                return True
-            if node.parent and node.parent.node_level == 2 and node.parent.ref_id == dept_id:
-                return True
+        if role == 'dept_manager':
+            for dp in _get_dept_node_paths(user):
+                if node.path == dp or node.path.startswith(dp):
+                    return True
 
         if role in ('team_leader', 'contributor') and team_ids:
-            if node.node_level == 3 and node.ref_id in team_ids:
-                return True
-            if node.parent and node.parent.node_level == 3 and node.parent.ref_id in team_ids:
-                return True
+            for tp in _get_team_node_paths(team_ids):
+                if node.path == tp or node.path.startswith(tp):
+                    return True
 
         return False
 

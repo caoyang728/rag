@@ -36,6 +36,7 @@ def get_or_create_kb_root() -> KnowledgeNode:
         defaults={
             'root_type': _ROOT_TYPE,
             'node_type': 'root',
+            'node_kind': 'ROOT',
             'name': _KB_ROOT_NAME,
             'path': '/',
             'depth': 0,
@@ -77,6 +78,10 @@ def sync_dept_node(department) -> KnowledgeNode | None:
         if node.is_deleted:
             node.is_deleted = False
             updated = True
+        # 存量部门节点默认 node_kind=FOLDER，统一纠正为 ORG
+        if node.node_kind != 'ORG':
+            node.node_kind = 'ORG'
+            updated = True
         if node.name != department.name:
             node.name = department.name
             updated = True
@@ -92,6 +97,7 @@ def sync_dept_node(department) -> KnowledgeNode | None:
         parent=kb_root,
         root_type=kb_root.root_type,
         node_type='folder',
+        node_kind='ORG',
         node_level=2,
         name=department.name,
         order_no=department.sort_order,
@@ -146,6 +152,10 @@ def sync_team_node(team) -> KnowledgeNode | None:
         if node.is_deleted:
             node.is_deleted = False
             updated = True
+        # 存量团队节点默认 node_kind=FOLDER，统一纠正为 ORG
+        if node.node_kind != 'ORG':
+            node.node_kind = 'ORG'
+            updated = True
         if node.name != team.name:
             node.name = team.name
             updated = True
@@ -167,6 +177,7 @@ def sync_team_node(team) -> KnowledgeNode | None:
         parent=dept_node,
         root_type=dept_node.root_type,
         node_type='folder',
+        node_kind='ORG',
         node_level=3,
         name=team.name,
         description=team.description or '',
@@ -181,14 +192,19 @@ def sync_team_node(team) -> KnowledgeNode | None:
 
 # ── 删除辅助 ────────────────────────────────────────────────
 def get_subtree_node_ids(node_id: int) -> list[int]:
-    """递归收集 node_id 及其所有子孙节点的 ID 列表（用于文档计数等）"""
-    ids = [node_id]
-    children = KnowledgeNode.objects.filter(
-        parent_id=node_id, is_deleted=False
-    ).values_list('id', flat=True)
-    for child_id in children:
-        ids.extend(get_subtree_node_ids(child_id))
-    return ids
+    """收集 node_id 及其所有非软删子孙节点的 ID 列表（用于文档计数等）
+
+    基于 Materialized Path（path 前缀匹配）一次查询取全部后代，避免递归逐层查库：
+    - 软删节点自身及其软删后代不计入（is_deleted=False 过滤）
+    - 即使中间祖先节点软删（组织分支下线），其非软删后代仍被收集：
+      节点软删仅表示分支下线，其下历史文件夹/文档可能仍存活，不能漏检
+    """
+    node = KnowledgeNode.objects.filter(id=node_id).first()
+    if node is None:
+        return []
+    return list(KnowledgeNode.objects.filter(
+        path__startswith=node.path, is_deleted=False,
+    ).values_list('id', flat=True))
 
 
 def count_docs_in_subtree(node_id: int) -> int:

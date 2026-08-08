@@ -161,7 +161,11 @@ function showConfirmDialog(opts) {
 		} else if (btn.type === 'primary') b.className = 'btn-save';
 		else if (btn.type === 'danger') b.className = 'btn btn-reject';
 		else b.className = 'btn-cancel';
-		b.onclick = () => { if (typeof btn.onClick === 'function') btn.onClick(ctx); };
+		// 取消类按钮未传 onClick 时默认关闭弹窗，避免点"取消"无响应
+		const click = typeof btn.onClick === 'function'
+			? btn.onClick
+			: (btn.type === 'cancel' ? () => ctx.close() : () => {});
+		b.onclick = () => click(ctx);
 		footerEl.appendChild(b);
 	});
 

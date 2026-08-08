@@ -1,6 +1,6 @@
 """knowledge serializers"""
 from rest_framework import serializers
-from apps.knowledge.models import KnowledgeNode, Document, DocumentChunk
+from apps.knowledge.models import KnowledgeNode, Document, DocumentChunk, VisibilityLevel
 from apps.knowledge.access import resolve_doc_access
 
 
@@ -12,8 +12,8 @@ class KnowledgeNodeSerializer(serializers.ModelSerializer):
     class Meta:
         model = KnowledgeNode
         fields = [
-            "id", "parent_id", "root_type", "node_type", "node_level",
-            "name", "path", "depth", "description", "order_no",
+            "id", "parent_id", "root_type", "node_type", "node_kind", "node_level",
+            "visibility_level", "name", "path", "depth", "description", "order_no",
             "children_count", "document_count",
             "created_by", "created_by_name", "created_at", "updated_at",
         ]
@@ -37,8 +37,10 @@ class KnowledgeNodeSerializer(serializers.ModelSerializer):
 class KnowledgeNodeCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = KnowledgeNode
-        fields = ["parent", "root_type", "node_type", "name", "description", "order_no"]
-        extra_kwargs = {"root_type": {"required": False}}
+        fields = ["parent", "root_type", "node_type", "node_kind", "visibility_level",
+                  "name", "description", "order_no"]
+        extra_kwargs = {"root_type": {"required": False}, "node_kind": {"required": False},
+                        "visibility_level": {"required": False}}
 
     def validate_parent(self, value):
         """校验父节点：不能是已删除、不能是叶子节点"""
@@ -46,6 +48,12 @@ class KnowledgeNodeCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("上级节点不存在")
         if value.node_type == "leaf":
             raise serializers.ValidationError("不能在叶子节点下创建子节点")
+        return value
+
+    def validate_visibility_level(self, value):
+        """可见范围必须为三档之一；空值（继承父级）由前端省略字段表达"""
+        if value is not None and value not in VisibilityLevel.values:
+            raise serializers.ValidationError("可见范围必须是 TEAM_ONLY/DEPT_ONLY/PUBLIC 之一")
         return value
 
 

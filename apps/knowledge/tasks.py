@@ -487,6 +487,18 @@ def batch_import_single_file(temp_file_path, node_id, owner_id, visibility, owne
             dept_id = getattr(owner, 'department_id', None)
         if not team_id:
             team_id = getattr(owner, 'team_id', None)
+        # 归属约束校验：节点无组织祖先且导入者也无部门/团队归属时，
+        # 非 PUBLIC 可见性既无部门/团队可挂靠，也会违反 doc_owner_scope_required 约束。
+        # 不能静默降级为 PUBLIC（会造成越权公开），清理已保存文件并报错
+        if not dept_id and not team_id and visibility_level != VisibilityLevel.PUBLIC:
+            error_msg = (f"节点无组织归属且导入者无部门/团队，仅支持导入为全局公开(PUBLIC)文档: {filename}")
+            logger.error(f'[BatchImport] {error_msg}')
+            _log_batch_import_failure(filename, node.name, error_msg)
+            try:
+                storage.delete(file_path)
+            except Exception:
+                logger.exception(f"Failed to clean up orphan file: {file_path}")
+            return {'ok': False, 'error': error_msg}
 
         doc = Document.objects.create(
             node=node,

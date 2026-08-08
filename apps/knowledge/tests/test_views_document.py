@@ -396,6 +396,59 @@ class TestDocumentUploadExtra(KnowledgeViewsExtraBase):
         assert doc.visibility_level == VisibilityLevel.TEAM_ONLY
 
     @pytest.mark.integration
+    @patch('apps.knowledge.views.magic')
+    def test_upload_no_org_restricted_visibility_400(self, mock_magic):
+        """root 下公共文件夹（无 ORG 祖先）+ 上传者无部门/团队 + 非 PUBLIC → 400
+
+        原实现会静默降级为 PUBLIC（越权公开风险），现改为显式报错，
+        且不得创建任何文档（在写文件前校验，无孤儿文件）。
+        """
+        mock_magic.from_buffer.return_value = 'text/plain'
+        # 手动创建 root 下手动文件夹（node_kind=FOLDER，祖先链无 ORG 节点）
+        folder = KnowledgeNode.objects.create(
+            name='公共文件夹', node_type='folder', node_level=2, node_kind='FOLDER',
+            root_type='company_doc', parent=self.root_node,
+            depth=1, created_by=self.super_admin)
+        padded = f'{folder.id:04d}'
+        folder.path = f'{self.root_node.path}{padded}/'
+        folder.save(update_fields=['path'])
+
+        upload = SimpleUploadedFile('a.txt', b'x', content_type='text/plain')
+        resp = self.client.post(
+            '/api/v1/knowledge/documents/upload/',
+            data={'file': upload, 'node_id': folder.id,
+                  'visibility_level': 'TEAM_ONLY'},
+            **_auth_headers(self.super_admin))
+        assert resp.status_code == 400
+        assert '全局公开' in resp.json()['detail']
+        # 不静默降级：文档不应被创建
+        assert not Document.objects.filter(node=folder, is_deleted=False).exists()
+
+    @pytest.mark.integration
+    @patch('apps.knowledge.views.magic')
+    def test_upload_no_org_public_ok_201(self, mock_magic):
+        """root 下公共文件夹 + 上传者无部门/团队 + 显式 PUBLIC → 201（合法路径）"""
+        mock_magic.from_buffer.return_value = 'text/plain'
+        folder = KnowledgeNode.objects.create(
+            name='公共文件夹', node_type='folder', node_level=2, node_kind='FOLDER',
+            root_type='company_doc', parent=self.root_node,
+            depth=1, created_by=self.super_admin)
+        padded = f'{folder.id:04d}'
+        folder.path = f'{self.root_node.path}{padded}/'
+        folder.save(update_fields=['path'])
+
+        upload = SimpleUploadedFile('a.txt', b'x', content_type='text/plain')
+        resp = self.client.post(
+            '/api/v1/knowledge/documents/upload/',
+            data={'file': upload, 'node_id': folder.id,
+                  'visibility_level': 'PUBLIC'},
+            **_auth_headers(self.super_admin))
+        assert resp.status_code == 201
+        doc = Document.objects.get(pk=resp.json()['document_id'])
+        assert doc.visibility_level == VisibilityLevel.PUBLIC
+        assert doc.dept_id is None and doc.team_id is None
+
+    @pytest.mark.integration
     @patch('apps.knowledge.tasks.parse_document')
     @patch('apps.knowledge.views.magic')
     @patch.object(DocumentUploadView, '_save_file', return_value='/tmp/dedup.txt')

@@ -155,10 +155,15 @@ function getSidebarGroups() {
 			{ icon: '🛡️', name: '审计与安全', page: 'admin-audit', key: 'admin-audit', desc: '操作审计日志与安全策略' },
 		);
 	}
-	// 组织架构 & RBAC 权限配置：仅超级管理员和文档管理员可见
-	if (isAdminOrOps()) {
+	// 组织架构：管理端 + 组长/部门经理可见（组长/部门经理在此发起协作角色授权工单）
+	if (isAdminOrOps() || hasAnyRole('team_leader', 'dept_manager')) {
 		adminItems.push(
 			{ icon: '🏢', name: '组织架构', page: 'admin-org', key: 'admin-org', desc: '部门与团队结构管理' },
+		);
+	}
+	// RBAC 权限配置：仅超级管理员和文档管理员可见
+	if (isAdminOrOps()) {
+		adminItems.push(
 			{ icon: '&#9881;&#65039;', name: 'RBAC 权限配置', page: 'admin-rbac', key: 'admin-rbac', desc: '角色权限矩阵配置' },
 		);
 	}

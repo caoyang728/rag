@@ -25,6 +25,7 @@ from apps.users.tests.test_views_base import (
     _get_or_create_role, _create_user, _grant_permission, _grant_global_role,
     _auth_headers, FakeRedis, UsersAPIExtraBase,
 )
+from apps.users.ticket_service import create_ticket, approve_ticket
 
 
 class TestAccessApplicationView(UsersAPIExtraBase):
@@ -40,13 +41,13 @@ class TestAccessApplicationView(UsersAPIExtraBase):
     @pytest.mark.integration
     def test_get_applications_only_own_tickets(self):
         """GET 只返回当前用户发起的工单（含 scope_name 与审批链序列化）"""
-        self._create_pending_ticket()  # normal_user 发起（跨团队 viewer → 前端组）
+        self._create_pending_ticket()  # normal_user 发起（跨部门 viewer → 市场一组）
         self._create_pending_ticket(applicant=self.team_leader)  # 他人工单不应出现
         resp = self.client.get('/api/v1/auth/permissions/applications/', **self.normal_headers)
         assert resp.status_code == 200
         rows = resp.json()['rows']
         assert len(rows) == 1
-        assert rows[0]['scope_name'] == '前端组'
+        assert rows[0]['scope_name'] == '市场一组'
         assert 'approval_chain' in rows[0]
 
     @pytest.mark.integration
@@ -134,11 +135,13 @@ class TestAccessApplicationView(UsersAPIExtraBase):
     @pytest.mark.integration
     def test_post_role_change_missing_previous_role_400(self):
         """ROLE_CHANGE 必须提供 previous_role_id → 400"""
+        # 协作角色由资源团队组长(team_a 组长)代被授权人提单,缺 previous_role_id 在校验层拦截
         resp = self.client.post(
             '/api/v1/auth/permissions/applications/',
             data=json.dumps({'role_key': 'viewer', 'scope_type': 'TEAM',
-                             'scope_id': self.team_a.id, 'change_type': 'ROLE_CHANGE', 'reason': 'r'}),
-            content_type='application/json', **self.normal_headers,
+                             'scope_id': self.team_a.id, 'change_type': 'ROLE_CHANGE',
+                             'reason': 'r', 'target_user_id': self.normal_user.id}),
+            content_type='application/json', **self.leader_headers,
         )
         assert resp.status_code == 400
 
@@ -149,37 +152,43 @@ class TestAccessApplicationView(UsersAPIExtraBase):
             '/api/v1/auth/permissions/applications/',
             data=json.dumps({'role_key': 'viewer', 'scope_type': 'TEAM',
                              'scope_id': self.team_a.id, 'change_type': 'ROLE_CHANGE',
-                             'previous_role_id': 999999, 'reason': 'r'}),
-            content_type='application/json', **self.normal_headers,
+                             'previous_role_id': 999999, 'reason': 'r',
+                             'target_user_id': self.normal_user.id}),
+            content_type='application/json', **self.leader_headers,
         )
         assert resp.status_code == 400
 
     @pytest.mark.integration
     def test_post_create_ticket_201(self):
-        """正常提交跨团队 viewer 申请 → 201 且工单 PENDING（自助申请目标用户为自身）"""
+        """资源所有者(超管兜底)提交跨部门 viewer 申请 → 201 且工单 PENDING
+
+        定稿后协作角色不再自助申请,统一由资源团队组长/部门经理代被授权人提单;
+        team_c(市场一组)所属部门无部门经理,超管作为资源所有者兜底提单。
+        """
         resp = self.client.post(
             '/api/v1/auth/permissions/applications/',
             data=json.dumps({'role_key': 'viewer', 'scope_type': 'TEAM',
-                             'scope_id': self.team_b.id, 'reason': '需要查看前端组资料'}),
-            content_type='application/json', **self.normal_headers,
+                             'scope_id': self._team_c().id, 'reason': '需要查看市场一组资料',
+                             'target_user_id': self.normal_user.id}),
+            content_type='application/json', **self.admin_headers,
         )
         assert resp.status_code == 201
         data = resp.json()
         assert data['status'] == 'PENDING'
         ticket = PermissionApprovalTicket.objects.get(id=data['id'])
-        assert ticket.applicant_id == self.normal_user.id
-        assert ticket.target_user_id == self.normal_user.id  # 自助申请：被授权对象为申请人自身
+        assert ticket.applicant_id == self.super_admin.id
+        assert ticket.target_user_id == self.normal_user.id  # 资源所有者代被授权人提单
 
     @pytest.mark.integration
-    def test_post_create_ticket_value_error_400(self):
-        """create_ticket 抛业务异常（如超管配额不足）→ 400"""
-        Role.objects.create(role_key='user_admin', name='用户管理员')
+    def test_post_management_role_self_apply_403(self):
+        """管理岗(user_admin 等)禁止自助申请 → 403(仅允许上级发起任命)"""
+        _get_or_create_role('user_admin')
         resp = self.client.post(
             '/api/v1/auth/permissions/applications/',
             data=json.dumps({'role_key': 'user_admin', 'scope_type': 'NONE', 'reason': '申请用户管理员'}),
             content_type='application/json', **self.normal_headers,
         )
-        assert resp.status_code == 400
+        assert resp.status_code == 403
 
     @pytest.mark.integration
     def test_post_anonymous_401(self):
@@ -254,7 +263,7 @@ class TestPendingApprovalTicketsView(UsersAPIExtraBase):
     def test_super_admin_sees_matching_ticket(self):
         """超管可看到审批链节点为 SUPER_ADMIN 的待审批工单
 
-        _create_pending_ticket 的 viewer 跨团队申请在组长缺失时降级为超管单审，
+        _create_pending_ticket 的 viewer 跨部门申请在目标部门经理缺失时降级为超管单审，
         需同时具备 super_admin 角色 rel 才能命中 _can_approve_for_role。
         """
         self._grant_sa_role()
@@ -264,25 +273,37 @@ class TestPendingApprovalTicketsView(UsersAPIExtraBase):
         rows = resp.json()['rows']
         assert len(rows) == 1
         assert rows[0]['approver_role'] == 'SUPER_ADMIN'
-        assert rows[0]['scope_name'] == '前端组'
+        assert rows[0]['scope_name'] == '市场一组'
 
     @pytest.mark.integration
-    def test_team_leader_sees_own_team_ticket(self):
-        """团队组长可看到本团队节点（TEAM_LEADER）的待审批工单"""
+    def test_dept_leader_sees_cross_dept_ticket(self):
+        """资源部门经理可看到本部门节点（DEPT_LEADER）的待审批工单
+
+        新矩阵下协作角色审批节点为 DEPT_LEADER(跨部门团队)或 KB_ADMIN(部门级跨部门),
+        不再产生 TEAM_LEADER 节点;为 dept_b 配置部门经理后,跨部门 viewer 申请
+        生成 DEPT_LEADER 节点,由该部门经理在待审批列表可见。
+        """
+        dept_b_leader = _create_user('deptb_mgr', department=self.dept_b)
+        _grant_global_role(dept_b_leader, 'dept_manager')
+        UserDeptScopeRel.objects.create(
+            user=dept_b_leader, role=_get_or_create_role('dept_manager'),
+            dept=self.dept_b, status=GrantStatus.ACTIVE,
+        )
         create_ticket(
             applicant=self.normal_user,
             target_user=self.normal_user,
             change_type=TicketChangeType.GRANT,
-            role=_get_or_create_role('contributor'),
+            role=_get_or_create_role('viewer'),
             scope_type=ScopeType.TEAM,
-            scope_id=self.team_a.id,
-            reason='本团队贡献者申请',
+            scope_id=self._team_c().id,
+            reason='跨部门查看市场一组资料',
         )
-        resp = self.client.get('/api/v1/auth/permissions/pending-approvals/', **self.leader_headers)
+        resp = self.client.get('/api/v1/auth/permissions/pending-approvals/',
+                               **_auth_headers(dept_b_leader))
         assert resp.status_code == 200
         rows = resp.json()['rows']
         assert len(rows) == 1
-        assert rows[0]['approver_role'] == 'TEAM_LEADER'
+        assert rows[0]['approver_role'] == 'DEPT_LEADER'
         assert rows[0]['target_user_name'] == 'normal'
 
     @pytest.mark.integration
@@ -352,7 +373,7 @@ class TestTicketApproveView(UsersAPIExtraBase):
         t.refresh_from_db()
         assert t.status == TicketStatus.EXECUTED
         assert UserTeamScopeRel.objects.filter(
-            user=t.target_user, role=t.role, team_id=self.team_b.id,
+            user=t.target_user, role=t.role, team_id=t.scope_id,
             status=GrantStatus.ACTIVE,
         ).exists()
 
@@ -532,15 +553,26 @@ class TestAssignableRolesView(UsersAPIExtraBase):
 
     @pytest.mark.integration
     def test_assignable_roles_200(self):
-        """GET 返回角色清单 → 200，排除 super_admin，按 rank 升序"""
+        """GET 返回自助申请清单 → 200，仅协作角色，按 rank 升序"""
         resp = self.client.get('/api/v1/auth/permissions/assignable-roles/', **self.normal_headers)
         assert resp.status_code == 200
         rows = resp.json()['rows']
         keys = {r['role_key'] for r in rows}
-        assert 'viewer' in keys and 'contributor' in keys and 'dept_manager' in keys
-        assert 'super_admin' not in keys  # 超管不可自助申请，不返回
+        # 管理岗(team_leader/dept_manager 等)一律走上级发起任命,不开放自助申请
+        assert keys == {'viewer', 'contributor'}
         ranks = [r['rank'] for r in rows]
         assert ranks == sorted(ranks)
+
+    @pytest.mark.integration
+    def test_management_roles_returns_management(self):
+        """purpose=management → 返回管理岗清单(供管理端发起任命)"""
+        resp = self.client.get(
+            '/api/v1/auth/permissions/assignable-roles/?purpose=management', **self.normal_headers)
+        rows = resp.json()['rows']
+        keys = {r['role_key'] for r in rows}
+        assert {'team_leader', 'dept_manager'} <= keys
+        assert 'super_admin' not in keys
+        assert 'viewer' not in keys  # 协作角色不属于管理岗清单
 
     @pytest.mark.integration
     def test_scope_type_filter(self):
@@ -613,15 +645,15 @@ class TestApprovalChainPreviewView(UsersAPIExtraBase):
 
     @pytest.mark.integration
     def test_preview_success(self):
-        """viewer 跨团队预览 → 200，组长缺失时返回降级后的超管单审链"""
+        """viewer 跨部门预览 → 200，目标部门经理缺失时返回降级后的超管单审链"""
         resp = self.client.get(
             f'/api/v1/auth/permissions/approval-chain-preview/'
-            f'?role_key=viewer&scope_type=TEAM&scope_id={self.team_b.id}',
+            f'?role_key=viewer&scope_type=TEAM&scope_id={self._team_c().id}',
             **self.normal_headers,
         )
         assert resp.status_code == 200
         data = resp.json()
         assert data['total_steps'] == 1
-        assert data['chain'][0]['approver_role'] == 'SUPER_ADMIN'  # 目标团队组长缺失 → 降级
-        assert data['scope_name'] == '前端组'
+        assert data['chain'][0]['approver_role'] == 'SUPER_ADMIN'  # 目标部门经理缺失 → 降级
+        assert data['scope_name'] == '市场一组'
 

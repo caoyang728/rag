@@ -6,6 +6,7 @@ apps.users.views
 - 用户导出/批量导出、搜索筛选、禁用/启用
 """
 import csv
+import datetime
 import io
 import re
 from loguru import logger
@@ -705,10 +706,15 @@ class UserViewSet(viewsets.ModelViewSet):
             return Response({"detail": conflict}, status=400)
         with transaction.atomic():
             user = User.objects.create(**ser.validated_data)
+            # department_id 需与密码一并持久化：save(update_fields) 只写指定字段，
+            # 否则部门赋值丢失(此前组长建人/带部门建人均不落库)
             if department_id is not None:
                 user.department_id = department_id
             user.set_password(pwd)
-            user.save(update_fields=['password'])
+            save_fields = ['password']
+            if department_id is not None:
+                save_fields.append('department_id')
+            user.save(update_fields=save_fields)
             # 批量创建角色关联
             if role_ids:
                 objs = [UserRoleRel(user=user, role_id=rid, status='ACTIVE', granted_by=u) for rid in role_ids]
@@ -1375,24 +1381,12 @@ class DepartmentViewSet(viewsets.ModelViewSet):
             return DepartmentWriteSerializer
         return DepartmentSerializer
 
-    def _set_leader(self, dept, leader_id):
-        """设置部门经理，如果 leader_id 为 None 则清除"""
-        if leader_id is not None:
-            leader = User.objects.filter(id=leader_id, is_deleted=False, status='active').first()
-            if not leader:
-                return False, "指定的用户不存在或已禁用"
-            dept.leader = leader
-        else:
-            dept.leader = None
-        dept.save(update_fields=['leader', 'updated_at'])
-        return True, ""
-
     def create(self, request, *args, **kwargs):
         self._check_can_manage_dept()
         data = request.data.copy()
         name = data.get("name", "").strip()
-        leader_id = data.get("leader_id")
-        # 清理非模型字段
+        # leader_id 不再直接写库:部门经理通过任命工单(GRANT dept_manager)设置,
+        # 审批通过后由工单执行同步 Department.leader_id
         data.pop("leader_id", None)
         if not data.get("code", "").strip():
             data["code"] = _auto_code(name)
@@ -1413,8 +1407,6 @@ class DepartmentViewSet(viewsets.ModelViewSet):
                 deleted_dept.save()
             except IntegrityError:
                 return Response({"detail": f"部门“{name}”已存在"}, status=400)
-            if leader_id is not None:
-                self._set_leader(deleted_dept, leader_id)
             logger.info(f"Department.create - restored deleted department: {deleted_dept.name}")
             return Response(DepartmentSerializer(deleted_dept).data, status=201)
 
@@ -1424,14 +1416,12 @@ class DepartmentViewSet(viewsets.ModelViewSet):
             dept = ser.save()
         except IntegrityError:
             return Response({"detail": f"部门“{name}”已存在"}, status=400)
-        if leader_id is not None:
-            self._set_leader(dept, leader_id)
         return Response(DepartmentSerializer(dept).data, status=201)
 
     def update(self, request, *args, **kwargs):
         self._check_can_manage_dept()
         dept = self.get_object()
-        leader_id = request.data.get("leader_id")
+        # leader_id 不再直接写库(同 create),部门经理通过任命工单设置
         data = {k: v for k, v in request.data.items() if k != 'leader_id'}
         ser = DepartmentWriteSerializer(dept, data=data, partial=kwargs.get('partial', False))
         ser.is_valid(raise_exception=True)
@@ -1439,10 +1429,6 @@ class DepartmentViewSet(viewsets.ModelViewSet):
             dept = ser.save()
         except IntegrityError:
             return Response({"detail": "部门编码冲突"}, status=400)
-        if 'leader_id' in request.data:
-            ok, msg = self._set_leader(dept, leader_id)
-            if not ok:
-                return Response({"detail": msg}, status=400)
         return Response(DepartmentSerializer(dept).data)
 
     def destroy(self, request, *args, **kwargs):
@@ -1669,25 +1655,14 @@ class TeamViewSet(viewsets.ModelViewSet):
             return TeamWriteSerializer
         return TeamSerializer
 
-    def _set_leader(self, team, leader_id):
-        """设置团队 leader，如果 leader_id 为 None 则清除"""
-        if leader_id is not None:
-            leader = User.objects.filter(id=leader_id, is_deleted=False, status='active').first()
-            if not leader:
-                return False, "指定的用户不存在或已禁用"
-            team.leader = leader
-        else:
-            team.leader = None
-        team.save(update_fields=['leader', 'updated_at'])
-        return True, ""
-
     def create(self, request, *args, **kwargs):
         logger.info(f"Team.create - request user: {request.user.username}, data: {request.data}")
 
         data = dict(request.data)
         name = data.get("name", "").strip()
         dept_id = data.get("department_id")
-        leader_id = data.get("leader_id")
+        # leader_id 不再直接写库:团队组长通过任命工单(GRANT team_leader)设置,
+        # 审批通过后由工单执行同步 Team.leader_id
         data.pop("leader_id", None)
 
         if not dept_id:
@@ -1730,8 +1705,6 @@ class TeamViewSet(viewsets.ModelViewSet):
                 deleted_team.save()
             except IntegrityError:
                 return Response({"detail": f"部门“{dept.name}”下已存在团队“{name}”"}, status=400)
-            if leader_id is not None:
-                self._set_leader(deleted_team, leader_id)
             logger.info(f"Team.create - restored deleted team: {deleted_team.name}, department_id: {dept_id}")
             return Response(TeamSerializer(deleted_team).data, status=201)
 
@@ -1743,8 +1716,6 @@ class TeamViewSet(viewsets.ModelViewSet):
                 department_id=dept_id,
                 description=data.get("description")
             )
-            if leader_id is not None:
-                self._set_leader(team, leader_id)
             logger.info(f"Team.create - success, team id: {team.id}, department_id: {team.department_id}")
             return Response(TeamSerializer(team).data, status=201)
         except IntegrityError:
@@ -1756,7 +1727,7 @@ class TeamViewSet(viewsets.ModelViewSet):
     def update(self, request, *args, **kwargs):
         team = self.get_object()
         self._check_can_manage_team(team.department_id)
-        leader_id = request.data.get("leader_id")
+        # leader_id 不再直接写库(同 create),团队组长通过任命工单设置
         data = {k: v for k, v in request.data.items() if k != 'leader_id'}
         ser = TeamWriteSerializer(team, data=data, partial=kwargs.get('partial', False))
         ser.is_valid(raise_exception=True)
@@ -1764,10 +1735,6 @@ class TeamViewSet(viewsets.ModelViewSet):
             team = ser.save()
         except IntegrityError:
             return Response({"detail": "团队编码冲突"}, status=400)
-        if 'leader_id' in request.data:
-            ok, msg = self._set_leader(team, leader_id)
-            if not ok:
-                return Response({"detail": msg}, status=400)
         return Response(TeamSerializer(team).data)
 
     def destroy(self, request, *args, **kwargs):
@@ -2015,8 +1982,68 @@ class AccessApplicationView(APIView):
 
     # 团队级角色(同 scope 内互斥,高等级覆盖低等级)
     TEAM_ROLE_KEYS = ('viewer', 'contributor', 'team_leader')
-    # 自助申请禁止的角色(只能由管理员发起工单)
-    SELF_APPLY_FORBIDDEN_KEYS = ('super_admin',)
+    # 管理岗/高权角色:仅允许上级(部门经理/用户管理员/超管)发起任命工单
+    SELF_APPLY_FORBIDDEN_KEYS = (
+        'team_leader', 'dept_manager',
+        'kb_admin', 'compliance_admin', 'user_admin', 'super_admin',
+    )
+    # 全局高权管理岗:仅用户管理员/超管可发起任命
+    GLOBAL_MANAGEMENT_KEYS = ('dept_manager', 'kb_admin', 'compliance_admin', 'user_admin')
+
+    def _can_nominate(self, user, role_key, scope_type, scope_id):
+        """上级发起任命的权限判定(管理岗专用)
+
+        判定规则(遵循权限模型:超管快路径,其余走 permission_key 判定):
+        - 超管:可发起任何管理岗任命
+        - team_leader:目标团队所属部门的部门经理(dept_manager 授权)或用户管理员可发起
+        - dept_manager/kb_admin/compliance_admin/user_admin:仅用户管理员/超管可发起
+        """
+        from apps.users.models import ScopeType
+        if user.is_super_admin:
+            return True
+        if role_key in self.GLOBAL_MANAGEMENT_KEYS:
+            return user.is_user_admin
+        if role_key == 'team_leader':
+            if user.is_user_admin:
+                return True
+            # 目标团队所属部门解析:scope_type=TEAM → team.department_id;DEPT → scope_id 即部门
+            dept_id = None
+            if scope_type == ScopeType.TEAM and scope_id:
+                dept_id = Team.objects.filter(
+                    id=scope_id, is_deleted=False,
+                ).values_list('department_id', flat=True).first()
+            elif scope_type == ScopeType.DEPT and scope_id:
+                dept_id = scope_id
+            if not dept_id:
+                return False
+            from apps.users.ticket_service import _get_dept_leader_id
+            # 仅本部门经理可任命本部门团队组长(避免跨部门越权)
+            return _get_dept_leader_id(dept_id) == user.id
+        return False
+
+    def _is_resource_owner(self, user, scope_type, scope_id):
+        """协作角色(viewer/contributor)提单人身份校验 —— 资源所有者原则
+
+        定稿规则:协作角色授权由"资源所有者"提单,即权限所在的组织管理者:
+        - scope_type=TEAM:必须是目标团队(scope_id)的组长(team.leader_id)
+        - scope_type=DEPT:必须是目标部门(scope_id)的部门经理(dept_manager 授权)
+        - 超管可兜底发起
+
+        提单人即工单发起人,不能同时是审批人(回避原则由审批链自动保证)。
+        """
+        from apps.users.models import ScopeType
+        if user.is_super_admin:
+            return True
+        if scope_type == ScopeType.TEAM and scope_id:
+            # 资源团队组长:team.leader_id 直接匹配
+            return Team.objects.filter(
+                id=scope_id, is_deleted=False, leader_id=user.id,
+            ).exists()
+        if scope_type == ScopeType.DEPT and scope_id:
+            from apps.users.ticket_service import _get_dept_leader_id
+            # 资源部门经理:以 dept_manager 授权为准(兼容 leader_id 双来源)
+            return _get_dept_leader_id(scope_id) == user.id
+        return False
 
     def get(self, request):
         """返回当前用户发起的工单列表,字段对齐 PermissionApprovalTicket 真实结构"""
@@ -2085,7 +2112,7 @@ class AccessApplicationView(APIView):
     def post(self, request):
         from apps.users.models import (
             Role, ScopeType, TicketChangeType, UserRoleRel,
-            UserTeamScopeRel, GrantStatus,
+            UserTeamScopeRel, GrantStatus, User,
         )
         from apps.users.ticket_service import create_ticket
 
@@ -2097,6 +2124,7 @@ class AccessApplicationView(APIView):
         reason = (request.data.get('reason') or '').strip()
         effective_from = request.data.get('effective_from')
         expires_at = request.data.get('expires_at')
+        target_user_id = request.data.get('target_user_id')
 
         # ── 字段校验 ──
         if not role_key:
@@ -2119,9 +2147,64 @@ class AccessApplicationView(APIView):
         if not role:
             return Response({'detail': f'角色不存在: {role_key}'}, status=400)
 
-        # super_admin 不可自助申请(只能由现有超管发起双人复核工单)
+        # ── 管理岗校验:禁止自助申请,仅允许上级发起任命 ──
+        # 管理岗(team_leader/dept_manager/kb_admin/compliance_admin/user_admin/super_admin)
+        # 必须指定被任命者(target_user_id)且不能是申请人自己,并校验发起人任命权限;
+        # 协作角色(viewer/contributor)仍为自助申请,被授权对象即申请人自身。
         if role_key in self.SELF_APPLY_FORBIDDEN_KEYS:
-            return Response({'detail': '超级管理员角色不可自助申请,请联系现有超管发起工单'}, status=403)
+            if change_type != TicketChangeType.GRANT:
+                return Response(
+                    {'detail': '管理岗撤销请由管理端处理,本接口仅支持任命(GRANT)'}, status=400,
+                )
+            try:
+                target_user_id = int(target_user_id) if target_user_id else None
+            except (TypeError, ValueError):
+                target_user_id = None
+            if not target_user_id or target_user_id == request.user.id:
+                return Response(
+                    {'detail': '该角色为管理岗,不能自助申请,请由上级(部门经理/用户管理员)发起任命'},
+                    status=403,
+                )
+            target_user = User.objects.filter(
+                id=target_user_id, is_deleted=False, status='active',
+            ).first()
+            if not target_user:
+                return Response({'detail': '指定的被任命用户不存在或已禁用'}, status=400)
+            if not self._can_nominate(request.user, role_key, scope_type, scope_id):
+                return Response({'detail': '当前用户无权发起该角色的任命工单'}, status=403)
+        else:
+            # 协作角色(viewer/contributor):资源所有者(组长/部门经理)提单(定稿)
+            # 定稿:本团队/本部门其他团队 → 资源团队组长提单自动生效;部门级本部门 → 部门经理提单自动生效;
+            # 跨部门团队 → 资源部门经理批准;部门级跨部门 → kb_admin 审核。
+            # 不再支持员工自助申请(前端申请入口已下线),统一由资源所有者代提单。
+            if change_type not in (
+                TicketChangeType.GRANT, TicketChangeType.REVOKE,
+                TicketChangeType.ROLE_CHANGE,
+            ):
+                return Response({'detail': 'change_type 取值应为 GRANT/REVOKE/ROLE_CHANGE'}, status=400)
+            if scope_type not in (ScopeType.TEAM, ScopeType.DEPT):
+                return Response(
+                    {'detail': 'viewer/contributor 必须绑定团队(TEAM)或部门(DEPT)范围'}, status=400,
+                )
+            try:
+                target_user_id = int(target_user_id) if target_user_id else None
+            except (TypeError, ValueError):
+                target_user_id = None
+            if not target_user_id or target_user_id == request.user.id:
+                return Response(
+                    {'detail': '协作角色授权须由资源团队组长/部门经理指定被授权人提单'},
+                    status=403,
+                )
+            target_user = User.objects.filter(
+                id=target_user_id, is_deleted=False, status='active',
+            ).first()
+            if not target_user:
+                return Response({'detail': '指定的被授权用户不存在或已禁用'}, status=400)
+            if not self._is_resource_owner(request.user, scope_type, scope_id):
+                return Response(
+                    {'detail': '当前用户无权提单,协作角色授权须由资源团队组长/部门经理发起'},
+                    status=403,
+                )
 
         # ── ROLE_CHANGE previous_role 解析 ──
         # 注:同团队角色互斥检测已下沉到 create_ticket 服务层,
@@ -2134,6 +2217,14 @@ class AccessApplicationView(APIView):
             if not previous_role:
                 return Response({'detail': 'previous_role_id 对应角色不存在'}, status=400)
 
+        # ── 管理岗默认有效期 1 年 ──
+        # 定稿:管理岗(team_leader/dept_manager/kb_admin/compliance_admin/user_admin/super_admin)
+        # 任命时若未指定有效期,默认授予 1 年。到期需重新授权,避免管理权限长期悬挂。
+        if (role_key in self.SELF_APPLY_FORBIDDEN_KEYS
+                and change_type == TicketChangeType.GRANT
+                and not expires_at):
+            expires_at = timezone.now() + datetime.timedelta(days=365)
+
         # ── 调用工单服务创建审批工单 ──
         # create_ticket 内部会自动检测同团队角色互斥并转为 ROLE_CHANGE
         ip = _client_ip(request)
@@ -2141,7 +2232,7 @@ class AccessApplicationView(APIView):
         try:
             ticket = create_ticket(
                 applicant=request.user,
-                target_user=request.user,  # 自助申请:被授权对象为申请人自身
+                target_user=target_user,  # 资源所有者提单=被授权人;管理岗任命=被任命者
                 change_type=change_type,
                 role=role,
                 scope_type=scope_type,
@@ -2264,6 +2355,7 @@ class PendingApprovalTicketsView(APIView):
                 'id': ticket.id,
                 'ticket_no': ticket.ticket_no,
                 'change_type': ticket.change_type,
+                'status': ticket.status,
                 'applicant_id': ticket.applicant_id,
                 'applicant_name': ticket.applicant.real_name or ticket.applicant.username,
                 'applicant_email': ticket.applicant.email or '',
@@ -2602,6 +2694,14 @@ class AssignableRolesView(APIView):
     """
     permission_classes = [IsAuthenticated]
 
+    # 自助申请角色(协作角色) — 管理岗一律走上级发起任命,不开放自助申请
+    SELF_APPLY_ROLE_KEYS = ('viewer', 'contributor')
+    # 管理岗/高权角色 — 仅允许上级(部门经理/用户管理员/超管)发起任命工单
+    MANAGEMENT_ROLE_KEYS = (
+        'team_leader', 'dept_manager',
+        'kb_admin', 'compliance_admin', 'user_admin',
+    )
+
     # 角色分类(前端按分类分组展示)
     ROLE_CATEGORY_MAP = {
         'viewer': {'category': 'team', 'category_label': '团队角色', 'rank': 1},
@@ -2616,22 +2716,32 @@ class AssignableRolesView(APIView):
 
     # 审批链概要(前端展示用,不包含具体审批人)
     APPROVAL_CHAIN_SUMMARY = {
-        'viewer': {'steps': ['目标团队组长'], 'desc': '目标团队组长单审(缺失降级)'},
-        'contributor': {'steps': ['本团队组长', '目标团队组长'], 'desc': '本团队组长 → 目标团队组长 双审(跨团队);本团队单审'},
-        'team_leader': {'steps': ['本部门经理', '目标部门经理'], 'desc': '本部门经理 → 目标部门经理 双审(跨部门);本部门单审'},
-        'dept_manager': {'steps': ['用户管理员', '超级管理员'], 'desc': '用户管理员 → 超管 双审'},
-        'kb_admin': {'steps': ['用户管理员', '超级管理员'], 'desc': '用户管理员 → 超管 双审'},
-        'compliance_admin': {'steps': ['用户管理员', '超级管理员'], 'desc': '用户管理员 → 超管 双审'},
-        'user_admin': {'steps': ['超级管理员', '超级管理员'], 'desc': '双超管复核(排除申请人,双人独立)'},
-        'super_admin': {'steps': ['超级管理员', '超级管理员'], 'desc': '双超管复核(排除申请人,双人独立)'},
+        'viewer': {'steps': ['组长/部门经理提单'], 'desc': '本团队/本部门其他团队组长提单自动生效;部门级本部门部门经理提单自动生效;跨部门团队由资源部门经理批准,部门级跨部门由文档管理员审核'},
+        'contributor': {'steps': ['组长/部门经理提单'], 'desc': '本团队/本部门其他团队组长提单自动生效;部门级本部门部门经理提单自动生效;跨部门团队由资源部门经理批准,部门级跨部门由文档管理员审核'},
+        'team_leader': {'steps': ['人员管理'], 'desc': '部门经理发起,人员管理审批(超管兜底)'},
+        'dept_manager': {'steps': ['用户管理员', '超级管理员'], 'desc': '人员管理发起,另一人员管理审批,超管复核'},
+        'kb_admin': {'steps': ['用户管理员', '超级管理员'], 'desc': '人员管理发起,另一人员管理审批,超管复核'},
+        'compliance_admin': {'steps': ['用户管理员', '超级管理员'], 'desc': '人员管理发起,另一人员管理审批,超管复核'},
+        'user_admin': {'steps': ['超级管理员', '超级管理员'], 'desc': '人员管理发起,双超管审批+复核(双人独立)'},
+        'super_admin': {'steps': ['超级管理员', '超级管理员'], 'desc': '人员管理发起,双超管审批+复核(双人独立)'},
     }
 
     def get(self, request):
         from apps.users.models import Role, ScopeType
 
+        # purpose=self 返回自助申请清单(协作角色);purpose=management 返回管理岗清单(管理端任命用)
+        purpose = (request.query_params.get('purpose') or 'self').strip()
         scope_filter = (request.query_params.get('scope_type') or '').strip()
-        # super_admin 不可自助申请,从返回清单中排除
-        roles = Role.objects.filter(is_deleted=False).exclude(role_key='super_admin').order_by('id')
+        if purpose == 'management':
+            # 管理岗清单:供管理端发起任命工单使用(super_admin 不在此列,超管任命走用户编辑接口)
+            roles = Role.objects.filter(
+                is_deleted=False, role_key__in=self.MANAGEMENT_ROLE_KEYS,
+            ).order_by('id')
+        else:
+            # 自助申请清单:仅协作角色(viewer/contributor)
+            roles = Role.objects.filter(
+                is_deleted=False, role_key__in=self.SELF_APPLY_ROLE_KEYS,
+            ).order_by('id')
 
         rows = []
         for r in roles:
@@ -2652,9 +2762,20 @@ class AssignableRolesView(APIView):
             chain_info = self.APPROVAL_CHAIN_SUMMARY.get(r.role_key, {'steps': [], 'desc': ''})
             # 需要绑定 scope 的角色类型
             need_scope = r.role_type in ('TEAM_SCOPE', 'DEPT_SCOPE')
-            scope_type_required = ScopeType.TEAM if r.role_key in (
-                'viewer', 'contributor', 'team_leader',
-            ) else (ScopeType.DEPT if r.role_key == 'dept_manager' else ScopeType.NONE)
+            # viewer/contributor 团队级与部门级均可授权(定稿开放部门级);
+            # 用 'TEAM|DEPT' 表达双范围,前端按 supported_scopes 渲染选择器。
+            if r.role_key in ('viewer', 'contributor'):
+                scope_type_required = 'TEAM|DEPT'
+                supported_scopes = [ScopeType.TEAM, ScopeType.DEPT]
+            elif r.role_key in ('team_leader',):
+                scope_type_required = ScopeType.TEAM
+                supported_scopes = [ScopeType.TEAM]
+            elif r.role_key == 'dept_manager':
+                scope_type_required = ScopeType.DEPT
+                supported_scopes = [ScopeType.DEPT]
+            else:
+                scope_type_required = ScopeType.NONE
+                supported_scopes = [ScopeType.NONE]
 
             rows.append({
                 'id': r.id,
@@ -2668,6 +2789,7 @@ class AssignableRolesView(APIView):
                 'rank': meta['rank'],
                 'need_scope': need_scope,
                 'scope_type_required': scope_type_required,
+                'supported_scopes': supported_scopes,
                 'approval_steps': chain_info['steps'],
                 'approval_desc': chain_info['desc'],
                 'is_builtin': r.is_builtin,

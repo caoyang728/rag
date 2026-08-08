@@ -5,6 +5,7 @@ from django.contrib.auth import get_user_model
 from apps.users.models import (
     Department, Team, Role, Permission,
     UserRoleRel, get_user_permissions,
+    get_user_managed_depts, get_user_managed_teams,
 )
 
 User = get_user_model()
@@ -60,29 +61,21 @@ class TeamSerializer(serializers.ModelSerializer):
 
 
 class DepartmentWriteSerializer(serializers.ModelSerializer):
-    leader_id = serializers.IntegerField(required=False, allow_null=True)
+    # leader_id 只读展示:部门经理通过任命工单(GRANT dept_manager)设置,审批通过后同步
+    leader_id = serializers.IntegerField(source="leader.id", read_only=True, allow_null=True, default=None)
 
     class Meta:
         model = Department
         fields = ["name", "code", "parent_id", "leader_id", "sort_order"]
 
-    def validate_leader_id(self, value):
-        if value is not None and not User.objects.filter(id=value, is_deleted=False, status='active').exists():
-            raise serializers.ValidationError("指定的用户不存在或已禁用")
-        return value
-
 
 class TeamWriteSerializer(serializers.ModelSerializer):
-    leader_id = serializers.IntegerField(required=False, allow_null=True)
+    # leader_id 只读展示:团队组长通过任命工单(GRANT team_leader)设置,审批通过后同步
+    leader_id = serializers.IntegerField(source="leader.id", read_only=True, allow_null=True, default=None)
 
     class Meta:
         model = Team
         fields = ["name", "code", "description", "department_id", "leader_id"]
-
-    def validate_leader_id(self, value):
-        if value is not None and not User.objects.filter(id=value, is_deleted=False, status='active').exists():
-            raise serializers.ValidationError("指定的用户不存在或已禁用")
-        return value
 
 
 class RoleSerializer(serializers.ModelSerializer):
@@ -127,6 +120,10 @@ class UserSerializer(serializers.ModelSerializer):
     department_name = serializers.CharField(source="department.name", read_only=True, default="")
     permission_map = serializers.SerializerMethodField()
     team = serializers.SerializerMethodField()
+    # 管辖范围:供组织架构页对组长/部门经理的授权入口做数据过滤
+    # (super_admin 不设限,前端按角色另行放行)
+    managed_team_ids = serializers.SerializerMethodField()
+    managed_dept_ids = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -136,6 +133,7 @@ class UserSerializer(serializers.ModelSerializer):
             "last_login_at", "last_login_ip",
             "created_at", "updated_at", "roles", "team",
             "permission_map", "is_deleted",
+            "managed_team_ids", "managed_dept_ids",
         ]
         read_only_fields = ["last_login_at", "last_login_ip", "created_at", "updated_at", "is_deleted"]
 
@@ -202,6 +200,15 @@ class UserSerializer(serializers.ModelSerializer):
             "code": team.code,
             "department_id": team.department_id,
         }
+
+    def get_managed_team_ids(self, obj):
+        # 管辖团队集合(含本团队):组织架构页对组长/部门经理过滤"授权成员"入口
+        # 复用 L3 缓存(perm:scope:team:{uid}),super_admin 前端按角色直接放行
+        return sorted(get_user_managed_teams(obj))
+
+    def get_managed_dept_ids(self, obj):
+        # 管辖部门集合(属地授权部门):部门经理在本部门发起部门级/团队级授权时过滤范围
+        return sorted(get_user_managed_depts(obj))
 
 
 class UserListSerializer(serializers.ModelSerializer):

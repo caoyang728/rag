@@ -99,7 +99,7 @@ function renderBasicTab(box) {
 	if (nameEl) nameEl.textContent = escapeHtml(u.name);
 
 	const roleDeptEl = box.querySelector('#pf-role-dept');
-	if (roleDeptEl) roleDeptEl.textContent = escapeHtml(u.role) + ' · ' + escapeHtml(u.dept) + ' / ' + escapeHtml(u.team);
+	if (roleDeptEl) roleDeptEl.textContent = escapeHtml(u.dept) + ' / ' + escapeHtml(u.team);
 
 	const metaEl = box.querySelector('#pf-meta');
 	if (metaEl) {
@@ -122,9 +122,6 @@ function renderBasicTab(box) {
 
 	const phoneInput = box.querySelector('#profilePhone');
 	if (phoneInput) phoneInput.value = u.phone || '';
-
-	const roleInput = box.querySelector('#pf-role');
-	if (roleInput) roleInput.value = u.role || '';
 }
 
 /* ============ 我的记忆 ============ */
@@ -436,7 +433,7 @@ async function changePassword() {
 	}
 }
 
-/* ============ 我的权限 / 权限申请 ============ */
+/* ============ 我的权限 ============ */
 // 模块标签(权限点分组展示用)
 const MODULE_LABELS = {
 	kb: '知识库', user: '用户管理', audit: '审计', system: '系统',
@@ -458,9 +455,6 @@ const CHANGE_TYPE_LABELS = {
 };
 // scope 类型标签(对齐 ScopeType)
 const SCOPE_TYPE_LABELS = { TEAM: '团队', DEPT: '部门', GLOBAL: '全局', NONE: '全局' };
-
-// 可申请角色清单缓存(打开弹窗时加载,选择角色时读取审批链概要)
-let _assignableRolesCache = [];
 
 async function loadMyPermissions() {
 	const rolesBox = document.getElementById('myRolesList');
@@ -585,325 +579,7 @@ async function loadPermissionApplications() {
 	}
 }
 
-/* ---- 申请弹窗:角色选择 + scope + 有效期 + 审批链预览 ---- */
-function openPermissionApplyModal() {
-	// 重置表单
-	document.getElementById('applyRoleKey').value = '';
-	document.getElementById('applyScopeId').innerHTML = '<option value="">请选择</option>';
-	document.getElementById('applyReason').value = '';
-	// 默认不勾选长期,需要填写日期
-	document.getElementById('applyPermanent').checked = false;
-	document.getElementById('applyExpiresAt').value = '';
-	document.getElementById('applyExpiresAt').style.display = '';
-	document.getElementById('applyRoleDesc').style.display = 'none';
-	document.getElementById('applyScopeWrap').style.display = 'none';
-	document.getElementById('applyDeptId').style.display = 'none';
-	document.getElementById('applyDeptId').innerHTML = '<option value="">请选择部门</option>';
-	document.getElementById('applyChainPreview').textContent = '请先选择角色和范围';
-	// 加载可申请角色清单
-	loadAssignableRoles();
-	const modal = document.getElementById('modal-permission-apply');
-	const mask = document.getElementById('mask');
-	if (modal) modal.classList.add('show');
-	if (mask) mask.classList.add('show');
-}
-
-// 切换"长期有效"勾选:勾选后隐藏日期框,取消勾选恢复显示
-function onApplyPermanentChange() {
-	const checked = document.getElementById('applyPermanent').checked;
-	const dateInput = document.getElementById('applyExpiresAt');
-	dateInput.style.display = checked ? 'none' : '';
-	if (checked) dateInput.value = '';
-}
-
-function closePermissionApplyModal() {
-	const modal = document.getElementById('modal-permission-apply');
-	const mask = document.getElementById('mask');
-	if (modal) modal.classList.remove('show');
-	if (mask) mask.classList.remove('show');
-}
-
-// 加载可申请角色清单(从 assignable-roles 接口)
-async function loadAssignableRoles() {
-	const select = document.getElementById('applyRoleKey');
-	if (!select) return;
-	select.innerHTML = '<option value="">加载中...</option>';
-	try {
-		const data = await api.getJson('/api/v1/auth/permissions/assignable-roles/');
-		_assignableRolesCache = data.rows || [];
-		if (_assignableRolesCache.length === 0) {
-			select.innerHTML = '<option value="">暂无可申请角色</option>';
-			return;
-		}
-		// 按 category 分组生成 optgroup(category_label 为空时归入"其他")
-		const groups = {};
-		_assignableRolesCache.forEach(r => {
-			const label = r.category_label || '其他';
-			if (!groups[label]) groups[label] = [];
-			groups[label].push(r);
-		});
-		let html = '<option value="">请选择角色</option>';
-		Object.entries(groups).forEach(([label, items]) => {
-			html += `<optgroup label="${escapeHtml(label)}">`;
-			items.forEach(r => {
-				html += `<option value="${escapeHtml(r.role_key)}" data-need-scope="${r.need_scope}" data-scope-type="${r.scope_type_required}">${escapeHtml(r.name)}</option>`;
-			});
-			html += '</optgroup>';
-		});
-		select.innerHTML = html;
-	} catch (e) {
-		console.error('load assignable roles failed:', e);
-		select.innerHTML = '<option value="">加载失败</option>';
-	}
-}
-
-// 角色选择变更:展示角色说明 + 动态加载 scope 选项 + 刷新审批链预览
-function onApplyRoleChange() {
-	const roleKey = document.getElementById('applyRoleKey').value;
-	const descEl = document.getElementById('applyRoleDesc');
-	const scopeWrap = document.getElementById('applyScopeWrap');
-	const deptSelect = document.getElementById('applyDeptId');
-	const scopeSelect = document.getElementById('applyScopeId');
-	const scopeHint = document.getElementById('applyScopeHint');
-
-	if (!roleKey) {
-		descEl.style.display = 'none';
-		scopeWrap.style.display = 'none';
-		deptSelect.style.display = 'none';
-		_refreshChainPreview();
-		return;
-	}
-
-	const role = _assignableRolesCache.find(r => r.role_key === roleKey);
-	if (!role) return;
-
-	// 展示角色说明 + 审批链概要
-	descEl.innerHTML = escapeHtml(role.description || role.name) +
-		`<br>审批流:${escapeHtml(role.approval_desc || '—')}`;
-	descEl.style.display = '';
-
-	// 动态加载 scope 选项
-	if (role.need_scope && role.scope_type_required) {
-		scopeWrap.style.display = '';
-		scopeSelect.innerHTML = '<option value="">请选择</option>';
-		if (role.scope_type_required === 'TEAM') {
-			// 团队角色:先选部门再选团队(级联),避免几百个团队平铺难找
-			deptSelect.style.display = '';
-			scopeHint.textContent = '先选择部门,再选择团队';
-			_loadDeptOptionsForCascade();
-		} else {
-			// 部门角色:直接选部门,隐藏级联部门框
-			deptSelect.style.display = 'none';
-			scopeHint.textContent = '选择目标部门';
-			_loadScopeOptions('DEPT');
-		}
-	} else {
-		scopeWrap.style.display = 'none';
-		deptSelect.style.display = 'none';
-		scopeSelect.value = '';
-	}
-
-	_refreshChainPreview();
-}
-
-// 加载部门列表(用于团队级联选择的第一级)
-async function _loadDeptOptionsForCascade() {
-	const select = document.getElementById('applyDeptId');
-	if (!select) return;
-	// 已加载过则不重复请求
-	if (select.dataset.loaded === '1' && select.options.length > 1) return;
-	select.innerHTML = '<option value="">加载中...</option>';
-	try {
-		const data = await api.getJson('/api/v1/auth/departments/');
-		const depts = data.results || data.rows || data || [];
-		const arr = Array.isArray(depts) ? depts : [];
-		select.innerHTML = '<option value="">请选择部门</option>' +
-			arr.map(d => `<option value="${d.id}">${escapeHtml(d.name)}</option>`).join('');
-		select.dataset.loaded = '1';
-	} catch (e) {
-		console.error('load dept for cascade failed:', e);
-		select.innerHTML = '<option value="">加载失败</option>';
-	}
-}
-
-// 部门变更:按部门加载团队列表(级联第二级)
-function onApplyDeptChange() {
-	const deptId = document.getElementById('applyDeptId').value;
-	const teamSelect = document.getElementById('applyScopeId');
-	if (!deptId) {
-		teamSelect.innerHTML = '<option value="">请先选择部门</option>';
-		_refreshChainPreview();
-		return;
-	}
-	_loadTeamOptionsByDept(deptId);
-}
-
-// 按部门 ID 加载团队列表
-async function _loadTeamOptionsByDept(deptId) {
-	const select = document.getElementById('applyScopeId');
-	if (!select) return;
-	select.innerHTML = '<option value="">加载中...</option>';
-	try {
-		const data = await api.getJson(`/api/v1/auth/teams/?department_id=${deptId}`);
-		const teams = data.results || data.rows || data || [];
-		const arr = Array.isArray(teams) ? teams : [];
-		if (arr.length === 0) {
-			select.innerHTML = '<option value="">该部门下暂无团队</option>';
-		} else {
-			select.innerHTML = '<option value="">请选择团队</option>' +
-				arr.map(t => `<option value="${t.id}">${escapeHtml(t.name)}</option>`).join('');
-		}
-	} catch (e) {
-		console.error('load teams by dept failed:', e);
-		select.innerHTML = '<option value="">加载失败</option>';
-	}
-	_refreshChainPreview();
-}
-
-// 加载 scope 选项(团队/部门列表)
-async function _loadScopeOptions(scopeType) {
-	const select = document.getElementById('applyScopeId');
-	if (!select) return;
-	select.innerHTML = '<option value="">加载中...</option>';
-	try {
-		if (scopeType === 'TEAM') {
-			const data = await api.getJson('/api/v1/auth/teams/');
-			const teams = data.results || data.rows || data || [];
-			const arr = Array.isArray(teams) ? teams : [];
-			select.innerHTML = '<option value="">请选择团队</option>' +
-				arr.map(t => `<option value="${t.id}">${escapeHtml(t.name)}</option>`).join('');
-		} else if (scopeType === 'DEPT') {
-			const data = await api.getJson('/api/v1/auth/departments/');
-			const depts = data.results || data.rows || data || [];
-			const arr = Array.isArray(depts) ? depts : [];
-			select.innerHTML = '<option value="">请选择部门</option>' +
-				arr.map(d => `<option value="${d.id}">${escapeHtml(d.name)}</option>`).join('');
-		}
-	} catch (e) {
-		console.error('load scope options failed:', e);
-		select.innerHTML = '<option value="">加载失败</option>';
-	}
-}
-
-// scope 选择变更:刷新审批链预览
-function onApplyScopeChange() {
-	_refreshChainPreview();
-}
-
-// 审批链预览请求序号(防止快速切换时旧请求覆盖新结果)
-let _chainPreviewSeq = 0;
-
-// 刷新审批链预览(选择角色 + scope 后调用)
-async function _refreshChainPreview() {
-	const roleKey = document.getElementById('applyRoleKey').value;
-	const scopeSelect = document.getElementById('applyScopeId');
-	const previewEl = document.getElementById('applyChainPreview');
-
-	if (!roleKey) {
-		previewEl.textContent = '请先选择角色和范围';
-		return;
-	}
-
-	const role = _assignableRolesCache.find(r => r.role_key === roleKey);
-	let scopeType = 'NONE';
-	let scopeId = '';
-	if (role && role.need_scope && role.scope_type_required) {
-		scopeType = role.scope_type_required;
-		scopeId = scopeSelect.value;
-		if (!scopeId) {
-			previewEl.textContent = '请选择' + (scopeType === 'TEAM' ? '团队' : '部门') + '后查看审批链';
-			return;
-		}
-	}
-
-	// 自增序号:仅最新一次请求的结果会渲染,避免快速切换时旧响应覆盖新结果
-	const seq = ++_chainPreviewSeq;
-	previewEl.textContent = '加载审批链...';
-	try {
-		const params = new URLSearchParams({ role_key: roleKey, scope_type: scopeType });
-		if (scopeId) params.set('scope_id', scopeId);
-		const data = await api.getJson('/api/v1/auth/permissions/approval-chain-preview/?' + params.toString());
-		if (seq !== _chainPreviewSeq) return;  // 已被新请求取代,丢弃本次结果
-		if (data.is_direct_execute) {
-			previewEl.innerHTML = '<span style="color:var(--success)">✓ 无需审批,提交后直接生效</span>';
-			return;
-		}
-		const chain = data.chain || [];
-		if (chain.length === 0) {
-			previewEl.textContent = '无法构造审批链,请联系管理员';
-			return;
-		}
-		// 渲染审批链步骤
-		const stepsHtml = chain.map((n, i) => {
-			const scopeTxt = n.approver_scope_name ? `(${escapeHtml(n.approver_scope_name)})` : '';
-			return `<div>${i + 1}. ${escapeHtml(n.approver_role_label)}${scopeTxt}</div>`;
-		}).join('');
-		previewEl.innerHTML = `<div style="color:var(--text)">共 ${chain.length} 步审批:</div>${stepsHtml}`;
-	} catch (e) {
-		if (seq !== _chainPreviewSeq) return;  // 已被新请求取代,静默丢弃
-		console.error('load chain preview failed:', e);
-		previewEl.textContent = '审批链加载失败';
-	}
-}
-
-async function submitPermissionApplication() {
-	const roleKey = document.getElementById('applyRoleKey').value;
-	const scopeSelect = document.getElementById('applyScopeId');
-	const reason = document.getElementById('applyReason').value.trim();
-	const isPermanent = document.getElementById('applyPermanent').checked;
-	const expiresAt = document.getElementById('applyExpiresAt').value;
-
-	if (!roleKey) { toast('请选择申请角色', 'error'); return; }
-	if (!reason) { toast('请填写申请理由', 'error'); return; }
-	// 未勾选长期时必须填写有效期,且不能早于今天
-	if (!isPermanent) {
-		if (!expiresAt) { toast('请填写有效期,或勾选"长期有效"', 'error'); return; }
-		const today = new Date();
-		today.setHours(0, 0, 0, 0);
-		if (new Date(expiresAt) < today) {
-			toast('有效期不能早于今天', 'error');
-			return;
-		}
-	}
-
-	const role = _assignableRolesCache.find(r => r.role_key === roleKey);
-	const payload = {
-		role_key: roleKey,
-		change_type: 'GRANT',  // 后端会自动检测同团队已有角色并转为 ROLE_CHANGE
-		reason: reason,
-	};
-	if (!isPermanent && expiresAt) {
-		// date input 返回 "YYYY-MM-DD",补到当天 23:59:59,避免当天 00:00 即过期
-		payload.expires_at = expiresAt + 'T23:59:59';
-	}
-
-	// 团队/部门角色需带 scope
-	if (role && role.need_scope && role.scope_type_required) {
-		const scopeId = scopeSelect.value;
-		if (!scopeId || isNaN(parseInt(scopeId))) {
-			toast('请选择' + (role.scope_type_required === 'TEAM' ? '团队' : '部门'), 'error');
-			return;
-		}
-		payload.scope_type = role.scope_type_required;
-		payload.scope_id = parseInt(scopeId);
-	} else {
-		// 全局角色无 scope
-		payload.scope_type = 'NONE';
-	}
-
-	try {
-		const res = await api.postJson('/api/v1/auth/permissions/applications/', payload);
-		toast(res.detail || '申请已提交', 'success');
-		closePermissionApplyModal();
-		loadPermissionApplications();
-		// 刷新权限展示(可能直接生效)
-		loadMyPermissions();
-	} catch (e) {
-		console.error('submit application failed:', e);
-		toast(e.message || '提交失败', 'error');
-	}
-}
-
+/* ============ 撤回申请记录 ============ */
 async function withdrawApplication(id) {
 	if (!confirm('确定撤回此申请?')) return;
 	try {

@@ -38,58 +38,6 @@
 	<div id="mask" class="mask"></div>
 	<div id="toast-wrap" class="toast-wrap"></div>
 
-	<!-- 申请权限弹窗 -->
-	<div class="modal" id="modal-permission-apply">
-		<div class="modal-header">
-			<div class="modal-title">申请权限</div>
-			<button class="modal-close" onclick="closePermissionApplyModal()">✕</button>
-		</div>
-		<div class="modal-body">
-			<div class="form-item">
-				<label class="form-label">申请角色 <span class="required">*</span></label>
-				<select class="select" id="applyRoleKey" onchange="onApplyRoleChange()">
-					<option value="">请选择角色</option>
-				</select>
-				<div id="applyRoleDesc" class="form-hint" style="display:none"></div>
-			</div>
-			<div class="form-item" id="applyScopeWrap" style="display:none">
-				<label class="form-label">申请范围 <span class="required">*</span></label>
-				<!-- 团队角色:先选部门再选团队(级联),避免几百个团队平铺难以查找 -->
-				<select class="select" id="applyDeptId" onchange="onApplyDeptChange()"
-					style="display:none;margin-bottom:8px">
-					<option value="">请选择部门</option>
-				</select>
-				<select class="select" id="applyScopeId" onchange="onApplyScopeChange()">
-					<option value="">请选择</option>
-				</select>
-				<div id="applyScopeHint" class="form-hint"></div>
-			</div>
-			<div class="form-item">
-				<label class="form-label">有效期至 <span class="required">*</span></label>
-				<div class="flex items-center gap-8" style="margin-bottom:8px">
-					<label class="flex items-center gap-4" style="cursor:pointer;font-size:13px;color:var(--text-sub)">
-						<input type="checkbox" id="applyPermanent" onchange="onApplyPermanentChange()"> 长期有效
-					</label>
-				</div>
-				<input class="input" type="date" id="applyExpiresAt">
-			</div>
-			<div class="form-item">
-				<label class="form-label">审批链预览</label>
-				<div id="applyChainPreview">
-					请先选择角色和范围
-				</div>
-			</div>
-			<div class="form-item">
-				<label class="form-label">申请理由 <span class="required">*</span></label>
-				<textarea class="textarea" id="applyReason" placeholder="请简要说明为什么需要此权限..."></textarea>
-			</div>
-		</div>
-		<div class="modal-footer">
-			<button class="btn-cancel" onclick="closePermissionApplyModal()">取消</button>
-			<button class="btn-save" onclick="submitPermissionApplication()">提交申请</button>
-		</div>
-	</div>
-
 	<script src="/static/js/common.js"></script>
 	<script src="/static/js/api.js"></script>
 	<script src="/static/js/layout.js"></script>
@@ -117,7 +65,6 @@
 			<div class="form-item">
 				<label class="form-label">企业邮箱</label>
 				<input class="input" id="pf-email" readonly>
-				<div class="form-hint">企业邮箱不可修改，如需变更请联系管理员</div>
 			</div>
 			<div class="form-item">
 				<label class="form-label">部门</label>
@@ -130,10 +77,6 @@
 			<div class="form-item">
 				<label class="form-label">手机号</label>
 				<input class="input" id="profilePhone" placeholder="请输入手机号">
-			</div>
-			<div class="form-item">
-				<label class="form-label">角色</label>
-				<input class="input" id="pf-role" disabled>
 			</div>
 		</div>
 		<div class="mt-16">
@@ -182,11 +125,10 @@
 	<template id="tmpl-profile-perms">
 		<div class="flex justify-between items-center mb-16">
 			<div class="card-title" style="margin:0">🔑 我的权限</div>
-			<button class="btn btn-primary btn-sm" onclick="openPermissionApplyModal()">＋ 申请权限</button>
 		</div>
 		<div
 			style="padding:12px 14px;background:var(--primary-light);border-radius:var(--radius);margin-bottom:16px;font-size:13px;line-height:1.7">
-			💡 <b>权限说明</b>:权限由角色 + 数据范围决定,申请时系统自动匹配审批链。同团队角色升级会覆盖旧角色;全局高权角色(用户管理员/文档管理员/合规管理员/超级管理员)4 选 1 互斥。
+			💡 <b>权限说明</b>:权限由角色 + 数据范围决定。同团队角色升级会覆盖旧角色;全局高权角色(用户管理员/文档管理员/合规管理员/超级管理员)4 选 1 互斥。
 		</div>
 		<div class="card-title" style="font-size:14px;margin-bottom:8px">已分配角色</div>
 		<div id="myRolesList" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:20px">

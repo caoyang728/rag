@@ -30,8 +30,8 @@ from apps.users.models import (
 )
 from apps.users.ticket_service import (
     create_ticket, approve_ticket, reject_ticket, cancel_ticket, revoke_direct,
-    build_approval_chain, _can_approve_for_role, ApproverRole,
-    GLOBAL_HIGH_PRIVILEGE_KEYS, TEAM_ROLE_KEYS,
+    build_approval_chain, _can_approve_for_role, _apply_grant, _build_chain_node,
+    ApproverRole, GLOBAL_HIGH_PRIVILEGE_KEYS, TEAM_ROLE_KEYS,
 )
 
 
@@ -104,6 +104,26 @@ class TicketTestBase:
         self.dept.save()
         _grant_role(self.dept_leader, 'dept_manager')
 
+        # 跨部门场景：市场部 + 市场一组（用于构造跨部门 PENDING 工单）
+        self.dept2 = Department.objects.create(name='市场部', code='mkt')
+        self.team3 = Team.objects.create(name='市场一组', code='mkt_1', department=self.dept2)
+        self.dept2_leader = _create_user('dept2mgr', department=self.dept2)
+        self.dept2.leader = self.dept2_leader
+        self.dept2.save()
+        # 市场部经理通过工单授予路径(UserDeptScopeRel 主源)授权
+        UserDeptScopeRel.objects.create(
+            user=self.dept2_leader, role=Role.objects.get(role_key='dept_manager'),
+            dept=self.dept2, status=GrantStatus.ACTIVE,
+        )
+
+        # 用户管理员(USER_ADMIN 审批池,2 人:申请人排除后仍有另一人可审) + 文档管理员(KB_ADMIN 审批池)
+        self.user_admin1 = _create_user('ua1')
+        _grant_role(self.user_admin1, 'user_admin')
+        self.user_admin2 = _create_user('ua2')
+        _grant_role(self.user_admin2, 'user_admin')
+        self.kb_admin1 = _create_user('kba1')
+        _grant_role(self.kb_admin1, 'kb_admin')
+
         # 3 个超管（满足双超管审批配额 ≥2，排除申请人后仍有 2 人）
         self.sa1 = _create_user('sa1')
         self.sa2 = _create_user('sa2')
@@ -151,21 +171,185 @@ class TestCreateTicket(TicketTestBase):
         ).exists()
 
     @pytest.mark.integration
-    def test_grant_viewer_cross_team_creates_pending_ticket(self):
-        """GRANT viewer 跨团队 → 目标团队组长单审链 → 工单 PENDING"""
+    def test_grant_viewer_cross_dept_creates_pending_ticket(self):
+        """GRANT viewer 跨部门团队 → 资源部门经理单审链 → 工单 PENDING"""
         ticket = create_ticket(
             applicant=self.applicant, target_user=self.target_user,
             change_type=TicketChangeType.GRANT, role=self.viewer,
-            scope_type=ScopeType.TEAM, scope_id=self.team2.id,
+            scope_type=ScopeType.TEAM, scope_id=self.team3.id,
             reason='申请 viewer',
         )
         # 非空链 → PENDING
         assert ticket.status == TicketStatus.PENDING
         assert ticket.current_step == 0
         assert len(ticket.approval_chain) == 1
-        # 目标团队组长单审
-        assert ticket.approval_chain[0]['approver_role'] == ApproverRole.TEAM_LEADER
-        assert ticket.approval_chain[0]['approver_scope_id'] == self.team2.id
+        # 跨部门团队:资源部门经理(市场部)单审
+        assert ticket.approval_chain[0]['approver_role'] == ApproverRole.DEPT_LEADER
+        assert ticket.approval_chain[0]['approver_scope_id'] == self.dept2.id
+
+    @pytest.mark.integration
+    def test_grant_viewer_same_dept_cross_team_direct_execution(self):
+        """GRANT viewer 本部门其他团队 → 组长提单自动生效(空链直接执行)"""
+        ticket = create_ticket(
+            applicant=self.team_leader2, target_user=self.target_user,
+            change_type=TicketChangeType.GRANT, role=self.viewer,
+            scope_type=ScopeType.TEAM, scope_id=self.team2.id,
+            reason='组长提单 viewer',
+        )
+        assert ticket.status == TicketStatus.EXECUTED
+        assert ticket.approval_chain == []
+        # 授权表已写入 ACTIVE 记录
+        assert UserTeamScopeRel.objects.filter(
+            user=self.target_user, role=self.viewer,
+            team=self.team2, status=GrantStatus.ACTIVE,
+        ).exists()
+
+    @pytest.mark.integration
+    def test_grant_contributor_same_team_direct_execution(self):
+        """GRANT contributor 本团队 → 组长提单自动生效(空链直接执行)"""
+        ticket = create_ticket(
+            applicant=self.team_leader1, target_user=self.target_user,
+            change_type=TicketChangeType.GRANT, role=self.contributor,
+            scope_type=ScopeType.TEAM, scope_id=self.team1.id,
+            reason='组长提单 contributor',
+        )
+        assert ticket.status == TicketStatus.EXECUTED
+        assert ticket.approval_chain == []
+        assert UserTeamScopeRel.objects.filter(
+            user=self.target_user, role=self.contributor,
+            team=self.team1, status=GrantStatus.ACTIVE,
+        ).exists()
+
+    @pytest.mark.integration
+    def test_grant_dept_contributor_same_dept_direct_execution(self):
+        """GRANT contributor 部门级本部门 → 部门经理提单自动生效(空链直接执行)"""
+        ticket = create_ticket(
+            applicant=self.dept_leader, target_user=self.target_user,
+            change_type=TicketChangeType.GRANT, role=self.contributor,
+            scope_type=ScopeType.DEPT, scope_id=self.dept.id,
+            reason='部门经理提单 contributor',
+        )
+        assert ticket.status == TicketStatus.EXECUTED
+        assert ticket.approval_chain == []
+        assert UserDeptScopeRel.objects.filter(
+            user=self.target_user, role=self.contributor,
+            dept=self.dept, status=GrantStatus.ACTIVE,
+        ).exists()
+
+    @pytest.mark.integration
+    def test_grant_dept_contributor_cross_dept_creates_pending_ticket(self):
+        """GRANT contributor 部门级跨部门 → 文档管理员(kb_admin)审核 → 工单 PENDING"""
+        ticket = create_ticket(
+            applicant=self.applicant, target_user=self.target_user,
+            change_type=TicketChangeType.GRANT, role=self.contributor,
+            scope_type=ScopeType.DEPT, scope_id=self.dept2.id,
+            reason='申请部门级 contributor',
+        )
+        assert ticket.status == TicketStatus.PENDING
+        assert len(ticket.approval_chain) == 1
+        assert ticket.approval_chain[0]['approver_role'] == ApproverRole.KB_ADMIN
+
+    @pytest.mark.integration
+    def test_grant_contributor_role_change_same_team_direct_execution(self):
+        """本团队 viewer→contributor 角色变更:组长提单自动生效,原子撤销旧角色"""
+        # 目标用户先持有 viewer(团队属地),组长提单升 contributor
+        UserTeamScopeRel.objects.create(
+            user=self.target_user, role=self.viewer,
+            team=self.team1, status=GrantStatus.ACTIVE,
+        )
+        ticket = create_ticket(
+            applicant=self.team_leader1, target_user=self.target_user,
+            change_type=TicketChangeType.GRANT, role=self.contributor,
+            scope_type=ScopeType.TEAM, scope_id=self.team1.id,
+            reason='组长提单升权',
+        )
+        # 互斥自动转 ROLE_CHANGE + 空链直接执行
+        assert ticket.status == TicketStatus.EXECUTED
+        assert ticket.change_type == TicketChangeType.ROLE_CHANGE
+        # 旧 viewer 已撤销,新 contributor 已授予
+        assert not UserTeamScopeRel.objects.filter(
+            user=self.target_user, role=self.viewer,
+            team=self.team1, status=GrantStatus.ACTIVE,
+        ).exists()
+        assert UserTeamScopeRel.objects.filter(
+            user=self.target_user, role=self.contributor,
+            team=self.team1, status=GrantStatus.ACTIVE,
+        ).exists()
+
+    @pytest.mark.integration
+    def test_duplicate_pending_ticket_rejected(self):
+        """工单防重:同目标用户同 scope 已有 PENDING 工单时拒绝重复提交"""
+        # 先创建跨部门 viewer 工单(PENDING)
+        create_ticket(
+            applicant=self.applicant, target_user=self.target_user,
+            change_type=TicketChangeType.GRANT, role=self.viewer,
+            scope_type=ScopeType.TEAM, scope_id=self.team3.id,
+            reason='申请 viewer',
+        )
+        with pytest.raises(ValueError, match='已有待审批的授权工单'):
+            create_ticket(
+                applicant=self.applicant, target_user=self.target_user,
+                change_type=TicketChangeType.GRANT, role=self.viewer,
+                scope_type=ScopeType.TEAM, scope_id=self.team3.id,
+                reason='重复申请 viewer',
+            )
+
+    @pytest.mark.integration
+    def test_grant_team_leader_when_team_has_leader_then_rejected(self):
+        """管理岗名额唯一：团队已有组长时任命他人 → ValueError（需先撤销现任）"""
+        tl_role = Role.objects.get(role_key='team_leader')
+        with pytest.raises(ValueError, match='该团队已有组长'):
+            create_ticket(
+                applicant=self.sa1, target_user=self.target_user,
+                change_type=TicketChangeType.GRANT, role=tl_role,
+                scope_type=ScopeType.TEAM, scope_id=self.team1.id,
+                reason='任命组长',
+            )
+
+    @pytest.mark.integration
+    def test_grant_dept_manager_when_dept_has_manager_then_rejected(self):
+        """管理岗名额唯一：部门已有经理时任命他人 → ValueError（需先撤销现任）"""
+        dm_role = Role.objects.get(role_key='dept_manager')
+        with pytest.raises(ValueError, match='该部门已有经理'):
+            create_ticket(
+                applicant=self.sa1, target_user=self.target_user,
+                change_type=TicketChangeType.GRANT, role=dm_role,
+                scope_type=ScopeType.DEPT, scope_id=self.dept.id,
+                reason='任命经理',
+            )
+
+    @pytest.mark.integration
+    def test_grant_team_leader_to_existing_leader_self_renew_then_allowed(self):
+        """现任组长本人续期 → 不拦截（名额唯一仅限他人，本人可续期/变更）"""
+        tl_role = Role.objects.get(role_key='team_leader')
+        ticket = create_ticket(
+            applicant=self.sa1, target_user=self.team_leader1,
+            change_type=TicketChangeType.GRANT, role=tl_role,
+            scope_type=ScopeType.TEAM, scope_id=self.team1.id,
+            reason='组长续期',
+        )
+        # 非空链 → PENDING（user_admin 单审），未被名额唯一校验拦截
+        assert ticket.status == TicketStatus.PENDING
+        assert ticket.approval_chain[0]['approver_role'] == ApproverRole.USER_ADMIN
+
+    @pytest.mark.integration
+    def test_grant_team_leader_when_leader_via_team_rel_then_rejected(self):
+        """leader_id 缺失但授权表有活跃 team_leader → 同样拒绝（双来源兜底判定）"""
+        # 新建无 leader_id 的团队,但已有他人的活跃 team_leader 授权
+        teamY = Team.objects.create(name='备用组', code='spare', department=self.dept)
+        other = _create_user('other_leader', team=teamY, department=self.dept)
+        UserTeamScopeRel.objects.create(
+            user=other, role=Role.objects.get(role_key='team_leader'),
+            team=teamY, status=GrantStatus.ACTIVE,
+        )
+        tl_role = Role.objects.get(role_key='team_leader')
+        with pytest.raises(ValueError, match='该团队已有组长'):
+            create_ticket(
+                applicant=self.sa1, target_user=self.target_user,
+                change_type=TicketChangeType.GRANT, role=tl_role,
+                scope_type=ScopeType.TEAM, scope_id=teamY.id,
+                reason='任命组长',
+            )
 
     @pytest.mark.integration
     def test_sod_conflict_rejects_high_privilege_role(self):
@@ -214,16 +398,17 @@ class TestApproveTicketStateMachine(TicketTestBase):
     @pytest.mark.integration
     def test_single_node_approve_executes_grant(self):
         """单节点链：审批通过 → APPROVED → EXECUTED，授权表写入 ACTIVE 记录"""
+        # 跨部门团队 viewer：资源部门经理(市场部)单审节点
         ticket = create_ticket(
             applicant=self.applicant, target_user=self.target_user,
             change_type=TicketChangeType.GRANT, role=self.viewer,
-            scope_type=ScopeType.TEAM, scope_id=self.team2.id,
+            scope_type=ScopeType.TEAM, scope_id=self.team3.id,
             reason='申请 viewer',
         )
         assert ticket.status == TicketStatus.PENDING
 
-        # 目标团队组长（team2.leader）审批通过
-        approved = approve_ticket(ticket, self.team_leader2, comment='同意')
+        # 资源部门经理（dept2.leader）审批通过
+        approved = approve_ticket(ticket, self.dept2_leader, comment='同意')
         # 末节点 → APPROVED → EXECUTED
         assert approved.status == TicketStatus.EXECUTED
         assert approved.approved_at is not None
@@ -231,36 +416,37 @@ class TestApproveTicketStateMachine(TicketTestBase):
         # 授权表已写入 ACTIVE 记录
         assert UserTeamScopeRel.objects.filter(
             user=self.target_user, role=self.viewer,
-            team=self.team2, status=GrantStatus.ACTIVE,
+            team=self.team3, status=GrantStatus.ACTIVE,
         ).exists()
 
     @pytest.mark.integration
     def test_multi_node_approve_advances_step(self):
         """多节点链：中间节点通过 → current_step+1，工单仍 PENDING"""
-        # contributor 跨团队申请：本团队组长 → 目标团队组长 双审
+        # dept_manager 授权链：用户管理员 → 超管 双节点（人员管理发起,另一人员管理审批,超管复核）
         ticket = create_ticket(
-            applicant=self.applicant, target_user=self.target_user,
-            change_type=TicketChangeType.GRANT, role=self.contributor,
-            scope_type=ScopeType.TEAM, scope_id=self.team2.id,
-            reason='申请 contributor 跨团队',
+            applicant=self.sa1, target_user=self.target_user,
+            change_type=TicketChangeType.GRANT,
+            role=Role.objects.get(role_key='dept_manager'),
+            scope_type=ScopeType.DEPT, scope_id=self.dept2.id,
+            reason='任命部门经理',
         )
-        # 跨团队 contributor 应产生 2 节点链
+        # 应产生 2 节点链
         assert len(ticket.approval_chain) == 2
         assert ticket.current_step == 0
 
-        # 第 1 节点：本团队组长（applicant 在 team1 → team1.leader）
-        approved = approve_ticket(ticket, self.team_leader1, comment='本团队同意')
+        # 第 1 节点：用户管理员（user_admin1）
+        approved = approve_ticket(ticket, self.user_admin1, comment='人员管理同意')
         # 中间节点 → 推进到下一节点，仍 PENDING
         assert approved.status == TicketStatus.PENDING
         assert approved.current_step == 1
 
-        # 第 2 节点：目标团队组长（team2.leader）
-        approved = approve_ticket(ticket, self.team_leader2, comment='目标团队同意')
+        # 第 2 节点：超管（sa2，与节点1 审批人不同 → 双人独立性）
+        approved = approve_ticket(ticket, self.sa2, comment='超管复核')
         # 末节点 → EXECUTED
         assert approved.status == TicketStatus.EXECUTED
-        assert UserTeamScopeRel.objects.filter(
-            user=self.target_user, role=self.contributor,
-            team=self.team2, status=GrantStatus.ACTIVE,
+        assert UserDeptScopeRel.objects.filter(
+            user=self.target_user, role=Role.objects.get(role_key='dept_manager'),
+            dept=self.dept2, status=GrantStatus.ACTIVE,
         ).exists()
 
     @pytest.mark.integration
@@ -269,12 +455,12 @@ class TestApproveTicketStateMachine(TicketTestBase):
         ticket = create_ticket(
             applicant=self.applicant, target_user=self.target_user,
             change_type=TicketChangeType.GRANT, role=self.viewer,
-            scope_type=ScopeType.TEAM, scope_id=self.team2.id,
+            scope_type=ScopeType.TEAM, scope_id=self.team3.id,
         )
-        approve_ticket(ticket, self.team_leader2)  # 通过 → EXECUTED
+        approve_ticket(ticket, self.dept2_leader)  # 通过 → EXECUTED
         # 已 EXECUTED 再审批应报错
         with pytest.raises(ValueError, match='工单非待审批状态'):
-            approve_ticket(ticket, self.team_leader2)
+            approve_ticket(ticket, self.dept2_leader)
 
     @pytest.mark.integration
     def test_approve_wrong_role_raises_permission_error(self):
@@ -282,26 +468,26 @@ class TestApproveTicketStateMachine(TicketTestBase):
         ticket = create_ticket(
             applicant=self.applicant, target_user=self.target_user,
             change_type=TicketChangeType.GRANT, role=self.viewer,
-            scope_type=ScopeType.TEAM, scope_id=self.team2.id,
+            scope_type=ScopeType.TEAM, scope_id=self.team3.id,
         )
-        # team1.leader 不是 team2 的组长，无权审批 team2 节点
+        # 当前节点是市场部经理(DEPT_LEADER dept2)，研发部组长无权审批
         with pytest.raises(PermissionError):
             approve_ticket(ticket, self.team_leader1)
 
     @pytest.mark.integration
     def test_applicant_cannot_approve_own_ticket(self):
         """回避原则：申请人不能审批自己的工单"""
-        # 让申请人恰好是目标团队组长（构造自审场景）
-        self.team2.leader = self.applicant
-        self.team2.save()
+        # 申请人为文档管理员，提交部门级跨部门 viewer 授权（KB_ADMIN 审核节点）
         ticket = create_ticket(
-            applicant=self.applicant, target_user=self.target_user,
+            applicant=self.kb_admin1, target_user=self.target_user,
             change_type=TicketChangeType.GRANT, role=self.viewer,
-            scope_type=ScopeType.TEAM, scope_id=self.team2.id,
+            scope_type=ScopeType.DEPT, scope_id=self.dept2.id,
         )
-        # 申请人审批自己的工单 → _can_approve_for_role 返回 False → PermissionError
+        assert ticket.status == TicketStatus.PENDING
+        assert ticket.approval_chain[0]['approver_role'] == ApproverRole.KB_ADMIN
+        # 申请人虽持有 kb_admin 角色，但回避原则(闸 1)拒绝其审批自己的工单
         with pytest.raises(PermissionError):
-            approve_ticket(ticket, self.applicant)
+            approve_ticket(ticket, self.kb_admin1)
 
 
 # ============================================================================
@@ -316,13 +502,13 @@ class TestRejectTicket(TicketTestBase):
         ticket = create_ticket(
             applicant=self.applicant, target_user=self.target_user,
             change_type=TicketChangeType.GRANT, role=self.viewer,
-            scope_type=ScopeType.TEAM, scope_id=self.team2.id,
+            scope_type=ScopeType.TEAM, scope_id=self.team3.id,
         )
-        rejected = reject_ticket(ticket, self.team_leader2, comment='不同意')
+        rejected = reject_ticket(ticket, self.dept2_leader, comment='不同意')
         assert rejected.status == TicketStatus.REJECTED
         # 驳回不执行授权写入
         assert not UserTeamScopeRel.objects.filter(
-            user=self.target_user, role=self.viewer, team=self.team2,
+            user=self.target_user, role=self.viewer, team=self.team3,
         ).exists()
         # 审计日志记录驳回事件
         assert PermissionAuditLog.objects.filter(
@@ -335,11 +521,11 @@ class TestRejectTicket(TicketTestBase):
         ticket = create_ticket(
             applicant=self.applicant, target_user=self.target_user,
             change_type=TicketChangeType.GRANT, role=self.viewer,
-            scope_type=ScopeType.TEAM, scope_id=self.team2.id,
+            scope_type=ScopeType.TEAM, scope_id=self.team3.id,
         )
-        reject_ticket(ticket, self.team_leader2)  # → REJECTED
+        reject_ticket(ticket, self.dept2_leader)  # → REJECTED
         with pytest.raises(ValueError, match='工单非待审批状态'):
-            reject_ticket(ticket, self.team_leader2)
+            reject_ticket(ticket, self.dept2_leader)
 
     @pytest.mark.integration
     def test_super_admin_can_reject_any_ticket(self):
@@ -347,9 +533,9 @@ class TestRejectTicket(TicketTestBase):
         ticket = create_ticket(
             applicant=self.applicant, target_user=self.target_user,
             change_type=TicketChangeType.GRANT, role=self.viewer,
-            scope_type=ScopeType.TEAM, scope_id=self.team2.id,
+            scope_type=ScopeType.TEAM, scope_id=self.team3.id,
         )
-        # sa1 既非 team2 组长也非申请人，但 super_admin 可兜底驳回
+        # sa1 既非市场部经理也非申请人，但 super_admin 可兜底驳回
         rejected = reject_ticket(ticket, self.sa1, comment='超管驳回')
         assert rejected.status == TicketStatus.REJECTED
 
@@ -366,7 +552,7 @@ class TestCancelTicket(TicketTestBase):
         ticket = create_ticket(
             applicant=self.applicant, target_user=self.target_user,
             change_type=TicketChangeType.GRANT, role=self.viewer,
-            scope_type=ScopeType.TEAM, scope_id=self.team2.id,
+            scope_type=ScopeType.TEAM, scope_id=self.team3.id,
         )
         cancelled = cancel_ticket(ticket, self.applicant)
         assert cancelled.status == TicketStatus.CANCELLED
@@ -377,9 +563,9 @@ class TestCancelTicket(TicketTestBase):
         ticket = create_ticket(
             applicant=self.applicant, target_user=self.target_user,
             change_type=TicketChangeType.GRANT, role=self.viewer,
-            scope_type=ScopeType.TEAM, scope_id=self.team2.id,
+            scope_type=ScopeType.TEAM, scope_id=self.team3.id,
         )
-        approve_ticket(ticket, self.team_leader2)  # → EXECUTED
+        approve_ticket(ticket, self.dept2_leader)  # → EXECUTED
         # approve_ticket 内部 select_for_update 返回新对象，此处需刷新以读取终态
         ticket.refresh_from_db()
         with pytest.raises(ValueError, match='仅待审批工单可撤回'):
@@ -391,7 +577,7 @@ class TestCancelTicket(TicketTestBase):
         ticket = create_ticket(
             applicant=self.applicant, target_user=self.target_user,
             change_type=TicketChangeType.GRANT, role=self.viewer,
-            scope_type=ScopeType.TEAM, scope_id=self.team2.id,
+            scope_type=ScopeType.TEAM, scope_id=self.team3.id,
         )
         with pytest.raises(PermissionError, match='仅发起人可撤回'):
             cancel_ticket(ticket, self.team_leader1)
@@ -402,7 +588,7 @@ class TestCancelTicket(TicketTestBase):
         ticket = create_ticket(
             applicant=self.applicant, target_user=self.target_user,
             change_type=TicketChangeType.GRANT, role=self.viewer,
-            scope_type=ScopeType.TEAM, scope_id=self.team2.id,
+            scope_type=ScopeType.TEAM, scope_id=self.team3.id,
         )
         cancelled = cancel_ticket(ticket, self.sa1)
         assert cancelled.status == TicketStatus.CANCELLED
@@ -420,7 +606,7 @@ class TestCanApproveForRole(TicketTestBase):
         ticket = create_ticket(
             applicant=self.applicant, target_user=self.target_user,
             change_type=TicketChangeType.GRANT, role=self.viewer,
-            scope_type=ScopeType.TEAM, scope_id=self.team2.id,
+            scope_type=ScopeType.TEAM, scope_id=self.team3.id,
         )
         assert _can_approve_for_role(self.sa1, ApproverRole.SUPER_ADMIN, ticket) is True
 
@@ -430,17 +616,20 @@ class TestCanApproveForRole(TicketTestBase):
         ticket = create_ticket(
             applicant=self.applicant, target_user=self.target_user,
             change_type=TicketChangeType.GRANT, role=self.viewer,
-            scope_type=ScopeType.TEAM, scope_id=self.team2.id,
+            scope_type=ScopeType.TEAM, scope_id=self.team3.id,
         )
         assert _can_approve_for_role(self.team_leader1, ApproverRole.SUPER_ADMIN, ticket) is False
 
     @pytest.mark.integration
     def test_team_leader_match_by_scope(self):
-        """TEAM_LEADER 节点：team.leader_id == user.id 且 scope 匹配才能审批"""
-        ticket = create_ticket(
-            applicant=self.applicant, target_user=self.target_user,
-            change_type=TicketChangeType.GRANT, role=self.viewer,
-            scope_type=ScopeType.TEAM, scope_id=self.team2.id,
+        """TEAM_LEADER 节点：team.leader_id == user.id 且 scope 匹配才能审批(兼容历史工单)"""
+        # 新矩阵下 GRANT 不再产生 TEAM_LEADER 节点,但历史工单的 TEAM_LEADER 节点仍需支持审批,
+        # 手工构造 TEAM_LEADER 节点工单验证判定逻辑
+        ticket = PermissionApprovalTicket(
+            applicant_id=self.applicant.id, target_user_id=self.target_user.id,
+            approval_chain=[_build_chain_node(ApproverRole.TEAM_LEADER,
+                                              ScopeType.TEAM, self.team2.id)],
+            current_step=0,
         )
         # team2.leader 可审批 team2 节点
         assert _can_approve_for_role(self.team_leader2, ApproverRole.TEAM_LEADER, ticket) is True
@@ -448,17 +637,30 @@ class TestCanApproveForRole(TicketTestBase):
         assert _can_approve_for_role(self.team_leader1, ApproverRole.TEAM_LEADER, ticket) is False
 
     @pytest.mark.integration
+    def test_kb_admin_match(self):
+        """KB_ADMIN 节点：持有 kb_admin 角色的用户可审批,其他用户不可"""
+        ticket = PermissionApprovalTicket(
+            applicant_id=self.applicant.id, target_user_id=self.target_user.id,
+            approval_chain=[_build_chain_node(ApproverRole.KB_ADMIN)],
+            current_step=0,
+        )
+        assert _can_approve_for_role(self.kb_admin1, ApproverRole.KB_ADMIN, ticket) is True
+        # 非 kb_admin（team_leader）不可审
+        assert _can_approve_for_role(self.team_leader1, ApproverRole.KB_ADMIN, ticket) is False
+
+    @pytest.mark.integration
     def test_applicant_excluded(self):
         """回避原则：申请人不能审批自己的工单"""
+        # 申请人为市场部经理,当前节点恰好也是市场部经理(DEPT_LEADER dept2)
         ticket = create_ticket(
-            applicant=self.applicant, target_user=self.target_user,
+            applicant=self.dept2_leader, target_user=self.target_user,
             change_type=TicketChangeType.GRANT, role=self.viewer,
-            scope_type=ScopeType.TEAM, scope_id=self.team2.id,
+            scope_type=ScopeType.TEAM, scope_id=self.team3.id,
         )
-        # applicant 不是超管，正常情况会返回 False；即使让其成为 team2.leader 也应被排除
-        self.team2.leader = self.applicant
-        self.team2.save()
-        assert _can_approve_for_role(self.applicant, ApproverRole.TEAM_LEADER, ticket) is False
+        # 申请人(市场部经理)即便满足节点角色也被回避原则排除
+        assert _can_approve_for_role(self.dept2_leader, ApproverRole.DEPT_LEADER, ticket) is False
+        # 非申请人的市场部经理不存在;换用超管验证不误伤(非申请人可审)
+        assert _can_approve_for_role(self.sa1, ApproverRole.SUPER_ADMIN, ticket) is True
 
     @pytest.mark.integration
     def test_target_user_excluded(self):
@@ -466,7 +668,7 @@ class TestCanApproveForRole(TicketTestBase):
         ticket = create_ticket(
             applicant=self.applicant, target_user=self.target_user,
             change_type=TicketChangeType.GRANT, role=self.viewer,
-            scope_type=ScopeType.TEAM, scope_id=self.team2.id,
+            scope_type=ScopeType.TEAM, scope_id=self.team3.id,
         )
         # target_user 即便持有 super_admin 也不能审（涉自己）
         _grant_role(self.target_user, 'super_admin')
@@ -520,30 +722,79 @@ class TestBuildApprovalChain(TicketTestBase):
         assert chain == []
 
     @pytest.mark.integration
-    def test_grant_viewer_cross_team_single_node(self):
-        """GRANT viewer 跨团队 → 目标团队组长单审"""
+    def test_grant_viewer_cross_dept_single_node(self):
+        """GRANT viewer 跨部门团队 → 资源部门经理单审"""
+        chain = build_approval_chain(
+            self.applicant, self.target_user, TicketChangeType.GRANT,
+            self.viewer, ScopeType.TEAM, self.team3.id,
+        )
+        assert len(chain) == 1
+        assert chain[0]['approver_role'] == ApproverRole.DEPT_LEADER
+        assert chain[0]['approver_scope_id'] == self.dept2.id
+
+    @pytest.mark.integration
+    def test_grant_viewer_same_dept_cross_team_empty_chain(self):
+        """GRANT viewer 本部门其他团队 → 空链(组长提单自动生效)"""
         chain = build_approval_chain(
             self.applicant, self.target_user, TicketChangeType.GRANT,
             self.viewer, ScopeType.TEAM, self.team2.id,
         )
-        assert len(chain) == 1
-        assert chain[0]['approver_role'] == ApproverRole.TEAM_LEADER
-        assert chain[0]['approver_scope_id'] == self.team2.id
+        assert chain == []
 
     @pytest.mark.integration
-    def test_grant_contributor_cross_team_two_nodes(self):
-        """GRANT contributor 跨团队 → 本团队组长 → 目标团队组长 双审"""
+    def test_grant_contributor_same_team_empty_chain(self):
+        """GRANT contributor 本团队 → 空链(组长提单自动生效)"""
         chain = build_approval_chain(
             self.applicant, self.target_user, TicketChangeType.GRANT,
-            self.contributor, ScopeType.TEAM, self.team2.id,
+            self.contributor, ScopeType.TEAM, self.team1.id,
         )
-        assert len(chain) == 2
-        # 节点1：本团队组长（applicant 在 team1）
-        assert chain[0]['approver_role'] == ApproverRole.TEAM_LEADER
-        assert chain[0]['approver_scope_id'] == self.team1.id
-        # 节点2：目标团队组长
-        assert chain[1]['approver_role'] == ApproverRole.TEAM_LEADER
-        assert chain[1]['approver_scope_id'] == self.team2.id
+        assert chain == []
+
+    @pytest.mark.integration
+    def test_grant_contributor_cross_dept_single_node(self):
+        """GRANT contributor 跨部门团队 → 资源部门经理单审"""
+        chain = build_approval_chain(
+            self.applicant, self.target_user, TicketChangeType.GRANT,
+            self.contributor, ScopeType.TEAM, self.team3.id,
+        )
+        assert len(chain) == 1
+        assert chain[0]['approver_role'] == ApproverRole.DEPT_LEADER
+        assert chain[0]['approver_scope_id'] == self.dept2.id
+
+    @pytest.mark.integration
+    def test_grant_dept_contributor_same_dept_empty_chain(self):
+        """GRANT contributor 部门级本部门 → 空链(部门经理提单自动生效)"""
+        chain = build_approval_chain(
+            self.dept_leader, self.target_user, TicketChangeType.GRANT,
+            self.contributor, ScopeType.DEPT, self.dept.id,
+        )
+        assert chain == []
+
+    @pytest.mark.integration
+    def test_grant_dept_contributor_cross_dept_kb_admin(self):
+        """GRANT contributor 部门级跨部门 → 文档管理员(kb_admin)单审"""
+        chain = build_approval_chain(
+            self.applicant, self.target_user, TicketChangeType.GRANT,
+            self.contributor, ScopeType.DEPT, self.dept2.id,
+        )
+        assert len(chain) == 1
+        assert chain[0]['approver_role'] == ApproverRole.KB_ADMIN
+        # 文档管理员可审批该节点
+        assert _can_approve_for_role(self.kb_admin1, ApproverRole.KB_ADMIN,
+                                     PermissionApprovalTicket(
+                                         approval_chain=chain, current_step=0,
+                                         applicant_id=self.applicant.id,
+                                         target_user_id=self.target_user.id,
+                                     )) is True
+
+    @pytest.mark.integration
+    def test_revoke_dept_contributor_returns_empty_chain(self):
+        """REVOKE contributor 部门级 → 空链(直接执行)"""
+        chain = build_approval_chain(
+            self.applicant, self.target_user, TicketChangeType.REVOKE,
+            self.contributor, ScopeType.DEPT, self.dept2.id,
+        )
+        assert chain == []
 
     @pytest.mark.integration
     def test_grant_super_admin_two_super_admin_nodes(self):
@@ -567,6 +818,64 @@ class TestBuildApprovalChain(TicketTestBase):
         assert len(chain) == 2
         assert chain[0]['approver_role'] == ApproverRole.USER_ADMIN
         assert chain[1]['approver_role'] == ApproverRole.SUPER_ADMIN
+
+    @pytest.mark.integration
+    def test_grant_team_leader_user_admin_single_node(self):
+        """GRANT team_leader → 用户管理员单审(部门经理发起,人员管理审批)"""
+        chain = build_approval_chain(
+            self.applicant, self.target_user, TicketChangeType.GRANT,
+            Role.objects.get(role_key='team_leader'),
+            ScopeType.TEAM, self.team1.id,
+        )
+        assert len(chain) == 1
+        assert chain[0]['approver_role'] == ApproverRole.USER_ADMIN
+        # 用户管理员可审批该节点
+        assert _can_approve_for_role(self.user_admin1, ApproverRole.USER_ADMIN,
+                                     PermissionApprovalTicket(
+                                         approval_chain=chain, current_step=0,
+                                         applicant_id=self.applicant.id,
+                                         target_user_id=self.target_user.id,
+                                     )) is True
+        # 部门经理(dept_manager)不再直接审批组长任命(定稿:人员管理审批)
+        assert _can_approve_for_role(self.dept_leader, ApproverRole.USER_ADMIN,
+                                     PermissionApprovalTicket(
+                                         approval_chain=chain, current_step=0,
+                                         applicant_id=self.applicant.id,
+                                         target_user_id=self.target_user.id,
+                                     )) is False
+
+    @pytest.mark.integration
+    def test_grant_team_leader_applicant_is_user_admin_single_node(self):
+        """GRANT team_leader 发起人为用户管理员 → 仍单节点(由另一 user_admin 审批,回避原则)"""
+        chain = build_approval_chain(
+            self.user_admin1, self.target_user, TicketChangeType.GRANT,
+            Role.objects.get(role_key='team_leader'),
+            ScopeType.TEAM, self.team1.id,
+        )
+        assert len(chain) == 1
+        assert chain[0]['approver_role'] == ApproverRole.USER_ADMIN
+
+    @pytest.mark.integration
+    def test_grant_team_leader_wrong_scope_falls_back_super_admin(self):
+        """GRANT team_leader 错误 scope_type(DEPT) → 兜底超管单审(保持兜底行为)"""
+        chain = build_approval_chain(
+            self.applicant, self.target_user, TicketChangeType.GRANT,
+            Role.objects.get(role_key='team_leader'),
+            ScopeType.DEPT, self.dept.id,
+        )
+        assert len(chain) == 1
+        assert chain[0]['approver_role'] == ApproverRole.SUPER_ADMIN
+
+    @pytest.mark.integration
+    def test_grant_team_leader_team_missing_falls_back_super_admin(self):
+        """GRANT team_leader 目标团队不存在 → 兜底超管单审"""
+        chain = build_approval_chain(
+            self.applicant, self.target_user, TicketChangeType.GRANT,
+            Role.objects.get(role_key='team_leader'),
+            ScopeType.TEAM, 99999999,
+        )
+        assert len(chain) == 1
+        assert chain[0]['approver_role'] == ApproverRole.SUPER_ADMIN
 
 
 # ============================================================================
@@ -605,3 +914,54 @@ class TestRevokeDirect(TicketTestBase):
                 role=Role.objects.get(role_key='super_admin'),
                 scope_type=ScopeType.NONE,
             )
+
+
+# ============================================================================
+# leader_id 同步：工单执行时维护 Team.leader_id / Department.leader_id
+# ============================================================================
+class TestGrantLeaderSync(TicketTestBase):
+    """工单执行时同步组织 leader_id(team_leader → Team.leader, dept_manager → Department.leader)"""
+
+    @pytest.mark.integration
+    def test_grant_team_leader_syncs_team_leader_id(self):
+        """授予 team_leader(团队无组长) → Team.leader_id 同步为被授权者"""
+        teamX = Team.objects.create(name='空组长组', code='no_leader', department=self.dept)
+        tl_role = Role.objects.get(role_key='team_leader')
+        ticket = PermissionApprovalTicket.objects.create(
+            ticket_no='T-SYNC-1', applicant=self.sa1, target_user=self.applicant,
+            change_type=TicketChangeType.GRANT, role=tl_role,
+            scope_type=ScopeType.TEAM, scope_id=teamX.id,
+            approval_chain=[], current_step=0, status=TicketStatus.APPROVED,
+        )
+        _apply_grant(ticket, actor=self.sa1)
+        teamX.refresh_from_db()
+        assert teamX.leader_id == self.applicant.id
+
+    @pytest.mark.integration
+    def test_grant_dept_manager_syncs_dept_leader_id(self):
+        """授予 dept_manager(部门无经理) → Department.leader_id 同步为被授权者"""
+        deptY = Department.objects.create(name='新部门', code='new_dept')
+        dm_role = Role.objects.get(role_key='dept_manager')
+        ticket = PermissionApprovalTicket.objects.create(
+            ticket_no='T-SYNC-2', applicant=self.sa1, target_user=self.applicant,
+            change_type=TicketChangeType.GRANT, role=dm_role,
+            scope_type=ScopeType.DEPT, scope_id=deptY.id,
+            approval_chain=[], current_step=0, status=TicketStatus.APPROVED,
+        )
+        _apply_grant(ticket, actor=self.sa1)
+        deptY.refresh_from_db()
+        assert deptY.leader_id == self.applicant.id
+
+    @pytest.mark.integration
+    def test_grant_team_leader_keeps_existing_leader(self):
+        """授予 team_leader 但团队已有组长 → 不覆盖原组长"""
+        tl_role = Role.objects.get(role_key='team_leader')
+        ticket = PermissionApprovalTicket.objects.create(
+            ticket_no='T-SYNC-3', applicant=self.sa1, target_user=self.applicant,
+            change_type=TicketChangeType.GRANT, role=tl_role,
+            scope_type=ScopeType.TEAM, scope_id=self.team1.id,
+            approval_chain=[], current_step=0, status=TicketStatus.APPROVED,
+        )
+        _apply_grant(ticket, actor=self.sa1)
+        self.team1.refresh_from_db()
+        assert self.team1.leader_id == self.team_leader1.id

@@ -81,58 +81,10 @@
 	margin-top: 4px
 }
 
-/* ============ 权限申请弹窗 ============ */
-#modal-permission-apply {
-	width: 560px;
-	max-width: 95vw;
-}
-
-#modal-permission-apply .modal-body {
-	padding: 20px 24px;
-}
-
-#modal-permission-apply .form-item {
-	margin-bottom: 16px;
-}
-
-#modal-permission-apply .form-label {
-	font-size: 13px;
-	font-weight: 500;
-	margin-bottom: 6px;
-	color: var(--text);
-}
-
-#modal-permission-apply .form-hint {
-	font-size: 12px;
-	color: var(--text-sub);
-	margin-top: 4px;
-	line-height: 1.6;
-}
-
-#modal-permission-apply .select,
-#modal-permission-apply .textarea {
-	width: 100%;
-	font-size: 13px;
-}
-
-#modal-permission-apply .textarea {
-	min-height: 72px;
-	resize: vertical;
-}
-
-/* 审批链预览区 */
-#applyChainPreview {
-	padding: 12px 14px;
+/* ============ 基本信息只读字段(邮箱/部门/团队)置灰 ============ */
+.profile-content .input[readonly],
+.profile-content .input[disabled] {
 	background: var(--hover);
-	border-radius: var(--radius);
-	font-size: 13px;
-	line-height: 1.8;
 	color: var(--text-sub);
-	min-height: 44px;
-}
-
-#applyChainPreview > div:first-child {
-	color: var(--text);
-	font-weight: 500;
-	margin-bottom: 4px;
+	cursor: not-allowed;
 }

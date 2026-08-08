@@ -878,9 +878,14 @@ def get_user_managed_depts(user) -> set:
 
 
 def get_user_managed_teams(user) -> set:
-    """获取用户可管理团队集合（含本团队）—— 用于团队级数据过滤
+    """获取用户可管理/可见团队集合（含本团队）—— 用于团队级数据过滤
 
-    来源：UserTeamScopeRel(团队属地授权) ∪ {user.team_id}
+    来源：
+    1. UserTeamScopeRel(团队属地授权，team_leader / 团队级 viewer/contributor)
+    2. UserDeptScopeRel 授权部门下的所有活跃团队
+       (部门级授权：dept_manager / 部门级 viewer/contributor，数据范围覆盖部门内全部团队)
+    3. {user.team_id} 本团队
+
     配合 L3 缓存（perm:scope:team:{uid}）。
     """
     if user is None or not getattr(user, 'is_authenticated', False):
@@ -891,6 +896,19 @@ def get_user_managed_teams(user) -> set:
             _active_grant_filter(), user=user,
     ).values_list('team_id', flat=True)
     )
+    # 部门属地授权 → 该部门下所有活跃团队也纳入可见范围
+    # (部门级授权人应能看到部门内其他团队的 TEAM_ONLY 文档，而非仅本团队)
+    dept_ids = list(
+        UserDeptScopeRel.objects.filter(
+            _active_grant_filter(), user=user,
+        ).values_list('dept_id', flat=True)
+    )
+    if dept_ids:
+        managed |= set(
+            Team.objects.filter(
+                department_id__in=dept_ids, is_deleted=False,
+            ).values_list('id', flat=True)
+        )
     if user.team_id:
         managed.add(user.team_id)
     return managed

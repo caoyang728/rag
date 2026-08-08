@@ -50,13 +50,16 @@ class ApproverRole:
     """审批人在审批链中的角色定位 —— 决定该节点由谁审批
 
     新增 USER_ADMIN 后审批节点匹配规则:
-    - TEAM_LEADER / DEPT_LEADER:基于组织架构(leader_id)匹配,带 scope 区分本团队/目标团队
+    - TEAM_LEADER / DEPT_LEADER:基于组织架构匹配,带 scope 区分本团队/目标团队
+    - TEAM_LEADER 判定 team.leader_id;DEPT_LEADER 判定 dept_manager 角色授权(见 _get_dept_leader_id)
     - USER_ADMIN:持有 user_admin 角色的用户(用于部门经理/文档管理员/合规管理员审批链)
+    - KB_ADMIN:持有 kb_admin 角色的用户(用于部门级跨部门 viewer/contributor 授权审核)
     - SUPER_ADMIN:持有 super_admin 角色的用户(用于全局高权角色审批链 / 兜底)
     """
     TEAM_LEADER = 'TEAM_LEADER'    # 团队组长(单审 / 跨团队审核)
     DEPT_LEADER = 'DEPT_LEADER'    # 部门负责人(团队组长审批 / 跨部门复核)
     USER_ADMIN = 'USER_ADMIN'      # 用户管理员(部门经理/文档管理员/合规管理员审批链第一节点)
+    KB_ADMIN = 'KB_ADMIN'          # 文档管理员(部门级跨部门 viewer/contributor 授权审核)
     SUPER_ADMIN = 'SUPER_ADMIN'    # 超级管理员(全局高权角色审批链第二节点 / super_admin 双人复核)
 
 
@@ -109,8 +112,9 @@ def _can_approve_for_role(user, approver_role: str, ticket=None) -> bool:
         注:用户管理员 × 超管互斥,故 USER_ADMIN 与 SUPER_ADMIN 节点的候选池天然不重叠
     - TEAM_LEADER:用户是审批节点指定 scope 的团队组长(team.leader_id == user.id)
         节点带 approver_scope_id,区分"本团队组长"和"目标团队组长"
-    - DEPT_LEADER:用户是审批节点指定 scope 的部门负责人(department.leader_id == user.id)
-        节点带 approver_scope_id,区分"本部门经理"和"目标部门经理"
+    - DEPT_LEADER:用户是审批节点指定 scope 部门的 dept_manager 角色持有人
+        (基于 UserDeptScopeRel 授权,非 Department.leader_id 字段;节点带 approver_scope_id,
+        区分"本部门经理"和"目标部门经理")
 
     排除规则(三道闸):
     1. 回避原则:申请人 / 目标用户不能审自己的工单
@@ -159,6 +163,13 @@ def _can_approve_for_role(user, approver_role: str, ticket=None) -> bool:
             status=GrantStatus.ACTIVE,
         ).exists()
 
+    if approver_role == ApproverRole.KB_ADMIN:
+        # 持有 kb_admin 角色即可(部门级跨部门 viewer/contributor 授权审核)
+        return UserRoleRel.objects.filter(
+            user=user, role__role_key='kb_admin',
+            status=GrantStatus.ACTIVE,
+        ).exists()
+
     if approver_role == ApproverRole.TEAM_LEADER:
         # 节点必须带 approver_scope_id(本团队 or 目标团队)
         if not current_node:
@@ -176,8 +187,19 @@ def _can_approve_for_role(user, approver_role: str, ticket=None) -> bool:
         node_dept_id = current_node.get('approver_scope_id')
         if not node_dept_id:
             return False
-        return Department.objects.filter(
-            id=node_dept_id, is_deleted=False, leader_id=user.id,
+        # 部门经理身份以 dept_manager 授权为准,兼容两个授予来源(见 _get_dept_leader_id)
+        if UserDeptScopeRel.objects.filter(
+            dept_id=node_dept_id,
+            user=user,
+            role__role_key='dept_manager',
+            status=GrantStatus.ACTIVE,
+        ).exists():
+            return True
+        return UserRoleRel.objects.filter(
+            user=user,
+            role__role_key='dept_manager',
+            status=GrantStatus.ACTIVE,
+            user__department_id=node_dept_id,
         ).exists()
 
     return False
@@ -213,6 +235,13 @@ def _find_approver_ids_for_role(approver_role: str, ticket=None) -> list:
         ).exclude(user_id__in=exclude_ids).values_list('user_id', flat=True).distinct())
         return ids
 
+    if approver_role == ApproverRole.KB_ADMIN:
+        # 查所有持有 kb_admin 角色的活跃用户(部门级跨部门审核池)
+        ids = list(UserRoleRel.objects.filter(
+            role__role_key='kb_admin', status=GrantStatus.ACTIVE,
+        ).exclude(user_id__in=exclude_ids).values_list('user_id', flat=True).distinct())
+        return ids
+
     # 取当前节点(读取 approver_scope_id)
     current_node = None
     if ticket and ticket.approval_chain and ticket.current_step < len(ticket.approval_chain):
@@ -235,12 +264,22 @@ def _find_approver_ids_for_role(approver_role: str, ticket=None) -> list:
         node_dept_id = current_node.get('approver_scope_id')
         if not node_dept_id:
             return []
-        leader_id = Department.objects.filter(
-            id=node_dept_id, is_deleted=False,
-        ).values_list('leader_id', flat=True).first()
-        if not leader_id or leader_id in exclude_ids:
+        # 部门经理身份以 dept_manager 授权为准(两个来源),先排除不能审批的人(回避/双人独立性)
+        rel_uid = UserDeptScopeRel.objects.filter(
+            dept_id=node_dept_id,
+            role__role_key='dept_manager',
+            status=GrantStatus.ACTIVE,
+        ).exclude(user_id__in=exclude_ids).values_list('user_id', flat=True).first()
+        if rel_uid:
+            return [rel_uid]
+        global_uid = UserRoleRel.objects.filter(
+            role__role_key='dept_manager',
+            status=GrantStatus.ACTIVE,
+            user__department_id=node_dept_id,
+        ).exclude(user_id__in=exclude_ids).values_list('user_id', flat=True).first()
+        if not global_uid:
             return []
-        return [leader_id]
+        return [global_uid]
 
     return []
 
@@ -263,10 +302,30 @@ def _get_team_leader_id(team_id) -> Optional[int]:
 
 
 def _get_dept_leader_id(dept_id) -> Optional[int]:
-    """获取部门负责人 ID —— 复核人"""
+    """获取部门负责人 ID —— 从 dept_manager 角色授权中解析(复核人)
+
+    业务背景:部门经理身份不再依赖 Department.leader_id 字段,而是以 dept_manager
+    授权为准。授权存在两个来源,均需兼容:
+    - UserDeptScopeRel(部门属地):工单授予的主源
+    - UserRoleRel(全局) + 用户所属部门匹配:用户编辑接口 assign_roles 的历史授予路径
+    若一个部门存在多条 dept_manager 授权,取先授权者。
+    """
     if not dept_id:
         return None
-    return Department.objects.filter(id=dept_id).values_list('leader_id', flat=True).first()
+    # 主源:部门属地授权表
+    uid = UserDeptScopeRel.objects.filter(
+        dept_id=dept_id,
+        role__role_key='dept_manager',
+        status=GrantStatus.ACTIVE,
+    ).values_list('user_id', flat=True).first()
+    if uid:
+        return uid
+    # 兼容源:全局角色表 + 用户所属部门匹配(编辑接口 assign_roles 授予)
+    return UserRoleRel.objects.filter(
+        role__role_key='dept_manager',
+        status=GrantStatus.ACTIVE,
+        user__department_id=dept_id,
+    ).values_list('user_id', flat=True).first()
 
 
 def _get_super_admin_ids(exclude_user_id=None, role_keys=('super_admin',)) -> list:
@@ -334,7 +393,7 @@ def _check_sod_conflict(target_user, new_role) -> None:
 
 
 def _detect_team_role_in_service(user, team_id):
-    """检测用户在指定团队内已持有的团队角色 —— 服务层互斥检测
+    """检测用户在指定团队内已持有的团队角色 —— 服务层互斥检测(团队级)
 
     业务背景:同团队内团队角色(viewer/contributor/team_leader)互斥,
     高等级覆盖低等级。create_ticket 入口检测到已有旧角色时,自动将 GRANT 转为
@@ -346,6 +405,27 @@ def _detect_team_role_in_service(user, team_id):
         return None
     existing_role_id = UserTeamScopeRel.objects.filter(
         user=user, team_id=team_id,
+        role__role_key__in=TEAM_ROLE_KEYS,
+        status=GrantStatus.ACTIVE,
+    ).values_list('role_id', flat=True).first()
+    if existing_role_id:
+        return Role.objects.filter(id=existing_role_id, is_deleted=False).first()
+    return None
+
+
+def _detect_dept_role_in_service(user, dept_id):
+    """检测用户在指定部门内已持有的团队角色 —— 服务层互斥检测(部门级)
+
+    业务背景:同部门内 viewer/contributor 互斥(部门级授权写入 UserDeptScopeRel,
+    该表 (user, dept) 唯一约束不含 role,同一部门同一用户只能有一条 ACTIVE 记录)。
+    create_ticket 入口检测到已有旧角色时,自动将 GRANT 转为 ROLE_CHANGE,避免撞唯一约束。
+
+    返回:已持有的活跃部门角色对象,无则 None。
+    """
+    if not user or not dept_id:
+        return None
+    existing_role_id = UserDeptScopeRel.objects.filter(
+        user=user, dept_id=dept_id,
         role__role_key__in=TEAM_ROLE_KEYS,
         status=GrantStatus.ACTIVE,
     ).values_list('role_id', flat=True).first()
@@ -496,17 +576,16 @@ def build_approval_chain(applicant, target_user, change_type: str,
     ============================================================
 
     【GRANT 申请】
-    - viewer 本团队       → 自动授予(节点同步,不进工单,本函数不处理)
-    - viewer 跨团队       → 目标团队组长单审(缺失降级)
-    - contributor 本团队  → 本团队组长单审(缺失降级)
-    - contributor 跨团队  → 本团队组长 → 目标团队组长 双审
-    - team_leader 本部门  → 本部门经理单审(缺失降级)
-    - team_leader 跨部门  → 本部门经理 → 目标部门经理 双审
-    - dept_manager        → 用户管理员 → 超管 双审
-    - kb_admin            → 用户管理员 → 超管 双审
-    - compliance_admin    → 用户管理员 → 超管 双审
-    - user_admin          → 双超管(排除申请人)
-    - super_admin         → 双超管(排除申请人,强制双人独立)
+    - viewer/contributor 团队级:本团队/本部门其他团队 → 组长提单自动生效(空链)
+      跨部门团队 → 资源部门经理批准
+    - viewer/contributor 部门级:本部门 → 部门经理提单自动生效(空链)
+      跨部门 → kb_admin 审核
+    - team_leader        → 用户管理员单审(超管兜底)
+    - dept_manager       → 用户管理员 → 超管 双审
+    - kb_admin           → 用户管理员 → 超管 双审
+    - compliance_admin   → 用户管理员 → 超管 双审
+    - user_admin         → 双超管(排除申请人)
+    - super_admin        → 双超管(排除申请人,强制双人独立)
 
     【REVOKE 撤销】(方案 B 加严)
     - viewer 跨团队       → 无需审批,直接生效 + 审计
@@ -575,15 +654,14 @@ def _build_grant_chain_for_team_role(applicant, role_key: str,
                                       is_role_change: bool = False) -> list:
     """构造 team_leader / contributor / viewer 的申请(GRANT)审批链
 
-    规则矩阵:
-    - viewer 跨团队       → 目标团队组长单审(缺失降级)
-    - contributor 本团队  → 本团队组长单审(缺失降级)
-    - contributor 跨团队  → 本团队组长 → 目标团队组长 双审
-    - team_leader 本部门  → 本部门经理单审(缺失降级)
-    - team_leader 跨部门  → 本部门经理 → 目标部门经理 双审
+    规则矩阵(定稿,资源所有者审批):
+    - viewer/contributor 团队级:本团队/本部门其他团队 → 空链(组长提单自动生效)
+      跨部门团队 → 资源部门经理单审(缺失降级)
+    - viewer/contributor 部门级:本部门 → 空链(部门经理提单自动生效)
+      跨部门 → kb_admin 单审
+    - team_leader:user_admin 单审(超管兜底) —— 部门经理发起流程,人员管理审批
 
-    跨部门/跨团队判定:对比 applicant.team_id/department_id 与 scope_id
-    申请人无 team_id → 默认跨部门,本团队节点降级到本部门经理
+    本部门判定:目标组织(团队所属部门/部门 scope)与申请人所属部门一致即视为本部门。
 
     is_role_change=True 时,本团队节点会触发回避(申请人自己),自动走降级链。
     """
@@ -591,59 +669,56 @@ def _build_grant_chain_for_team_role(applicant, role_key: str,
     applicant_team_id = applicant.team_id if applicant else None
     applicant_dept_id = applicant.department_id if applicant else None
 
-    # ── viewer 申请(仅跨团队场景进工单) ──
-    if role_key == 'viewer':
-        # viewer 本团队自动授予,不进工单;进到这里默认是跨团队
+    # ── viewer / contributor 申请(组长/部门经理提单:本部门自动生效,跨部门单审) ──
+    # 定稿矩阵(资源所有者审批):
+    # - 团队级:本团队 / 本部门其他团队 → 资源团队组长提单自动生效(空链直接执行)
+    #   跨部门团队 → 资源团队组长提单 + 资源部门经理批准
+    # - 部门级:本部门 → 部门经理提单自动生效;跨部门 → 资源部门经理提单 + kb_admin 审核
+    # 本部门判定:目标组织(团队所属部门/部门 scope)与申请人所属部门一致即视为本部门,
+    # 同部门内由资源组长/经理背书即可,不再上双重审批(避免小权限大流程倒挂)。
+    if role_key in ('viewer', 'contributor'):
+        # 部门级授权(scope_id = dept_id)
+        if scope_type == ScopeType.DEPT:
+            if not scope_id:
+                # 部门 scope 缺少 dept_id,异常情况降级到超管兜底
+                return [_build_chain_node(ApproverRole.SUPER_ADMIN)]
+            if applicant_dept_id and scope_id == applicant_dept_id:
+                # 本部门:部门经理提单自动生效
+                return []
+            # 跨部门:资源部门经理提单 + kb_admin 审核
+            return [_build_chain_node(ApproverRole.KB_ADMIN)]
+        # 团队级授权(scope_id = team_id)
         if scope_type != ScopeType.TEAM or not scope_id:
-            # viewer 跨团队必须有 scope_id,异常情况降级到超管兜底
             return [_build_chain_node(ApproverRole.SUPER_ADMIN)]
-        # 目标团队组长单审(缺失降级)
-        approver_role, s_type, s_id = _resolve_team_leader(scope_id, exclude_user_id=applicant_id)
+        target_team = Team.objects.filter(id=scope_id, is_deleted=False).only('department_id').first()
+        if not target_team or not target_team.department_id:
+            # 目标团队无部门归属,无法判定本部门/跨部门,兜底超管单审
+            return [_build_chain_node(ApproverRole.SUPER_ADMIN)]
+        target_dept_id = target_team.department_id
+        if scope_id == applicant_team_id or target_dept_id == applicant_dept_id:
+            # 本团队 或 本部门其他团队:资源团队组长提单自动生效
+            return []
+        # 跨部门团队:资源团队组长提单 + 资源部门经理批准(缺失降级)
+        approver_role, s_type, s_id = _resolve_dept_leader(target_dept_id, exclude_user_id=applicant_id)
         return [_build_chain_node(approver_role, s_type, s_id)]
 
-    # ── contributor 申请(本团队单审 / 跨团队双审) ──
-    if role_key == 'contributor':
+    # ── team_leader 申请(授权组长:部门经理发起流程,人员管理审批,超管兜底) ──
+    # 定稿:任命组长由部门经理发起流程,审批人是人员管理(user_admin),超管兜底。
+    # 审批池为全局角色,不绑定具体组织;发起人为 user_admin 时由另一 user_admin 审批(回避原则)。
+    if role_key == 'team_leader':
+        # team_leader 是 TEAM_SCOPE 角色,scope 必须绑定目标团队,否则授权语义错误
         if scope_type != ScopeType.TEAM or not scope_id:
             return [_build_chain_node(ApproverRole.SUPER_ADMIN)]
-        is_cross = (scope_id != applicant_team_id)
-        if not is_cross:
-            # 本团队:本团队组长单审
-            approver_role, s_type, s_id = _resolve_team_leader(scope_id, exclude_user_id=applicant_id)
-            return [_build_chain_node(approver_role, s_type, s_id)]
-        # 跨团队:本团队组长 → 目标团队组长 双审
-        # 本团队组长节点(申请人无 team_id 时降级到本部门经理)
-        if applicant_team_id:
-            role1, t1, i1 = _resolve_team_leader(applicant_team_id, exclude_user_id=applicant_id)
-        else:
-            # 申请人无 team_id:本团队节点降级到本部门经理
-            if applicant_dept_id:
-                role1, t1, i1 = _resolve_dept_leader(applicant_dept_id, exclude_user_id=applicant_id)
-            else:
-                role1, t1, i1 = (ApproverRole.USER_ADMIN, ScopeType.NONE, None)
-        # 目标团队组长节点
-        role2, t2, i2 = _resolve_team_leader(scope_id, exclude_user_id=applicant_id)
-        return [
-            _build_chain_node(role1, t1, i1),
-            _build_chain_node(role2, t2, i2),
-        ]
-
-    # ── team_leader 申请(本部门单审 / 跨部门双审) ──
-    if role_key == 'team_leader':
-        if scope_type != ScopeType.DEPT or not scope_id:
+        # 目标团队不存在/已删除 → 兜底超管单审(避免对失效团队产生可审批工单)
+        if not Team.objects.filter(id=scope_id, is_deleted=False).exists():
             return [_build_chain_node(ApproverRole.SUPER_ADMIN)]
-        is_cross = (scope_id != applicant_dept_id)
-        if not is_cross:
-            # 本部门:本部门经理单审
-            approver_role, s_type, s_id = _resolve_dept_leader(scope_id, exclude_user_id=applicant_id)
-            return [_build_chain_node(approver_role, s_type, s_id)]
-        # 跨部门:本部门经理 → 目标部门经理 双审
-        role1, t1, i1 = _resolve_dept_leader(applicant_dept_id, exclude_user_id=applicant_id) \
-            if applicant_dept_id else (ApproverRole.USER_ADMIN, ScopeType.NONE, None)
-        role2, t2, i2 = _resolve_dept_leader(scope_id, exclude_user_id=applicant_id)
-        return [
-            _build_chain_node(role1, t1, i1),
-            _build_chain_node(role2, t2, i2),
-        ]
+        has_user_admin = UserRoleRel.objects.filter(
+            role__role_key='user_admin', status=GrantStatus.ACTIVE,
+        ).exclude(user_id=applicant_id or 0).exists()
+        if has_user_admin:
+            return [_build_chain_node(ApproverRole.USER_ADMIN)]
+        # 无可用用户管理员 → 超管兜底单审
+        return [_build_chain_node(ApproverRole.SUPER_ADMIN)]
 
     # 兜底:未知角色 → 超管单审
     return [_build_chain_node(ApproverRole.SUPER_ADMIN)]
@@ -670,16 +745,23 @@ def _build_revoke_chain_for_team_role(applicant, role_key: str,
         return []
 
     # team_leader:本部门 → 本部门经理 + 用户管理员;跨部门 → 本部门经理 + 目标部门经理
+    # team_leader 是 TEAM_SCOPE 角色,撤销 scope 绑定目标团队(scope_id=team_id),
+    # 本部门/跨部门按"目标团队所属部门"与"申请人(操作者)部门"对比判定。
     if role_key == 'team_leader':
-        if scope_type != ScopeType.DEPT or not scope_id:
+        if scope_type != ScopeType.TEAM or not scope_id:
             return [_build_chain_node(ApproverRole.SUPER_ADMIN)]
-        is_cross = (scope_id != applicant_dept_id)
+        target_team = Team.objects.filter(id=scope_id, is_deleted=False).only('department_id').first()
+        if not target_team or not target_team.department_id:
+            # 目标团队无部门归属,无法构造部门审批链,兜底超管单审
+            return [_build_chain_node(ApproverRole.SUPER_ADMIN)]
+        target_dept_id = target_team.department_id
+        is_cross = (target_dept_id != applicant_dept_id)
         # 节点1:本部门经理(降级到用户管理员)
         role1, t1, i1 = _resolve_dept_leader(applicant_dept_id, exclude_user_id=applicant_id) \
             if applicant_dept_id else (ApproverRole.USER_ADMIN, ScopeType.NONE, None)
         if is_cross:
             # 跨部门:节点2 = 目标部门经理(降级到用户管理员)
-            role2, t2, i2 = _resolve_dept_leader(scope_id, exclude_user_id=applicant_id)
+            role2, t2, i2 = _resolve_dept_leader(target_dept_id, exclude_user_id=applicant_id)
         else:
             # 本部门:节点2 = 用户管理员(本部门经理已审,加用户管理员复核)
             role2, t2, i2 = (ApproverRole.USER_ADMIN, ScopeType.NONE, None)
@@ -748,21 +830,77 @@ def create_ticket(applicant, target_user, change_type: str,
         _check_super_admin_quota(applicant)
 
     # ── 入口校验 3:团队级互斥自动转 ROLE_CHANGE ──
-    # 业务规则:同团队内团队角色(viewer/contributor/team_leader)互斥,
-    # 高等级覆盖低等级。申请同团队新角色时,若已有旧角色,自动转为 ROLE_CHANGE
-    # (原子撤销旧角色 + 授予新角色),避免同团队出现多条 ACTIVE 记录违反 DB 唯一约束。
-    # 此校验下沉到 create_ticket,确保所有工单创建路径(自助申请/管理员工单)统一拦截。
+    # 业务规则:同团队/同部门内团队角色(viewer/contributor/team_leader)互斥,
+    # 高等级覆盖低等级。申请同 scope 新角色时,若已有旧角色,自动转为 ROLE_CHANGE
+    # (原子撤销旧角色 + 授予新角色),避免同 scope 出现多条 ACTIVE 记录违反 DB 唯一约束。
+    # 此校验下沉到 create_ticket,确保所有工单创建路径统一拦截。
     if (change_type == TicketChangeType.GRANT
             and role and role.role_key in TEAM_ROLE_KEYS
-            and scope_type == ScopeType.TEAM and scope_id):
-        existing_role = _detect_team_role_in_service(target_user, scope_id)
+            and scope_type in (ScopeType.TEAM, ScopeType.DEPT) and scope_id):
+        if scope_type == ScopeType.TEAM:
+            existing_role = _detect_team_role_in_service(target_user, scope_id)
+        else:
+            existing_role = _detect_dept_role_in_service(target_user, scope_id)
         if existing_role and existing_role.id != role.id:
             previous_role = existing_role
             change_type = TicketChangeType.ROLE_CHANGE
             logger.info(
                 f'[Ticket] 团队级互斥自动转 ROLE_CHANGE: '
-                f'user={target_user.username} team_id={scope_id} '
+                f'user={target_user.username} scope={scope_type}#{scope_id} '
                 f'{existing_role.role_key} -> {role.role_key}'
+            )
+
+    # ── 入口校验 4:工单防重 —— 同目标用户同 scope 已有待审批的同类角色工单则拒绝 ──
+    # 业务背景:重复提交相同授权申请会堆积 PENDING 工单,审批人处理一单后其余变废单,
+    # 且高等级覆盖低等级语义下同 scope 不应并存多个待批角色。仅拦截待审批(非已执行/已驳回)。
+    if change_type in (TicketChangeType.GRANT, TicketChangeType.ROLE_CHANGE) and role:
+        dup_qs = PermissionApprovalTicket.objects.filter(
+            target_user=target_user,
+            scope_type=scope_type, scope_id=scope_id,
+            status=TicketStatus.PENDING,
+        )
+        if scope_type in (ScopeType.TEAM, ScopeType.DEPT):
+            # 团队/部门 scope:同范围任意团队角色互斥,存在任一 PENDING 即拒绝
+            dup_qs = dup_qs.filter(role__role_key__in=TEAM_ROLE_KEYS)
+        else:
+            # 全局 scope:同角色 PENDING 才拒绝
+            dup_qs = dup_qs.filter(role=role)
+        if dup_qs.exists():
+            raise ValueError('该用户在此范围内已有待审批的授权工单，请勿重复提交')
+
+    # ── 入口校验 5:管理岗名额唯一 —— 部门已有经理 / 团队已有组长时不可重复任命 ──
+    # 业务背景:Team.leader_id / Department.leader_id 与 team_leader / dept_manager 授权
+    # 一一对应(见 _sync_leader_for_role)。已有现任者时,仅允许现任者本人续期/变更;
+    # 任命新人必须先撤销现任(REVOKE 工单)再任命,避免出现双组长/双经理。
+    if (change_type in (TicketChangeType.GRANT, TicketChangeType.ROLE_CHANGE)
+            and role and role.role_key in ('team_leader', 'dept_manager') and scope_id):
+        existing_leader_id = None
+        if role.role_key == 'team_leader' and scope_type == ScopeType.TEAM:
+            # 团队现任组长:优先 leader_id 字段,兜底活跃 team_leader 授权(字段与授权双来源对齐)
+            team = Team.objects.filter(id=scope_id, is_deleted=False).only('leader_id').first()
+            if team and team.leader_id:
+                existing_leader_id = team.leader_id
+            if not existing_leader_id:
+                existing_leader_id = UserTeamScopeRel.objects.filter(
+                    team_id=scope_id, role__role_key='team_leader',
+                    status=GrantStatus.ACTIVE,
+                ).values_list('user_id', flat=True).first()
+        elif role.role_key == 'dept_manager' and scope_type == ScopeType.DEPT:
+            # 部门现任经理:优先 leader_id 字段,兜底活跃 dept_manager 授权
+            dept = Department.objects.filter(id=scope_id, is_deleted=False).only('leader_id').first()
+            if dept and dept.leader_id:
+                existing_leader_id = dept.leader_id
+            if not existing_leader_id:
+                existing_leader_id = UserDeptScopeRel.objects.filter(
+                    dept_id=scope_id, role__role_key='dept_manager',
+                    status=GrantStatus.ACTIVE,
+                ).values_list('user_id', flat=True).first()
+        # 已有现任者且非本人 → 拒绝(换人需先撤销现任);本人续期/变更放行
+        if existing_leader_id and existing_leader_id != target_user.id:
+            scope_label = '团队' if role.role_key == 'team_leader' else '部门'
+            leader_label = '组长' if role.role_key == 'team_leader' else '经理'
+            raise ValueError(
+                f'该{scope_label}已有{leader_label},如需更换请先撤销现任{leader_label}后再任命'
             )
 
     chain = build_approval_chain(applicant, target_user, change_type,
@@ -975,6 +1113,40 @@ def _execute_grant_or_revoke(ticket: PermissionApprovalTicket, actor: User):
         _apply_role_change(ticket, actor)
 
 
+def _sync_leader_for_role(ticket, role, grant: bool):
+    """工单执行时同步组织 leader_id —— 与用户编辑接口 _sync_role_leader 对齐
+
+    业务背景:Team.leader_id / Department.leader_id 与 team_leader / dept_manager 授权
+    应保持一致。此前工单授予路径只写授权表不同步 leader_id,导致审批链判定
+    部门经理时(基于授权表)与组织树展示(基于 leader_id)不一致。
+
+    规则(与编辑接口对齐):
+    - grant: 授予 team_leader/dept_manager 时,仅当原 leader 为空才写入,避免覆盖已有 leader
+    - revoke: 撤销时仅当 leader 就是被撤销者才清空,避免误伤
+    - scope 过滤:按工单 scope(目标团队/部门)精确定位,ROLE_CHANGE 撤销旧角色时传 previous_role
+    """
+    if not role:
+        return
+    role_key = role.role_key
+    target = ticket.target_user
+    if role_key == 'team_leader':
+        team_qs = Team.objects.filter(is_deleted=False)
+        if ticket.scope_type == ScopeType.TEAM and ticket.scope_id:
+            team_qs = team_qs.filter(id=ticket.scope_id)
+        if grant:
+            team_qs.filter(leader__isnull=True).update(leader=target)
+        else:
+            team_qs.filter(leader=target).update(leader=None)
+    elif role_key == 'dept_manager':
+        dept_qs = Department.objects.filter(is_deleted=False)
+        if ticket.scope_type == ScopeType.DEPT and ticket.scope_id:
+            dept_qs = dept_qs.filter(id=ticket.scope_id)
+        if grant:
+            dept_qs.filter(leader__isnull=True).update(leader=target)
+        else:
+            dept_qs.filter(leader=target).update(leader=None)
+
+
 def _apply_role_change(ticket: PermissionApprovalTicket, actor: User):
     """角色变更执行 —— 原子操作:撤销旧角色(previous_role) + 授予新角色(role)
 
@@ -1016,6 +1188,8 @@ def _apply_role_change(ticket: PermissionApprovalTicket, actor: User):
             if ticket.scope_type == ScopeType.TEAM and ticket.scope_id:
                 qs = qs.filter(team_id=ticket.scope_id)
             qs.update(status=GrantStatus.REVOKED, revoked_at=now, revoked_by=actor, ticket=ticket)
+        # 撤销旧管理角色时同步清理组织 leader_id(与 _sync_role_leader 对齐)
+        _sync_leader_for_role(ticket, prev_role, grant=False)
 
     # 2) 授予新角色(复用 _apply_grant 逻辑)
     _apply_grant(ticket, actor)
@@ -1076,6 +1250,8 @@ def _apply_grant(ticket: PermissionApprovalTicket, actor: User):
             defaults=common,
         )
         action = AuditAction.ROLE_GRANT
+    # 授予 team_leader/dept_manager 时同步组织 leader_id(仅原 leader 为空才写入)
+    _sync_leader_for_role(ticket, ticket.role, grant=True)
     _write_audit(ticket, actor, action, '', '', result='SUCCESS')
 
 
@@ -1111,6 +1287,8 @@ def _apply_revoke(ticket: PermissionApprovalTicket, actor: User):
             revoked = True
 
     action = AuditAction.ROLE_REVOKE if ticket.scope_type == ScopeType.NONE else AuditAction.SCOPE_REVOKE
+    # 撤销 team_leader/dept_manager 时同步清理组织 leader_id(仅 leader 是被撤销者才清空)
+    _sync_leader_for_role(ticket, ticket.role, grant=False)
     _write_audit(ticket, actor, action, '', '',
                  result='SUCCESS' if revoked else 'NOOP')
 

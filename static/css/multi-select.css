@@ -2,6 +2,8 @@
 .multi-select {
 	position: relative;
 	width: 100%;
+	/* 允许在 flex 父容器内收缩，防止长标签把组件撑宽（配合 label 省略号截断） */
+	min-width: 0;
 }
 
 .multi-select-row {
@@ -46,7 +48,13 @@
 
 .multi-select-label {
 	color: var(--text-sub);
-	font-size: 13px
+	font-size: 13px;
+	/* 单行展示，内容过长时省略号截断（触发器内 flex 空间让给 label 收缩） */
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
 }
 
 .multi-select-count {

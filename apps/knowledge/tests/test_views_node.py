@@ -33,7 +33,7 @@ from apps.knowledge.tests.test_views import (
     KnowledgeViewsExtraBase,
 )
 from apps.users.models import (
-    User, Role, UserRoleRel, GrantStatus, Department, Team,
+    User, Role, UserRoleRel, GrantStatus, Department, Team, Permission, RolePermissionRel,
     PermissionApprovalTicket, TicketStatus, TicketChangeType,
 )
 
@@ -97,11 +97,31 @@ class TestNodeTreeFilter(KnowledgeViewsExtraBase):
 # ============================================================================
 
 class TestNodeCreate(KnowledgeViewsExtraBase):
-    """KnowledgeNodeViewSet.create 测试"""
+    """KnowledgeNodeViewSet.create 测试 —— 节点/文件夹分层 + 角色领地校验"""
+
+    def _make_dept_manager(self, dept):
+        """构造部门经理：user.manage 权限 + 主部门归属
+
+        get_user_managed_depts 含主部门，故只要授予 user.manage 权限即为部门经理。
+        """
+        user = _create_test_user('mgr_' + dept.code)
+        user.department = dept
+        user.save(update_fields=['department'])
+        role = _get_or_create_role('dept_manager')
+        perm, _ = Permission.objects.get_or_create(
+            permission_key='user.manage',
+            defaults={'permission_name': '用户管理', 'module': 'user'})
+        RolePermissionRel.objects.get_or_create(
+            role=role, permission=perm,
+            defaults={'granted_by': self.super_admin, 'is_active': True})
+        UserRoleRel.objects.get_or_create(
+            user=user, role=role,
+            defaults={'status': GrantStatus.ACTIVE})
+        return user
 
     @pytest.mark.integration
     def test_admin_create_category_under_team(self):
-        """超管在团队节点下创建业务分类 → 201 且 path 正确"""
+        """超管在团队节点下创建业务分类 → 201 且 path 正确、node_kind=FOLDER"""
         resp = self.client.post(
             '/api/v1/knowledge/nodes/',
             data=json.dumps({'parent': self.team_node.id, 'name': '新分类',
@@ -114,6 +134,59 @@ class TestNodeCreate(KnowledgeViewsExtraBase):
                                          parent=self.team_node)
         assert node.path.startswith(self.team_node.path)
         assert node.node_level == 4
+        assert node.node_kind == 'FOLDER'
+
+    @pytest.mark.integration
+    def test_admin_create_folder_under_root(self):
+        """超管在 root 下创建文件夹 → 201（与部门节点同级，node_level=2）"""
+        resp = self.client.post(
+            '/api/v1/knowledge/nodes/',
+            data=json.dumps({'parent': self.root_node.id, 'name': '公共资料',
+                             'node_type': 'folder'}),
+            content_type='application/json',
+            **_auth_headers(self.super_admin))
+        assert resp.status_code == 201
+        node = KnowledgeNode.objects.get(name='公共资料', parent=self.root_node)
+        assert node.node_kind == 'FOLDER'
+        assert node.node_level == 2
+
+    def test_kb_admin_create_folder_under_root(self):
+        """知识库管理员可在 root 下创建文件夹（与部门节点同级，node_level=2）"""
+        kb_admin = _create_test_user('kb_admin_user')
+        role = _get_or_create_role('kb_admin')
+        perm, _ = Permission.objects.get_or_create(
+            permission_key='kb.manage_all',
+            defaults={'permission_name': '知识库管理', 'module': 'knowledge'})
+        RolePermissionRel.objects.get_or_create(
+            role=role, permission=perm,
+            defaults={'granted_by': self.super_admin, 'is_active': True})
+        UserRoleRel.objects.get_or_create(
+            user=kb_admin, role=role,
+            defaults={'status': GrantStatus.ACTIVE})
+        resp = self.client.post(
+            '/api/v1/knowledge/nodes/',
+            data=json.dumps({'parent': self.root_node.id, 'name': '公共资料库',
+                             'node_type': 'folder'}),
+            content_type='application/json',
+            **_auth_headers(kb_admin))
+        assert resp.status_code == 201
+        node = KnowledgeNode.objects.get(name='公共资料库', parent=self.root_node)
+        assert node.node_kind == 'FOLDER'
+        assert node.node_level == 2
+
+    @pytest.mark.integration
+    def test_admin_create_folder_under_dept_node(self):
+        """超管在部门节点下创建文件夹 → 201（新语义：部门节点可挂文件夹）"""
+        resp = self.client.post(
+            '/api/v1/knowledge/nodes/',
+            data=json.dumps({'parent': self.dept_node.id, 'name': '部门共享',
+                             'node_type': 'folder'}),
+            content_type='application/json',
+            **_auth_headers(self.super_admin))
+        assert resp.status_code == 201
+        node = KnowledgeNode.objects.get(name='部门共享', parent=self.dept_node)
+        assert node.node_kind == 'FOLDER'
+        assert node.node_level == 3
 
     @pytest.mark.integration
     def test_team_leader_create_in_own_team(self):
@@ -125,6 +198,17 @@ class TestNodeCreate(KnowledgeViewsExtraBase):
             content_type='application/json',
             **_auth_headers(self.team_leader))
         assert resp.status_code == 201
+
+    @pytest.mark.integration
+    def test_team_leader_create_under_dept_node_denied(self):
+        """团队组长在部门节点下创建 → 403（部门节点归部门经理/超管管理）"""
+        resp = self.client.post(
+            '/api/v1/knowledge/nodes/',
+            data=json.dumps({'parent': self.dept_node.id, 'name': '越权',
+                             'node_type': 'folder'}),
+            content_type='application/json',
+            **_auth_headers(self.team_leader))
+        assert resp.status_code == 403
 
     @pytest.mark.integration
     def test_team_leader_create_outside_team_denied(self):
@@ -142,6 +226,34 @@ class TestNodeCreate(KnowledgeViewsExtraBase):
         assert resp.status_code == 403
 
     @pytest.mark.integration
+    def test_dept_manager_create_in_own_dept(self):
+        """部门经理在本部门节点下创建文件夹 → 201"""
+        mgr = self._make_dept_manager(self.dept)
+        resp = self.client.post(
+            '/api/v1/knowledge/nodes/',
+            data=json.dumps({'parent': self.dept_node.id, 'name': '经理文件夹',
+                             'node_type': 'folder'}),
+            content_type='application/json',
+            **_auth_headers(mgr))
+        assert resp.status_code == 201
+
+    @pytest.mark.integration
+    def test_dept_manager_create_other_dept_denied(self):
+        """部门经理在别的部门节点下创建 → 403"""
+        mgr = self._make_dept_manager(self.dept)
+        other_dept = Department.objects.create(name='市场部', code='mkt')
+        other_node = self._create_node(
+            '市场部', 'folder', node_level=2, parent=self.root_node,
+            ref_id=other_dept.id)
+        resp = self.client.post(
+            '/api/v1/knowledge/nodes/',
+            data=json.dumps({'parent': other_node.id, 'name': '越权',
+                             'node_type': 'folder'}),
+            content_type='application/json',
+            **_auth_headers(mgr))
+        assert resp.status_code == 403
+
+    @pytest.mark.integration
     def test_normal_user_create_denied(self):
         """普通用户（非组长非管理员）创建 → 403"""
         resp = self.client.post(
@@ -153,21 +265,19 @@ class TestNodeCreate(KnowledgeViewsExtraBase):
         assert resp.status_code == 403
 
     @pytest.mark.integration
-    def test_create_protected_level_denied(self):
-        """在部门节点（Level 2 保护层）下创建 → 400 层级保护"""
+    def test_create_without_parent_denied(self):
+        """文件夹必须指定上级节点 → 400"""
         resp = self.client.post(
             '/api/v1/knowledge/nodes/',
-            data=json.dumps({'parent': self.dept_node.id, 'name': 'x',
-                             'node_type': 'folder'}),
+            data=json.dumps({'name': 'x', 'node_type': 'folder'}),
             content_type='application/json',
             **_auth_headers(self.super_admin))
         assert resp.status_code == 400
-        # 自定义异常处理器将字段错误放在 details 内
-        assert '不支持直接创建' in resp.json()['details']['parent']
+        assert '必须指定上级节点' in resp.json()['details']['parent']
 
     @pytest.mark.integration
-    def test_create_root_with_parent_denied(self):
-        """root 节点指定父节点 → 400"""
+    def test_create_root_manual_denied(self):
+        """手动创建 root 节点（含指定/未指定父节点）→ 400，根节点由系统自动创建"""
         resp = self.client.post(
             '/api/v1/knowledge/nodes/',
             data=json.dumps({'parent': self.team_node.id, 'name': 'x',
@@ -175,11 +285,8 @@ class TestNodeCreate(KnowledgeViewsExtraBase):
             content_type='application/json',
             **_auth_headers(self.super_admin))
         assert resp.status_code == 400
-        assert '根节点不能指定上级节点' in resp.json()['details']['parent']
-
-    @pytest.mark.integration
-    def test_create_root_without_parent_blocked_by_level_guard(self):
-        """无父节点的 root 创建同样被 Level 保护拦截（depth=0）—— 固化源码行为"""
+        assert '根节点由系统自动创建' in resp.json()['details']['parent']
+        # 未指定父节点的 root 创建同样被拦截
         resp = self.client.post(
             '/api/v1/knowledge/nodes/',
             data=json.dumps({'name': '新库', 'node_type': 'root',
@@ -214,6 +321,173 @@ class TestNodeUpdate(KnowledgeViewsExtraBase):
         assert resp.status_code == 400
         # 自定义异常处理器将字段错误放在 details 内
         assert '不支持直接操作' in resp.json()['details']['detail']
+
+    @pytest.mark.integration
+    def test_update_visibility_creates_ticket(self):
+        """修改文件夹可见范围 → 403 且自动创建双层审批工单，节点值不变"""
+        resp = self.client.patch(
+            f'/api/v1/knowledge/nodes/{self.category_node.id}/',
+            data=json.dumps({'visibility_level': 'PUBLIC'}),
+            content_type='application/json',
+            **_auth_headers(self.super_admin))
+        assert resp.status_code == 403
+        assert '工单' in resp.json()['details']['detail']
+        ticket = PermissionApprovalTicket.objects.filter(
+            reason__startswith=f'[node:{self.category_node.id}:visibility_change]',
+            status=TicketStatus.PENDING,
+        ).first()
+        assert ticket is not None
+        assert len(ticket.approval_chain) == 2
+        assert '目标值:PUBLIC' in ticket.reason
+        # 节点可见范围未直接变更（待审批后写回）
+        self.category_node.refresh_from_db()
+        assert self.category_node.visibility_level is None
+
+    @pytest.mark.integration
+    def test_update_visibility_same_value_no_ticket(self):
+        """可见范围未变化时正常保存，不创建工单"""
+        resp = self.client.patch(
+            f'/api/v1/knowledge/nodes/{self.category_node.id}/',
+            data=json.dumps({'name': '改名'}),
+            content_type='application/json',
+            **_auth_headers(self.super_admin))
+        assert resp.status_code == 200
+        assert PermissionApprovalTicket.objects.filter(
+            reason__startswith=f'[node:{self.category_node.id}:visibility_change]',
+        ).count() == 0
+
+    def _make_dept_manager(self):
+        """构造部门经理（user.manage + 主部门归属，get_user_managed_depts 含主部门）"""
+        mgr = _create_test_user('mgr_rd')
+        mgr.department = self.dept
+        mgr.save(update_fields=['department'])
+        role = _get_or_create_role('dept_manager')
+        perm, _ = Permission.objects.get_or_create(
+            permission_key='user.manage',
+            defaults={'permission_name': '用户管理', 'module': 'user'})
+        RolePermissionRel.objects.get_or_create(
+            role=role, permission=perm,
+            defaults={'granted_by': self.super_admin, 'is_active': True})
+        UserRoleRel.objects.get_or_create(
+            user=mgr, role=role,
+            defaults={'status': GrantStatus.ACTIVE})
+        return mgr
+
+    @pytest.mark.integration
+    def test_team_leader_visibility_chain_has_dept_leader(self):
+        """团队级：组长发起可见范围变更 → 审批链第一节点为部门经理（DEPT_LEADER + 部门 scope）"""
+        resp = self.client.patch(
+            f'/api/v1/knowledge/nodes/{self.category_node.id}/',
+            data=json.dumps({'visibility_level': 'PUBLIC'}),
+            content_type='application/json',
+            **_auth_headers(self.team_leader))
+        assert resp.status_code == 403
+        ticket = PermissionApprovalTicket.objects.filter(
+            reason__startswith=f'[node:{self.category_node.id}:visibility_change]',
+            status=TicketStatus.PENDING,
+        ).first()
+        assert ticket is not None
+        assert len(ticket.approval_chain) == 1
+        step0 = ticket.approval_chain[0]
+        assert step0['approver_role'] == 'DEPT_LEADER'
+        assert step0['approver_scope_id'] == self.dept.id
+
+    @pytest.mark.integration
+    def test_dept_manager_visibility_chain_has_kb_admin(self):
+        """部门级：部门经理发起可见范围变更 → 审批链第一节点为文档管理员/超管（KB_ADMIN）"""
+        mgr = self._make_dept_manager()
+        resp = self.client.patch(
+            f'/api/v1/knowledge/nodes/{self.category_node.id}/',
+            data=json.dumps({'visibility_level': 'PUBLIC'}),
+            content_type='application/json',
+            **_auth_headers(mgr))
+        assert resp.status_code == 403
+        ticket = PermissionApprovalTicket.objects.filter(
+            reason__startswith=f'[node:{self.category_node.id}:visibility_change]',
+            status=TicketStatus.PENDING,
+        ).first()
+        assert ticket is not None
+        assert len(ticket.approval_chain) == 1
+        assert ticket.approval_chain[0]['approver_role'] == 'KB_ADMIN'
+
+    @pytest.mark.integration
+    def test_approve_visibility_ticket_by_dept_manager(self):
+        """团队级工单由部门经理审批 → 通过后节点可见范围生效（单层审批直接写回）"""
+        # 组长发起
+        self.client.patch(
+            f'/api/v1/knowledge/nodes/{self.category_node.id}/',
+            data=json.dumps({'visibility_level': 'PUBLIC'}),
+            content_type='application/json',
+            **_auth_headers(self.team_leader))
+        ticket = PermissionApprovalTicket.objects.filter(
+            reason__startswith=f'[node:{self.category_node.id}:visibility_change]',
+            status=TicketStatus.PENDING,
+        ).first()
+        # 部门经理审批（匹配 DEPT_LEADER scope）
+        mgr = self._make_dept_manager()
+        resp = self.client.post(
+            '/api/v1/knowledge/documents/approve_access_request/',
+            data=json.dumps({'request_id': ticket.id, 'comment': '同意'}),
+            content_type='application/json',
+            **_auth_headers(mgr))
+        assert resp.status_code == 200, resp.content
+        self.category_node.refresh_from_db()
+        assert self.category_node.visibility_level == VisibilityLevel.PUBLIC
+
+    @pytest.mark.integration
+    def test_approve_visibility_ticket_wrong_role_denied(self):
+        """团队级工单非部门经理审批 → 403（审批链按角色指派校验生效）"""
+        self.client.patch(
+            f'/api/v1/knowledge/nodes/{self.category_node.id}/',
+            data=json.dumps({'visibility_level': 'PUBLIC'}),
+            content_type='application/json',
+            **_auth_headers(self.team_leader))
+        ticket = PermissionApprovalTicket.objects.filter(
+            reason__startswith=f'[node:{self.category_node.id}:visibility_change]',
+            status=TicketStatus.PENDING,
+        ).first()
+        # 普通用户（无 user.manage、非管理员）审批 → 403
+        resp = self.client.post(
+            '/api/v1/knowledge/documents/approve_access_request/',
+            data=json.dumps({'request_id': ticket.id, 'comment': '越权'}),
+            content_type='application/json',
+            **_auth_headers(self.normal_user))
+        assert resp.status_code == 403
+        ticket.refresh_from_db()
+        assert ticket.status == TicketStatus.PENDING
+
+    @pytest.mark.integration
+    def test_approve_visibility_ticket_super_admin_chain_double(self):
+        """超管发起 → 双管理员复核链，需两位管理员先后审批"""
+        self.client.patch(
+            f'/api/v1/knowledge/nodes/{self.category_node.id}/',
+            data=json.dumps({'visibility_level': 'PUBLIC'}),
+            content_type='application/json',
+            **_auth_headers(self.super_admin))
+        ticket = PermissionApprovalTicket.objects.filter(
+            reason__startswith=f'[node:{self.category_node.id}:visibility_change]',
+            status=TicketStatus.PENDING,
+        ).first()
+        assert len(ticket.approval_chain) == 2
+        assert ticket.approval_chain[0]['approver_role'] == 'KB_ADMIN'
+        # 第一审通过 → 仍 pending
+        resp = self.client.post(
+            '/api/v1/knowledge/documents/approve_access_request/',
+            data=json.dumps({'request_id': ticket.id, 'comment': '一审同意'}),
+            content_type='application/json',
+            **_auth_headers(self.super_admin))
+        assert resp.status_code == 200, resp.content
+        ticket.refresh_from_db()
+        assert ticket.status == TicketStatus.PENDING
+        # 第二审由另一位超管通过 → 生效
+        resp = self.client.post(
+            '/api/v1/knowledge/documents/approve_access_request/',
+            data=json.dumps({'request_id': ticket.id, 'comment': '复核同意'}),
+            content_type='application/json',
+            **_auth_headers(self.admin2))
+        assert resp.status_code == 200, resp.content
+        self.category_node.refresh_from_db()
+        assert self.category_node.visibility_level == VisibilityLevel.PUBLIC
 
 class TestNodeDestroy(KnowledgeViewsExtraBase):
     """KnowledgeNodeViewSet.destroy 测试"""

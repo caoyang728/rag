@@ -8,6 +8,7 @@
 	<link rel="stylesheet" href="/static/css/common.css">
 	<link rel="stylesheet" href="/static/css/layout.css">
 	<link rel="stylesheet" href="/static/css/admin-nodes.css">
+	<link rel="stylesheet" href="/static/css/preview-doc.css">
 	<link rel="stylesheet" href="/static/css/multi-select.css">
 </head>
 
@@ -112,28 +113,7 @@
 			</div>
 		</div>
 
-		<!-- ============ 文档预览弹窗（不可复制，支持分页） ============ -->
-		<div class="modal" id="docPreviewModal">
-			<div class="modal-content" style="max-width:860px;max-height:85vh">
-				<div class="modal-header">
-					<div class="modal-title" id="docPreviewTitle">文档预览</div>
-					<button class="modal-close" onclick="closeModal('docPreviewModal')">&times;</button>
-				</div>
-				<div class="modal-body overflow-y-auto">
-					<div id="docPreviewContent" class="doc-preview-content select-none"></div>
-				</div>
-				<div class="modal-footer hidden" id="docPreviewFooter">
-					<div class="flex items-center gap-8">
-						<span class="text-sm text-sub" id="docPreviewInfo"></span>
-						<button class="btn btn-sm" id="docPreviewPrev"
-							onclick="previewDocPage(currentPreviewDocId, currentPreviewPage - 1)">‹ 上一页</button>
-						<span class="text-sm" id="docPreviewPage"></span>
-						<button class="btn btn-sm" id="docPreviewNext"
-							onclick="previewDocPage(currentPreviewDocId, currentPreviewPage + 1)">下一页 ›</button>
-					</div>
-				</div>
-			</div>
-		</div>
+		<!-- 文档预览弹窗由 preview-doc.js 动态创建，无需预留 HTML -->
 
 		<!-- ============ 编辑文档设置弹窗 ============ -->
 		<div class="modal" id="docVisModal">
@@ -346,21 +326,23 @@
 					<div class="form-section-title">节点归属</div>
 					<div class="form-row">
 						<div class="form-item flex-1">
-							<label class="form-label">节点类型 <span class="required">*</span></label>
-							<select id="nodeType" class="select">
-								<option value="root">根节点</option>
-								<option value="folder">文件夹</option>
-								<option value="leaf">叶子节点</option>
-							</select>
-							<div class="form-hint">根节点为顶级目录，文件夹下可建子节点，叶子节点不可再建子节点</div>
-						</div>
-						<div class="form-item flex-1">
-							<label class="form-label">上级节点 <span class="required hidden"
-									id="parentRequired">*</span></label>
+							<label class="form-label">上级节点 <span class="required">*</span></label>
 							<select id="nodeParent" class="select">
-								<option value="">— 无（作为根节点）—</option>
+								<option value="">— 请选择上级节点 —</option>
 							</select>
-							<div class="form-hint" id="parentHint">选择"无"则创建为根节点；知识库分类将从上级节点继承</div>
+							<div class="form-hint" id="parentHint">节点只能由组织架构同步创建；手动创建的是文件夹，需选择上级节点</div>
+						</div>
+					</div>
+					<div class="form-row">
+						<div class="form-item flex-1">
+							<label class="form-label">可见范围</label>
+							<select id="nodeVisibility" class="select">
+								<option value="">继承父级（默认）</option>
+								<option value="TEAM_ONLY">仅团队</option>
+								<option value="DEPT_ONLY">仅部门</option>
+								<option value="PUBLIC">全局公开</option>
+							</select>
+							<div class="form-hint">未设置时继承上级节点可见范围；上传文档未指定可见范围时以此为准</div>
 						</div>
 					</div>
 
@@ -448,6 +430,10 @@
 					<div>
 						<div class="text-sub text-sm">上级节点</div>
 						<div class="fw-500 mt-4 nd-info-parent"></div>
+					</div>
+					<div>
+						<div class="text-sub text-sm">可见范围</div>
+						<div class="fw-500 mt-4 nd-info-visibility"></div>
 					</div>
 					<div>
 						<div class="text-sub text-sm">排序号</div>
@@ -539,6 +525,7 @@
 		<script src="/static/js/api.js"></script>
 		<script src="/static/js/layout.js"></script>
 		<script src="/static/js/multi-select.js"></script>
+		<script src="/static/js/preview-doc.js"></script>
 		<script src="/static/js/admin-nodes.js"></script>
 		<script>
 			// 所有登录用户可浏览文档；节点增删改仅管理员可用（按钮显隐控制）

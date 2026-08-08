@@ -151,7 +151,11 @@ function renderTreeHTML(items, depth) {
 }
 
 function getNodeIcon(n) {
-	if (n.node_type === 'root') return ROOT_ICON_MAP[n.root_type] || '📁';
+	// 根节点：按领域图标
+	if (n.node_kind === 'ROOT' || n.node_type === 'root') return ROOT_ICON_MAP[n.root_type] || '📁';
+	// 组织节点（部门/团队，由组织架构同步创建）
+	if (n.node_kind === 'ORG') return '🏢';
+	// 叶子/文件夹
 	if (n.node_type === 'leaf') return '📄';
 	return '📂';
 }
@@ -205,7 +209,8 @@ function selectNode(id, elm, e) {
 function renderNodeDetail(n) {
 	var rootTypeName = ROOT_TYPE_MAP[n.root_type] || n.root_type;
 	var icon = getNodeIcon(n);
-	var nodeTypeLabels = { root: '根节点', folder: '文件夹', leaf: '叶子节点' };
+	var nodeKindLabels = { ROOT: '根节点', ORG: '组织节点', FOLDER: '文件夹' };
+	var visLabels = { TEAM_ONLY: '仅团队', DEPT_ONLY: '仅部门', PUBLIC: '全局公开' };
 	var parentInfo = n.parent_id ? '节点#' + n.parent_id : '（根节点）';
 	var parentPath = n.path ? n.path.replace(/\/$/, '').replace(/\//g, ' / ').trim() : '/';
 
@@ -217,20 +222,21 @@ function renderNodeDetail(n) {
 	clone.querySelector('.nd-id').textContent = 'node-' + n.id;
 	clone.querySelector('.nd-path').textContent = parentPath;
 
-	// 操作按钮：admin/ops 全可见，团队组长仅本团队范围内可见
+	// 操作按钮：admin/ops 全可见，团队组长仅本团队范围内可见（仅文件夹可编辑/删除）
 	var actionsEl = clone.querySelector('.nd-actions');
-	var showActions = isAdminOrOps() || (isTeamLeader() && isNodeInTeam(n, getTeamLeaderTeamNodeIds()));
+	var showActions = (isAdminOrOps() || (isTeamLeader() && isNodeInTeam(n, getTeamLeaderTeamNodeIds())))
+		&& n.node_kind !== 'ROOT' && n.node_kind !== 'ORG';
 	if (showActions) {
 		actionsEl.innerHTML =
 			'<button class="btn btn-sm" onclick="editNode(' + n.id + ')">\uD83D\uDCDD 编辑</button>' +
-			'<button class="btn btn-sm btn-danger" onclick="deleteNode(' + n.id + ')">\uD83D\uDDD1 删除节点</button>';
+			'<button class="btn btn-sm btn-danger" onclick="deleteNode(' + n.id + ')">\uD83D\uDDD1 删除文件夹</button>';
 	}
 
 	// 统计卡片
 	clone.querySelector('.nd-doc-card').onclick = function () { viewNodeDocs(n.id); };
 	clone.querySelector('.nd-doc-count').textContent = (n.document_count || 0).toLocaleString();
 	clone.querySelector('.nd-children-count').textContent = (n.children_count || 0).toLocaleString();
-	clone.querySelector('.nd-node-type-label').textContent = nodeTypeLabels[n.node_type] || n.node_type;
+	clone.querySelector('.nd-node-type-label').textContent = nodeKindLabels[n.node_kind] || n.node_type || '—';
 
 	// 基础信息
 	clone.querySelector('.nd-info-name').textContent = n.name;
@@ -239,6 +245,8 @@ function renderNodeDetail(n) {
 	clone.querySelector('.nd-info-created').textContent = formatDate(n.created_at);
 	clone.querySelector('.nd-info-updated').textContent = formatDate(n.updated_at);
 	clone.querySelector('.nd-info-parent').textContent = parentInfo;
+	clone.querySelector('.nd-info-visibility').textContent =
+		n.visibility_level ? (visLabels[n.visibility_level] || n.visibility_level) : '继承父级';
 	clone.querySelector('.nd-info-order').textContent = n.order_no || 0;
 	clone.querySelector('.nd-info-depth').textContent = '第' + n.depth + '层';
 
@@ -260,51 +268,21 @@ function openNodeModal() {
 	document.getElementById('nodeName').value = '';
 	document.getElementById('nodeDesc').value = '';
 	document.getElementById('nodeOrder').value = '0';
-	document.getElementById('nodeModalTitle').textContent = '新增节点';
+	document.getElementById('nodeVisibility').value = '';
+	document.getElementById('nodeModalTitle').textContent = '新增文件夹';
 
 	var isTL = isTeamLeader();
 
-	// 还原 root 选项（非组长时可见）
-	var typeSel = document.getElementById('nodeType');
-	var rootOpt = typeSel.querySelector('option[value="root"]');
-	if (rootOpt) rootOpt.style.display = isTL ? 'none' : '';
-
-	// 团队组长：只能创建文件夹/叶子节点，强制选择父节点
-	document.getElementById('nodeType').value = isTL ? 'folder' : 'root';
+	// 手动创建的一律是文件夹；所有用户都必选上级节点
+	var hint = document.getElementById('parentHint');
 	if (isTL) {
-		typeSel.disabled = false; // 允许 folder/leaf 切换
-		document.getElementById('nodeParent').disabled = false;
-		document.getElementById('parentRequired').classList.remove('hidden');
-		document.getElementById('parentHint').textContent = '必须选择一个团队范围内的上级节点';
+		hint.textContent = '必须选择一个团队范围内的上级节点';
 	} else {
-		document.getElementById('nodeType').disabled = false;
-		document.getElementById('nodeParent').disabled = true;
-		document.getElementById('nodeParent').value = '';
-		document.getElementById('parentRequired').classList.add('hidden');
-		document.getElementById('parentHint').textContent = '根节点无需上级节点；知识库分类从数据库动态获取';
+		hint.textContent = '超管/文档管理员可在知识库根下创建文件夹（与部门同级）；其他角色选择自己范围内的上级节点';
 	}
 
 	// 复用已加载的 nodeTree 构建父节点列表
 	buildParentOptions(null);
-
-	// 节点类型切换：根节点禁父节点，文件夹/叶子必选父节点
-	document.getElementById('nodeType').onchange = function () {
-		if (isTL) return; // 团队组长不可切换类型
-		var ntype = document.getElementById('nodeType').value;
-		var parentSel = document.getElementById('nodeParent');
-		var reqStar = document.getElementById('parentRequired');
-		var hint = document.getElementById('parentHint');
-		if (ntype === 'root') {
-			parentSel.disabled = true;
-			parentSel.value = '';
-			reqStar.classList.add('hidden');
-			hint.textContent = '根节点无需上级节点；知识库分类默认为"企业文档"';
-		} else {
-			parentSel.disabled = false;
-			reqStar.classList.remove('hidden');
-			hint.textContent = '必须选择一个上级节点；知识库分类将从上级节点继承';
-		}
-	};
 	showModal('nodeModal');
 }
 
@@ -312,22 +290,18 @@ function openNodeModal() {
 function editNode(id) {
 	api.getJson(NODE_API + '/' + id + '/').then(function (node) {
 		document.getElementById('nodeId').value = node.id;
-		document.getElementById('nodeType').value = node.node_type;
 		document.getElementById('nodeName').value = node.name;
 		document.getElementById('nodeDesc').value = node.description || '';
 		document.getElementById('nodeOrder').value = node.order_no || 0;
-		document.getElementById('nodeModalTitle').textContent = '编辑节点';
+		document.getElementById('nodeVisibility').value = node.visibility_level || '';
+		document.getElementById('nodeModalTitle').textContent = '编辑文件夹';
 
-		// 编辑时不允许改节点类型和父节点
-		document.getElementById('nodeType').disabled = true;
-		document.getElementById('parentRequired').classList.add('hidden');
-
-		// 父节点改为只读文本展示
+		// 编辑时不允许修改父节点
 		buildParentOptions(node.parent_id);
 		document.getElementById('nodeParent').disabled = true;
 
 		document.getElementById('parentHint').textContent =
-			'知识库分类：' + (ROOT_TYPE_MAP[node.root_type] || node.root_type);
+			'修改可见范围需走工单审批，由两位管理员先后审核';
 		showModal('nodeModal');
 	}).catch(function (e) {
 		toast('加载节点详情失败: ' + e.message, 'error');
@@ -392,12 +366,6 @@ function buildParentOptions(selectedParentId, cb) {
 		}
 
 		var html = '';
-		if (!selectedParentId) {
-			// 团队组长不能创建根节点，不显示"无"选项
-			if (!isTeamLeader()) {
-				html += '<option value="">— 无（作为根节点）—</option>';
-			}
-		}
 		options.forEach(function (opt) {
 			var sel = (selectedParentId === opt.id) ? ' selected' : '';
 			html += '<option value="' + opt.id + '"' + sel + '>' + escapeHtml(opt.name) + '</option>';
@@ -435,25 +403,33 @@ function buildParentOptions(selectedParentId, cb) {
 function saveNode() {
 	var id = document.getElementById('nodeId').value;
 	var parentId = document.getElementById('nodeParent').value;
-	var nodeType = document.getElementById('nodeType').value;
 	var name = document.getElementById('nodeName').value.trim();
 	var desc = document.getElementById('nodeDesc').value.trim();
 	var orderNo = parseInt(document.getElementById('nodeOrder').value) || 0;
+	var visibility = document.getElementById('nodeVisibility').value;
 
 	if (!name) { toast('请输入节点名称', 'warning'); return; }
 
-	// 文件夹/叶子节点必须选择上级节点
-	if (nodeType !== 'root' && !parentId) {
-		toast('文件夹和叶子节点必须选择上级节点', 'warning');
+	// 文件夹必须选择上级节点
+	if (!parentId) {
+		toast('文件夹必须选择上级节点', 'warning');
 		return;
 	}
 
 	var body = {
-		node_type: nodeType,
+		node_type: 'folder',
 		name: name,
 		description: desc,
 		order_no: orderNo,
 	};
+
+	if (id) {
+		// 编辑模式：PATCH 提交可见范围（空值表示继承父级，写回 null），变更走工单审批
+		body.visibility_level = visibility || null;
+	} else if (visibility) {
+		// 新建模式：初始可见范围直接生效，无需审批
+		body.visibility_level = visibility;
+	}
 
 	// 仅新建时发送 parent，编辑时不修改归属
 	if (!id && parentId) {
@@ -476,24 +452,43 @@ function saveNode() {
 			'<div style="font-size:48px;margin-bottom:12px">🗂️</div>' +
 			'<div>请在左侧选择或创建一个节点</div></div>';
 	}).catch(function (e) {
+		// 403 + 审批提示 = 可见范围变更已自动提交审批工单（非失败），以成功提示告知用户
+		if (e && e.status === 403 && e.message && e.message.indexOf('已自动提交审批工单') !== -1) {
+			toast('可见范围变更已提交审批，审批通过后生效', 'success');
+			return;
+		}
 		toast('保存失败: ' + e.message, 'error');
 	});
 }
 
-/* ============ 删除节点 ============ */
+/* ============ 删除文件夹 ============ */
 function deleteNode(id) {
-	if (!confirm('确认删除该节点？\n\n注意：节点下存在子节点或文档时无法删除。')) return;
-
-	api.deleteJson(NODE_API + '/' + id + '/').then(function () {
-		toast('节点已删除', 'success');
-		selectedNodeId = null;
-		loadTree();
-		document.getElementById('nodeDetail').innerHTML =
-			'<div style="padding:40px;text-align:center;color:var(--text-sub)">' +
-			'<div style="font-size:48px;margin-bottom:12px">🗂️</div>' +
-			'<div>请在左侧选择或创建一个节点</div></div>';
-	}).catch(function (e) {
-		toast(e.message, 'error');
+	// 使用 common.css 的二次确认弹窗替代原生 confirm
+	showConfirmDialog({
+		title: '删除文件夹',
+		bannerType: 'danger',
+		bannerIcon: '🗑',
+		bannerText: '确认删除该文件夹？',
+		bodyHtml: '<p class="form-hint">注意：文件夹下存在子文件夹或文档时无法删除。</p>',
+		buttons: [
+			{ text: '取消', type: 'cancel' },
+			{
+				text: '确认删除', type: 'danger', onClick: function (ctx) {
+					ctx.close();
+					api.deleteJson(NODE_API + '/' + id + '/').then(function () {
+						toast('文件夹已删除', 'success');
+						selectedNodeId = null;
+						loadTree();
+						document.getElementById('nodeDetail').innerHTML =
+							'<div style="padding:40px;text-align:center;color:var(--text-sub)">' +
+							'<div style="font-size:48px;margin-bottom:12px">🗂️</div>' +
+							'<div>请在左侧选择或创建一个节点</div></div>';
+					}).catch(function (e) {
+						toast(e.message, 'error');
+					});
+				}
+			}
+		]
 	});
 }
 
@@ -508,12 +503,6 @@ var docListTotal = 0;
 var docListNodeFilter = null;   // 当前节点筛选（null=全部）
 var docListCurrentDocs = [];    // 当前页文档数据（用于权限判定）
 var docListSearchTimeout = null;  // 搜索防抖定时器
-
-// 预览分页状态
-var currentPreviewDocId = null;
-var currentPreviewPage = 1;
-var currentPreviewTotalPages = 1;
-var currentPreviewTotalChars = 0;
 
 /* ---- 搜索输入防抖 ---- */
 function onDocSearchInput() {
@@ -709,110 +698,11 @@ function renderDocPagination() {
 }
 
 /* ================================================================
- * 预览（不可复制，支持分页） — 拉取 raw_content 渲染纯文本
+ * 文档预览（预览弹窗由公共模块 preview-doc.js 实现）
  * ================================================================ */
-function previewDoc(id) {
-	currentPreviewDocId = id;
-	currentPreviewPage = 1;
-	currentPreviewTotalPages = 1;
-	currentPreviewTotalChars = 0;
-	previewDocPage(id, 1);
-}
-
-function previewDocPage(id, page) {
-	var titleEl = document.getElementById('docPreviewTitle');
-	var contentEl = document.getElementById('docPreviewContent');
-	var footerEl = document.getElementById('docPreviewFooter');
-	var infoEl = document.getElementById('docPreviewInfo');
-	var pageEl = document.getElementById('docPreviewPage');
-	var prevBtn = document.getElementById('docPreviewPrev');
-	var nextBtn = document.getElementById('docPreviewNext');
-
-	titleEl.textContent = '文档预览';
-	contentEl.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-sub)">加载中...</div>';
-	footerEl.classList.add('hidden');
-	showModal('docPreviewModal');
-
-	// 先尝试获取原始内容（支持分页）
-	api.getJson('/api/v1/knowledge/documents/' + id + '/raw_content/?page=' + page).then(function (data) {
-		if (!data.content || !data.content.trim()) {
-			contentEl.innerHTML = '<div class="doc-preview-disabled"><div class="doc-preview-disabled-icon">📭</div>文档无内容</div>';
-			return;
-		}
-
-		// 更新分页状态
-		currentPreviewPage = data.current_page || 1;
-		currentPreviewTotalPages = data.total_pages || 1;
-		currentPreviewTotalChars = data.total_chars || 0;
-
-		titleEl.textContent = '文档预览：' + escapeHtml(data.file_name || '') + '（不可复制）';
-
-		// 使用 <pre> 保留原始格式，禁止复制
-		contentEl.innerHTML = '<pre class="doc-preview-content" style="white-space:pre-wrap;word-break:break-word;font-family:inherit">' + escapeHtml(data.content) + '</pre>';
-
-		// 显示分页栏（当有多个页面时）
-		if (currentPreviewTotalPages > 1) {
-			footerEl.classList.remove('hidden');
-			infoEl.textContent = '共 ' + currentPreviewTotalChars.toLocaleString() + ' 字符';
-			pageEl.textContent = '第 ' + currentPreviewPage + ' / ' + currentPreviewTotalPages + ' 页';
-			prevBtn.disabled = currentPreviewPage <= 1;
-			nextBtn.disabled = currentPreviewPage >= currentPreviewTotalPages;
-		} else {
-			footerEl.classList.add('hidden');
-		}
-	}).catch(function (e) {
-		// 原始内容获取失败时，回退到 chunks（向量化数据）
-		console.warn('raw_content failed, fallback to chunks:', e);
-		api.getJson('/api/v1/knowledge/documents/' + id + '/chunks/').then(function (data) {
-			var chunks = data.chunks || [];
-			if (chunks.length === 0) {
-				contentEl.innerHTML = '<div class="doc-preview-disabled"><div class="doc-preview-disabled-icon">📭</div>暂无可预览的内容</div>';
-				return;
-			}
-			titleEl.textContent = '文档预览（' + data.total + ' 个切片，不可复制）';
-			contentEl.innerHTML = chunks.map(function (c, i) {
-				return '<div class="doc-chunk">' +
-					'<div class="doc-chunk-idx">片段 ' + (i + 1) + (c.section_path ? ' · ' + escapeHtml(c.section_path) : '') + '</div>' +
-					'<div>' + escapeHtml(c.content || '') + '</div>' +
-					'</div>';
-			}).join('');
-		}).catch(function (e2) {
-			contentEl.innerHTML = '<div class="doc-preview-disabled"><div class="doc-preview-disabled-icon">🔒</div>无权限查看或加载失败：' + escapeHtml(e2.message || '') + '</div>';
-		});
-	});
-}
-
-/* ================================================================
- * 下载
- * ================================================================ */
-function downloadDoc(id) {
-	var token = localStorage.getItem('rag_access');
-	if (!token) { toast('请先登录', 'error'); return; }
-	// 使用 fetch 携带 token，失败时提示
-	fetch('/api/v1/knowledge/documents/' + id + '/download/', {
-		headers: { 'Authorization': 'Bearer ' + token }
-	}).then(function (res) {
-		if (!res.ok) return res.json().then(function (d) { throw new Error(d.detail || '下载失败'); });
-		// OSS 跳转（302）或文件流
-		if (res.headers.get('content-type') && res.headers.get('content-type').indexOf('json') >= 0) {
-			return res.json();
-		}
-		return res.blob();
-	}).then(function (blob) {
-		if (blob instanceof Blob) {
-			var a = document.createElement('a');
-			a.href = URL.createObjectURL(blob);
-			a.download = '';
-			document.body.appendChild(a);
-			a.click();
-			a.remove();
-		} else {
-			// 可能是 OSS 签名 URL 跳转
-			if (blob && blob.url) window.open(blob.url, '_blank');
-		}
-	}).catch(function (e) {
-		toast(e.message || '下载失败', 'error');
-	});
+// 预览元信息来源：当前文档列表（docListCurrentDocs）中按 id 查找，找不到返回 null
+function getDocForPreview(id) {
+	return Promise.resolve((docListCurrentDocs || []).find(function (x) { return x.id === id; }) || null);
 }
 
 /* ================================================================
@@ -971,12 +861,25 @@ function loadDocRequests(id) {
 }
 
 function revokeGrant(docId, grantId) {
-	if (!confirm('确认撤销该用户的访问权限？')) return;
-	api.postJson(DOC_API + '/' + docId + '/revoke_grant/', { grant_id: grantId }).then(function () {
-		toast('已撤销', 'success');
-		loadDocGrants(docId);
-	}).catch(function (e) {
-		toast(e.message || '撤销失败', 'error');
+	showConfirmDialog({
+		title: '撤销访问权限',
+		bannerType: 'warning',
+		bannerIcon: '⚠',
+		bannerText: '确认撤销该用户的访问权限？',
+		buttons: [
+			{ text: '取消', type: 'cancel' },
+			{
+				text: '确认撤销', type: 'primary', onClick: function (ctx) {
+					ctx.close();
+					api.postJson(DOC_API + '/' + docId + '/revoke_grant/', { grant_id: grantId }).then(function () {
+						toast('已撤销', 'success');
+						loadDocGrants(docId);
+					}).catch(function (e) {
+						toast(e.message || '撤销失败', 'error');
+					});
+				}
+			}
+		]
 	});
 }
 
@@ -993,12 +896,25 @@ function approveReq(reqId) {
 
 function rejectReq(reqId) {
 	var docId = document.getElementById('docAccessId').value;
-	if (!confirm('确认驳回该申请？')) return;
-	api.postJson(DOC_API + '/reject_access_request/', { request_id: reqId }).then(function () {
-		toast('已驳回', 'success');
-		loadDocRequests(docId);
-	}).catch(function (e) {
-		toast(e.message || '操作失败', 'error');
+	showConfirmDialog({
+		title: '驳回申请',
+		bannerType: 'warning',
+		bannerIcon: '⚠',
+		bannerText: '确认驳回该申请？',
+		buttons: [
+			{ text: '取消', type: 'cancel' },
+			{
+				text: '确认驳回', type: 'primary', onClick: function (ctx) {
+					ctx.close();
+					api.postJson(DOC_API + '/reject_access_request/', { request_id: reqId }).then(function () {
+						toast('已驳回', 'success');
+						loadDocRequests(docId);
+					}).catch(function (e) {
+						toast(e.message || '操作失败', 'error');
+					});
+				}
+			}
+		]
 	});
 }
 
@@ -1252,12 +1168,25 @@ function createNarrowGrants(docId, teamIds) {
  * 删除文档
  * ================================================================ */
 function deleteDoc(id) {
-	if (!confirm('确认删除此文档？删除后不可恢复。')) return;
-	api.deleteJson(DOC_API + '/' + id + '/').then(function () {
-		toast('文档已删除', 'success');
-		loadDocList(docListPage);
-	}).catch(function (e) {
-		toast(e.message || '删除失败', 'error');
+	showConfirmDialog({
+		title: '删除文档',
+		bannerType: 'danger',
+		bannerIcon: '🗑',
+		bannerText: '确认删除此文档？删除后不可恢复。',
+		buttons: [
+			{ text: '取消', type: 'cancel' },
+			{
+				text: '确认删除', type: 'danger', onClick: function (ctx) {
+					ctx.close();
+					api.deleteJson(DOC_API + '/' + id + '/').then(function () {
+						toast('文档已删除', 'success');
+						loadDocList(docListPage);
+					}).catch(function (e) {
+						toast(e.message || '删除失败', 'error');
+					});
+				}
+			}
+		]
 	});
 }
 

@@ -1,0 +1,103 @@
+/* ==========================================================
+   文档预览弹窗样式（公共，upload / admin-nodes 共用）
+   依赖 common.css 的 .modal / .btn / .hidden 等基础组件
+   ========================================================== */
+
+/* 文档预览正文（纯文本，禁止复制） */
+.doc-preview-content {
+	font-size: 14px;
+	line-height: 1.8;
+	color: var(--text);
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+/* 原文不可用 / 无内容提示 */
+.doc-preview-disabled {
+	text-align: center;
+	padding: 60px 20px;
+	color: var(--text-sub);
+}
+
+.doc-preview-disabled-icon {
+	font-size: 48px;
+	margin-bottom: 12px
+}
+
+/* 文档预览元信息条（文件名/类型/大小/版本/上传人/时间/可见范围） */
+.doc-preview-meta {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px 14px;
+	padding: 10px 14px;
+	margin-bottom: 12px;
+	background: #f9fafb;
+	border: 1px solid var(--border);
+	border-radius: var(--radius-lg);
+	font-size: 12px;
+	color: var(--text-sub);
+}
+
+.doc-preview-meta-item {
+	white-space: nowrap;
+}
+
+.doc-preview-meta-item:first-child {
+	font-weight: 600;
+	color: var(--text);
+	max-width: 260px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+/* 文档预览弹窗 footer：字符数(左下) / 分页(居中) / 关闭(右下) 三栏布局
+   左右列 minmax(0,1fr) 允许收缩，避免弹窗较窄时关闭按钮被挤出弹窗外 */
+.doc-preview-footer {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+	align-items: center;
+}
+
+.doc-preview-footer .doc-preview-pager {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	justify-self: center;
+	white-space: nowrap;
+}
+
+.doc-preview-footer > button:last-child {
+	justify-self: end;
+	white-space: nowrap;
+}
+
+.doc-preview-footer #docPreviewInfo {
+	justify-self: start;
+	min-width: 0;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+/* 极窄视口（弹窗 ≤95vw 时随之收窄）：隐藏左下角字符数，确保分页与关闭按钮不溢出 */
+@media (max-width: 480px) {
+	.doc-preview-footer #docPreviewInfo {
+		display: none;
+	}
+	.doc-preview-footer {
+		grid-template-columns: minmax(0, 1fr) auto;
+	}
+}
+
+/* 手机竖屏极窄视口：隐藏 footer 关闭按钮（右上角 × 仍可关闭），避免被挤出弹窗 */
+@media (max-width: 340px) {
+	.doc-preview-footer > button:last-child {
+		display: none;
+	}
+	.doc-preview-footer {
+		grid-template-columns: 1fr;
+	}
+	.doc-preview-footer .doc-preview-pager {
+		justify-self: center;
+	}
+}

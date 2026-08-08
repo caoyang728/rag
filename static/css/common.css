@@ -589,20 +589,29 @@ ol {
 	align-items: center;
 	justify-content: space-between;
 	flex-shrink: 0;
+	/* 弹窗较窄时裁剪溢出内容，避免标题/关闭按钮被挤出弹窗 */
+	overflow: hidden;
 }
 
 .modal-title {
 	flex: 1;
+	min-width: 0;
 	text-align: center;
 	font-size: 16px;
-	font-weight: 600
+	font-weight: 600;
+	/* 标题过长不换行，超出省略截断 */
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis
 }
 
 .modal-close {
 	color: var(--text-sub);
 	font-size: 20px;
 	line-height: 1;
-	padding: 4px
+	padding: 4px;
+	/* 标题较长时保持关闭按钮固定宽度，不被 flex 压缩或挤出 */
+	flex-shrink: 0;
 }
 
 .modal-close:hover {

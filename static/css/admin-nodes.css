@@ -180,42 +180,6 @@
 	border-top: 1px solid var(--border)
 }
 
-/* 文档预览（禁止复制） */
-.doc-preview-content {
-	font-size: 14px;
-	line-height: 1.8;
-	color: var(--text);
-	white-space: pre-wrap;
-	word-break: break-word;
-}
-
-.doc-preview-content .doc-chunk {
-	margin-bottom: 14px;
-	padding-bottom: 14px;
-	border-bottom: 1px dashed var(--border)
-}
-
-.doc-preview-content .doc-chunk:last-child {
-	border-bottom: none
-}
-
-.doc-preview-content .doc-chunk-idx {
-	font-size: 12px;
-	color: var(--text-sub);
-	margin-bottom: 4px
-}
-
-.doc-preview-disabled {
-	text-align: center;
-	padding: 60px 20px;
-	color: var(--text-sub);
-}
-
-.doc-preview-disabled-icon {
-	font-size: 48px;
-	margin-bottom: 12px
-}
-
 /* 分页 */
 .page-btn {
 	min-width: 30px;

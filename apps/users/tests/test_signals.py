@@ -44,7 +44,8 @@ class TestInvalidateVisibilityCache:
         """Redis 可用时 scan 匹配的 key 与 available_depts_list 全部删除"""
         conn = MagicMock()
         conn.scan_iter.return_value = iter(['allowed_visibility_1', 'allowed_visibility_2'])
-        with patch('apps.users.signals.get_redis_connection', return_value=conn) as mock_get:
+        # get_redis_connection 在 signals 内部 import（django_redis），patch 原模块路径
+        with patch('django_redis.get_redis_connection', return_value=conn) as mock_get:
             signals._invalidate_visibility_cache()
         mock_get.assert_called_once_with('default')
         assert conn.delete.call_args_list[0][0] == ('allowed_visibility_1',)
@@ -60,7 +61,7 @@ class TestInvalidateVisibilityCache:
     @pytest.mark.unit
     def test_redis_error_falls_back_to_delete_pattern(self):
         """Redis 连接异常时回退 cache.delete_pattern 兜底"""
-        with patch('apps.users.signals.get_redis_connection',
+        with patch('django_redis.get_redis_connection',
                    side_effect=RuntimeError('redis down')), \
                 patch('apps.users.signals.cache') as mock_cache:
             signals._invalidate_visibility_cache()
@@ -75,7 +76,8 @@ class TestDelayedInvalidateCache:
     def test_send_task_with_countdown(self):
         """应通过 Celery 发送延迟任务，countdown=5"""
         mock_app = MagicMock()
-        with patch('apps.users.signals.current_app', mock_app):
+        # current_app 在 signals 内部 import（celery），patch 原模块路径
+        with patch('celery.current_app', mock_app):
             signals._delayed_invalidate_cache()
         mock_app.send_task.assert_called_once_with(
             'apps.users.tasks.delayed_invalidate_visibility_cache', countdown=5)

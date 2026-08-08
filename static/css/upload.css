@@ -1,8 +1,115 @@
 /* ============ 上传页 ============ */
+
+/* 上传页整体不随页面滚动：页头 + 拖拽区固定，中部滚动区独占剩余空间 */
+.upload-main {
+	display: flex;
+	flex-direction: column;
+	overflow: hidden;
+}
+
+/* 页头与拖拽区固定（flex 子项默认可收缩，需显式禁止） */
+.upload-main > .page-header {
+	flex-shrink: 0;
+	/* 页头稍增留白，避免标题区与拖拽区贴得太紧 */
+	margin-bottom: 12px;
+}
+
+.upload-main > .upload-drop {
+	flex-shrink: 0;
+}
+
+/* 中部区域：本次上传面板与上传历史互斥共用，占满剩余空间；
+   面板较多时由面板自身内部滚动（见 #uploadPanel），本容器不再整体滚动 */
+.upload-body {
+	flex: 1;
+	min-height: 0;
+	overflow: hidden;
+	display: flex;
+	flex-direction: column;
+	padding: 4px 2px 10px;
+}
+
+/* 本次上传面板：最多占满剩余空间，文件列表内部滚动；
+   上方 uploadOptions 固定，不随面板内容挤出屏幕 */
+#uploadPanel {
+	flex: 1;
+	min-height: 0;
+	display: flex;
+	flex-direction: column;
+	/* 与上方上传选项卡片间距缩小（覆盖 .mt-16） */
+	margin-top: 8px;
+}
+
+#uploadPanel .card-title {
+	flex-shrink: 0;
+}
+
+#uploadPanel .file-list {
+	flex: 1;
+	min-height: 0;
+	overflow-y: auto;
+}
+
+#uploadOptions {
+	flex-shrink: 0;
+}
+
+/* ============ 上传历史区：占满中部剩余空间，表头/分页固定，表格中间滚动 ============ */
+#uploadHistorySection {
+	/* 覆盖 mt-24：精确占满 upload-body 高度（height 100% 使高度确定，
+	   内部表格容器 flex:1 才能收缩并独立滚动，min-height 在 flex 下不生效） */
+	height: 100%;
+	box-sizing: border-box;
+	margin-top: 0;
+	display: flex;
+	flex-direction: column;
+}
+
+/* 筛选栏固定（不随表格滚动）：上下留白一致（覆盖 HTML 的 mb-12，改由 padding 统一控制） */
+#uploadHistorySection > .page-header-flex {
+	flex-shrink: 0;
+	margin-bottom: 0;
+	padding: 12px 0;
+}
+
+/* 表格卡片与分页一体：卡片占满剩余高度，表格滚动层内部滚动，分页固定卡片底部居中 */
+#uploadHistorySection .table-container {
+	flex: 1;
+	min-height: 0;
+	display: flex;
+	flex-direction: column;
+	overflow: hidden;
+}
+
+/* 表格滚动层：表头 sticky 固定，行内容内部滚动 */
+#uploadHistorySection .table-scroll {
+	flex: 1;
+	min-height: 0;
+	overflow-y: auto;
+}
+
+#uploadHistorySection .table thead th {
+	/* 表头随表格滚动时固定顶部（需要背景色遮挡下方内容） */
+	position: sticky;
+	top: 0;
+	background: #f9fafb;
+	z-index: 1;
+}
+
+/* 分页与表格卡片一体：卡片内固定底部居中，淡灰线分割表格与分页 */
+#uploadHistorySection .pagination {
+	flex-shrink: 0;
+	justify-content: center;
+	background: var(--white);
+	border-top: 1px solid var(--border);
+	padding: 8px 16px;
+}
+
 .upload-drop {
 	border: 2px dashed var(--border-strong);
 	border-radius: var(--radius-lg);
-	padding: 40px 20px;
+	/* 压缩高度：减少纵向内边距，为中部滚动区让出更多空间 */
+	padding: 12px 20px;
 	text-align: center;
 	background: var(--white);
 	transition: all 0.2s;
@@ -16,86 +123,66 @@
 }
 
 .upload-drop-icon {
-	font-size: 48px;
-	margin-bottom: 12px;
+	font-size: 28px;
+	margin-bottom: 6px;
 	color: var(--primary)
 }
 
 .upload-drop-title {
-	font-size: 16px;
+	font-size: 14px;
 	font-weight: 500;
-	margin-bottom: 6px
+	margin-bottom: 4px
 }
 
 .upload-drop-desc {
 	color: var(--text-sub);
-	font-size: 13px
+	font-size: 12px
 }
 
 .upload-types {
 	display: flex;
 	justify-content: center;
 	gap: 8px;
-	margin-top: 14px;
-	flex-wrap: wrap
+	margin-top: 8px;
+	/* 单行展示，超出时直接截断（不换行、不横向滚动） */
+	flex-wrap: nowrap;
+	overflow: hidden;
+	white-space: nowrap;
+	max-width: 100%
 }
+
+.upload-types .tag {
+	flex-shrink: 0
+}
+
+/* ============ 文档预览弹窗样式已抽离到 preview-doc.css（upload / admin-nodes 共用） ============ */
 
 .upload-options {
 	background: var(--white);
 	border: 1px solid var(--border);
 	border-radius: var(--radius-lg);
-	padding: 20px;
-	margin-top: 16px
+	padding: 16px 20px;
+	/* 位于上传选项与文件面板之间：保持小间隔紧凑排布 */
+	margin-top: 8px
 }
 
-.upload-radio-group {
+/* 归属节点与可见范围同行两列展示 */
+.upload-options-row {
 	display: flex;
-	gap: 12px;
-	flex-wrap: wrap;
-	margin-top: 6px
+	gap: 40px;
 }
 
-.upload-radio {
+.upload-opt-cell {
 	flex: 1;
-	min-width: 200px;
-	padding: 12px 14px;
-	border: 1.5px solid var(--border);
-	border-radius: var(--radius);
-	cursor: pointer;
-	transition: all 0.15s;
-	display: flex;
-	align-items: flex-start;
-	gap: 10px;
+	min-width: 0;
 }
 
-.upload-radio:hover {
-	border-color: var(--primary)
+/* 归属节点列固定较窄比例，可见范围列占剩余更宽空间 */
+.upload-opt-node {
+	flex: 0 0 32%;
 }
 
-.upload-radio.selected {
-	border-color: var(--primary);
-	background: var(--primary-light)
-}
-
-.upload-radio input {
-	margin-top: 3px;
-	accent-color: var(--primary)
-}
-
-.upload-radio-title {
-	font-weight: 500;
-	font-size: 13px;
-	display: flex;
-	align-items: center;
-	gap: 4px
-}
-
-.upload-radio-desc {
-	font-size: 11.5px;
-	color: var(--text-sub);
-	margin-top: 3px
-}
-
+/* 可见范围行内 radio 选项（旧版卡片式 .upload-radio 系列已移除，页面统一使用 inline 样式） */
 .upload-radio-inline {
 	padding: 8px 14px;
 	border: 1.5px solid var(--border);
@@ -108,6 +195,9 @@
 	font-size: 13px;
 	min-height: 36px;
 	box-sizing: border-box;
+	/* 选项文案单行展示，容器过窄时不压缩换行 */
+	white-space: nowrap;
+	flex-shrink: 0;
 }
 
 .upload-radio-inline:hover {
@@ -129,9 +219,57 @@
 	align-items: center;
 }
 
+/* 部门/团队多选区：在可见范围行内占剩余宽度（flex:1 放 CSS 而非内联，
+   否则内联优先级会覆盖窄屏断点的 flex-wrap 换行规则） */
 #uploadOrgSelect {
+	flex: 1;
+	min-width: 0;
+	display: flex;
+	gap: 12px;
 	min-height: 36px;
 	align-items: center;
+}
+
+/* ============ 上传选项响应式：两级降级换行 ============ */
+/* 第一级：屏幕变窄时，归属节点与可见范围两列上下排列（各占整行） */
+@media (max-width: 1000px) {
+	.upload-options-row {
+		flex-wrap: wrap;
+		gap: 16px;
+	}
+
+	.upload-opt-cell,
+	.upload-opt-node {
+		flex: 1 1 100%;
+	}
+}
+
+/* 第二级：更窄时，归属节点内 select 与自动脱敏换行；可见范围内 radio 与 select 换行 */
+@media (max-width: 640px) {
+	.upload-opt-node > .flex,
+	#visRow {
+		flex-wrap: wrap;
+	}
+
+	/* 归属节点：select 独占一行，自动脱敏 checkbox 换行到下一行 */
+	.upload-opt-node .select {
+		flex: 1 1 100%;
+		width: 100%;
+	}
+
+	/* 可见范围：radio 按钮保持一行，部门/团队选择区换行到下一行整行展示 */
+	#visRow .upload-radio-inline {
+		padding: 8px 10px;
+	}
+
+	#visRow #uploadOrgSelect {
+		flex: 1 1 100%;
+	}
+
+	/* item 自身内容禁止换行（select 原生不换行，checkbox/radio 文本单行展示） */
+	.upload-opt-node .checkbox span {
+		white-space: nowrap;
+	}
 }
 
 .file-list {

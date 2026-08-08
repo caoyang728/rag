@@ -34,6 +34,7 @@ from apps.knowledge.views import (
 )
 from apps.users.models import (
     User, Role, UserRoleRel, GrantStatus, Department, Team,
+    Permission, RolePermissionRel,
     PermissionApprovalTicket, TicketStatus, TicketChangeType,
 )
 
@@ -85,24 +86,26 @@ def _create_document(node, owner, visibility_level=VisibilityLevel.TEAM_ONLY,
 
     file_hash 用 uuid 保证唯一，避免同节点同名同版本唯一约束冲突。
     归属约束：team_id 或 dept_id 至少一个非空。
+    extra 可覆盖默认字段（如 status='pending' 构造待处理文档）。
     """
-    return Document.objects.create(
-        node=node,
-        title=title,
-        file_name=file_name or f'{title}.txt',
-        file_type='txt',
-        file_size=100,
-        file_hash=uuid_lib.uuid4().hex,
-        file_path='/tmp/fake.txt',
-        mime_type='text/plain',
-        owner=owner,
-        dept_id=dept_id,
-        team_id=team_id,
-        visibility_level=visibility_level,
-        root_type=node.root_type,
-        status='done',
-        **extra,
-    )
+    fields = {
+        'node': node,
+        'title': title,
+        'file_name': file_name or f'{title}.txt',
+        'file_type': 'txt',
+        'file_size': 100,
+        'file_hash': uuid_lib.uuid4().hex,
+        'file_path': '/tmp/fake.txt',
+        'mime_type': 'text/plain',
+        'owner': owner,
+        'dept_id': dept_id,
+        'team_id': team_id,
+        'visibility_level': visibility_level,
+        'root_type': node.root_type,
+        'status': 'done',
+    }
+    fields.update(extra)
+    return Document.objects.create(**fields)
 
 
 # ============================================================================
@@ -166,9 +169,19 @@ class KnowledgeViewsTestBase:
             title='他人私有文档', file_name='other_private.txt')
 
     def _create_node(self, name, node_type, node_level, parent=None, ref_id=None):
-        """创建节点并回填 path（路径枚举 /id1/id2/.../，4 位零填充）"""
+        """创建节点并回填 path（路径枚举 /id1/id2/.../，4 位零填充）
+
+        node_kind 按层级自动推导：1=ROOT / 2-3=ORG / 4+=FOLDER，与 node_sync 同步逻辑保持一致。
+        """
+        if node_level == 1:
+            node_kind = 'ROOT'
+        elif node_level in (2, 3):
+            node_kind = 'ORG'
+        else:
+            node_kind = 'FOLDER'
         node = KnowledgeNode.objects.create(
             name=name, node_type=node_type, node_level=node_level,
+            node_kind=node_kind,
             root_type='company_doc', parent=parent, ref_id=ref_id,
             depth=(parent.depth + 1) if parent else 0,
             created_by=self.super_admin,
@@ -216,6 +229,19 @@ class KnowledgeViewsExtraBase:
         self.team = Team.objects.create(
             name='后端组', code='rd-backend', department=self.dept,
             leader=self.team_leader)
+        # 团队组长：补全组织归属 + user.manage 权限，使 _get_user_role 能识别 team_leader
+        self.team_leader.team_id = self.team.id
+        self.team_leader.save(update_fields=['team_id'])
+        leader_role = _get_or_create_role('team_leader')
+        leader_perm, _ = Permission.objects.get_or_create(
+            permission_key='user.manage',
+            defaults={'permission_name': '用户管理', 'module': 'user'})
+        RolePermissionRel.objects.get_or_create(
+            role=leader_role, permission=leader_perm,
+            defaults={'granted_by': self.super_admin, 'is_active': True})
+        UserRoleRel.objects.get_or_create(
+            user=self.team_leader, role=leader_role,
+            defaults={'status': GrantStatus.ACTIVE})
 
         # 知识节点树：root → dept → team → 业务分类
         self.root_node = self._create_node('知识库', 'root', node_level=1)
@@ -246,9 +272,19 @@ class KnowledgeViewsExtraBase:
             title='他人私有文档', file_name='other_private.txt')
 
     def _create_node(self, name, node_type, node_level, parent=None, ref_id=None):
-        """创建节点并回填 path（/id1/id2/.../，4 位零填充）"""
+        """创建节点并回填 path（/id1/id2/.../，4 位零填充）
+
+        node_kind 按层级自动推导：1=ROOT / 2-3=ORG / 4+=FOLDER，与 node_sync 同步逻辑保持一致。
+        """
+        if node_level == 1:
+            node_kind = 'ROOT'
+        elif node_level in (2, 3):
+            node_kind = 'ORG'
+        else:
+            node_kind = 'FOLDER'
         node = KnowledgeNode.objects.create(
             name=name, node_type=node_type, node_level=node_level,
+            node_kind=node_kind,
             root_type='company_doc', parent=parent, ref_id=ref_id,
             depth=(parent.depth + 1) if parent else 0,
             created_by=self.super_admin,
@@ -265,7 +301,7 @@ class KnowledgeViewsExtraBase:
             applicant=applicant,
             target_user=applicant,
             change_type=TicketChangeType.GRANT,
-            reason=_encode_ticket_reason(doc.id, action, reason),
+            reason=_encode_ticket_reason('doc', doc.id, action, reason),
             status=TicketStatus.PENDING,
             approval_chain=[
                 {'step': 0, 'approver_id': None, 'status': 'pending',
@@ -630,19 +666,24 @@ class TestViewHelpers:
 
     @pytest.mark.unit
     def test_ticket_reason_roundtrip(self):
-        """编码 → 解码往返一致"""
-        reason = _encode_ticket_reason(42, 'read', '需要参考')
+        """编码 → 解码往返一致（doc/node 两种前缀）"""
+        reason = _encode_ticket_reason('doc', 42, 'read', '需要参考')
         assert reason == '[doc:42:read] 需要参考'
-        assert _decode_ticket_reason(reason) == (42, 'read', '需要参考')
+        assert _decode_ticket_reason(reason) == ('doc', 42, 'read', '需要参考')
         # 无 user_reason 时前缀后无多余空格
-        assert _encode_ticket_reason(7, 'download', '') == '[doc:7:download] '
+        assert _encode_ticket_reason('doc', 7, 'download', '') == '[doc:7:download] '
+        # 节点可见范围变更工单前缀
+        assert _encode_ticket_reason('node', 9, 'visibility_change', '目标值:PUBLIC') == \
+            '[node:9:visibility_change] 目标值:PUBLIC'
+        assert _decode_ticket_reason('[node:9:visibility_change] 目标值:PUBLIC') == \
+            ('node', 9, 'visibility_change', '目标值:PUBLIC')
 
     @pytest.mark.unit
     def test_decode_ticket_reason_unprefixed(self):
-        """非文档工单 reason 无法解析 → (None, None, 原文)"""
-        assert _decode_ticket_reason('普通理由') == (None, None, '普通理由')
-        assert _decode_ticket_reason('') == (None, None, '')
-        assert _decode_ticket_reason(None) == (None, None, '')
+        """非文档工单 reason 无法解析 → (None, None, None, 原文)"""
+        assert _decode_ticket_reason('普通理由') == (None, None, None, '普通理由')
+        assert _decode_ticket_reason('') == (None, None, None, '')
+        assert _decode_ticket_reason(None) == (None, None, None, '')
 
     @pytest.mark.unit
     def test_extract_last_comment(self):

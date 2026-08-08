@@ -4,6 +4,8 @@
 let pendingFiles = [];
 let uploadHistoryCurrentPage = 1;
 let uploadHistoryTotal = 0;
+/** 归属节点下拉中可选的文件夹节点 ID 集合（仅 FOLDER 可选，用于 startUpload 二次拦截组织节点） */
+let folderNodeIds = new Set();
 
 document.addEventListener('DOMContentLoaded', () => {
 	initUploadPage();
@@ -223,7 +225,7 @@ function renderUploadPagination() {
 	container.appendChild(frag);
 }
 
-async function viewDocument(docId) {
+function viewDocument(docId) {
 	const doc = currentDocs.find(d => d.id === docId);
 	if (!doc) {
 		toast('文档不存在', 'error');
@@ -235,12 +237,14 @@ async function viewDocument(docId) {
 		return;
 	}
 
-	try {
-		const data = await api.getJson(`/api/v1/knowledge/documents/${docId}/chunks/`);
-		toast(`文档 ${docId} 共 ${data.total || 0} 个切片`, '');
-	} catch (e) {
-		toast('查看失败', 'error');
-	}
+	// 打开文档预览弹窗（元信息 + 原文内容，公共模块 preview-doc.js 实现）
+	previewDoc(docId);
+}
+
+/* ============ 文档预览（预览弹窗由公共模块 preview-doc.js 实现） ============ */
+// 预览元信息来源：上传历史列表（currentDocs）中按 id 查找，找不到返回 null
+function getDocForPreview(id) {
+	return Promise.resolve((currentDocs || []).find(function (x) { return x.id === id; }) || null);
 }
 
 async function reparseDocument(docId) {
@@ -278,36 +282,75 @@ async function reparseDocument(docId) {
 }
 
 async function restoreDocument(docId) {
-	if (!confirm('确定恢复此文档？')) return;
-	try {
-		await api.postJson(`/api/v1/knowledge/documents/${docId}/restore/`, {});
-		toast('文档已恢复', 'success');
-		loadUploadHistory();
-	} catch (e) {
-		toast(e.message || '操作失败', 'error');
-	}
+	showConfirmDialog({
+		title: '恢复文档',
+		bannerType: 'warning',
+		bannerIcon: '↺',
+		bannerText: '确定恢复此文档？',
+		buttons: [
+			{ text: '取消', type: 'cancel' },
+			{
+				text: '确认恢复', type: 'primary', onClick: async function (ctx) {
+					ctx.close();
+					try {
+						await api.postJson(`/api/v1/knowledge/documents/${docId}/restore/`, {});
+						toast('文档已恢复', 'success');
+						loadUploadHistory();
+					} catch (e) {
+						toast(e.message || '操作失败', 'error');
+					}
+				}
+			}
+		]
+	});
 }
 
 async function hardDeleteDocument(docId) {
-	if (!confirm('⚠️ 警告：物理删除后无法恢复，确定继续？')) return;
-	try {
-		await api.postJson(`/api/v1/knowledge/documents/${docId}/hard_delete/`, {});
-		toast('物理删除成功', 'success');
-		loadUploadHistory();
-	} catch (e) {
-		toast(e.message || '操作失败', 'error');
-	}
+	showConfirmDialog({
+		title: '物理删除文档',
+		bannerType: 'danger',
+		bannerIcon: '⚠',
+		bannerText: '⚠️ 警告：物理删除后无法恢复，确定继续？',
+		buttons: [
+			{ text: '取消', type: 'cancel' },
+			{
+				text: '确认删除', type: 'danger', onClick: async function (ctx) {
+					ctx.close();
+					try {
+						await api.postJson(`/api/v1/knowledge/documents/${docId}/hard_delete/`, {});
+						toast('物理删除成功', 'success');
+						loadUploadHistory();
+					} catch (e) {
+						toast(e.message || '操作失败', 'error');
+					}
+				}
+			}
+		]
+	});
 }
 
 async function deleteDocument(docId) {
-	if (!confirm('确定删除此文档？删除后不可恢复。')) return;
-	try {
-		await api.deleteJson(`/api/v1/knowledge/documents/${docId}/`);
-		toast('文档已删除', 'success');
-		loadUploadHistory();
-	} catch (e) {
-		toast(e.message || '删除失败', 'error');
-	}
+	showConfirmDialog({
+		title: '删除文档',
+		bannerType: 'danger',
+		bannerIcon: '🗑',
+		bannerText: '确定删除此文档？删除后不可恢复。',
+		buttons: [
+			{ text: '取消', type: 'cancel' },
+			{
+				text: '确认删除', type: 'danger', onClick: async function (ctx) {
+					ctx.close();
+					try {
+						await api.deleteJson(`/api/v1/knowledge/documents/${docId}/`);
+						toast('文档已删除', 'success');
+						loadUploadHistory();
+					} catch (e) {
+						toast(e.message || '删除失败', 'error');
+					}
+				}
+			}
+		]
+	});
 }
 
 /* ============ 归属节点下拉填充 ============ */
@@ -360,26 +403,65 @@ async function initNodeSelect() {
 			}
 		}
 
-		sel.innerHTML = '<option value="">-- 请选择归属节点 --</option>';
-		function walk(nodes, prefix, depth) {
+		sel.innerHTML = '<option value="">-- 请选择归属文件夹 --</option>';
+		folderNodeIds.clear();
+
+		// 判断节点子树中是否存在文件夹（FOLDER），用于决定组织节点是否展示为灰色分支标题
+		function hasFolder(n) {
+			if (n.node_kind === 'FOLDER') return true;
+			return (n.children || []).some(hasFolder);
+		}
+
+		// 树形层级缩进（每层 3 个全角空格）
+		function indent(level) { return '&nbsp;'.repeat((level - 1) * 3); }
+
+		// 归属节点以树形结构展示（从知识库根开始），避免层级过深时路径拼接难以辨认：
+		// - 知识库根 / 部门 / 团队：作为灰色不可选的层级标题，仅当其子树内含文件夹时展示
+		// - 文件夹（FOLDER）：可选，文档只能上传到文件夹
+		function walk(nodes, level) {
 			nodes.forEach(n => {
 				if (n.node_level === 1) {
-					if (n.children && n.children.length) walk(n.children, '', depth + 1);
+					// 根节点：仅当子树中存在文件夹时展示为分支标题，否则整棵树无可用文件夹
+					if (hasFolder(n)) {
+						const rootOpt = document.createElement('option');
+						rootOpt.disabled = true;
+						rootOpt.innerHTML = indent(level) + '📚 ' + escapeHtml(n.name || '知识库');
+						sel.appendChild(rootOpt);
+					}
+					if (n.children && n.children.length) walk(n.children, level + 1);
 					return;
 				}
-				const indent = '&nbsp;'.repeat((depth - 1) * 4);
-				const p = prefix ? prefix + ' / ' + n.name : n.name;
-				const opt = document.createElement('option');
-				opt.value = n.id;
-				opt.innerHTML = indent + (n.name ? p : p);
-				if (n.id === defaultNodeId) {
-					opt.selected = true;
+				if (n.node_kind === 'FOLDER') {
+					const opt = document.createElement('option');
+					opt.value = n.id;
+					opt.innerHTML = indent(level) + '📁 ' + escapeHtml(n.name);
+					folderNodeIds.add(String(n.id));
+					if (n.id === defaultNodeId) {
+						opt.selected = true;
+					}
+					sel.appendChild(opt);
+				} else {
+					// 组织节点（部门/团队）无文件夹后代时直接隐藏，避免空分支干扰选择；
+					// 有文件夹后代的组织节点保持可选，选中时提示"不可选择节点"并重置（见 change 监听）
+					if (hasFolder(n)) {
+						const orgOpt = document.createElement('option');
+						orgOpt.value = 'org:' + n.id;
+						orgOpt.innerHTML = indent(level) + (n.node_level === 2 ? '🏢 ' : '👥 ') + escapeHtml(n.name);
+						sel.appendChild(orgOpt);
+					}
 				}
-				sel.appendChild(opt);
-				if (n.children && n.children.length) walk(n.children, p, depth + 1);
+				if (n.children && n.children.length) walk(n.children, level + 1);
 			});
 		}
-		walk(filteredNodes, '', 1);
+		walk(filteredNodes, 1);
+
+		// 组织节点（value 前缀 org:）虽可选但不可作为归属，选中即提示并重置回占位
+		sel.addEventListener('change', function () {
+			if (String(sel.value).startsWith('org:')) {
+				toast('不可选择节点，请先在节点上创建文件夹', 'warning');
+				sel.value = '';
+			}
+		});
 	} catch (e) {
 		console.error('load nodes failed:', e);
 		sel.innerHTML = '<option value="">加载节点失败</option>';
@@ -540,6 +622,9 @@ function showUploadPanels() {
 	const opts = $('#uploadOptions');
 	if (panel) panel.classList.remove('hidden');
 	if (opts) opts.classList.remove('hidden');
+	// 本次上传面板与上传历史互斥（共用中部滚动区）：显示面板时隐藏上传历史
+	const history = document.getElementById('uploadHistorySection');
+	if (history) history.classList.add('hidden');
 }
 
 function hideUploadPanels() {
@@ -547,6 +632,9 @@ function hideUploadPanels() {
 	const opts = document.getElementById('uploadOptions');
 	if (panel) panel.classList.add('hidden');
 	if (opts) opts.classList.add('hidden');
+	// 面板隐藏后恢复上传历史展示
+	const history = document.getElementById('uploadHistorySection');
+	if (history) history.classList.remove('hidden');
 }
 
 /* ============ 上传完成收尾 ============ */
@@ -639,6 +727,11 @@ async function startUpload() {
 
 	const nodeId = $('#nodeSelect')?.value;
 	if (!nodeId) { toast('请选择归属节点', 'error'); return; }
+	// 前端二次拦截：仅文件夹（FOLDER）可直接上传文档，组织节点（部门/团队）需先选其下文件夹
+	if (!folderNodeIds.has(String(nodeId))) {
+		toast('文档只能上传到文件夹中，请选择文件夹节点', 'warning');
+		return;
+	}
 
 	const visRadio = $('#visRow .upload-radio-inline.selected input');
 	const visValue = visRadio ? visRadio.value : 'org';
@@ -664,7 +757,11 @@ async function startUpload() {
 		});
 	}
 
-	toast('正在准备上传...', '');
+	const total = pendingFiles.length;
+
+	// 瞬时反馈用 info（蓝色 3 秒自动关闭），避免无类型 toast 永久停留；
+	// 上传进度由全局进度条持续反馈，不需要常驻提示
+	toast('正在上传 ' + total + ' 个文件', 'info');
 
 	try {
 		await checkCeleryStatusBeforeUpload();
@@ -679,10 +776,10 @@ async function startUpload() {
 	setUploadBtnDisabled(true);
 	uploadingXhrs = [];
 
-	const total = pendingFiles.length;
 	let completedCount = 0;
 	let successCount = 0;
 	let failCount = 0;
+	const failReasons = [];   // 失败原因列表，最终 toast 中展示第一条
 	const uploadedDocIds = [];
 	const maxConcurrent = 3;
 
@@ -725,6 +822,10 @@ async function startUpload() {
 				}
 			}
 			if (metaEl) metaEl.innerHTML = escapeHtml(info.type) + ' · ' + formatSize(info.size) + ' · ' + escapeHtml(errorMsg);
+			// 记录失败原因（含文件名），最终汇总 toast 展示，避免用户只看到"x 失败"不明原因
+			if (failReasons.length < 3) {
+				failReasons.push((info.name || '文件') + '：' + errorMsg);
+			}
 			return 'failed';
 		} finally {
 			completedCount++;
@@ -758,7 +859,9 @@ async function startUpload() {
 		if (failCount === 0) {
 			toast('全部 ' + successCount + ' 个文件上传成功', 'success');
 		} else {
-			toast('上传完成：' + successCount + ' 成功，' + failCount + ' 失败', failCount === total ? 'error' : '');
+			// 告警 toast（黄色 5s 自动关闭），附第一条失败原因，让用户知道为什么失败
+			const reasonText = failReasons.length ? '：' + failReasons[0] : '';
+			toast('上传完成：' + successCount + ' 成功，' + failCount + ' 失败' + reasonText, 'warning');
 		}
 
 		if (uploadedDocIds.length > 0) {
@@ -819,7 +922,6 @@ async function checkAndShowCeleryStatus() {
 	try {
 		const data = await api.getJson('/api/v1/knowledge/celery/status/');
 		updateCeleryStatusUI(data.celery_ok, data.detail);
-		checkPendingDocs();
 	} catch (e) {
 		updateCeleryStatusUI(false, '状态检查失败');
 	}
@@ -829,7 +931,6 @@ function updateCeleryStatusUI(ok, detail) {
 	const iconEl = $('#celeryIcon');
 	const textEl = $('#celeryText');
 	const tagEl = iconEl?.parentElement;
-	const retryBtn = $('#retryPendingBtn');
 
 	if (!iconEl || !textEl || !tagEl) return;
 
@@ -842,23 +943,6 @@ function updateCeleryStatusUI(ok, detail) {
 		textEl.textContent = detail || 'Celery 未启动';
 		tagEl.className = 'tag tag-danger';
 	}
-
-	if (retryBtn) {
-		retryBtn.classList.toggle('hidden', ok);
-	}
-}
-
-async function checkPendingDocs() {
-	try {
-		const data = await api.getJson('/api/v1/knowledge/documents/pending/');
-		const retryBtn = $('#retryPendingBtn');
-		if (retryBtn && data.total > 0) {
-			retryBtn.classList.remove('hidden');
-			retryBtn.textContent = `🔄 重试 ${data.total} 个待处理文档`;
-		}
-	} catch (e) {
-		console.warn('检查待处理文档失败:', e);
-	}
 }
 
 /* ============ Celery 状态检查 ============ */
@@ -866,7 +950,26 @@ async function checkCeleryStatusBeforeUpload() {
 	try {
 		const data = await api.getJson('/api/v1/knowledge/celery/status/');
 		if (!data.celery_ok) {
-			if (!confirm('检测到文档解析服务未启动或连接失败，文档上传后将无法自动解析。\n\n是否继续上传？\n（上传后可在历史列表中点击"重传"按钮手动触发解析）')) {
+			// 使用二次确认弹窗（common.css 样式）替代原生 confirm
+			const confirmed = await new Promise(function (resolve) {
+				showConfirmDialog({
+					title: '解析服务未就绪',
+					bannerType: 'warning',
+					bannerIcon: '⚠',
+					bannerText: '检测到文档解析服务未启动或连接失败，文档上传后将无法自动解析。',
+					bodyHtml: '<p class="form-hint">是否继续上传？上传后可在历史列表中点击"重传"按钮手动触发解析。</p>',
+					buttons: [
+						{ text: '取消上传', type: 'cancel', onClick: function () { resolve(false); } },
+						{
+							text: '继续上传', type: 'primary', onClick: function (ctx) {
+								ctx.close();
+								resolve(true);
+							}
+						}
+					]
+				});
+			});
+			if (!confirmed) {
 				throw new Error('用户取消上传');
 			}
 		}
@@ -919,42 +1022,6 @@ document.addEventListener('visibilitychange', () => {
 		stopUploadPolling();
 	}
 });
-
-/* ============ 重试待处理文档 ============ */
-async function retryPendingDocs() {
-	try {
-		const data = await api.postJson('/api/v1/knowledge/documents/pending/', {});
-		if (data.ok) {
-			toast(`已重新触发 ${data.retriggered} 个待处理文档的解析`, 'success');
-			if (data.failed && data.failed.length > 0) {
-				toast(`有 ${data.failed.length} 个文档触发失败`, 'error');
-			}
-			// 乐观更新：将所有 pending/parsing/... 之外的 failed/embedding_failed 文档改为 pending
-			const toTrigger = (data.failed && data.failed.length)
-				? data.retriggered
-				: data.retriggered;
-			if (toTrigger > 0) {
-				currentDocs.forEach(d => {
-					if (d.status === 'failed' || d.status === 'embedding_failed') {
-						d.status = 'pending';
-						d.error_message = '';
-						const row = document.querySelector(`#uploadHistoryBody tr[data-doc-id="${d.id}"]`);
-						if (row) {
-							const statusEl = row.querySelector('.up-row-status');
-							if (statusEl) statusEl.innerHTML = statusTag('pending');
-						}
-					}
-				});
-				startUploadPolling();
-			}
-			loadUploadHistory(uploadHistoryCurrentPage);
-		} else {
-			toast(data.detail || '操作失败', 'error');
-		}
-	} catch (e) {
-		toast(e.message || '操作失败', 'error');
-	}
-}
 
 /* ============ 可见范围选择 ============ */
 function pickVis(elm) {

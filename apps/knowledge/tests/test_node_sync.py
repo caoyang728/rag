@@ -34,7 +34,7 @@ def _make_user(username='sync_user'):
 
 
 def _make_doc(node, owner, title='同步文档'):
-    """创建未删除文档（node 必需）"""
+    """创建未删除文档（node 必需；dept_id 满足归属约束，无 FK 校验）"""
     return Document.objects.create(
         node=node,
         title=title,
@@ -45,6 +45,7 @@ def _make_doc(node, owner, title='同步文档'):
         file_path='/tmp/fake.txt',
         mime_type='text/plain',
         owner=owner,
+        dept_id=1,
         root_type=node.root_type,
         status='done',
     )
@@ -168,12 +169,6 @@ class TestSyncTeamNode:
             name=name, department=dept,
             description=description, is_deleted=is_deleted)
 
-    def test_team_without_department_skipped(self):
-        """团队无归属部门：跳过同步，返回 None 且不建节点"""
-        team = Team.objects.create(name='游离组', department=None)
-        assert sync_team_node(team) is None
-        assert not KnowledgeNode.objects.filter(node_level=3).exists()
-
     def test_create_team_node(self):
         """创建团队节点：挂在部门节点下，ref_id=team.id"""
         dept = self._make_dept()
@@ -224,10 +219,16 @@ class TestSyncTeamNode:
         assert node.is_deleted is True
 
     def test_missing_dept_node_warns(self):
-        """团队归属部门的 level 2 节点不存在：返回 None，不创建团队节点"""
+        """部门节点缺失（被软删）：团队同步跳过，返回 None 且不建团队节点
+
+        Department/Team 创建会经 post_save 信号自动同步节点，
+        故先手动软删部门节点构造"部门节点缺失"场景，验证 sync_team_node 的防御分支。
+        """
         dept = self._make_dept()
+        dept_node = sync_dept_node(dept)
+        dept_node.is_deleted = True
+        dept_node.save(update_fields=['is_deleted'])
         team = self._make_team(dept)
-        # 不先 sync_dept_node，让部门节点缺失
         assert sync_team_node(team) is None
         assert not KnowledgeNode.objects.filter(node_level=3).exists()
 

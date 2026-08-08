@@ -98,13 +98,26 @@ class KnowledgeNode(models.Model):
         ('leaf', 'leaf'),
     ]
 
+    NODE_KIND_CHOICES = [
+        ('ROOT', '根节点'),
+        ('ORG', '组织节点'),
+        ('FOLDER', '文件夹'),
+    ]
+
     id = models.BigAutoField(primary_key=True)
     parent = models.ForeignKey('self', null=True, blank=True, on_delete=models.CASCADE,
                                db_column='parent_id', related_name='children')
     root_type = models.CharField(max_length=32, help_text=_('根节点类型，加速检索过滤'))
     node_type = models.CharField(max_length=16, choices=NODE_TYPE_CHOICES, default='folder')
+    node_kind = models.CharField(max_length=16, choices=NODE_KIND_CHOICES, default='FOLDER',
+                                 help_text=_('节点性质: ROOT=根节点 / ORG=组织节点(部门/团队,由组织同步创建) / '
+                                             'FOLDER=文件夹(手动创建,文档只能挂在文件夹下)'))
     node_level = models.SmallIntegerField(default=4,
                                            help_text=_('节点层级: 1=kb 2=dept 3=team 4+=业务分类'))
+    # 节点可见范围：NULL=继承父级（文档可见性收敛的单源约束）
+    visibility_level = models.CharField(
+        max_length=32, choices=VisibilityLevel.choices, null=True, blank=True,
+        help_text=_('节点可见范围: TEAM_ONLY/DEPT_ONLY/PUBLIC，NULL=继承父级（root 兜底 PUBLIC）'))
     name = models.CharField(max_length=128)
     path = models.CharField(max_length=512, default='/',
                              help_text=_('路径枚举 /kb_id/dept_id/team_id/cat_id/... 首尾加 /'))
@@ -290,9 +303,12 @@ class Document(models.Model):
                 condition=models.Q(is_deleted=False),
                 name='unique_doc_node_name_version',
             ),
-            # 归属约束：团队或部门至少一个非空（无个人级文档）
+            # 归属约束：非公开文档必须归属于团队或部门（无个人级文档）；
+            # PUBLIC 全局公开文档允许无组织归属（如 root 下公共文件夹的全局文档）
             models.CheckConstraint(
-                check=models.Q(team_id__isnull=False) | models.Q(dept_id__isnull=False),
+                check=models.Q(visibility_level=VisibilityLevel.PUBLIC)
+                | models.Q(team_id__isnull=False)
+                | models.Q(dept_id__isnull=False),
                 name='doc_owner_scope_required',
             ),
         ]

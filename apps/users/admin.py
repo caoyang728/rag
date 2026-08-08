@@ -5,7 +5,8 @@ from apps.users.models import (
     Role, Permission,
     UserRoleRel, RolePermissionRel,
     UserDeptScopeRel, UserTeamScopeRel,
-    PermissionApprovalTicket, PermissionAuditLog,
+    TicketList, TicketPermissionDetail, PermissionAuditLog,
+    TicketConfigDetail, TicketScheduleDetail, TicketModelDetail,
 )
 
 
@@ -71,12 +72,41 @@ class UserTeamScopeRelAdmin(admin.ModelAdmin):
     search_fields = ("user__username", "team__name")
 
 
-@admin.register(PermissionApprovalTicket)
-class PermissionApprovalTicketAdmin(admin.ModelAdmin):
-    """权限审批工单"""
-    list_display = ("id", "ticket_no", "applicant", "target_user", "change_type", "status", "created_at")
-    list_filter = ("status", "change_type", "scope_type")
-    search_fields = ("ticket_no", "applicant__username", "target_user__username")
+@admin.register(TicketList)
+class TicketListAdmin(admin.ModelAdmin):
+    """统一工单主表（含权限/配置/模型/定时任务全部类型）"""
+    list_display = ("id", "ticket_no", "title", "biz_type", "status", "applicant", "created_at")
+    list_filter = ("biz_type", "status", "risk_level")
+    search_fields = ("ticket_no", "title", "applicant__username")
+
+
+@admin.register(TicketPermissionDetail)
+class TicketPermissionDetailAdmin(admin.ModelAdmin):
+    """权限审批工单详情"""
+    list_display = ("id", "ticket", "target_user", "change_type", "scope_type")
+    list_filter = ("change_type", "scope_type")
+    search_fields = ("ticket__ticket_no", "target_user__username")
+
+
+@admin.register(TicketConfigDetail)
+class TicketConfigDetailAdmin(admin.ModelAdmin):
+    """配置变更工单详情"""
+    list_display = ("id", "ticket", "config_label", "old_value", "new_value")
+    search_fields = ("ticket__ticket_no", "config_label")
+
+
+@admin.register(TicketScheduleDetail)
+class TicketScheduleDetailAdmin(admin.ModelAdmin):
+    """定时任务工单详情"""
+    list_display = ("id", "ticket", "config_label", "old_value", "new_value")
+    search_fields = ("ticket__ticket_no", "config_label")
+
+
+@admin.register(TicketModelDetail)
+class TicketModelDetailAdmin(admin.ModelAdmin):
+    """模型变更工单详情"""
+    list_display = ("id", "ticket", "reason")
+    search_fields = ("ticket__ticket_no",)
 
 
 @admin.register(PermissionAuditLog)

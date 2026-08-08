@@ -169,7 +169,7 @@ rag/
 │   │   ├── admin-rbac.js       # 角色权限管理
 │   │   ├── admin-nodes.js      # 知识节点管理（动态加载根类型）
 │   │   ├── admin-docs.js       # 文档审核（待审列表 + 通过/驳回）
-│   │   ├── admin-approvals.js  # 权限审批中心（四视角：待我审批/我已审批/我发起的/全部工单）
+│   │   ├── ticket.js           # 工单中心（四视角：待我审批/我已审批/我的工单/全部工单）
 │   │   ├── admin-analytics.js  # 统计分析
 │   │   ├── admin-eval.js       # 质量评估中心（黄金集/检索/回答/文档/覆盖率/反馈/归因）
 │   │   ├── admin-system-config.js # 系统配置（KV 配置 + 模型管理 + 工单审批）
@@ -185,7 +185,7 @@ rag/
 │   ├── admin-rbac.html         # 角色权限管理页
 │   ├── admin-nodes.html        # 知识节点管理页
 │   ├── admin-docs.html         # 文档审核页
-│   ├── admin-approvals.html    # 权限审批中心页
+│   ├── ticket.html             # 工单中心页
 │   ├── admin-analytics.html    # 统计分析页
 │   ├── admin-eval.html         # 质量评估中心页
 │   ├── admin-system-config.html # 系统配置页
@@ -225,12 +225,12 @@ rag/
 | GET | `/api/v1/permissions/approvers/` | 可用审批人列表 |
 | GET | `/api/v1/permissions/assignable-roles/` | 可申请角色清单 |
 | POST | `/api/v1/permissions/approval-chain-preview/` | 审批链预览（申请前展示） |
-| GET | `/api/v1/permissions/pending-approvals/` | 待我审批工单（共享审批池） |
-| GET | `/api/v1/permissions/processed-tickets/` | 我已审批工单 |
-| GET | `/api/v1/permissions/my-tickets/` | 我发起的工单 |
-| GET | `/api/v1/permissions/all-tickets/` | 全部工单（仅超管/合规管理员） |
-| POST | `/api/v1/permissions/tickets/{id}/approve/` | 工单通过 |
-| POST | `/api/v1/permissions/tickets/{id}/reject/` | 工单驳回 |
+| GET | `/api/v1/auth/tickets/` | 统一工单中心（四视角 + 类型/状态/搜索 + 分页，默认每页 20） |
+| POST | `/api/v1/auth/tickets/{id}/approve/` | 统一审批通过（按类型路由） |
+| POST | `/api/v1/auth/tickets/{id}/reject/` | 统一驳回（按类型路由） |
+| POST | `/api/v1/auth/tickets/{id}/withdraw/` | 创建人撤回（按类型路由） |
+| POST | `/api/v1/permissions/tickets/{id}/approve/` | 权限域工单通过（工单中心委托） |
+| POST | `/api/v1/permissions/tickets/{id}/reject/` | 权限域工单驳回（工单中心委托） |
 | GET/POST | `/api/v1/permissions/applications/` | 权限申请单（双轨：申请拉） |
 | POST | `/api/v1/permissions/applications/{id}/withdraw/` | 撤回权限申请 |
 

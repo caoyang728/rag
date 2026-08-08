@@ -25,8 +25,12 @@ apps.users.ticket_service - 权限配置审批工单服务
   - approver_id：审批时回填（谁先处理就锁定谁，防止并发审批）
   - status：PENDING / APPROVED / REJECTED
   - 顺序执行：current_step 指向待审批节点，前一节点 APPROVED 才到下一节点
+
+本模块同时承载权限域与系统域共用的工单纯函数（审批链解析/双人独立性判定），
+供 apps.users.views 与 apps.system.views 共用，避免序列化与审批判定逻辑两处漂移。
 """
-import uuid
+import json
+import re
 from typing import Optional
 
 from django.db import transaction
@@ -35,12 +39,28 @@ from django.utils import timezone
 from loguru import logger
 
 from apps.users.models import (
-    PermissionApprovalTicket, PermissionAuditLog,
+    TicketList, TicketPermissionDetail, TicketFlowLog, PermissionAuditLog,
     UserRoleRel, UserDeptScopeRel, UserTeamScopeRel,
     Role, User, Department, Team,
     TicketStatus, TicketChangeType, ScopeType, RoleType, GrantStatus,
-    AuditTargetType, RoleConflictRule,
+    AuditTargetType, RoleConflictRule, TicketBizType,
 )
+
+
+# ============================================================================
+# 工单号生成（统一格式：类型前缀 + YYYYMMDD + 当日全局 4 位序列）
+# ============================================================================
+# 类型前缀（两字母大写拼音首字母）：权限 QX / 配置 PZ / 定时 DS / 模型 MX
+# 示例：QX202608080001（当日第 1 单，权限）、DS202608080002（当日第 2 单，定时任务）
+TICKET_TYPE_PREFIX = {
+    TicketBizType.PERMISSION: 'QX',
+    TicketBizType.CONFIG: 'PZ',
+    TicketBizType.SCHEDULE: 'DS',
+    TicketBizType.MODEL: 'MX',
+}
+
+# 新格式工单号正则：两字母前缀 + 8 位日期 + 4 位当日序列（用于取当日全局序列）
+_NEW_TICKET_NO_RE = re.compile(r'^[A-Z]{2}(\d{8})(\d{4})$')
 
 
 # ============================================================================
@@ -100,6 +120,40 @@ class AuditAction:
 
 
 # ============================================================================
+# 权限域与系统域共用的工单纯函数（序列化 / 双人独立性判定）
+# ============================================================================
+
+def parse_change_summary(cs_raw):
+    """解析 change_summary 字段 —— 兼容 JSON 字符串与已解析对象
+
+    config/schedule 工单的 change_summary 存为 JSON 字符串，列表/详情序列化
+    需解析后返回对象供前端渲染；解析失败（脏数据）返回 None 而不是抛异常，
+    前端按"无差异摘要"处理，不影响审批流程展示。
+    """
+    if not cs_raw:
+        return None
+    try:
+        return json.loads(cs_raw) if isinstance(cs_raw, str) else cs_raw
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
+def get_approved_approver_ids(ticket) -> set:
+    """返回工单已审前序节点的审批人 ID 集合 —— 双人独立性的公共判定
+
+    业务背景：双审/双超管工单要求前序节点审批人不能再审后续节点，
+    权限域 _can_approve_for_role 与系统域 SUPER_ADMIN 复核/驳回共用同一判定，
+    避免两处各写一份逻辑漂移。审批链为空或工单未走完时返回空集。
+    """
+    if not ticket or not getattr(ticket, 'approval_chain', None):
+        return set()
+    return {
+        n.get('approver_id') for n in ticket.approval_chain[:ticket.current_step]
+        if n.get('approver_id')
+    }
+
+
+# ============================================================================
 # 审批人角色匹配 —— 共享审批池的核心：判定用户是否具备某审批节点所需的角色
 # ============================================================================
 
@@ -135,13 +189,9 @@ def _can_approve_for_role(user, approver_role: str, ticket=None) -> bool:
 
     # 闸 2:双人独立性 —— 已审过前序节点的人不能再审后续节点
     # 业务背景:双超管工单若同一人审两节点,等同单人独审,失去双审意义
-    if ticket and ticket.approval_chain:
-        approved_user_ids = {
-            n.get('approver_id') for n in ticket.approval_chain[:ticket.current_step]
-            if n.get('approver_id')
-        }
-        if user.id in approved_user_ids:
-            return False
+    # 与系统域 SUPER_ADMIN 复核共用 get_approved_approver_ids 判定,避免逻辑漂移
+    if user.id in get_approved_approver_ids(ticket):
+        return False
 
     # 取当前节点(用于读取节点上的 approver_scope_id)
     current_node = None
@@ -218,11 +268,8 @@ def _find_approver_ids_for_role(approver_role: str, ticket=None) -> list:
             exclude_ids.add(ticket.applicant_id)
         if ticket.target_user_id:
             exclude_ids.add(ticket.target_user_id)
-        # 双人独立性:前序节点审批人不能再审后续节点
-        if ticket.approval_chain:
-            for n in ticket.approval_chain[:ticket.current_step]:
-                if n.get('approver_id'):
-                    exclude_ids.add(n['approver_id'])
+        # 双人独立性:前序节点审批人不能再审后续节点(复用公共判定)
+        exclude_ids.update(get_approved_approver_ids(ticket))
 
     if approver_role == ApproverRole.SUPER_ADMIN:
         ids = _get_super_admin_ids(exclude_user_id=ticket.applicant_id if ticket else None)
@@ -796,9 +843,79 @@ def _get_team_dept_id(team_id):
 # 工单创建与流转
 # ============================================================================
 
-def _gen_ticket_no() -> str:
-    """生成全局唯一工单号：T + 日期 + 短 UUID，便于人工沟通与检索"""
-    return 'T' + timezone.localtime().strftime('%Y%m%d') + uuid.uuid4().hex[:8].upper()
+def _gen_ticket_no(biz_type: str = TicketBizType.PERMISSION) -> str:
+    """生成统一格式工单号：类型前缀 + YYYYMMDD + 当日全局 4 位序列
+
+    当日全局序列 = 当日已存在的新格式工单最大序号 + 1（跨类型共享当日序号，
+    与工单号示例 QX…0001 / DS…0002 / PZ…0003 一致）。唯一性由 ticket_no 唯一索引兜底。
+    """
+    prefix = TICKET_TYPE_PREFIX.get(biz_type, 'QX')
+    today = timezone.localtime().strftime('%Y%m%d')
+    # 一次查询取出最新一条新格式工单号（新格式排序即按日期+序号降序）
+    last_no = TicketList.objects.filter(
+        ticket_no__regex=r'^[A-Z]{2}\d{12}$',
+    ).order_by('-ticket_no').values_list('ticket_no', flat=True).first()
+    seq = 1
+    if last_no:
+        m = _NEW_TICKET_NO_RE.match(last_no)
+        if m and m.group(1) == today:
+            seq = int(m.group(2)) + 1
+    return f'{prefix}{today}{seq:04d}'
+
+
+def _log_flow(ticket: TicketList, action: str, actor: User = None,
+              comment: str = '', step: int = 0):
+    """写流转日志 —— 工单业务对象的一部分（事务内写入，随工单回滚）
+
+    action: SUBMIT(提交) / APPROVE(节点通过) / REJECT(驳回) / CANCEL(撤回) / EXECUTE(执行)
+    与审计日志（PermissionAuditLog）分离：流转日志随工单生命周期，审计日志只增不删。
+    """
+    TicketFlowLog.objects.create(
+        ticket=ticket,
+        action=action,
+        actor=actor,
+        step=step,
+        comment=comment or '',
+    )
+
+
+def _create_permission_ticket(applicant, target_user, change_type: str,
+                              role: Role, previous_role: Role, scope_type: str,
+                              scope_id, effective_from, expires_at, reason: str,
+                              chain: list, status: str,
+                              approved_at=None, executed_at=None) -> TicketList:
+    """创建统一工单（主表 + 权限详情子表 + 提交流转日志）—— 原子操作
+
+    主表承接流程字段（工单号/状态/审批链/时间），业务字段入 TicketPermissionDetail，
+    提交动作写一条 SUBMIT 流转日志。title 供工单中心列表展示与模糊搜索。
+    """
+    role_key = role.role_key if role else ''
+    ticket = TicketList.objects.create(
+        ticket_no=_gen_ticket_no(TicketBizType.PERMISSION),
+        title=f'权限·{change_type} {role_key}'.strip(),
+        biz_type=TicketBizType.PERMISSION,
+        status=status,
+        risk_level='normal',
+        applicant=applicant,
+        approval_chain=chain,
+        current_step=0,
+        approved_at=approved_at,
+        executed_at=executed_at,
+    )
+    TicketPermissionDetail.objects.create(
+        ticket=ticket,
+        target_user=target_user,
+        change_type=change_type,
+        role=role,
+        previous_role=previous_role,
+        scope_type=scope_type,
+        scope_id=scope_id,
+        effective_from=effective_from,
+        expires_at=expires_at,
+        reason=reason,
+    )
+    _log_flow(ticket, 'SUBMIT', actor=applicant)
+    return ticket
 
 
 @transaction.atomic
@@ -806,7 +923,7 @@ def create_ticket(applicant, target_user, change_type: str,
                   role: Role, scope_type: str = ScopeType.NONE, scope_id=None,
                   effective_from=None, expires_at=None, reason: str = '',
                   ip_address: str = '', user_agent: str = '',
-                  previous_role: Role = None) -> PermissionApprovalTicket:
+                  previous_role: Role = None) -> TicketList:
     """创建审批工单 —— 授权变更统一入口
 
     流程:
@@ -854,17 +971,19 @@ def create_ticket(applicant, target_user, change_type: str,
     # 业务背景:重复提交相同授权申请会堆积 PENDING 工单,审批人处理一单后其余变废单,
     # 且高等级覆盖低等级语义下同 scope 不应并存多个待批角色。仅拦截待审批(非已执行/已驳回)。
     if change_type in (TicketChangeType.GRANT, TicketChangeType.ROLE_CHANGE) and role:
-        dup_qs = PermissionApprovalTicket.objects.filter(
-            target_user=target_user,
-            scope_type=scope_type, scope_id=scope_id,
+        dup_qs = TicketList.objects.filter(
+            biz_type=TicketBizType.PERMISSION,
             status=TicketStatus.PENDING,
+            permission_detail__target_user=target_user,
+            permission_detail__scope_type=scope_type,
+            permission_detail__scope_id=scope_id,
         )
         if scope_type in (ScopeType.TEAM, ScopeType.DEPT):
             # 团队/部门 scope:同范围任意团队角色互斥,存在任一 PENDING 即拒绝
-            dup_qs = dup_qs.filter(role__role_key__in=TEAM_ROLE_KEYS)
+            dup_qs = dup_qs.filter(permission_detail__role__role_key__in=TEAM_ROLE_KEYS)
         else:
             # 全局 scope:同角色 PENDING 才拒绝
-            dup_qs = dup_qs.filter(role=role)
+            dup_qs = dup_qs.filter(permission_detail__role=role)
         if dup_qs.exists():
             raise ValueError('该用户在此范围内已有待审批的授权工单，请勿重复提交')
 
@@ -909,23 +1028,12 @@ def create_ticket(applicant, target_user, change_type: str,
 
     # 空审批链:降级/撤销低权角色 → 直接执行(viewer 跨团队撤销/contributor 撤销)
     if not chain:
-        ticket = PermissionApprovalTicket.objects.create(
-            ticket_no=_gen_ticket_no(),
-            applicant=applicant,
-            target_user=target_user,
-            change_type=change_type,
-            role=role,
-            previous_role=previous_role,
-            scope_type=scope_type,
-            scope_id=scope_id,
-            effective_from=effective_from,
-            expires_at=expires_at,
-            reason=reason,
-            approval_chain=[],
-            current_step=0,
-            status=TicketStatus.EXECUTED,
-            approved_at=timezone.now(),
-            executed_at=timezone.now(),
+        now = timezone.now()
+        ticket = _create_permission_ticket(
+            applicant, target_user, change_type, role, previous_role,
+            scope_type, scope_id, effective_from, expires_at, reason,
+            chain=[], status=TicketStatus.EXECUTED,
+            approved_at=now, executed_at=now,
         )
         _execute_grant_or_revoke(ticket, actor=applicant)
         _write_audit(ticket, applicant, AuditAction.TICKET_CREATE,
@@ -937,21 +1045,10 @@ def create_ticket(applicant, target_user, change_type: str,
         return ticket
 
     # 非空审批链:创建待审批工单
-    ticket = PermissionApprovalTicket.objects.create(
-        ticket_no=_gen_ticket_no(),
-        applicant=applicant,
-        target_user=target_user,
-        change_type=change_type,
-        role=role,
-        previous_role=previous_role,
-        scope_type=scope_type,
-        scope_id=scope_id,
-        effective_from=effective_from,
-        expires_at=expires_at,
-        reason=reason,
-        approval_chain=chain,
-        current_step=0,
-        status=TicketStatus.PENDING,
+    ticket = _create_permission_ticket(
+        applicant, target_user, change_type, role, previous_role,
+        scope_type, scope_id, effective_from, expires_at, reason,
+        chain=chain, status=TicketStatus.PENDING,
     )
     _write_audit(ticket, applicant, AuditAction.TICKET_CREATE,
                  ip_address, user_agent, result='SUCCESS')
@@ -961,8 +1058,8 @@ def create_ticket(applicant, target_user, change_type: str,
 
 
 @transaction.atomic
-def approve_ticket(ticket: PermissionApprovalTicket, approver: User,
-                   comment: str = '', ip_address: str = '', user_agent: str = '') -> PermissionApprovalTicket:
+def approve_ticket(ticket: TicketList, approver: User,
+                   comment: str = '', ip_address: str = '', user_agent: str = '') -> TicketList:
     """审批通过当前节点 —— 共享审批池模式：任一符合 approver_role 的用户均可审批，先到先得
 
     校验（共享审批池 + 先到先得）：
@@ -973,9 +1070,10 @@ def approve_ticket(ticket: PermissionApprovalTicket, approver: User,
     - select_for_update 防并发：两个管理员同时审批时只有一个能成功
 
     末节点通过 → status=APPROVED → 同步执行授权写入 → status=EXECUTED
+    每步流转写 TicketFlowLog（APPROVE / EXECUTE），详情页时间线渲染用。
     """
     # select_for_update 防止并发审批：同一工单同时只能被一个事务修改
-    ticket = PermissionApprovalTicket.objects.select_for_update().get(pk=ticket.pk)
+    ticket = TicketList.objects.select_for_update().get(pk=ticket.pk)
 
     if ticket.status != TicketStatus.PENDING:
         raise ValueError(f'工单非待审批状态: {ticket.status}')
@@ -1013,16 +1111,19 @@ def approve_ticket(ticket: PermissionApprovalTicket, approver: User,
         ticket.status = TicketStatus.APPROVED
         ticket.approved_at = now
         ticket.save()
+        _log_flow(ticket, 'APPROVE', actor=approver, comment=comment, step=ticket.current_step)
         _execute_grant_or_revoke(ticket, actor=approver)
         ticket.status = TicketStatus.EXECUTED
         ticket.executed_at = timezone.now()
         ticket.save()
+        _log_flow(ticket, 'EXECUTE', actor=approver, step=ticket.current_step)
         _write_audit(ticket, approver, AuditAction.TICKET_EXECUTE,
                      ip_address, user_agent, result='SUCCESS')
         logger.info(f'[Ticket] 工单审批通过并执行: {ticket.ticket_no} '
                     f'approver={approver.id} role={approver_role}')
     else:
         # 推进到下一节点
+        _log_flow(ticket, 'APPROVE', actor=approver, comment=comment, step=ticket.current_step)
         ticket.current_step += 1
         ticket.save()
         logger.info(f'[Ticket] 工单节点通过，推进下一节点: {ticket.ticket_no} step={ticket.current_step}')
@@ -1030,13 +1131,14 @@ def approve_ticket(ticket: PermissionApprovalTicket, approver: User,
 
 
 @transaction.atomic
-def reject_ticket(ticket: PermissionApprovalTicket, rejector: User,
-                  comment: str = '', ip_address: str = '', user_agent: str = '') -> PermissionApprovalTicket:
+def reject_ticket(ticket: TicketList, rejector: User,
+                  comment: str = '', ip_address: str = '', user_agent: str = '') -> TicketList:
     """驳回工单 —— 共享审批池模式：任一符合 approver_role 的用户均可驳回
 
     驳回人可以是当前节点审批人（角色匹配），或 super_admin（兜底越级驳回）。
+    驳回动作写 TicketFlowLog（REJECT），工单终态 REJECTED。
     """
-    ticket = PermissionApprovalTicket.objects.select_for_update().get(pk=ticket.pk)
+    ticket = TicketList.objects.select_for_update().get(pk=ticket.pk)
 
     if ticket.status != TicketStatus.PENDING:
         raise ValueError(f'工单非待审批状态: {ticket.status}')
@@ -1061,6 +1163,7 @@ def reject_ticket(ticket: PermissionApprovalTicket, rejector: User,
 
     ticket.status = TicketStatus.REJECTED
     ticket.save()
+    _log_flow(ticket, 'REJECT', actor=rejector, comment=comment, step=ticket.current_step)
     _write_audit(ticket, rejector, AuditAction.TICKET_REJECT,
                  ip_address, user_agent, result='SUCCESS',
                  extra={'comment': comment})
@@ -1069,11 +1172,11 @@ def reject_ticket(ticket: PermissionApprovalTicket, rejector: User,
 
 
 @transaction.atomic
-def cancel_ticket(ticket: PermissionApprovalTicket, actor: User,
-                  ip_address: str = '', user_agent: str = '') -> PermissionApprovalTicket:
+def cancel_ticket(ticket: TicketList, actor: User,
+                  ip_address: str = '', user_agent: str = '') -> TicketList:
     """发起人撤回工单 —— 仅 PENDING 状态可撤回，已执行不可撤
 
-    防止授权已生效后撤回工单造成状态不一致。
+    防止授权已生效后撤回工单造成状态不一致。撤回动作写 TicketFlowLog（CANCEL）。
     """
     if ticket.status != TicketStatus.PENDING:
         raise ValueError('仅待审批工单可撤回')
@@ -1082,6 +1185,7 @@ def cancel_ticket(ticket: PermissionApprovalTicket, actor: User,
 
     ticket.status = TicketStatus.CANCELLED
     ticket.save()
+    _log_flow(ticket, 'CANCEL', actor=actor, step=ticket.current_step)
     _write_audit(ticket, actor, AuditAction.TICKET_CANCEL,
                  ip_address, user_agent, result='SUCCESS')
     logger.info(f'[Ticket] 工单撤回: {ticket.ticket_no} by={actor.id}')
@@ -1092,7 +1196,7 @@ def cancel_ticket(ticket: PermissionApprovalTicket, actor: User,
 # 工单执行：审批通过后写入授权表（GRANT）或撤销授权（REVOKE）
 # ============================================================================
 
-def _execute_grant_or_revoke(ticket: PermissionApprovalTicket, actor: User):
+def _execute_grant_or_revoke(ticket: TicketList, actor: User):
     """执行授权写入 —— 工单 APPROVED 后调用
 
     GRANT:根据 scope_type 写入对应授权表,status=ACTIVE
@@ -1147,7 +1251,7 @@ def _sync_leader_for_role(ticket, role, grant: bool):
             dept_qs.filter(leader=target).update(leader=None)
 
 
-def _apply_role_change(ticket: PermissionApprovalTicket, actor: User):
+def _apply_role_change(ticket: TicketList, actor: User):
     """角色变更执行 —— 原子操作:撤销旧角色(previous_role) + 授予新角色(role)
 
     业务背景:用户在同一 scope 内变更角色(如 viewer → contributor),
@@ -1206,7 +1310,7 @@ def _apply_role_change(ticket: PermissionApprovalTicket, actor: User):
                 f'for user {ticket.target_user_id}')
 
 
-def _apply_grant(ticket: PermissionApprovalTicket, actor: User):
+def _apply_grant(ticket: TicketList, actor: User):
     """写入授权表（GRANT/SCOPE_CHANGE）—— 根据 scope_type 分发到三张授权表
 
     - scope_type=NONE + 全局角色 → UserRoleRel
@@ -1255,7 +1359,7 @@ def _apply_grant(ticket: PermissionApprovalTicket, actor: User):
     _write_audit(ticket, actor, action, '', '', result='SUCCESS')
 
 
-def _apply_revoke(ticket: PermissionApprovalTicket, actor: User):
+def _apply_revoke(ticket: TicketList, actor: User):
     """撤销授权（REVOKE）—— 将对应授权记录置 REVOKED
 
     逐表尝试撤销（一个用户同一角色可能跨表存在），全部命中即撤销。
@@ -1293,7 +1397,7 @@ def _apply_revoke(ticket: PermissionApprovalTicket, actor: User):
                  result='SUCCESS' if revoked else 'NOOP')
 
 
-def _apply_extend(ticket: PermissionApprovalTicket, actor: User):
+def _apply_extend(ticket: TicketList, actor: User):
     """延期（EXPIRE_EXTEND）—— 仅更新 expires_at，不改状态"""
     new_expires = ticket.expires_at
     updated = False
@@ -1315,7 +1419,7 @@ def _apply_extend(ticket: PermissionApprovalTicket, actor: User):
 @transaction.atomic
 def revoke_direct(actor: User, target_user: User, role: Role,
                   scope_type: str = ScopeType.NONE, scope_id=None,
-                  reason: str = '', ip_address: str = '', user_agent: str = '') -> PermissionApprovalTicket:
+                  reason: str = '', ip_address: str = '', user_agent: str = '') -> TicketList:
     """降级/撤销直接执行 —— 团队组长可直接撤销普通角色授权，无需审批
 
     适用场景（build_approval_chain 返回空链的场景）：
@@ -1330,20 +1434,12 @@ def revoke_direct(actor: User, target_user: User, role: Role,
     if role and role.role_key in ('super_admin',):
         raise ValueError('超管角色撤销必须走审批工单（双人复核）')
 
-    ticket = PermissionApprovalTicket.objects.create(
-        ticket_no=_gen_ticket_no(),
-        applicant=actor,
-        target_user=target_user,
-        change_type=TicketChangeType.REVOKE,
-        role=role,
-        scope_type=scope_type,
-        scope_id=scope_id,
-        reason=reason,
-        approval_chain=[],
-        current_step=0,
-        status=TicketStatus.EXECUTED,
-        approved_at=timezone.now(),
-        executed_at=timezone.now(),
+    now = timezone.now()
+    ticket = _create_permission_ticket(
+        actor, target_user, TicketChangeType.REVOKE, role, None,
+        scope_type, scope_id, None, None, reason,
+        chain=[], status=TicketStatus.EXECUTED,
+        approved_at=now, executed_at=now,
     )
     _apply_revoke(ticket, actor)
     _write_audit(ticket, actor, AuditAction.TICKET_CREATE, ip_address, user_agent, result='SUCCESS')
@@ -1357,7 +1453,7 @@ def revoke_direct(actor: User, target_user: User, role: Role,
 # 审计写入
 # ============================================================================
 
-def _write_audit(ticket: PermissionApprovalTicket, actor: User, action: str,
+def _write_audit(ticket: TicketList, actor: User, action: str,
                  ip_address: str, user_agent: str, result: str = 'SUCCESS', extra: dict = None):
     """写权限审计日志 —— 工单全生命周期留痕
 

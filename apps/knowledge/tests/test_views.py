@@ -35,7 +35,7 @@ from apps.knowledge.views import (
 from apps.users.models import (
     User, Role, UserRoleRel, GrantStatus, Department, Team,
     Permission, RolePermissionRel,
-    PermissionApprovalTicket, TicketStatus, TicketChangeType,
+    TicketList, TicketPermissionDetail, TicketStatus, TicketChangeType, ScopeType,
 )
 
 
@@ -295,20 +295,35 @@ class KnowledgeViewsExtraBase:
         return node
 
     def _request_ticket(self, applicant, doc, action='read', reason='测试申请'):
-        """直接 ORM 创建一条文档访问申请工单（模拟 request_access 产物）"""
-        return PermissionApprovalTicket.objects.create(
-            ticket_no=f'DOC-REQ-{uuid_lib.uuid4().hex[:12].upper()}',
+        """直接 ORM 创建一条文档访问申请工单（模拟 request_access 产物）
+
+        统一工单架构下走 TicketList 主表 + 权限详情子表：
+        文档/节点目标信息编码在详情 reason（与 _create_doc_ticket 一致），
+        审批链沿用旧格式节点（无 approver_role，审批人绑定资源所有者）。
+        """
+        ticket = TicketList.objects.create(
+            ticket_no=f'QX-REQ-{uuid_lib.uuid4().hex[:12].upper()}',
+            title='文档访问申请',
+            biz_type='permission',
             applicant=applicant,
-            target_user=applicant,
-            change_type=TicketChangeType.GRANT,
-            reason=_encode_ticket_reason('doc', doc.id, action, reason),
             status=TicketStatus.PENDING,
+            risk_level='normal',
             approval_chain=[
                 {'step': 0, 'approver_id': None, 'status': 'pending',
                  'comment': '', 'approved_at': None},
             ],
             current_step=0,
         )
+        TicketPermissionDetail.objects.create(
+            ticket=ticket,
+            target_user=applicant,
+            change_type=TicketChangeType.GRANT,
+            role=None,
+            scope_type=ScopeType.NONE,
+            scope_id=None,
+            reason=_encode_ticket_reason('doc', doc.id, action, reason),
+        )
+        return ticket
 
 
 # ============================================================================

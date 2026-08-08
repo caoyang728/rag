@@ -34,7 +34,7 @@ from apps.knowledge.tests.test_views import (
 )
 from apps.users.models import (
     User, Role, UserRoleRel, GrantStatus, Department, Team,
-    PermissionApprovalTicket, TicketStatus, TicketChangeType,
+    TicketList, TicketStatus, TicketChangeType,
 )
 
 
@@ -364,8 +364,8 @@ class TestApproveAccessRequest(KnowledgeViewsExtraBase):
             content_type='application/json',
             **_auth_headers(self.normal_user))
         assert resp.status_code == 403
-        ticket = PermissionApprovalTicket.objects.get(
-            change_type=TicketChangeType.SCOPE_CHANGE)
+        ticket = TicketList.objects.get(
+            permission_detail__change_type=TicketChangeType.SCOPE_CHANGE)
         return ticket
 
     @pytest.mark.integration

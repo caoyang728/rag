@@ -1,9 +1,10 @@
 """
 apps.users.views 权限工单补充测试 —— 申请 / 撤回 / 审批 / 驳回 / 查询全链路
 
-与 test_views.py 互补：AccessApplicationView / withdraw / pending-approvals /
-processed-tickets / my-tickets / all-tickets / approve / reject /
+与 test_views.py 互补：AccessApplicationView / withdraw / approve / reject /
 assignable-roles / approval-chain-preview。
+（旧列表接口 pending-approvals / processed-tickets / my-tickets / all-tickets
+已下线，统一收敛到工单中心 /api/v1/auth/tickets/，见 test_views_ticket_center.py）
 """
 import csv
 import io
@@ -18,7 +19,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from apps.users.models import (
     User, Role, Department, Team, Permission, RolePermissionRel,
     UserRoleRel, UserDeptScopeRel, UserTeamScopeRel,
-    PermissionApprovalTicket, TicketStatus, TicketChangeType, ScopeType,
+    TicketList, TicketStatus, TicketChangeType, ScopeType,
     GrantStatus, RoleType, DataScope,
 )
 from apps.users.tests.test_views_base import (
@@ -175,7 +176,7 @@ class TestAccessApplicationView(UsersAPIExtraBase):
         assert resp.status_code == 201
         data = resp.json()
         assert data['status'] == 'PENDING'
-        ticket = PermissionApprovalTicket.objects.get(id=data['id'])
+        ticket = TicketList.objects.get(id=data['id'])
         assert ticket.applicant_id == self.super_admin.id
         assert ticket.target_user_id == self.normal_user.id  # 资源所有者代被授权人提单
 
@@ -240,81 +241,6 @@ class TestAccessApplicationWithdrawView(UsersAPIExtraBase):
         assert resp.json()['status'] == 'cancelled'
         t.refresh_from_db()
         assert t.status == TicketStatus.CANCELLED
-
-
-# ============================================================================
-# PendingApprovalTicketsView —— 待我审批（共享审批池）
-# ============================================================================
-
-class TestPendingApprovalTicketsView(UsersAPIExtraBase):
-    """待审批列表：入口权限 + 审批角色匹配（_can_approve_for_role）"""
-
-    def _grant_sa_role(self):
-        """给超管绑定 super_admin 角色（_can_approve_for_role 按角色反查，不认 is_super_admin 标志）"""
-        _grant_global_role(self.super_admin, 'super_admin')
-
-    @pytest.mark.integration
-    def test_normal_user_403(self):
-        """普通用户（非管理角色/非 leader）查看待审批 → 403"""
-        resp = self.client.get('/api/v1/auth/permissions/pending-approvals/', **self.normal_headers)
-        assert resp.status_code == 403
-
-    @pytest.mark.integration
-    def test_super_admin_sees_matching_ticket(self):
-        """超管可看到审批链节点为 SUPER_ADMIN 的待审批工单
-
-        _create_pending_ticket 的 viewer 跨部门申请在目标部门经理缺失时降级为超管单审，
-        需同时具备 super_admin 角色 rel 才能命中 _can_approve_for_role。
-        """
-        self._grant_sa_role()
-        self._create_pending_ticket()
-        resp = self.client.get('/api/v1/auth/permissions/pending-approvals/', **self.admin_headers)
-        assert resp.status_code == 200
-        rows = resp.json()['rows']
-        assert len(rows) == 1
-        assert rows[0]['approver_role'] == 'SUPER_ADMIN'
-        assert rows[0]['scope_name'] == '市场一组'
-
-    @pytest.mark.integration
-    def test_dept_leader_sees_cross_dept_ticket(self):
-        """资源部门经理可看到本部门节点（DEPT_LEADER）的待审批工单
-
-        新矩阵下协作角色审批节点为 DEPT_LEADER(跨部门团队)或 KB_ADMIN(部门级跨部门),
-        不再产生 TEAM_LEADER 节点;为 dept_b 配置部门经理后,跨部门 viewer 申请
-        生成 DEPT_LEADER 节点,由该部门经理在待审批列表可见。
-        """
-        dept_b_leader = _create_user('deptb_mgr', department=self.dept_b)
-        _grant_global_role(dept_b_leader, 'dept_manager')
-        UserDeptScopeRel.objects.create(
-            user=dept_b_leader, role=_get_or_create_role('dept_manager'),
-            dept=self.dept_b, status=GrantStatus.ACTIVE,
-        )
-        create_ticket(
-            applicant=self.normal_user,
-            target_user=self.normal_user,
-            change_type=TicketChangeType.GRANT,
-            role=_get_or_create_role('viewer'),
-            scope_type=ScopeType.TEAM,
-            scope_id=self._team_c().id,
-            reason='跨部门查看市场一组资料',
-        )
-        resp = self.client.get('/api/v1/auth/permissions/pending-approvals/',
-                               **_auth_headers(dept_b_leader))
-        assert resp.status_code == 200
-        rows = resp.json()['rows']
-        assert len(rows) == 1
-        assert rows[0]['approver_role'] == 'DEPT_LEADER'
-        assert rows[0]['target_user_name'] == 'normal'
-
-    @pytest.mark.integration
-    def test_non_pending_ticket_not_in_list(self):
-        """非 PENDING 状态的工单不出现在待审批列表"""
-        self._grant_sa_role()
-        t = self._create_pending_ticket()
-        t.status = TicketStatus.APPROVED
-        t.save(update_fields=['status', 'updated_at'])
-        resp = self.client.get('/api/v1/auth/permissions/pending-approvals/', **self.admin_headers)
-        assert resp.json()['count'] == 0
 
 
 # ============================================================================
@@ -444,104 +370,6 @@ class TestTicketRejectView(UsersAPIExtraBase):
         assert resp.json()['status'] == 'REJECTED'
         t.refresh_from_db()
         assert t.status == TicketStatus.REJECTED
-
-
-# ============================================================================
-# MyTicketsView / ProcessedTicketsView / AllTicketsView —— 工单列表三视图
-# ============================================================================
-
-class TestMyTicketsView(UsersAPIExtraBase):
-    """我发起的工单列表"""
-
-    @pytest.mark.integration
-    def test_my_tickets_200(self):
-        """GET 返回当前用户发起的工单 → 200"""
-        self._create_pending_ticket()
-        resp = self.client.get('/api/v1/auth/permissions/my-tickets/', **self.normal_headers)
-        assert resp.status_code == 200
-        assert resp.json()['count'] == 1
-        assert resp.json()['rows'][0]['ticket_no']
-
-    @pytest.mark.integration
-    def test_my_tickets_only_mine(self):
-        """他人发起的工单不出现在我的列表"""
-        self._create_pending_ticket(applicant=self.team_leader)
-        resp = self.client.get('/api/v1/auth/permissions/my-tickets/', **self.normal_headers)
-        assert resp.json()['count'] == 0
-
-    @pytest.mark.integration
-    def test_my_tickets_anonymous_401(self):
-        """匿名访问 → 401"""
-        resp = self.client.get('/api/v1/auth/permissions/my-tickets/')
-        assert resp.status_code in (401, 403)
-
-class TestProcessedTicketsView(UsersAPIExtraBase):
-    """我已审批的工单列表（approval_chain 中 approver_id=当前用户的节点）"""
-
-    def _grant_sa_role(self):
-        _grant_global_role(self.super_admin, 'super_admin')
-
-    @pytest.mark.integration
-    def test_normal_user_403(self):
-        """普通用户（非管理角色/非 leader）→ 403"""
-        resp = self.client.get('/api/v1/auth/permissions/processed-tickets/', **self.normal_headers)
-        assert resp.status_code == 403
-
-    @pytest.mark.integration
-    def test_processed_tickets_shows_approved_by_me(self):
-        """审批过的工单出现在“我已审批”，并带我的审批角色与意见"""
-        self._grant_sa_role()
-        t = self._create_pending_ticket()
-        resp = self.client.post(
-            f'/api/v1/auth/permissions/tickets/{t.id}/approve/',
-            data=json.dumps({'comment': '同意'}), content_type='application/json', **self.admin_headers,
-        )
-        assert resp.status_code == 200
-        resp = self.client.get('/api/v1/auth/permissions/processed-tickets/', **self.admin_headers)
-        assert resp.status_code == 200
-        rows = resp.json()['rows']
-        assert len(rows) == 1
-        assert rows[0]['my_approver_role'] == 'SUPER_ADMIN'
-        assert rows[0]['my_comment'] == '同意'
-
-    @pytest.mark.integration
-    def test_pending_ticket_not_in_processed(self):
-        """PENDING 工单不计入“我已审批”"""
-        self._grant_sa_role()
-        self._create_pending_ticket()
-        resp = self.client.get('/api/v1/auth/permissions/processed-tickets/', **self.admin_headers)
-        assert resp.json()['count'] == 0
-
-class TestAllTicketsView(UsersAPIExtraBase):
-    """全部工单（审计视角，仅超管 / 合规管理员）"""
-
-    @pytest.mark.integration
-    def test_super_admin_200(self):
-        """超管查看全部工单 → 200"""
-        self._create_pending_ticket()
-        resp = self.client.get('/api/v1/auth/permissions/all-tickets/', **self.admin_headers)
-        assert resp.status_code == 200
-        assert resp.json()['count'] == 1
-
-    @pytest.mark.integration
-    def test_normal_user_403(self):
-        """普通用户查看全部工单 → 403"""
-        resp = self.client.get('/api/v1/auth/permissions/all-tickets/', **self.normal_headers)
-        assert resp.status_code == 403
-
-    @pytest.mark.integration
-    def test_status_filter(self):
-        """按 status 筛选工单"""
-        t = self._create_pending_ticket()
-        t.status = TicketStatus.EXECUTED
-        t.save(update_fields=['status', 'updated_at'])
-        resp = self.client.get(
-            '/api/v1/auth/permissions/all-tickets/?status=EXECUTED', **self.admin_headers)
-        assert resp.status_code == 200
-        assert resp.json()['count'] == 1
-        resp = self.client.get(
-            '/api/v1/auth/permissions/all-tickets/?status=PENDING', **self.admin_headers)
-        assert resp.json()['count'] == 0
 
 
 # ============================================================================

@@ -24,9 +24,9 @@ import pytest
 from apps.users.models import (
     User, Role, Department, Team,
     UserRoleRel, UserDeptScopeRel, UserTeamScopeRel,
-    PermissionApprovalTicket, PermissionAuditLog, RoleConflictRule,
+    TicketList, TicketPermissionDetail, PermissionAuditLog, RoleConflictRule,
     TicketStatus, TicketChangeType, ScopeType, RoleType, DataScope, GrantStatus,
-    AuditTargetType,
+    AuditTargetType, TicketBizType,
 )
 from apps.users.ticket_service import (
     create_ticket, approve_ticket, reject_ticket, cancel_ticket, revoke_direct,
@@ -67,6 +67,24 @@ def _create_user(username, **extra):
     return User.objects.create_user(
         username=username, email=f'{username}@test.com',
         password='pass12345', **extra)
+
+
+def _create_approved_ticket(applicant, target_user, role, scope_type, scope_id, ticket_no):
+    """构造已 APPROVED 的统一工单（主表 + 权限详情子表）—— 供 _apply_grant 执行测试用
+
+    统一工单下 target_user/role/scope 等业务字段由详情子表承载（_pd 代理读取），
+    与生产创建路径（_create_permission_ticket）保持一致，仅跳过审批链直接置 APPROVED。
+    """
+    ticket = TicketList.objects.create(
+        ticket_no=ticket_no, title='测试执行工单', biz_type=TicketBizType.PERMISSION,
+        applicant=applicant, status=TicketStatus.APPROVED,
+        approval_chain=[], current_step=0,
+    )
+    TicketPermissionDetail.objects.create(
+        ticket=ticket, target_user=target_user, change_type=TicketChangeType.GRANT,
+        role=role, scope_type=scope_type, scope_id=scope_id, reason='',
+    )
+    return ticket
 
 
 @pytest.mark.django_db
@@ -423,11 +441,13 @@ class TestApproveTicketStateMachine(TicketTestBase):
     def test_multi_node_approve_advances_step(self):
         """多节点链：中间节点通过 → current_step+1，工单仍 PENDING"""
         # dept_manager 授权链：用户管理员 → 超管 双节点（人员管理发起,另一人员管理审批,超管复核）
+        # 新建空部门作为任命目标：setup 中 dept/dept2 均已预置经理，避开"已有经理"唯一性校验
+        dept3 = Department.objects.create(name='项目部', code='proj')
         ticket = create_ticket(
             applicant=self.sa1, target_user=self.target_user,
             change_type=TicketChangeType.GRANT,
             role=Role.objects.get(role_key='dept_manager'),
-            scope_type=ScopeType.DEPT, scope_id=self.dept2.id,
+            scope_type=ScopeType.DEPT, scope_id=dept3.id,
             reason='任命部门经理',
         )
         # 应产生 2 节点链
@@ -446,7 +466,7 @@ class TestApproveTicketStateMachine(TicketTestBase):
         assert approved.status == TicketStatus.EXECUTED
         assert UserDeptScopeRel.objects.filter(
             user=self.target_user, role=Role.objects.get(role_key='dept_manager'),
-            dept=self.dept2, status=GrantStatus.ACTIVE,
+            dept=dept3, status=GrantStatus.ACTIVE,
         ).exists()
 
     @pytest.mark.integration
@@ -625,8 +645,8 @@ class TestCanApproveForRole(TicketTestBase):
         """TEAM_LEADER 节点：team.leader_id == user.id 且 scope 匹配才能审批(兼容历史工单)"""
         # 新矩阵下 GRANT 不再产生 TEAM_LEADER 节点,但历史工单的 TEAM_LEADER 节点仍需支持审批,
         # 手工构造 TEAM_LEADER 节点工单验证判定逻辑
-        ticket = PermissionApprovalTicket(
-            applicant_id=self.applicant.id, target_user_id=self.target_user.id,
+        ticket = TicketList(
+            applicant_id=self.applicant.id,
             approval_chain=[_build_chain_node(ApproverRole.TEAM_LEADER,
                                               ScopeType.TEAM, self.team2.id)],
             current_step=0,
@@ -639,8 +659,8 @@ class TestCanApproveForRole(TicketTestBase):
     @pytest.mark.integration
     def test_kb_admin_match(self):
         """KB_ADMIN 节点：持有 kb_admin 角色的用户可审批,其他用户不可"""
-        ticket = PermissionApprovalTicket(
-            applicant_id=self.applicant.id, target_user_id=self.target_user.id,
+        ticket = TicketList(
+            applicant_id=self.applicant.id,
             approval_chain=[_build_chain_node(ApproverRole.KB_ADMIN)],
             current_step=0,
         )
@@ -781,10 +801,9 @@ class TestBuildApprovalChain(TicketTestBase):
         assert chain[0]['approver_role'] == ApproverRole.KB_ADMIN
         # 文档管理员可审批该节点
         assert _can_approve_for_role(self.kb_admin1, ApproverRole.KB_ADMIN,
-                                     PermissionApprovalTicket(
+                                     TicketList(
                                          approval_chain=chain, current_step=0,
                                          applicant_id=self.applicant.id,
-                                         target_user_id=self.target_user.id,
                                      )) is True
 
     @pytest.mark.integration
@@ -831,17 +850,15 @@ class TestBuildApprovalChain(TicketTestBase):
         assert chain[0]['approver_role'] == ApproverRole.USER_ADMIN
         # 用户管理员可审批该节点
         assert _can_approve_for_role(self.user_admin1, ApproverRole.USER_ADMIN,
-                                     PermissionApprovalTicket(
+                                     TicketList(
                                          approval_chain=chain, current_step=0,
                                          applicant_id=self.applicant.id,
-                                         target_user_id=self.target_user.id,
                                      )) is True
         # 部门经理(dept_manager)不再直接审批组长任命(定稿:人员管理审批)
         assert _can_approve_for_role(self.dept_leader, ApproverRole.USER_ADMIN,
-                                     PermissionApprovalTicket(
+                                     TicketList(
                                          approval_chain=chain, current_step=0,
                                          applicant_id=self.applicant.id,
-                                         target_user_id=self.target_user.id,
                                      )) is False
 
     @pytest.mark.integration
@@ -927,11 +944,9 @@ class TestGrantLeaderSync(TicketTestBase):
         """授予 team_leader(团队无组长) → Team.leader_id 同步为被授权者"""
         teamX = Team.objects.create(name='空组长组', code='no_leader', department=self.dept)
         tl_role = Role.objects.get(role_key='team_leader')
-        ticket = PermissionApprovalTicket.objects.create(
-            ticket_no='T-SYNC-1', applicant=self.sa1, target_user=self.applicant,
-            change_type=TicketChangeType.GRANT, role=tl_role,
-            scope_type=ScopeType.TEAM, scope_id=teamX.id,
-            approval_chain=[], current_step=0, status=TicketStatus.APPROVED,
+        ticket = _create_approved_ticket(
+            self.sa1, self.applicant, tl_role,
+            ScopeType.TEAM, teamX.id, ticket_no='T-SYNC-1',
         )
         _apply_grant(ticket, actor=self.sa1)
         teamX.refresh_from_db()
@@ -942,11 +957,9 @@ class TestGrantLeaderSync(TicketTestBase):
         """授予 dept_manager(部门无经理) → Department.leader_id 同步为被授权者"""
         deptY = Department.objects.create(name='新部门', code='new_dept')
         dm_role = Role.objects.get(role_key='dept_manager')
-        ticket = PermissionApprovalTicket.objects.create(
-            ticket_no='T-SYNC-2', applicant=self.sa1, target_user=self.applicant,
-            change_type=TicketChangeType.GRANT, role=dm_role,
-            scope_type=ScopeType.DEPT, scope_id=deptY.id,
-            approval_chain=[], current_step=0, status=TicketStatus.APPROVED,
+        ticket = _create_approved_ticket(
+            self.sa1, self.applicant, dm_role,
+            ScopeType.DEPT, deptY.id, ticket_no='T-SYNC-2',
         )
         _apply_grant(ticket, actor=self.sa1)
         deptY.refresh_from_db()
@@ -956,11 +969,9 @@ class TestGrantLeaderSync(TicketTestBase):
     def test_grant_team_leader_keeps_existing_leader(self):
         """授予 team_leader 但团队已有组长 → 不覆盖原组长"""
         tl_role = Role.objects.get(role_key='team_leader')
-        ticket = PermissionApprovalTicket.objects.create(
-            ticket_no='T-SYNC-3', applicant=self.sa1, target_user=self.applicant,
-            change_type=TicketChangeType.GRANT, role=tl_role,
-            scope_type=ScopeType.TEAM, scope_id=self.team1.id,
-            approval_chain=[], current_step=0, status=TicketStatus.APPROVED,
+        ticket = _create_approved_ticket(
+            self.sa1, self.applicant, tl_role,
+            ScopeType.TEAM, self.team1.id, ticket_no='T-SYNC-3',
         )
         _apply_grant(ticket, actor=self.sa1)
         self.team1.refresh_from_db()

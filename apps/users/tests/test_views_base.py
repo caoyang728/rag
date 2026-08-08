@@ -22,7 +22,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from apps.users.models import (
     User, Role, Department, Team, Permission, RolePermissionRel,
     UserRoleRel, UserDeptScopeRel, UserTeamScopeRel,
-    PermissionApprovalTicket, TicketStatus, TicketChangeType, ScopeType,
+    TicketList, TicketStatus, TicketChangeType, ScopeType,
     GrantStatus, RoleType, DataScope,
 )
 from apps.users.ticket_service import create_ticket, approve_ticket

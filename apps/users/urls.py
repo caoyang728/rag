@@ -28,13 +28,13 @@ urlpatterns = [
     # 可申请角色清单 + 审批链预览(申请前展示用)
     path("permissions/assignable-roles/", views.AssignableRolesView.as_view()),
     path("permissions/approval-chain-preview/", views.ApprovalChainPreviewView.as_view()),
-    # 工单审批池：待我审批 / 我已审批 / 我发起的 / 全部工单
-    path("permissions/pending-approvals/", views.PendingApprovalTicketsView.as_view()),
-    path("permissions/processed-tickets/", views.ProcessedTicketsView.as_view()),
-    path("permissions/my-tickets/", views.MyTicketsView.as_view()),
-    path("permissions/all-tickets/", views.AllTicketsView.as_view()),
-    # 审批操作：通过 / 驳回
+    # 审批操作：通过 / 驳回（permission 域审批，工单中心按类型委托）
     path("permissions/tickets/<int:pk>/approve/", views.TicketApproveView.as_view()),
     path("permissions/tickets/<int:pk>/reject/", views.TicketRejectView.as_view()),
+    # 统一工单中心：全部类型工单一页展示（权限/配置/定时/模型）+ 统一审批操作
+    path("tickets/", views.TicketCenterView.as_view()),
+    path("tickets/<int:pk>/approve/", views.TicketCenterApproveView.as_view()),
+    path("tickets/<int:pk>/reject/", views.TicketCenterRejectView.as_view()),
+    path("tickets/<int:pk>/withdraw/", views.TicketCenterWithdrawView.as_view()),
     path("", include(router.urls)),
 ]

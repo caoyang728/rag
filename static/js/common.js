@@ -222,7 +222,7 @@ const PAGE_MAP = {
 	'upload': '/upload/',
 	'admin-users': '/admin-users/',
 	'admin-nodes': '/admin-nodes/',
-	'admin-approvals': '/admin-approvals/',
+	'ticket': '/ticket/',
 	'admin-docs': '/admin-docs/',
 	'admin-analytics': '/admin-analytics/',
 	'admin-eval': '/admin-eval/',

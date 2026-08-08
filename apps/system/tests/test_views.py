@@ -20,8 +20,9 @@ from django.test import Client
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.users.models import User, Role, UserRoleRel, GrantStatus
+from apps.users.models import TicketList, TicketStatus, TicketBizType
 from apps.system.models import (
-    SystemConfig, LLMModel, ConfigChangeTicket, ModelChangeTicket,
+    SystemConfig, LLMModel,
 )
 
 
@@ -166,7 +167,7 @@ class TestSystemConfigView(SystemAPITestBase):
             **self.admin_a_headers)
         assert resp.status_code == 201
         data = resp.json()
-        assert data['status'] == 'pending'
+        assert data['status'] == TicketStatus.PENDING
         assert data['old_value'] == '60'
         assert data['new_value'] == '120'
         assert data['risk_level'] == 'normal'
@@ -391,9 +392,9 @@ class TestLLMModelViewSet(SystemAPITestBase):
         data = resp.json()
         assert data['ticket_id']
         # 工单为普通修改、pending 状态
-        ticket = ModelChangeTicket.objects.get(id=data['ticket_id'])
+        ticket = TicketList.objects.get(id=data['ticket_id'])
         assert ticket.operation == 'update_normal'
-        assert ticket.status == 'pending'
+        assert ticket.status == TicketStatus.PENDING
         # 模型本身未被改（等审批通过）
         self.model.refresh_from_db()
         assert self.model.base_url == 'https://api.deepseek.com'
@@ -424,9 +425,10 @@ class TestLLMModelViewSet(SystemAPITestBase):
             content_type='application/json',
             **self.admin_a_headers)
         assert resp.status_code == 202
-        ticket = ModelChangeTicket.objects.get(target_model=self.model, operation='delete')
+        ticket = TicketList.objects.get(biz_type=TicketBizType.MODEL,
+                                        target_model_id=self.model.id, operation='delete')
         assert ticket.risk_level == 'high'
-        assert ticket.status == 'pending'
+        assert ticket.status == TicketStatus.PENDING
         # 模型未被物理删除（等超管复核）
         self.model.refresh_from_db()
 
@@ -478,18 +480,18 @@ class TestConfigChangeTicketFlow(SystemAPITestBase):
         ticket_id = resp.json()['id']
         # admin_b 审核（!= 创建人）
         resp = self.client.post(
-            f'/api/v1/system/config-tickets/{ticket_id}/approve/',
+            f'/api/v1/system/tickets/{ticket_id}/approve/',
             data=json.dumps({'comment': '同意'}),
             content_type='application/json',
             **self.admin_b_headers)
         assert resp.status_code == 200
-        assert resp.json()['status'] == 'approved'
+        assert resp.json()['status'] == TicketStatus.EXECUTED
         # 配置应已生效
         self.normal_cfg.refresh_from_db()
         assert self.normal_cfg.value == '120'
         # 工单记录了生效时间
-        ticket = ConfigChangeTicket.objects.get(id=ticket_id)
-        assert ticket.applied_at is not None
+        ticket = TicketList.objects.get(id=ticket_id)
+        assert ticket.executed_at is not None
 
     @pytest.mark.integration
     def test_high_risk_ticket_two_stage_approval(self):
@@ -499,23 +501,24 @@ class TestConfigChangeTicketFlow(SystemAPITestBase):
         ticket_id = resp.json()['id']
         # admin_b 审核 -> 进入待超管复核
         resp = self.client.post(
-            f'/api/v1/system/config-tickets/{ticket_id}/approve/',
+            f'/api/v1/system/tickets/{ticket_id}/approve/',
             data=json.dumps({'comment': '审核通过'}),
             content_type='application/json',
             **self.admin_b_headers)
         assert resp.status_code == 200
-        assert resp.json()['status'] == 'first_approved'
+        # 高风险项审核通过后进入待复核：状态仍为 PENDING，审批链 step 前进
+        assert resp.json()['status'] == TicketStatus.PENDING
         # 配置尚未生效
         self.high_cfg.refresh_from_db()
         assert self.high_cfg.value == '5'
         # admin_c 超管复核 -> 生效（!= 创建人且 != 审核人）
         resp = self.client.post(
-            f'/api/v1/system/config-tickets/{ticket_id}/approve/',
+            f'/api/v1/system/tickets/{ticket_id}/approve/',
             data=json.dumps({'comment': '复核通过'}),
             content_type='application/json',
             **self.admin_c_headers)
         assert resp.status_code == 200
-        assert resp.json()['status'] == 'approved'
+        assert resp.json()['status'] == TicketStatus.EXECUTED
         self.high_cfg.refresh_from_db()
         assert self.high_cfg.value == '10'
 
@@ -526,13 +529,13 @@ class TestConfigChangeTicketFlow(SystemAPITestBase):
         ticket_id = resp.json()['id']
         # admin_b 审核 -> first_approved
         self.client.post(
-            f'/api/v1/system/config-tickets/{ticket_id}/approve/',
+            f'/api/v1/system/tickets/{ticket_id}/approve/',
             data=json.dumps({'comment': 'ok'}),
             content_type='application/json',
             **self.admin_b_headers)
         # 普通用户尝试复核应 403
         resp = self.client.post(
-            f'/api/v1/system/config-tickets/{ticket_id}/approve/',
+            f'/api/v1/system/tickets/{ticket_id}/approve/',
             data=json.dumps({'comment': 'r'}),
             content_type='application/json',
             **self.normal_headers)
@@ -545,7 +548,7 @@ class TestConfigChangeTicketFlow(SystemAPITestBase):
         ticket_id = resp.json()['id']
         # admin_a 自己审批应 403
         resp = self.client.post(
-            f'/api/v1/system/config-tickets/{ticket_id}/approve/',
+            f'/api/v1/system/tickets/{ticket_id}/approve/',
             data=json.dumps({'comment': 'r'}),
             content_type='application/json',
             **self.admin_a_headers)
@@ -558,13 +561,13 @@ class TestConfigChangeTicketFlow(SystemAPITestBase):
         ticket_id = resp.json()['id']
         # admin_b 审核 -> first_approved
         self.client.post(
-            f'/api/v1/system/config-tickets/{ticket_id}/approve/',
+            f'/api/v1/system/tickets/{ticket_id}/approve/',
             data=json.dumps({'comment': 'ok'}),
             content_type='application/json',
             **self.admin_b_headers)
         # admin_b 再做超管复核应 403（与审核人相同）
         resp = self.client.post(
-            f'/api/v1/system/config-tickets/{ticket_id}/approve/',
+            f'/api/v1/system/tickets/{ticket_id}/approve/',
             data=json.dumps({'comment': 'r'}),
             content_type='application/json',
             **self.admin_b_headers)
@@ -576,12 +579,12 @@ class TestConfigChangeTicketFlow(SystemAPITestBase):
         resp = self._create_ticket(self.normal_cfg, self.super_admin_a, '120')
         ticket_id = resp.json()['id']
         resp = self.client.post(
-            f'/api/v1/system/config-tickets/{ticket_id}/reject/',
+            f'/api/v1/system/tickets/{ticket_id}/reject/',
             data=json.dumps({'comment': '不合理'}),
             content_type='application/json',
             **self.admin_b_headers)
         assert resp.status_code == 200
-        assert resp.json()['status'] == 'rejected'
+        assert resp.json()['status'] == TicketStatus.REJECTED
         # 配置不变
         self.normal_cfg.refresh_from_db()
         assert self.normal_cfg.value == '60'
@@ -592,7 +595,7 @@ class TestConfigChangeTicketFlow(SystemAPITestBase):
         resp = self._create_ticket(self.normal_cfg, self.super_admin_a, '120')
         ticket_id = resp.json()['id']
         resp = self.client.post(
-            f'/api/v1/system/config-tickets/{ticket_id}/reject/',
+            f'/api/v1/system/tickets/{ticket_id}/reject/',
             data=json.dumps({}),
             content_type='application/json',
             **self.admin_b_headers)
@@ -604,12 +607,12 @@ class TestConfigChangeTicketFlow(SystemAPITestBase):
         resp = self._create_ticket(self.normal_cfg, self.super_admin_a, '120')
         ticket_id = resp.json()['id']
         resp = self.client.post(
-            f'/api/v1/system/config-tickets/{ticket_id}/withdraw/',
+            f'/api/v1/system/tickets/{ticket_id}/withdraw/',
             data=json.dumps({'comment': '撤回'}),
             content_type='application/json',
             **self.admin_a_headers)
         assert resp.status_code == 200
-        assert resp.json()['status'] == 'withdrawn'
+        assert resp.json()['status'] == TicketStatus.CANCELLED
 
     @pytest.mark.integration
     def test_withdraw_by_non_creator_403(self):
@@ -617,7 +620,7 @@ class TestConfigChangeTicketFlow(SystemAPITestBase):
         resp = self._create_ticket(self.normal_cfg, self.super_admin_a, '120')
         ticket_id = resp.json()['id']
         resp = self.client.post(
-            f'/api/v1/system/config-tickets/{ticket_id}/withdraw/',
+            f'/api/v1/system/tickets/{ticket_id}/withdraw/',
             data=json.dumps({'comment': 'r'}),
             content_type='application/json',
             **self.admin_b_headers)
@@ -625,10 +628,11 @@ class TestConfigChangeTicketFlow(SystemAPITestBase):
 
     @pytest.mark.integration
     def test_create_ticket_via_endpoint(self):
-        """POST /config-tickets/ 创建工单主入口与 PUT /configs/<key>/ 行为一致"""
+        """POST /tickets/ 创建工单主入口与 PUT /configs/<key>/ 行为一致"""
         resp = self.client.post(
-            '/api/v1/system/config-tickets/',
+            '/api/v1/system/tickets/',
             data=json.dumps({
+                'ticket_type': 'config',
                 'config_key': 'LLM_TIMEOUT',
                 'new_value': '90',
                 'reason': '通过工单入口创建',
@@ -636,14 +640,14 @@ class TestConfigChangeTicketFlow(SystemAPITestBase):
             content_type='application/json',
             **self.admin_a_headers)
         assert resp.status_code == 201
-        assert resp.json()['status'] == 'pending'
+        assert resp.json()['status'] == TicketStatus.PENDING
 
     @pytest.mark.integration
     def test_list_tickets_excludes_creator(self):
         """待审核列表自动排除创建人自己的工单（避免自审）"""
         self._create_ticket(self.normal_cfg, self.super_admin_a, '120')
         resp = self.client.get(
-            '/api/v1/system/config-tickets/', **self.admin_a_headers)
+            '/api/v1/system/tickets/', **self.admin_a_headers)
         assert resp.status_code == 200
         for t in resp.json()['tickets']:
             assert t['creator'] != self.super_admin_a.username

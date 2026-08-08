@@ -14,6 +14,7 @@ urlpatterns = [
         'get': 'retrieve', 'put': 'update', 'patch': 'partial_update', 'delete': 'destroy'})),
     # 统一工单列表+创建+操作：合并配置变更/定时任务/模型变更工单
     path("tickets/", views.TicketViewSet.as_view(), name='ticket-list-create'),
+    path("tickets/<int:pk>/", views.TicketViewSet.as_view(), name='ticket-detail'),
     path("tickets/<int:pk>/approve/", views.ApproveTicketView.as_view(), name='ticket-approve'),
     path("tickets/<int:pk>/reject/", views.RejectTicketView.as_view(), name='ticket-reject'),
     path("tickets/<int:pk>/withdraw/", views.WithdrawTicketView.as_view(), name='ticket-withdraw'),

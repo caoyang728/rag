@@ -33,7 +33,7 @@ from apps.knowledge.tests.test_views import (
 )
 from apps.users.models import (
     User, Role, UserRoleRel, GrantStatus, Department, Team,
-    PermissionApprovalTicket, TicketStatus, TicketChangeType,
+    TicketList, TicketStatus, TicketChangeType,
 )
 
 

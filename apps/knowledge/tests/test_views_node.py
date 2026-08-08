@@ -34,7 +34,7 @@ from apps.knowledge.tests.test_views import (
 )
 from apps.users.models import (
     User, Role, UserRoleRel, GrantStatus, Department, Team, Permission, RolePermissionRel,
-    PermissionApprovalTicket, TicketStatus, TicketChangeType,
+    TicketList, TicketStatus, TicketChangeType,
 )
 
 
@@ -332,8 +332,8 @@ class TestNodeUpdate(KnowledgeViewsExtraBase):
             **_auth_headers(self.super_admin))
         assert resp.status_code == 403
         assert '工单' in resp.json()['details']['detail']
-        ticket = PermissionApprovalTicket.objects.filter(
-            reason__startswith=f'[node:{self.category_node.id}:visibility_change]',
+        ticket = TicketList.objects.filter(
+            permission_detail__reason__startswith=f'[node:{self.category_node.id}:visibility_change]',
             status=TicketStatus.PENDING,
         ).first()
         assert ticket is not None
@@ -352,8 +352,8 @@ class TestNodeUpdate(KnowledgeViewsExtraBase):
             content_type='application/json',
             **_auth_headers(self.super_admin))
         assert resp.status_code == 200
-        assert PermissionApprovalTicket.objects.filter(
-            reason__startswith=f'[node:{self.category_node.id}:visibility_change]',
+        assert TicketList.objects.filter(
+            permission_detail__reason__startswith=f'[node:{self.category_node.id}:visibility_change]',
         ).count() == 0
 
     def _make_dept_manager(self):
@@ -382,8 +382,8 @@ class TestNodeUpdate(KnowledgeViewsExtraBase):
             content_type='application/json',
             **_auth_headers(self.team_leader))
         assert resp.status_code == 403
-        ticket = PermissionApprovalTicket.objects.filter(
-            reason__startswith=f'[node:{self.category_node.id}:visibility_change]',
+        ticket = TicketList.objects.filter(
+            permission_detail__reason__startswith=f'[node:{self.category_node.id}:visibility_change]',
             status=TicketStatus.PENDING,
         ).first()
         assert ticket is not None
@@ -402,8 +402,8 @@ class TestNodeUpdate(KnowledgeViewsExtraBase):
             content_type='application/json',
             **_auth_headers(mgr))
         assert resp.status_code == 403
-        ticket = PermissionApprovalTicket.objects.filter(
-            reason__startswith=f'[node:{self.category_node.id}:visibility_change]',
+        ticket = TicketList.objects.filter(
+            permission_detail__reason__startswith=f'[node:{self.category_node.id}:visibility_change]',
             status=TicketStatus.PENDING,
         ).first()
         assert ticket is not None
@@ -419,8 +419,8 @@ class TestNodeUpdate(KnowledgeViewsExtraBase):
             data=json.dumps({'visibility_level': 'PUBLIC'}),
             content_type='application/json',
             **_auth_headers(self.team_leader))
-        ticket = PermissionApprovalTicket.objects.filter(
-            reason__startswith=f'[node:{self.category_node.id}:visibility_change]',
+        ticket = TicketList.objects.filter(
+            permission_detail__reason__startswith=f'[node:{self.category_node.id}:visibility_change]',
             status=TicketStatus.PENDING,
         ).first()
         # 部门经理审批（匹配 DEPT_LEADER scope）
@@ -442,8 +442,8 @@ class TestNodeUpdate(KnowledgeViewsExtraBase):
             data=json.dumps({'visibility_level': 'PUBLIC'}),
             content_type='application/json',
             **_auth_headers(self.team_leader))
-        ticket = PermissionApprovalTicket.objects.filter(
-            reason__startswith=f'[node:{self.category_node.id}:visibility_change]',
+        ticket = TicketList.objects.filter(
+            permission_detail__reason__startswith=f'[node:{self.category_node.id}:visibility_change]',
             status=TicketStatus.PENDING,
         ).first()
         # 普通用户（无 user.manage、非管理员）审批 → 403
@@ -464,8 +464,8 @@ class TestNodeUpdate(KnowledgeViewsExtraBase):
             data=json.dumps({'visibility_level': 'PUBLIC'}),
             content_type='application/json',
             **_auth_headers(self.super_admin))
-        ticket = PermissionApprovalTicket.objects.filter(
-            reason__startswith=f'[node:{self.category_node.id}:visibility_change]',
+        ticket = TicketList.objects.filter(
+            permission_detail__reason__startswith=f'[node:{self.category_node.id}:visibility_change]',
             status=TicketStatus.PENDING,
         ).first()
         assert len(ticket.approval_chain) == 2

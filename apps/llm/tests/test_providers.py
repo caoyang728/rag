@@ -279,3 +279,124 @@ class TestOpenAICompatibleProvider:
         kwargs = p.client.chat.completions.create.call_args.kwargs
         assert 'tools' not in kwargs
         assert 'tool_choice' not in kwargs
+
+
+# ============================================================================
+# _OpenAICompatibleProvider 边界分支（chat 降级 / stream 全流程）
+# ============================================================================
+@patch('apps.llm.providers.stubs.logger')
+@pytest.mark.unit
+class TestOpenAICompatibleProviderEdge:
+    """OpenAI 兼容 Provider 的 chat 降级与 stream 流式帧测试"""
+
+    def _make_provider(self):
+        """绕过 __init__ 构造 provider，注入 mock client"""
+        p = object.__new__(_OpenAICompatibleProvider)
+        p.api_key = 'sk'
+        p.base_url = 'http://x'
+        p.model = 'm'
+        p.timeout = 60
+        p.name = 'qwen'
+        p.extra = {}
+        p.client = MagicMock()
+        return p
+
+    def test_chat_with_usage_none_tokens_zero(self, mock_logger):
+        """响应无 usage 时 token 计数应回退为 0"""
+        p = self._make_provider()
+        resp = _make_resp(content='ok')
+        resp.usage = None
+        p.client.chat.completions.create.return_value = resp
+
+        result = p.chat([{'role': 'user', 'content': 'q'}])
+        assert result['content'] == 'ok'
+        assert result['prompt_tokens'] == 0
+        assert result['completion_tokens'] == 0
+
+    def test_chat_content_none_returns_empty_string(self, mock_logger):
+        """响应 content 为 None 时应回退为空字符串"""
+        p = self._make_provider()
+        p.client.chat.completions.create.return_value = _make_resp(content=None)
+
+        result = p.chat([{'role': 'user', 'content': 'q'}])
+        assert result['content'] == ''
+
+    def test_chat_error_returns_error_dict(self, mock_logger):
+        """chat 异常时返回 error 降级字典"""
+        p = self._make_provider()
+        p.client.chat.completions.create.side_effect = RuntimeError('boom')
+
+        result = p.chat([{'role': 'user', 'content': 'q'}])
+        assert result['finish_reason'] == 'error'
+        assert 'boom' in result['content']
+        assert result['tool_calls'] == []
+
+    def test_stream_skips_chunk_without_choices(self, mock_logger):
+        """流式帧 choices 为空时应跳过，不产出增量帧"""
+        p = self._make_provider()
+        empty = MagicMock()
+        empty.choices = []
+        text = MagicMock()
+        text.choices = [MagicMock()]
+        text.choices[0].finish_reason = None
+        text.choices[0].delta.content = '你'
+        p.client.chat.completions.create.return_value = [empty, text]
+
+        frames = list(p.stream([{'role': 'user', 'content': 'q'}]))
+        assert frames[0]['delta'] == '你'
+        assert frames[-1]['content'] == '你'
+        assert frames[-1]['finish'] is True
+
+    def test_stream_accumulates_tool_call_deltas(self, mock_logger):
+        """流式 tool_calls 分片应累积到结束帧"""
+        p = self._make_provider()
+
+        def _tc_delta(index, tc_id, name, args):
+            d = MagicMock()
+            d.index = index
+            d.id = tc_id
+            fn = MagicMock()
+            fn.name = name
+            fn.arguments = args
+            d.function = fn
+            return d
+
+        chunk1 = MagicMock()
+        chunk1.choices = [MagicMock()]
+        chunk1.choices[0].finish_reason = None
+        chunk1.choices[0].delta.content = None
+        chunk1.choices[0].delta.tool_calls = [_tc_delta(0, 'call_1', 'search', '{"q"')]
+        chunk2 = MagicMock()
+        chunk2.choices = [MagicMock()]
+        chunk2.choices[0].finish_reason = 'tool_calls'
+        chunk2.choices[0].delta.content = None
+        chunk2.choices[0].delta.tool_calls = [_tc_delta(0, None, None, ':"x"}')]
+        p.client.chat.completions.create.return_value = [chunk1, chunk2]
+
+        frames = list(p.stream([{'role': 'user', 'content': 'q'}]))
+        end = frames[-1]
+        assert end['tool_calls'] == [{'id': 'call_1', 'name': 'search', 'arguments': '{"q":"x"}'}]
+        assert end['finish_reason'] == 'tool_calls'
+        assert end['content'] == ''
+
+    def test_stream_error_frame(self, mock_logger):
+        """stream 异常时 yield 错误结束帧"""
+        p = self._make_provider()
+        p.client.chat.completions.create.side_effect = ConnectionError('down')
+
+        frames = list(p.stream([{'role': 'user', 'content': 'q'}]))
+        assert frames[0]['finish'] is True
+        assert frames[0]['finish_reason'] == 'error'
+        assert 'down' in frames[0]['delta']
+
+    def test_stream_with_tools_no_tool_choice(self, mock_logger):
+        """stream 传 tools 但不传 tool_choice 时只透传 tools"""
+        p = self._make_provider()
+        p.client.chat.completions.create.return_value = []
+
+        list(p.stream([{'role': 'user', 'content': 'q'}], tools=[{'type': 'function'}]))
+
+        kwargs = p.client.chat.completions.create.call_args.kwargs
+        assert kwargs['tools'] == [{'type': 'function'}]
+        assert 'tool_choice' not in kwargs
+        assert kwargs['stream'] is True

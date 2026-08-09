@@ -22,10 +22,13 @@ from apps.llm.prompts.qa import (
     MAX_TABLE_CONTEXT_LENGTH,
     MAX_TABLE_PREVIEW_ROWS,
 )
+from apps.llm.prompts.agent import AGENT_SYSTEM_PROMPT, build_agent_messages
 
 
 def _chunk(doc_id, group, content, chunk_type='text', **extra):
-    """构造一个检索 chunk dict"""
+    """构造一个检索 chunk dict，group 写入 extra.paragraph_group
+    （_merge_chunks_by_group 按 (document_id, paragraph_group) 分组合并）"""
+    extra.setdefault('paragraph_group', group)
     return {'document_id': doc_id, 'content': content,
             'chunk_type': chunk_type, 'extra': extra}
 
@@ -134,7 +137,8 @@ class TestBuildContextBlock:
 
     def test_table_chunk_large_uses_summary(self):
         """大表格 full_content 超过阈值时降级为摘要"""
-        rows = ['| H |'] + [f'| r{i} |' for i in range(30)]
+        # 300 行 markdown 表格约 2400+ 字符，确保超过 MAX_TABLE_CONTEXT_LENGTH
+        rows = ['| H |'] + [f'| r{i} |' for i in range(300)]
         full = '\n'.join(rows)
         assert len(full) > MAX_TABLE_CONTEXT_LENGTH
         out = build_context_block([_chunk(1, 0, '摘要', chunk_type='table',
@@ -188,3 +192,38 @@ class TestBuildQaMessages:
         """QA_USER_TEMPLATE 的三个占位符均可格式化"""
         out = QA_USER_TEMPLATE.format(memory_block='m', context_block='c', question='q')
         assert 'm' in out and 'c' in out and 'q' in out
+
+
+# ============================================================================
+# build_agent_messages（Agent ReAct 模式）
+# ============================================================================
+@pytest.mark.unit
+class TestBuildAgentMessages:
+    """Agent 模式 messages 拼装测试（不预注入检索片段，保留记忆）"""
+
+    def test_messages_default_agent_system_prompt(self):
+        """默认使用 AGENT_SYSTEM_PROMPT"""
+        msgs = build_agent_messages('怎么报销')
+        assert msgs[0]['role'] == 'system'
+        assert msgs[0]['content'] == AGENT_SYSTEM_PROMPT
+        assert '怎么报销' in msgs[1]['content']
+
+    def test_messages_custom_system_prompt(self):
+        """传入 system_prompt 时覆盖默认系统提示"""
+        msgs = build_agent_messages('q', system_prompt='自定义')
+        assert msgs[0]['content'] == '自定义'
+
+    def test_messages_without_memory_uses_placeholder(self):
+        """未传 memory_block 时 user 内容使用占位文本"""
+        msgs = build_agent_messages('q')
+        assert '（无历史记忆）' in msgs[1]['content']
+
+    def test_messages_with_memory_kept(self):
+        """传入 memory_block 时拼入 user 内容"""
+        msgs = build_agent_messages('q', memory_block='上次聊过报销流程')
+        assert '上次聊过报销流程' in msgs[1]['content']
+
+    def test_messages_do_not_inject_context_block(self):
+        """Agent 模式不应预注入检索片段（区别于 build_qa_messages）"""
+        msgs = build_agent_messages('q', memory_block='m')
+        assert '知识片段' not in msgs[1]['content']

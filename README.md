@@ -959,9 +959,10 @@ docker compose exec django pytest -m integration           # 仅集成测试
 docker compose exec django pytest -m smoke                 # 冒烟测试（CI 门禁用）
 docker compose exec django pytest apps/users/tests/        # 指定 app
 
-# 覆盖率统计（覆盖范围由 pytest.ini 的 [coverage:run] source=apps 控制，排除 tests/migrations）
-docker compose exec django pytest --cov=apps --cov-report=term-missing   # 终端输出覆盖率明细
-docker compose exec django coverage html -d coverage_report              # 生成 HTML 覆盖率报告
+# 覆盖率统计（覆盖范围与报告目录由 .coveragerc 控制：source=apps，排除 tests/migrations，
+# HTML 报告输出到 coverage_report/，与前端 /coverage/ 静态服务目录一致）
+docker compose exec django pytest --cov=apps --cov-report=term-missing  # 终端输出覆盖率明细
+docker compose exec django pytest --cov=apps --cov-report=html          # 生成 HTML 覆盖率报告（coverage_report/）
 # 生成后可访问 http://localhost:8000/coverage/ 查看（仅开发环境挂载，生产 DEBUG=False 时 404）
 ```
 

@@ -7,6 +7,10 @@ class Migration(migrations.Migration):
 
     dependencies = [
         ('system', '0014_rename_old_ticket_tables'),
+        # users/0009 数据迁移依赖 system.Ticket（0012 创建/0013 填充），
+        # 本迁移删除 Ticket，必须排在 users/0009 之后，否则全新库全量 migrate 时
+        # StateApps 中已无 system.Ticket 模型，users/0009 的 apps.get_model 会抛 LookupError
+        ('users', '0009_migrate_tickets_to_unified'),
     ]
 
     operations = [

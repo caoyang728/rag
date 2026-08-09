@@ -438,13 +438,13 @@ def _extract_text_content(content: bytes, file_type: str, filename: str) -> str:
     # PDF
     if file_type == "pdf" or ext == ".pdf":
         try:
-            from PyPDF2 import PdfReader
+            from pypdf import PdfReader
             import io
             reader = PdfReader(io.BytesIO(content))
             text = "\n\n".join(page.extract_text() or "" for page in reader.pages)
             return text if text.strip() else "PDF 文档无文本内容"
         except ImportError:
-            return "需要安装 PyPDF2 才能预览 PDF 内容"
+            return "需要安装 pypdf 才能预览 PDF 内容"
         except Exception as e:
             logger.error(f"PDF extract failed: {e}")
             return f"PDF 解析失败: {str(e)}"

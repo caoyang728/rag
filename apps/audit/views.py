@@ -4,8 +4,10 @@ audit views
 - POST /api/v1/audit/verify-chain/ 校验哈希链完整性
 """
 import hashlib
+from datetime import datetime
 
 from django.core.paginator import Paginator
+from django.utils import timezone
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -13,6 +15,18 @@ from apps.audit.models import AuditLog
 from apps.users.permissions import perm_class, IsSuperAdmin
 
 MAX_PAGE_SIZE = 200
+
+
+def _parse_date_param(value):
+    """解析 YYYY-MM-DD 为当天零点的 aware datetime；非法输入返回 None（不做过滤）
+
+    created_at 为带时区的 timestamptz，直接传字符串会被解析成 naive datetime，
+    在 USE_TZ=True 下会触发 RuntimeWarning，故统一转成 aware 时间。
+    """
+    try:
+        return timezone.make_aware(datetime.strptime(value, "%Y-%m-%d"))
+    except (ValueError, TypeError):
+        return None
 
 
 class AuditLogListView(APIView):
@@ -34,10 +48,10 @@ class AuditLogListView(APIView):
         ip = request.query_params.get("ip")
         if ip:
             qs = qs.filter(ip_address__icontains=ip[:64])
-        start_date = request.query_params.get("start_date")
+        start_date = _parse_date_param(request.query_params.get("start_date"))
         if start_date:
             qs = qs.filter(created_at__gte=start_date)
-        end_date = request.query_params.get("end_date")
+        end_date = _parse_date_param(request.query_params.get("end_date"))
         if end_date:
             qs = qs.filter(created_at__lte=end_date)
 

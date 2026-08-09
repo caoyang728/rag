@@ -52,7 +52,7 @@ Pillow==12.3.0              # 图片处理
 python-magic==0.4.27        # MIME 检测
 pyyaml==6.0.3               # YAML 配置文件解析
 chardet==7.4.3              # 编码检测
-PyPDF2==3.0.1               # PDF 解析
+pypdf==6.15.0               # PDF 解析
 openpyxl==3.1.5             # Excel XLSX
 python-pptx==1.0.2          # PowerPoint PPTX
 

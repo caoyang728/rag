@@ -1,0 +1,11 @@
+[run]
+source = apps
+omit = */tests/*, */migrations/*
+
+[report]
+exclude_lines =
+    pragma: no cover
+
+[html]
+# 与前端 /coverage/ 静态服务目录保持一致（见 rag_project/urls.py）
+directory = coverage_report

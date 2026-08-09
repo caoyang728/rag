@@ -97,7 +97,11 @@ class KnowledgeSearchTool(BaseTool):
             return {
                 'result': '未在知识库中检索到相关文档片段。',
                 'ok': True,
-                'meta': {'chunks': [], 'chunk_ids': []},
+                'meta': {
+                    'chunks': [], 'chunk_ids': [],
+                    # 查询改写/分解审计信息（供 QaRecord.route_trace 记录）
+                    'transform': retrieval.get('transform'),
+                },
             }
 
         # 二次权限验证：过滤用户无权访问的文档片段
@@ -141,5 +145,7 @@ class KnowledgeSearchTool(BaseTool):
                 'chunks': chunks,
                 'chunk_ids': [c['chunk_id'] for c in chunks],
                 'doc_ids': list({c['document_id'] for c in chunks}),
+                # 查询改写/分解审计信息（供 QaRecord.route_trace 记录）
+                'transform': retrieval.get('transform'),
             },
         }

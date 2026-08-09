@@ -12,6 +12,47 @@
 
 ---
 
+## 检索流程总览
+
+> 从用户 Query 到最终结果的完整链路，包含**热点缓存**（上游拦截）与**权限过滤**（两路召回内部完成）。查询改写/分解（`QUERY_TRANSFORM_ENABLED`，默认关闭）是透明增强层——仅改变 query，召回/融合/精排完全复用同一核心；LLM 改写或分解**任何失败都降级为原始 Query**，永不阻断主流程。改写/分解的输入输出随 `route_trace` 落库，评估看板据此统计"改写命中率"。
+
+```mermaid
+flowchart TD
+    Q["用户 Query"] --> CACHE{"① 热点缓存命中？<br/>HotQaCache 组织分组（public/org_…）"}
+    CACHE -->|"命中：直接返回缓存答案<br/>（仍过内容审查 + 引用权限校验）"| DONE["返回答案"]
+    CACHE -->|"未命中"| H{"② hybrid_search 入口<br/>QUERY_TRANSFORM_ENABLED"}
+
+    H -->|"关闭（默认）"| CORE["_search_core 混合检索核心"]
+    H -->|"开启"| RW["③ LLM 改写 + 同义词扩展"]
+    RW -->|"失败降级为原 Query"| S1["④ 改写后混合检索"]
+    S1 --> CF{"⑤ 置信度 ≥ 阈值<br/>默认 0.35"}
+    CF -->|"是：直接返回"| OUT["返回检索结果"]
+    CF -->|"否：触发分解"| DC["⑥ LLM 查询分解<br/>N 个子查询"]
+    DC -->|"逐路召回（不 Rerank 省成本）"| SUB["⑦ 各子查询独立混合检索"]
+    SUB --> MG["⑧ RRF 合并去重<br/>以原 query 精排"]
+    MG --> OUT
+
+    CORE --> VEC["向量检索 pgvector<br/>top_k<br/>（权限过滤）"]
+    CORE --> BM["BM25 关键词检索<br/>top_k<br/>（权限过滤）"]
+    S1 --> CORE
+    SUB --> CORE
+    VEC --> FUSE["RRF 融合 k=60<br/>top 30"]
+    BM --> FUSE
+    FUSE --> RK["BGE-Reranker 重排<br/>top N"]
+    RK --> EN["补全元信息<br/>doc_title / section_path / 图片"]
+    EN --> OUT
+    OUT --> DONE
+    DONE --> CTX["chunks 作为上下文拼入 Prompt<br/>transform → QaRecord.route_trace"]
+```
+
+检索核心（`_search_core`，[apps/retrieval/hybrid.py](apps/retrieval/hybrid.py)）五步：**query 向量化 → 向量 + BM25 并行召回 → RRF 融合 → BGE-Reranker 重排 → 元信息补全**，最终返回 `{chunks, stats, raw}`；改写/分解链路见 [apps/retrieval/query_transform.py](apps/retrieval/query_transform.py)。
+
+**缓存（组织分组 + 文档兜底）**：`HotQaCache` 按 `question_hash + root_type + visibility_scope` 三键定位，`visibility_scope` 按答案引用文档的**组织归属**分组（`public` 无引用或全 PUBLIC 文档，任意用户共享 / `org_d3_t7` 部门/团队 ID 升序拼接，同组用户共享），不同权限组各自独立一条、互不覆盖。命中校验两层：① **权限组粗筛**——`org_...` 组需用户可见组织（部门祖先链 + 管辖/所属团队）AND 全覆盖；② **文档级兜底**——`filter_accessible_doc_ids` 对 `cited_doc_ids` 引用文档全通过，兜住黑名单/个人共享/申请审批等组织维度看不见的个人级权限（Deny Override 铁律：任一引用无权则跳过缓存、回落完整检索重新生成，答案文本无法按文档切割部分返回）。旧数据无权限组标记（`cited_doc_ids` 空但有引用）非超管保守跳过。命中结果仍会**过内容审查**（词库更新后拦截历史违规答案）。
+
+**权限过滤**：两路召回（`vector_search` / `bm25_search`）内部均完成检索级权限过滤（黑名单 Deny Override → 可见范围 → 主动共享，见 [apps/retrieval/permission.py](apps/retrieval/permission.py)），RRF 融合与 Rerank 层无需重复判权；Agent 工具在混合检索后还会做二次权限校验。
+
+---
+
 ## 一、项目特性
 
 - **三层混合架构（LLM Wiki + GraphRAG + RAG）**：问答按置信度逐层路由——Wiki 页面直接命中 → 图谱实体/关系与社区摘要 → 混合检索兜底，各层命中率与回答质量持续评估对比

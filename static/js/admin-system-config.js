@@ -41,6 +41,9 @@ const CONFIG_METADATA = {
 	HNSW_EF_SEARCH: { label: 'HNSW 向量搜索 ef 参数', description: 'HNSW 索引搜索时的 ef 参数，值越大召回越准但速度越慢，需权衡平衡', sortOrder: 3 },
 	BM25_TOP_K: { label: 'BM25 召回 top K', description: 'BM25 关键词检索召回的候选文档数量，与向量召回合并后进入 Rerank', sortOrder: 4 },
 	VECTOR_TOP_K: { label: '向量召回 top K', description: '向量相似度检索召回的候选文档数量，与 BM25 召回合并后进入 Rerank', sortOrder: 5 },
+	QUERY_TRANSFORM_ENABLED: { label: '查询改写/分解开关', description: '开启后，检索前先对用户 Query 做 LLM 改写/同义词扩展，改写后置信度不足时再拆分为多个子查询分别召回后合并；关闭时行为与现状一致', sortOrder: 6 },
+	QUERY_DECOMPOSE_THRESHOLD: { label: '改写后置信度阈值', description: '改写后检索结果的置信度低于该值时触发查询分解（0-1），越低越容易触发分解；0.35 大致对应改写后无命中片段', sortOrder: 7 },
+	QUERY_DECOMPOSE_MAX_SUB: { label: '最大子查询数', description: '查询分解时最多生成的子查询数量（1-5），防止过度拆分导致检索延迟过高', sortOrder: 8 },
 
 	// ===== 存储 =====
 	IMAGE_STORAGE_MODE: { label: '图片存储模式', description: '图片的存储方式：转换 base64 存入数据库或对象存储', sortOrder: 1 },

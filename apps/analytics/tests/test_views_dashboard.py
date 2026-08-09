@@ -815,6 +815,43 @@ class TestRouteAnalysisDashboardAPI(AnalyticsViewsBase):
                                **self.anon_headers)
         assert resp.status_code in [401, 403]
 
+    def test_query_transform_stats(self):
+        """改写命中率：从 QaRecord.route_trace 实时聚合 rewrite/decompose 统计"""
+        # 2 条改写链路：1 次实际改写 changed、1 次未改写；其中 1 条触发分解
+        self._make_qa(question='年假怎么申请', route_trace=[
+            {'layer': 'query_rewrite', 'query': '年假怎么申请',
+             'rewritten_query': '公司年假申请流程', 'changed': True, 'latency_ms': 120},
+            {'layer': 'query_decompose', 'query': '年假怎么申请',
+             'sub_queries': ['年假规则', '请假天数'], 'need_decompose': True,
+             'decomposed': True, 'latency_ms': 80},
+        ])
+        self._make_qa(question='报销流程', route_trace=[
+            {'layer': 'query_rewrite', 'query': '报销流程',
+             'rewritten_query': '报销流程', 'changed': False, 'latency_ms': 60},
+        ])
+        # 普通 QA（无改写链路）不影响统计
+        self._make_qa(question='普通问题')
+
+        resp = self.client.get('/api/v1/analytics/eval-dashboard/route-analysis/',
+                               **self.reader_headers)
+        assert resp.status_code == 200
+        stats = resp.json()['query_transform_stats']
+        assert stats['rewrite_total'] == 2
+        assert stats['rewrite_changed'] == 1
+        assert stats['rewrite_hit_rate'] == 0.5
+        assert stats['decompose_total'] == 1
+
+    def test_query_transform_stats_empty(self):
+        """无改写链路 → 全 0（前端可渲染空态）"""
+        self._make_qa(question='普通问题')
+        resp = self.client.get('/api/v1/analytics/eval-dashboard/route-analysis/',
+                               **self.reader_headers)
+        stats = resp.json()['query_transform_stats']
+        assert stats == {
+            'rewrite_total': 0, 'rewrite_changed': 0,
+            'rewrite_hit_rate': 0.0, 'decompose_total': 0,
+        }
+
 
 class TestRouteAnalysisAggregateAPI(AnalyticsViewsBase):
     """RouteAnalysisAggregateView 手动触发聚合"""

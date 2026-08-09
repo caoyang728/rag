@@ -16,11 +16,12 @@ from apps.chat.models import QaRecord, HotQaCache
 from apps.memory.models import Session
 from apps.memory.manager import MemoryManager
 from apps.retrieval.hybrid import hybrid_search
+from apps.retrieval.query_transform import build_route_trace
 from apps.llm.factory import get_llm
 from apps.llm.prompts import build_qa_messages
 from apps.system.models import LlmCallLog
 from apps.llm.embedding import EmbeddingException
-from apps.knowledge.access import filter_accessible_doc_ids
+from apps.knowledge.access import filter_accessible_doc_ids, build_user_context
 
 
 def _detect_error_type(llm_stats: dict) -> str:
@@ -99,6 +100,20 @@ def _make_filtered_event(hit) -> dict:
     }
 
 
+def _collect_transform_route_trace(tool_traces: list) -> list:
+    """从 Agent 工具调用链 meta 中收集查询改写/分解追踪信息，转成 route_trace 审计条目
+
+    knowledge_search 工具执行时若命中改写/分解链路，会把 transform 追踪信息放进
+    工具结果 meta，这里统一收集并落 QaRecord.route_trace，供评估看板统计"改写命中率"。
+    """
+    trace = []
+    for t in tool_traces or []:
+        tr = (t.get('meta') or {}).get('transform')
+        if tr and tr.get('enabled'):
+            trace.extend(build_route_trace(tr))
+    return trace
+
+
 
 def _normalize(q: str) -> str:
     return ''.join(q.strip().lower().split())
@@ -108,13 +123,32 @@ def _hash(q: str) -> str:
     return hashlib.sha256(_normalize(q).encode('utf-8')).hexdigest()
 
 
-def _cache_scope(user) -> str:
-    """返回缓存作用域，用于区分匿名用户/超级管理员/普通用户的缓存"""
-    if not user or not getattr(user, 'is_authenticated', False):
-        return 'anonymous'
-    if getattr(user, 'is_super_admin', False):
-        return 'super'
-    return f'user_{user.id}'
+def _build_org_scope(doc_ids: list) -> str:
+    """计算引用文档的权限组（缓存分组标识）
+
+    权限组 = 答案引用文档的组织归属：
+    - 无引用（纯 LLM 知识）或引用全为 PUBLIC 可见文档 → 'public'（任意用户可命中）
+    - 否则 → 'org_d3_t7'（部门 d / 团队 t ID 升序拼接），同一权限组用户共享该条缓存
+
+    黑名单 / 个人共享 / 申请审批等个人级权限无法表达在组织组内，
+    由命中时的文档级兜底校验（_cache_docs_accessible）兜住，遵循 Deny Override 铁律。
+    """
+    if not doc_ids:
+        return 'public'
+    from apps.knowledge.models import Document, VisibilityLevel
+    orgs = set()
+    for dept_id, team_id, vlevel in (Document.objects.filter(id__in=doc_ids)
+                                     .values_list('dept_id', 'team_id', 'visibility_level')):
+        # PUBLIC 全局可见文档不产生组织归属，纯 PUBLIC 引用整组降级为 'public'
+        if vlevel == VisibilityLevel.PUBLIC:
+            continue
+        if team_id:
+            orgs.add(f't{team_id}')
+        elif dept_id:
+            orgs.add(f'd{dept_id}')
+    if not orgs:
+        return 'public'
+    return 'org_' + '_'.join(sorted(orgs))
 
 
 def ask_stream(user, question: str, session: Session,
@@ -307,6 +341,10 @@ def ask_stream(user, question: str, session: Session,
         retrieval = hybrid_search(question, user, root_types=root_types, node_ids=node_ids, do_rerank=do_rerank)
         chunks = retrieval['chunks']
         r_stats = retrieval['stats']
+        # 查询改写/分解审计：transform 追踪信息记入 QaRecord.route_trace
+        # 开关关闭时 retrieval 无 'transform' 键，route_trace 保持 None（与现状一致）
+        transform = retrieval.get('transform') or {}
+        transform_route_trace = build_route_trace(transform) or None
     except EmbeddingException as e:
         logger.error(f'[ask_stream] embedding failed during search: {e}')
         answer = '当前向量服务暂时不可用，请稍后重试。'
@@ -484,6 +522,7 @@ def ask_stream(user, question: str, session: Session,
                     # 客户端主动终止视为成功（部分回答有效），
                     # is_success=True 防止被计入失败率统计
                     is_success=True,
+                    route_trace=transform_route_trace,
                 )
             except Exception:
                 logger.exception('[ask_stream] failed to persist partial answer on abort')
@@ -574,6 +613,7 @@ def ask_stream(user, question: str, session: Session,
         # 内容审查命中标记：is_filtered=True 不影响 is_success（审查拦截视为正常完成）
         is_filtered=filter_hit is not None,
         filter_reason=(f'output:{filter_hit.word}' if filter_hit else ''),
+        route_trace=transform_route_trace,
     )
 
     # 9. 记录短时记忆 + 更新热点缓存
@@ -581,7 +621,7 @@ def ask_stream(user, question: str, session: Session,
     # 与缓存命中路径（memory_answer='' if cache_hit）和 Agent 路径（answer='' if is_filtered）保持一致
     memory_answer = '' if filter_hit else answer
     mm.append_turn(session, question, memory_answer)
-    if answer_type == 'rag' and not filter_hit:
+    if _should_update_cache(answer_type, filter_hit is not None):
         _update_cache(question, root_type, user, answer, citations)
 
     # 10. 发送 done 事件
@@ -815,7 +855,7 @@ def _ask_stream_via_route(user, question, session, root_types, root_type,
     # 6. 记忆 + 缓存（命中 block 时不更新，避免违规内容被缓存复用或污染上下文）
     memory_answer = '' if filter_hit else answer
     mm.append_turn(session, question, memory_answer)
-    if answer_type == 'rag' and not filter_hit:
+    if _should_update_cache(answer_type, filter_hit is not None):
         _update_cache(question, root_type, user, answer, citations)
 
     # 7. done 事件（带路由链路信息）
@@ -877,56 +917,163 @@ def _build_citations(chunks: list) -> list:
     return citations
 
 
+def _user_covers_org_scope(user, org_scope: str) -> bool:
+    """校验用户可见组织范围是否覆盖缓存权限组（AND 全覆盖）
+
+    org_scope 形如 'org_d3_t7'（d=部门，t=团队）。
+    覆盖规则：
+    - 部门：须在用户可见部门集合（管辖 + 所属部门祖先链）中；
+    - 团队：在用户可见团队集合（管辖团队 + 自己所属团队）中，
+      或其所属部门在可见部门集合中（部门级可见天然覆盖下属团队）。
+    粗筛不做个人级（黑名单/个人共享）判定，由文档级兜底校验兜底。
+    """
+    ctx = build_user_context(user)
+    if not ctx:
+        return False
+    visible_depts = ctx['visible_depts']
+    # 普通用户对自己所属团队的 TEAM_ONLY 文档自然可见，纳入可见团队集合
+    visible_teams = set(ctx['visible_teams'])
+    if getattr(user, 'team_id', None):
+        visible_teams.add(user.team_id)
+    for token in org_scope.split('_')[1:]:
+        kind, oid = token[0], int(token[1:])
+        if kind == 'd':
+            if oid not in visible_depts:
+                return False
+        else:
+            if oid in visible_teams:
+                continue
+            from apps.users.models import Team
+            # 团队所属部门在用户可见部门中 → 该团队被部门级可见覆盖
+            if Team.objects.filter(id=oid, department_id__in=visible_depts).exists():
+                continue
+            return False
+    return True
+
+
+def _cache_scope_accessible(user, obj) -> bool:
+    """权限组粗筛：用户是否有资格进入该缓存分组
+
+    - 'public'：无引用或全 PUBLIC 文档，任意用户可命中（无需校验）；
+    - 'org_...'：组织覆盖校验（超管全权限直接通过）；
+    - 'super'/'anonymous'：历史分组，仅身份匹配（新写入不再产生）；
+    - 其他（旧 per-user 分组）：直接失效。
+    """
+    scope = obj.visibility_scope
+    if scope == 'public':
+        return True
+    if scope.startswith('org_'):
+        if not user or not getattr(user, 'is_authenticated', False):
+            return False
+        if getattr(user, 'is_super_admin', False):
+            return True
+        return _user_covers_org_scope(user, scope)
+    if scope == 'super':
+        return bool(user and getattr(user, 'is_super_admin', False))
+    if scope == 'anonymous':
+        return not (user and getattr(user, 'is_authenticated', False))
+    return False
+
+
+def _cache_docs_accessible(user, obj) -> bool:
+    """文档级兜底：引用文档全部可访问才返回缓存
+
+    组织粗筛看不见个人级权限（黑名单 / 个人共享 / 申请审批），
+    此处用 filter_accessible_doc_ids 精确校验（Deny Override 铁律）。
+    旧数据无权限组标记（cited_doc_ids 空但有引用）：非超管保守跳过，
+    避免泄露未知权限视野的历史答案。
+    """
+    if obj.cited_doc_ids:
+        if not (user and getattr(user, 'is_authenticated', False)):
+            return False  # 匿名无权限上下文，仅可命中纯知识缓存
+        accessible_ids = filter_accessible_doc_ids(user, obj.cited_doc_ids)
+        return set(obj.cited_doc_ids) <= set(accessible_ids)
+    if obj.citations:
+        # 旧数据无权限组标记：无法确认答案权限视野，非超管保守跳过
+        return bool(user and getattr(user, 'is_super_admin', False))
+    return True
+
+
 def _try_cache(question: str, root_type: str, user) -> dict:
-    scope = _cache_scope(user)
+    """热点缓存命中（组织分组 + 文档兜底）
+
+    权限感知共享缓存策略：
+    1. 缓存按答案引用文档的组织归属分组（visibility_scope='public' / 'org_...'），
+       不同权限组各自独立一条，互不覆盖（避免权限异构场景下缓存抖动互相污染）；
+    2. 命中校验两层：
+       a. 权限组粗筛：'public' 零校验；'org_...' 需用户可见组织覆盖（AND 全覆盖）；
+       b. 文档级兜底：filter_accessible_doc_ids 对引用文档全通过，
+          覆盖黑名单 / 个人共享 / 申请审批等组织维度看不见的权限；
+    3. 按 public → 其他分组的顺序尝试，任一通过即命中，全不命中返回 None（重新生成）。
+    """
     qh = _hash(question)
     now = timezone.now()
-    scopes = [scope]
-    if user and getattr(user, 'is_authenticated', False):
-        scopes.append('super')
-    obj = HotQaCache.objects.filter(
-        question_hash=qh, root_type=root_type,
-        visibility_scope__in=scopes,
-    ).first()
-    if not obj:
-        return None
-    if obj.expires_at and obj.expires_at < now:
-        return None
+    records = list(HotQaCache.objects.filter(question_hash=qh, root_type=root_type))
+    # public 组零校验优先；其余按创建先后（各组独立，互不覆盖）
+    records.sort(key=lambda o: (0 if o.visibility_scope == 'public' else 1, o.created_at))
+    for obj in records:
+        if obj.expires_at and obj.expires_at < now:
+            continue
+        if not _cache_scope_accessible(user, obj):
+            continue
+        if not _cache_docs_accessible(user, obj):
+            continue
+        HotQaCache.objects.filter(id=obj.id).update(hit_count=F('hit_count') + 1, last_hit_at=timezone.now())
+        return {'answer': obj.answer, 'citations': obj.citations}
+    return None
 
-    # 验证用户是否仍有权限访问缓存中的文档
-    if user and getattr(user, 'is_authenticated', False) and obj.citations:
-        doc_ids = []
-        for cite in obj.citations:
-            chunk_ids = cite.get('chunk_ids', [])
-            if chunk_ids:
-                from apps.knowledge.models import DocumentChunk
-                chunk = DocumentChunk.objects.filter(id=chunk_ids[0]).first()
-                if chunk and chunk.document_id not in doc_ids:
-                    doc_ids.append(chunk.document_id)
 
-        if doc_ids:
-            accessible_ids = filter_accessible_doc_ids(user, doc_ids)
-            if set(doc_ids) - set(accessible_ids):
-                logger.info('[Cache] permission revoked for cached QA, skipping')
-                return None
+def _should_update_cache(answer_type: str, is_filtered: bool) -> bool:
+    """是否写入热点缓存（agent / general / rag 成功回答均可复用）
 
-    HotQaCache.objects.filter(id=obj.id).update(hit_count=F('hit_count') + 1, last_hit_at=timezone.now())
-    return {'answer': obj.answer, 'citations': obj.citations}
+    general 无工具调用也需缓存：否则同样问题每次都完整 LLM 生成（数秒延迟）。
+    refused（拒答/审查拦截）不缓存：词库会更新，且违规内容不应被缓存复用。
+    """
+    return answer_type in ('agent', 'general', 'rag') and not is_filtered
+
+
+def _extract_cited_doc_ids(citations: list) -> list:
+    """从 citations 提取引用文档 ID 集合（作为缓存条目的权限组标记）
+
+    权限组 = 答案引用的文档集合：命中缓存时对当前用户按该集合校验权限
+    （全部可访问才可命中）。每个 citation 取第一个 chunk 批量反查文档，
+    避免逐条查询。
+    """
+    chunk_ids = []
+    for cite in citations or []:
+        ids = cite.get('chunk_ids') or []
+        if ids:
+            chunk_ids.append(ids[0])
+    if not chunk_ids:
+        return []
+    from apps.knowledge.models import DocumentChunk
+    return list(DocumentChunk.objects.filter(id__in=chunk_ids)
+                .values_list('document_id', flat=True).distinct())
 
 
 def _update_cache(question: str, root_type: str, user, answer: str, citations: list):
-    scope = _cache_scope(user)
     qh = _hash(question)
     try:
-        HotQaCache.objects.update_or_create(
-            question_hash=qh, root_type=root_type, visibility_scope=scope,
+        # 权限组：按引用文档的组织归属分组（public / org_...），命中时按组校验
+        cited_doc_ids = _extract_cited_doc_ids(citations)
+        org_scope = _build_org_scope(cited_doc_ids)
+        obj, created = HotQaCache.objects.get_or_create(
+            question_hash=qh, root_type=root_type, visibility_scope=org_scope,
             defaults={
                 'question': question[:1000],
                 'answer': answer,
                 'citations': citations,
+                'cited_doc_ids': cited_doc_ids,
                 'hit_count': 1,
             }
         )
+        if not created:
+            # 更新答案与引用，保留 hit_count 累计（update_or_create 每次重置为 1 会失真）
+            obj.question = question[:1000]
+            obj.answer = answer
+            obj.citations = citations
+            obj.cited_doc_ids = cited_doc_ids
+            obj.save(update_fields=['question', 'answer', 'citations', 'cited_doc_ids', 'last_hit_at'])
     except Exception:
         logger.exception('cache write failed')
 
@@ -1110,6 +1257,7 @@ def _ask_stream_via_agent(user, question, session, root_types, node_ids,
                     is_success=True,
                     is_filtered=is_filtered,
                     filter_reason=filter_reason,
+                    route_trace=_collect_transform_route_trace(tool_traces) or None,
                 )
             except Exception:
                 logger.exception('[ask_stream_via_agent] failed to persist partial answer')
@@ -1155,6 +1303,8 @@ def _ask_stream_via_agent(user, question, session, root_types, node_ids,
         # 内容审查命中标记（从 agent_ask_stream 透传）
         is_filtered=is_filtered,
         filter_reason=filter_reason,
+        # 查询改写/分解审计：从工具调用链 meta 收集 transform 追踪信息
+        route_trace=_collect_transform_route_trace(tool_traces) or None,
     )
 
     # 记录 Agent 工具调用链（失败不影响主流程，为 Tracing 体系铺路）
@@ -1184,7 +1334,7 @@ def _ask_stream_via_agent(user, question, session, root_types, node_ids,
 
     # 记忆 + 缓存（命中 block 时不更新缓存，避免违规内容被缓存复用）
     MemoryManager().append_turn(session, question, answer)
-    if answer_type == 'agent' and citations and not is_filtered:
+    if _should_update_cache(answer_type, is_filtered):
         _update_cache(question, root_type, user, answer, citations)
 
     yield {

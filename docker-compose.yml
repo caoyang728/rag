@@ -1,54 +1,58 @@
 # ==========================================================================
-# 企业私有化多场景智能 RAG-Agent 统一知识库平台 - Docker Compose 编排
-# 部署：django + celery-worker + celery-beat
-# 依赖：外部 PostgreSQL + Redis（单独部署在 data_network）
+# 企业私有化多场景智能 RAG-Agent 统一知识库平台 - Docker Compose 全量编排
+# 部署：nginx + django + celery-worker + celery-beat + postgres + redis + xinference
+# 网络拓扑：
+#   - 除 LLM（DeepSeek 云 API）外，所有服务都跑在 docker 内部网络 rag_network
+#   - 仅 nginx 对外暴露 80 端口，postgres/redis/xinference 不暴露到宿主机
+#   - embedding/rerank 由 Xinference 自托管（bge-m3 / bge-reranker-v2-m3，CPU）
+# 数据持久化：postgres_data / redis_data / static_data / media_data / xinference_data
+#   （全部为具名卷，容器重建不丢数据；精简版 docker-compose.core.yml 复用同名卷）
 # ==========================================================================
 
-services:
-  # postgres:
-  #   image: pgvector/pgvector:pg16
-  #   container_name: rag_postgres
-  #   restart: unless-stopped
-  #   environment:
-  #     POSTGRES_DB: ${POSTGRES_DB:-rag_agent}
-  #     POSTGRES_USER: ${POSTGRES_USER:-rag_user}
-  #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-please_set_in_env}
-  #     TZ: Asia/Shanghai
-  #   volumes:
-  #     - postgres_data:/var/lib/postgresql/data
-  #     - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
-  #   ports:
-  #     - "5432:5432"
-  #   healthcheck:
-  #     test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-rag_user} -d ${POSTGRES_DB:-rag_agent}"]
-  #     interval: 5s
-  #     timeout: 5s
-  #     retries: 10
-  #   networks:
-  #     - data_network
+name: rag-full
 
-  # redis:
-  #   image: redis:7-alpine
-  #   container_name: rag_redis
-  #   restart: unless-stopped
-  #   volumes:
-  #     - redis_data:/data
-  #   ports:
-  #     - "6379:6379"
-  #   command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_DB_PASSWORD}"]
-  #   healthcheck:
-  #     test: ["CMD", "redis-cli", "-a", "${REDIS_DB_PASSWORD}", "ping"]
-  #     interval: 5s
-  #     timeout: 5s
-  #     retries: 5
-  #   networks:
-  #     - data_network
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: rag_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-rag_agent}
+      POSTGRES_USER: ${POSTGRES_USER:-rag_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-please_set_in_env}
+      TZ: Asia/Shanghai
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-rag_user} -d ${POSTGRES_DB:-rag_agent}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - rag_network
+
+  redis:
+    image: redis:7-alpine
+    container_name: rag_redis
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_DB_PASSWORD}"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_DB_PASSWORD}", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - rag_network
 
   django:
     build: .
     container_name: rag_django
     restart: unless-stopped
-    mem_limit: 2g   # 开发期间, 服务器内存太小, 所以限制 
+    # 内存上限 4G：runserver 实际占用约 200M，留足余量给 xinference（模型加载/推理）
+    mem_limit: 4g
     env_file:
       - .env
     environment:
@@ -58,11 +62,15 @@ services:
     volumes:
       - .:/app
       - static_data:/app/staticfiles
-    ports:
-      - "8000:8000"
+      - media_data:/app/media
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     command: ["/app/entrypoint.sh"]
     networks:
-      - data_network
+      - rag_network
 
   celery-worker:
     build: .
@@ -76,9 +84,15 @@ services:
       TZ: Asia/Shanghai
     volumes:
       - .:/app
+      - media_data:/app/media
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     command: ["celery", "-A", "rag_project", "worker", "-l", "info", "-Q", "default,parse,memory,email,analytics", "--concurrency=1"]
     networks:
-      - data_network
+      - rag_network
 
   celery-beat:
     build: .
@@ -92,27 +106,74 @@ services:
       TZ: Asia/Shanghai
     volumes:
       - .:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     command: ["celery", "-A", "rag_project", "beat", "-l", "info"]
     networks:
-      - data_network
+      - rag_network
 
-  # nginx:
-  #   build: ./nginx
-  #   container_name: rag_nginx
-  #   restart: unless-stopped
-  #   depends_on:
-  #     - backend
-  #   ports:
-  #     - "80:80"
-  #   volumes:
-  #     - static_data:/usr/share/nginx/static:ro
-  #     - ./media:/usr/share/nginx/media:ro
+  # 反向代理 + 静态资源服务，唯一对外暴露端口的服务
+  nginx:
+    build: ./nginx
+    container_name: rag_nginx
+    restart: unless-stopped
+    depends_on:
+      - django
+    ports:
+      - "80:80"
+    volumes:
+      - static_data:/usr/share/nginx/static:ro
+      - media_data:/usr/share/nginx/media:ro
+    networks:
+      - rag_network
+
+  # Embedding / Rerank 自托管（CPU 版镜像）
+  # 模型注册：scripts/launch_xinference_models.sh（bge-m3 / bge-reranker-v2-m3）
+  # 模型权重与元数据持久化在 xinference_data 卷，容器重建后无需重新下载
+  xinference:
+    image: xprobe/xinference:latest-cpu
+    container_name: rag_xinference
+    restart: unless-stopped
+    command: ["xinference-local", "--host", "0.0.0.0", "--port", "9997"]
+    # 内存上限 8G：CPU 推理需要同时加载 embedding + rerank 两个模型权重（约 4-5G），
+    # 过低会触发容器 OOM Kill（曾 6G 下同时加载两个 bge 模型被 OOM）
+    mem_limit: 8g
+    environment:
+      XINFERENCE_HOME: /root/.xinference
+      # 仅在 docker 内部网络暴露，不对宿主机开放端口，禁用内置认证
+      # （Xinference v3 默认启用数据库认证，开启后会 401 拦截 /v1/* 调用）
+      XINFERENCE_AUTH_ADVANCED: "false"
+      # 国内环境：HF 镜像站加速模型下载
+      HF_ENDPOINT: https://hf-mirror.com
+      # 首次启动模型时引擎依赖走清华 PyPI 镜像
+      PIP_INDEX_URL: https://pypi.tuna.tsinghua.edu.cn/simple
+      TZ: Asia/Shanghai
+    volumes:
+      - xinference_data:/root/.xinference
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9997/v1/models')"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    networks:
+      - rag_network
 
 volumes:
   postgres_data:
+    name: rag_postgres_data
   redis_data:
+    name: rag_redis_data
   static_data:
+    name: rag_static_data
+  media_data:
+    name: rag_media_data
+  xinference_data:
+    name: rag_xinference_data
 
 networks:
-  data_network:
-    external: true
+  rag_network:
+    name: rag_network

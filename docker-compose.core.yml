@@ -1,0 +1,80 @@
+# ==========================================================================
+# 企业私有化多场景智能 RAG-Agent 统一知识库平台 - Docker Compose 精简编排
+# 部署：仅 django + celery-worker + celery-beat（开发用）
+# 依赖：postgres / redis 由其他项目在共享网络 data_network 中部署提供
+#       （容器名 postgres / redis 在该网络注册），本编排仅加入该外部网络
+# 数据持久化：static_data / media_data（复用与全量版相同的具名卷）
+# 注意：django / celery 容器名与全量版 docker-compose.yml 共用（rag_django 等），
+#       同一时间只能运行其中一个编排，切换前需先停掉另一方的容器
+# ==========================================================================
+
+name: rag-core
+
+services:
+  django:
+    build: .
+    container_name: rag_django
+    restart: unless-stopped
+    # 内存上限 2G：开发期间服务器内存较小，限制 django 容器占用
+    mem_limit: 2g
+    env_file:
+      - .env
+    environment:
+      PG_DB_HOST: postgres
+      REDIS_DB_HOST: redis
+      TZ: Asia/Shanghai
+    volumes:
+      - .:/app
+      - static_data:/app/staticfiles
+      - media_data:/app/media
+    ports:
+      # 开发直连 django（无 nginx），对外暴露 8000
+      - "8000:8000"
+    command: ["/app/entrypoint.sh"]
+    networks:
+      - data_network
+
+  celery-worker:
+    build: .
+    container_name: rag_celery_worker
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      PG_DB_HOST: postgres
+      REDIS_DB_HOST: redis
+      TZ: Asia/Shanghai
+    volumes:
+      - .:/app
+      - media_data:/app/media
+    command: ["celery", "-A", "rag_project", "worker", "-l", "info", "-Q", "default,parse,memory,email,analytics", "--concurrency=1"]
+    networks:
+      - data_network
+
+  celery-beat:
+    build: .
+    container_name: rag_celery_beat
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      PG_DB_HOST: postgres
+      REDIS_DB_HOST: redis
+      TZ: Asia/Shanghai
+    volumes:
+      - .:/app
+    command: ["celery", "-A", "rag_project", "beat", "-l", "info"]
+    networks:
+      - data_network
+
+volumes:
+  static_data:
+    name: rag_static_data
+  media_data:
+    name: rag_media_data
+
+networks:
+  # 复用共享外部网络 data_network：postgres / redis 由其他项目部署并在该网络注册，
+  # 本编排不再自建网络，仅加入该网络即可通过服务名（postgres / redis）访问
+  data_network:
+    external: true

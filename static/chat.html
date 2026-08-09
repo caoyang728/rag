@@ -74,6 +74,7 @@
 	<script src="/static/js/common.js"></script>
 	<script src="/static/js/api.js"></script>
 	<script src="/static/js/layout.js"></script>
+	<script src="/static/js/preview-doc.js"></script>
 	<script src="/static/js/chat.js"></script>
 
 	<!-- ===== Template Fragments ===== -->
@@ -116,10 +117,21 @@
 		</div>
 	</template>
 
-	<!-- 4b. 单条溯源来源卡片 -->
+	<!-- 4b. 单条溯源来源卡片（文档/数据库/网络共用骨架，类型徽标 + 标题 + 元信息） -->
 	<template id="tmpl-source-card">
 		<div class="source-card">
-			<div class="source-card-title"></div>
+			<div class="source-card-head">
+				<span class="source-card-badge"></span>
+				<div class="source-card-title"></div>
+			</div>
+			<div class="source-card-meta"></div>
+		</div>
+	</template>
+
+	<!-- 4c. 无引用提示（基于模型知识回答） -->
+	<template id="tmpl-source-llm">
+		<div class="source-block source-llm-hint">
+			<div class="source-header">💡 基于模型知识回答，无引用来源</div>
 		</div>
 	</template>
 

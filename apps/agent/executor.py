@@ -408,13 +408,16 @@ def ask_stream(user, question: str, session: Session,
                 'doc_title': doc_title,
                 'sections': set(),
                 'pages': set(),
-                'chunk_ids': []
+                'chunk_ids': [],
+                'doc_ids': set(),
             }
         if c.get('section_path'):
             doc_citations[doc_title]['sections'].add(c['section_path'])
         if c.get('page_number'):
             doc_citations[doc_title]['pages'].add(c['page_number'])
         doc_citations[doc_title]['chunk_ids'].append(c['chunk_id'])
+        if c.get('document_id'):
+            doc_citations[doc_title]['doc_ids'].add(c['document_id'])
     citations = []
     for key, val in doc_citations.items():
         citations.append({
@@ -422,7 +425,9 @@ def ask_stream(user, question: str, session: Session,
             'doc_title': val['doc_title'],
             'section': ', '.join(list(val['sections'])[:3]) + ('...' if len(val['sections']) > 3 else ''),
             'page': sorted(list(val['pages']))[:5],
-            'chunk_ids': val['chunk_ids']
+            'chunk_ids': val['chunk_ids'],
+            # 供前端点击引用卡片打开文档预览（JSON 结构，不影响历史数据）
+            'document_id': sorted(val['doc_ids'])[0] if val['doc_ids'] else None,
         })
 
     # 6. 发送 start 事件（citations 提前下发）
@@ -886,7 +891,8 @@ def _build_citations(chunks: list) -> list:
         chunks: hybrid_search 返回的 chunks 列表
 
     Returns:
-        [{'index','doc_title','section','page','chunk_ids'}]
+        [{'index','doc_title','section','page','chunk_ids','document_id'}]
+        其中 document_id 供前端点击引用卡片打开文档预览（历史数据可能缺失）。
     """
     doc_citations = {}
     for i, c in enumerate(chunks):
@@ -897,13 +903,16 @@ def _build_citations(chunks: list) -> list:
                 'doc_title': doc_title,
                 'sections': set(),
                 'pages': set(),
-                'chunk_ids': []
+                'chunk_ids': [],
+                'doc_ids': set(),
             }
         if c.get('section_path'):
             doc_citations[doc_title]['sections'].add(c['section_path'])
         if c.get('page_number'):
             doc_citations[doc_title]['pages'].add(c['page_number'])
         doc_citations[doc_title]['chunk_ids'].append(c['chunk_id'])
+        if c.get('document_id'):
+            doc_citations[doc_title]['doc_ids'].add(c['document_id'])
 
     citations = []
     for key, val in doc_citations.items():
@@ -912,7 +921,9 @@ def _build_citations(chunks: list) -> list:
             'doc_title': val['doc_title'],
             'section': ', '.join(list(val['sections'])[:3]) + ('...' if len(val['sections']) > 3 else ''),
             'page': sorted(list(val['pages']))[:5],
-            'chunk_ids': val['chunk_ids']
+            'chunk_ids': val['chunk_ids'],
+            # 供前端点击引用卡片打开文档预览（JSON 结构，不影响历史数据）
+            'document_id': sorted(val['doc_ids'])[0] if val['doc_ids'] else None,
         })
     return citations
 

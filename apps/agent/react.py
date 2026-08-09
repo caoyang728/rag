@@ -122,12 +122,15 @@ def _collect_citations(tool_traces: List[Dict]) -> tuple:
                     'sections': set(),
                     'pages': set(),
                     'chunk_ids': [],
+                    'doc_ids': set(),
                 }
             if c.get('section_path'):
                 doc_citations[doc_title]['sections'].add(c['section_path'])
             if c.get('page_number'):
                 doc_citations[doc_title]['pages'].add(c['page_number'])
             doc_citations[doc_title]['chunk_ids'].append(c.get('chunk_id'))
+            if c.get('document_id'):
+                doc_citations[doc_title]['doc_ids'].add(c['document_id'])
 
     citations = []
     for val in doc_citations.values():
@@ -138,6 +141,8 @@ def _collect_citations(tool_traces: List[Dict]) -> tuple:
                        ('...' if len(val['sections']) > 3 else ''),
             'page': sorted(list(val['pages']))[:5],
             'chunk_ids': val['chunk_ids'],
+            # 供前端点击引用卡片打开文档预览（JSON 结构，不影响历史数据）
+            'document_id': sorted(val['doc_ids'])[0] if val['doc_ids'] else None,
         })
     return citations, all_chunks
 

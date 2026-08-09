@@ -543,22 +543,56 @@
 	min-width: 0
 }
 
-/* 标题行：文档名 + 相关度，单行 */
-.source-card-title {
-	color: var(--text);
-	font-weight: 500;
+/* 卡片头部：类型徽标 + 标题一行排布 */
+.source-card-head {
 	display: flex;
 	align-items: center;
 	gap: 6px;
+	min-width: 0
+}
+
+/* 来源类型徽标（文档/数据库/网络） */
+.source-card-badge {
+	flex-shrink: 0;
+	font-size: 10px;
+	line-height: 1;
+	padding: 3px 6px;
+	border-radius: 999px;
+	font-weight: 600;
+	color: #fff;
+	white-space: nowrap
+}
+
+.badge-doc { background: var(--primary) }
+.badge-db { background: #7c5cfc }
+.badge-web { background: var(--info) }
+
+/* 标题行：文档名，单行省略 */
+.source-card-title {
+	flex: 1;
+	min-width: 0;
+	color: var(--text);
+	font-weight: 500;
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap
+}
+
+/* 可点击标题（有 document_id 的文档引用 → 打开预览定位页码） */
+.source-card-title-link {
+	cursor: pointer;
+	color: var(--primary)
+}
+
+.source-card-title-link:hover {
+	text-decoration: underline
 }
 
 /* 元信息行：章节/页码/引用数 inline 排列，自动换行 */
 .source-card-meta {
 	display: flex;
 	flex-wrap: wrap;
+	align-items: center;
 	gap: 2px 8px;
 	margin-top: 4px
 }
@@ -575,12 +609,61 @@
 	color: var(--text-sub)
 }
 
+/* 数据库来源：查看 SQL 折叠开关 */
+.source-card-sql-toggle {
+	cursor: pointer;
+	color: var(--primary);
+	font-size: 11px;
+	font-weight: 400;
+	user-select: none
+}
+
+/* 数据库来源：SQL 折叠内容（默认收起，点击"查看 SQL"展开，便于复核查询语句） */
+.source-card-sql {
+	margin-top: 6px;
+	padding: 6px 8px;
+	background: rgba(0, 0, 0, 0.04);
+	border-radius: var(--radius-sm);
+	font-family: monospace;
+	font-size: 11px;
+	line-height: 1.5;
+	white-space: pre-wrap;
+	word-break: break-all;
+	color: var(--text-sub);
+	max-height: 160px;
+	overflow-y: auto
+}
+
+/* 无引用提示（基于模型知识） */
+.source-llm-hint .source-header {
+	margin-bottom: 0
+}
+
+/* 回答正文中的引用序号上标 */
+.cite-ref {
+	font-size: .72em;
+	color: var(--primary);
+	font-weight: 600;
+	margin: 0 1px
+}
+
 .source-score {
 	color: var(--primary);
 	font-weight: 600;
 	margin-left: auto;
 	font-size: 11px;
 	flex-shrink: 0
+}
+
+/* 移动端：来源卡片单列全宽，SQL 折叠区不设上限高度 */
+@media (max-width: 640px) {
+	.source-list {
+		grid-template-columns: 1fr
+	}
+
+	.source-card-sql {
+		max-height: none
+	}
 }
 
 /* 反馈 */

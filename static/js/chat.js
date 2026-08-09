@@ -347,38 +347,196 @@ function updateScopeBadge() {
 	}
 }
 
-/* ---- 构建溯源来源 HTML ---- */
-function buildSourceHtml(citations) {
-	if (!citations || citations.length === 0) return '';
+/* ---- 构建溯源来源 HTML ----
+ * 按数据来源渲染四类徽标卡片：
+ *   - 文档：citations（route_source=wiki/graphrag 或 knowledge_search 工具），标题可点击跳转文档预览
+ *   - 数据库：text2sql 工具调用，展示表名 + 行数，可展开查看 SQL（便于复核）
+ *   - 网络：web_search 工具调用，展示搜索关键词
+ *   - LLM：无任何引用时提示"基于模型知识回答"
+ * 历史 citations 缺失 document_id 时标题降级为纯文本（兼容缺失字段，不可点击）。
+ * @param {Array} citations - 文档引用列表（可能为空）
+ * @param {string|null} routeSource - 路由来源（wiki/graphrag_local/graphrag_global/rag/agent）
+ * @param {Array} toolTraces - Agent 工具调用链（含 text2sql/web_search 等）
+ * @param {boolean} isPending - Agent 工具尚未返回时先不渲染 LLM 占位，避免闪烁
+ */
+function buildSourceHtml(citations, routeSource, toolTraces, isPending) {
+	const cards = [];
+	const traces = Array.isArray(toolTraces) ? toolTraces : [];
+
+	// 1. 文档引用卡片（可点击跳转预览）
+	(Array.isArray(citations) ? citations : []).forEach(c => {
+		cards.push(buildDocSourceCard(c, routeSource));
+	});
+
+	// 2. 数据库来源（text2sql 工具调用）
+	traces.forEach(t => {
+		if (t.tool_name !== 'text2sql') return;
+		// 执行失败的查询不展示为来源，避免误导用户
+		if (t.ok === false || t.result_ok === false) return;
+		const card = buildDbSourceCard(t);
+		if (card) cards.push(card);
+	});
+
+	// 3. 网络来源（web_search 工具调用）
+	traces.forEach(t => {
+		if (t.tool_name !== 'web_search') return;
+		if (t.ok === false || t.result_ok === false) return;
+		cards.push(buildWebSourceCard(t));
+	});
+
+	// 4. 全无引用 → 基于模型知识（Agent 工具未执行完时先留空，等 done 事件再渲染）
+	if (cards.length === 0) {
+		if (isPending) return '';
+		return htmlFromTpl('tmpl-source-llm', () => {});
+	}
 
 	return htmlFromTpl('tmpl-source-block', (frag) => {
-		frag.querySelector('.source-header').textContent = '📎 溯源来源 · ' + citations.length + ' 个文档';
-		const list = frag.querySelector('.source-list');
-		list.innerHTML = citations.map(c => {
-			return htmlFromTpl('tmpl-source-card', (cardFrag) => {
-				const titleEl = cardFrag.querySelector('.source-card-title');
-				titleEl.innerHTML = escapeHtml(c.doc_title || '未知文档') + ' <span class="source-score">80%</span>';
-
-				// 元信息（章节/页码/引用数）放到底部 meta 行，inline 排列节省纵向空间
-				let meta = '';
-				if (c.section) {
-					meta += '<span class="source-card-section">章节: ' + escapeHtml(c.section) + '</span>';
-				}
-				if (c.page && Array.isArray(c.page)) {
-					meta += '<span class="source-card-page">页码: P' + c.page.join(', P') + '</span>';
-				}
-				if (c.chunk_ids && c.chunk_ids.length > 0) {
-					meta += '<span class="source-card-count">引用 ' + c.chunk_ids.length + ' 处</span>';
-				}
-				if (meta) {
-					const metaEl = document.createElement('div');
-					metaEl.className = 'source-card-meta';
-					metaEl.innerHTML = meta;
-					cardFrag.querySelector('.source-card').appendChild(metaEl);
-				}
-			});
-		}).join('');
+		frag.querySelector('.source-header').textContent = '📎 溯源来源 · ' + cards.length + ' 项';
+		frag.querySelector('.source-list').innerHTML = cards.join('');
 	});
+}
+
+/* 文档引用卡片：徽标 + 可点击标题（有 document_id 时跳转预览并定位页码） */
+function buildDocSourceCard(c, routeSource) {
+	return htmlFromTpl('tmpl-source-card', (frag) => {
+		const badgeEl = frag.querySelector('.source-card-badge');
+		// Wiki / GraphRAG 路由下的引用同属文档来源，细分徽标便于用户识别检索层
+		let badgeText = '文档';
+		if (routeSource === 'wiki') badgeText = '文档 · Wiki';
+		else if (routeSource && String(routeSource).startsWith('graphrag')) badgeText = '文档 · 图谱';
+		badgeEl.textContent = badgeText;
+		badgeEl.className = 'source-card-badge badge-doc';
+
+		const titleEl = frag.querySelector('.source-card-title');
+		titleEl.textContent = c.doc_title || '未知文档';
+		// 历史数据可能缺失 document_id → 降级为不可点击纯文本
+		const docId = c.document_id || c.doc_id;
+		if (docId) {
+			titleEl.classList.add('source-card-title-link');
+			titleEl.setAttribute('title', '点击预览文档');
+			const page = (Array.isArray(c.page) && c.page[0]) || 1;
+			titleEl.setAttribute('onclick', 'previewCitation(' + docId + ', ' + page + ')');
+		}
+
+		// 元信息（章节/页码/引用数）inline 排列，节省纵向空间
+		let meta = '';
+		if (c.section) {
+			meta += '<span class="source-card-section">章节: ' + escapeHtml(c.section) + '</span>';
+		}
+		if (c.page && Array.isArray(c.page) && c.page.length) {
+			meta += '<span class="source-card-page">页码: ' + c.page.map(p => 'P' + escapeHtml(String(p))).join(', ') + '</span>';
+		}
+		if (c.chunk_ids && c.chunk_ids.length > 0) {
+			meta += '<span class="source-card-count">引用 ' + c.chunk_ids.length + ' 处</span>';
+		}
+		frag.querySelector('.source-card-meta').innerHTML = meta;
+	});
+}
+
+/* 数据库来源卡片：表名 + 行数 + 可展开的 SQL（表名/SQL 均从工具调用链推导，历史数据缺失时降级） */
+function buildDbSourceCard(t) {
+	const args = t.tool_args || {};
+	const sql = extractToolSql(t);
+	// 表名：优先工具参数 tables，缺失时从 SQL 的 FROM/JOIN 子句提取
+	let tables = Array.isArray(args.tables) ? args.tables.slice() : [];
+	if (tables.length === 0 && sql) tables = extractTablesFromSql(sql);
+	const tableName = tables.length > 0 ? tables.join(' / ') : '业务数据库';
+
+	return htmlFromTpl('tmpl-source-card', (frag) => {
+		const badgeEl = frag.querySelector('.source-card-badge');
+		badgeEl.textContent = '数据库';
+		badgeEl.className = 'source-card-badge badge-db';
+
+		frag.querySelector('.source-card-title').textContent = tableName + ' 表';
+
+		let meta = '';
+		const rows = extractRowsFromResult(t);
+		if (rows != null) {
+			meta += '<span class="source-card-count">查询到 ' + rows + ' 行</span>';
+		}
+		if (sql) {
+			meta += '<span class="source-card-sql-toggle" onclick="toggleSourceSql(this)">查看 SQL ▾</span>';
+		}
+		frag.querySelector('.source-card-meta').innerHTML = meta;
+
+		if (sql) {
+			const sqlEl = document.createElement('div');
+			sqlEl.className = 'source-card-sql hidden';
+			sqlEl.textContent = sql;
+			frag.querySelector('.source-card').appendChild(sqlEl);
+		}
+	});
+}
+
+/* 网络来源卡片：徽标 + 搜索关键词 */
+function buildWebSourceCard(t) {
+	const args = t.tool_args || {};
+	return htmlFromTpl('tmpl-source-card', (frag) => {
+		const badgeEl = frag.querySelector('.source-card-badge');
+		badgeEl.textContent = '网络';
+		badgeEl.className = 'source-card-badge badge-web';
+		const titleEl = frag.querySelector('.source-card-title');
+		titleEl.textContent = '联网搜索';
+		titleEl.setAttribute('title', '外部网络信息，仅供参考');
+		frag.querySelector('.source-card-meta').innerHTML =
+			'<span class="source-card-section">关键词: ' + escapeHtml(args.query || '-') + '</span>';
+	});
+}
+
+/* 提取 text2sql 执行的 SQL：流式 tool_traces 带 meta.sql，历史记录从结果文本 "SQL: ..." 解析 */
+function extractToolSql(t) {
+	const meta = t.meta || {};
+	if (meta.sql) return String(meta.sql).trim();
+	const text = t.result || t.tool_result || '';
+	// 结果文本格式：'SQL: <sql>\n\n查询结果...'，SQL 取到首个空行之前（SQL 本身可含换行）
+	const m = String(text).match(/^SQL:\s*([\s\S]*?)(?:\n\s*\n|$)/);
+	return m ? m[1].trim() : '';
+}
+
+/* 从 SQL 的 FROM/JOIN 子句提取表名（去重；带 schema 前缀时只取表名） */
+function extractTablesFromSql(sql) {
+	const tables = [];
+	const re = /\b(?:FROM|JOIN)\s+([A-Za-z0-9_."]+)/gi;
+	let m;
+	while ((m = re.exec(sql)) !== null) {
+		const name = m[1].replace(/["']/g, '').split('.').pop();
+		if (name && !tables.includes(name)) tables.push(name);
+	}
+	return tables;
+}
+
+/* 提取查询返回行数：优先 meta.rows，历史记录从结果文本 "共 N 行" 解析 */
+function extractRowsFromResult(t) {
+	const meta = t.meta || {};
+	if (meta.rows != null) return meta.rows;
+	const text = t.result || t.tool_result || '';
+	const m = String(text).match(/共\s*(\d+)\s*行/);
+	return m ? parseInt(m[1], 10) : null;
+}
+
+/* 展开/收起来源卡片中的 SQL（数据库来源，便于用户复核查询语句） */
+function toggleSourceSql(btn) {
+	const card = btn.closest('.source-card');
+	const sqlEl = card && card.querySelector('.source-card-sql');
+	if (!sqlEl) return;
+	sqlEl.classList.toggle('hidden');
+	btn.textContent = sqlEl.classList.contains('hidden') ? '查看 SQL ▾' : '收起 SQL ▴';
+}
+
+/* 从引用卡片跳转文档预览并定位页码（复用 preview-doc.js；document_id 由后端在 citations 中带出） */
+function previewCitation(docId, page) {
+	if (!docId) return;
+	previewTargetId = docId;
+	previewDocPage(docId, page || 1);
+}
+
+/* 预览弹窗元信息条数据源：按文档 ID 拉取元信息；拉取失败返回 null（预览主流程不受影响） */
+async function getDocForPreview(id) {
+	try {
+		return await api.getJson('/api/v1/knowledge/documents/' + id + '/');
+	} catch (e) {
+		return null;
+	}
 }
 
 /* ---- 发送消息 ---- */
@@ -568,7 +726,7 @@ async function sendChat() {
 			const end = Math.min(answerText.length, displayText.length + TYPING_CHARS_PER_STEP);
 			displayText = answerText.slice(0, end);
 			if (answerTextEl) {
-				answerTextEl.innerHTML = formatAnswer(displayText);
+				answerTextEl.innerHTML = formatAnswer(displayText, citations);
 			}
 			scrollChatBottom();
 		}, TYPING_INTERVAL_MS);
@@ -586,7 +744,7 @@ async function sendChat() {
 		stopTypingAnimation();
 		displayText = answerText;
 		if (answerTextEl) {
-			answerTextEl.innerHTML = formatAnswer(displayText);
+			answerTextEl.innerHTML = formatAnswer(displayText, citations);
 			scrollChatBottom();
 		}
 	}
@@ -658,7 +816,8 @@ async function sendChat() {
 						answerTextEl.innerHTML = '<p style="color:var(--text-sub)">🔎 正在检索知识库并生成答案，请稍候...</p>';
 					}
 					const sourceArea = answerFrag.querySelector('.ai-source-area');
-					const sourceHtml = buildSourceHtml(citations);
+					// Agent 模式下工具尚未执行完，先不渲染"基于模型知识"占位，避免闪烁
+					const sourceHtml = buildSourceHtml(citations, chunk.route_source, undefined, !!chunk.is_agent);
 					if (sourceHtml) sourceArea.innerHTML = sourceHtml;
 					// message_id 此时未知，先用 0 占位，done 时回填
 					answerFrag.querySelector('.feedback-good').setAttribute('onclick', "submitFeedback('" + mid + "', 0, 1)");
@@ -748,6 +907,8 @@ async function sendChat() {
 					totalMs = chunk.stats?.total_ms || 0;
 					ttfbMs = chunk.stats?.ttfb_ms || ttfbMs;
 					citations = chunk.citations || citations;
+					// 工具调用链（text2sql/web_search 等来源卡片依赖它渲染）
+					const doneToolTraces = chunk.tool_traces || [];
 
 					// 命中审查拦截时跳过 flushDisplayText：content_filtered 事件已清空
 					// answerText 并渲染拦截卡片，flush 会用 formatAnswer('') 覆盖卡片为"暂无回答"
@@ -759,7 +920,7 @@ async function sendChat() {
 						// 刷新溯源区
 						const sourceArea = answerContentEl.querySelector('.ai-source-area');
 						if (sourceArea) {
-							const sourceHtml = buildSourceHtml(citations);
+							const sourceHtml = buildSourceHtml(citations, chunk.route_source, doneToolTraces);
 							sourceArea.innerHTML = sourceHtml || '';
 						}
 						// 回填真实 message_id 到反馈按钮
@@ -806,7 +967,7 @@ async function sendChat() {
 							latency_total_ms: totalMs,
 							latency_ttfb_ms: ttfbMs,
 							created_at: new Date().toISOString(),
-							tool_traces: [],
+							tool_traces: doneToolTraces,
 						};
 						const cache = getSessionCache(currentSessionId);
 						if (cache && cache.records) {
@@ -882,7 +1043,7 @@ async function sendChat() {
 			// 用户主动终止：停止打字机动画，保留已生成的部分回答，标注"已终止"
 			flushDisplayText();
 			if (answerText && answerTextEl) {
-				answerTextEl.innerHTML = formatAnswer(answerText);
+				answerTextEl.innerHTML = formatAnswer(answerText, citations);
 			}
 			if (answerContentEl) {
 				const latencyEl = answerContentEl.querySelector('.feedback-latency');
@@ -933,8 +1094,23 @@ function retrySendChat(e) {
 	sendChat();
 }
 
-function formatAnswer(text) {
+/* 把 [n] 引用标记渲染为来源上标：仅当 n 对应实际引用序号时才转换，
+ * 避免误伤正文中普通出现的 [数字]（如年份、脚注）。输入须为已转义的 HTML 文本。 */
+function renderCiteSup(text, citeIdx) {
+	if (!citeIdx || citeIdx.size === 0) return text;
+	return text.replace(/\[(\d+)\]/g, function (m, num) {
+		return citeIdx.has(parseInt(num, 10)) ? '<sup class="cite-ref">[' + num + ']</sup>' : m;
+	});
+}
+
+function formatAnswer(text, citations) {
 	if (!text) return '<p>暂无回答</p>';
+
+	// 引用序号集合：正文 [n] 上标只对实际存在的引用生效
+	const citeIdx = new Set();
+	(Array.isArray(citations) ? citations : []).forEach(c => {
+		if (c && c.index) citeIdx.add(Number(c.index));
+	});
 
 	const lines = text.split('\n');
 	const result = [];
@@ -965,26 +1141,26 @@ function formatAnswer(text) {
 
 		if (line.startsWith('### ')) {
 			if (inList) { result.push('</ul>'); inList = false; }
-			result.push('<h5>' + escapeHtml(line.slice(4)) + '</h5>');
+			result.push('<h5>' + renderCiteSup(escapeHtml(line.slice(4)), citeIdx) + '</h5>');
 			continue;
 		}
 
 		if (line.startsWith('## ')) {
 			if (inList) { result.push('</ul>'); inList = false; }
-			result.push('<h4>' + escapeHtml(line.slice(3)) + '</h4>');
+			result.push('<h4>' + renderCiteSup(escapeHtml(line.slice(3)), citeIdx) + '</h4>');
 			continue;
 		}
 
 		if (line.startsWith('# ')) {
 			if (inList) { result.push('</ul>'); inList = false; }
-			result.push('<h3>' + escapeHtml(line.slice(2)) + '</h3>');
+			result.push('<h3>' + renderCiteSup(escapeHtml(line.slice(2)), citeIdx) + '</h3>');
 			continue;
 		}
 
 		if (line.startsWith('- ') || line.startsWith('* ') || line.match(/^\d+\./)) {
 			if (!inList) { result.push('<ul>'); inList = true; }
 			const content = line.replace(/^(- |\* |\d+\.\s*)/, '');
-			result.push('<li>' + escapeHtml(content) + '</li>');
+			result.push('<li>' + renderCiteSup(escapeHtml(content), citeIdx) + '</li>');
 			continue;
 		}
 
@@ -993,7 +1169,7 @@ function formatAnswer(text) {
 		if (line.startsWith('`') && line.endsWith('`')) {
 			result.push('<p><code>' + escapeHtml(line.slice(1, -1)) + '</code></p>');
 		} else if (line.trim()) {
-			result.push('<p>' + escapeHtml(line) + '</p>');
+			result.push('<p>' + renderCiteSup(escapeHtml(line), citeIdx) + '</p>');
 		}
 	}
 
@@ -1023,8 +1199,8 @@ function renderAIMessageHTML(answer, citations, messageId, stats, toolTraces) {
 		if (thinkingHtml) {
 			frag.querySelector('.ai-thinking-area').innerHTML = thinkingHtml;
 		}
-		frag.querySelector('.ai-answer-text').innerHTML = formatAnswer(answer || '');
-		const sourceHtml = buildSourceHtml(citations);
+		frag.querySelector('.ai-answer-text').innerHTML = formatAnswer(answer || '', citations);
+		const sourceHtml = buildSourceHtml(citations, undefined, toolTraces);
 		if (sourceHtml) {
 			frag.querySelector('.ai-source-area').innerHTML = sourceHtml;
 		}

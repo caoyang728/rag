@@ -147,5 +147,6 @@ class TestCaptcha(SecurityAPITestBase):
     @pytest.mark.integration
     def test_generate_captcha_image_exception_returns_none(self):
         """PIL 绘制抛异常时返回 None（接口层降级为 500）"""
-        with patch('apps.security.views.Image.new', side_effect=RuntimeError('oom')):
+        # Image 在 _generate_captcha_image 函数内部 import，模块级不存在该属性，须 patch PIL 源类
+        with patch('PIL.Image.new', side_effect=RuntimeError('oom')):
             assert security_views._generate_captcha_image('AB12') is None

@@ -130,8 +130,15 @@ class TestRefineUserMemory:
 
     @staticmethod
     def _yesterday():
-        """返回位于昨日窗口内的时刻"""
-        return timezone.now() - timedelta(days=1)
+        """返回任务"昨日窗口"内的时刻
+
+        任务窗口 = [make_aware(今日0点) - 24h, make_aware(今日0点))。
+        用与任务相同的基准再减 12 小时得到"昨日正午"，无论当前几点都必然落在窗口内，
+        避免用 now()-24h 在跨日/跨时区边界时跑出窗口导致 updated=0。
+        """
+        today = timezone.now().date()
+        return timezone.make_aware(
+            timezone.datetime(today.year, today.month, today.day)) - timedelta(hours=12)
 
     def test_specified_user_without_yesterday_qa_skipped(self):
         """指定用户但昨日无新对话：不调用 LLM，updated=0"""

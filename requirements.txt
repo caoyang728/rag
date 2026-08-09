@@ -72,6 +72,8 @@ pytest==9.1.1
 pytest-django==4.12.0
 pytest-mock==3.15.1
 pytest-asyncio==1.4.0
+pytest-xdist==3.7.0         # 并行测试
+pytest-cov==6.2.1           # 覆盖率统计
 factory-boy==3.3.3
 
 # --- 开发工具（可选）---

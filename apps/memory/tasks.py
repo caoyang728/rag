@@ -90,7 +90,6 @@ def refine_user_memory(user_id: int = None):
         ).values_list('user_id', flat=True).distinct()
         users = User.objects.filter(id__in=list(active_uids))
 
-    llm = get_llm()
     updated = 0
 
     user_ids = [u.id for u in users]
@@ -109,6 +108,9 @@ def refine_user_memory(user_id: int = None):
 
         if not yesterday_qas:
             continue
+
+        # 有昨日新增对话才需要 LLM 提炼；无对话直接跳过，避免无效调用
+        llm = get_llm()
 
         new_conversations = '\n'.join(
             f'用户：{q.question}\n助手：{q.answer[:400]}' for q in yesterday_qas

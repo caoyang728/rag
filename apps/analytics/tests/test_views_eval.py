@@ -16,6 +16,9 @@ import json
 from datetime import timedelta
 from decimal import Decimal
 
+from types import SimpleNamespace
+from uuid import uuid4
+
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -245,8 +248,14 @@ class TestGoldenDatasetAPI(AnalyticsViewsBase):
 
     def test_post_happy_200(self):
         # create_golden_dataset 在视图内部导入，patch 模块级符号
-        mock_ds = MagicMock(id=42, name='新数据集', root_type='company_doc',
-                            status='draft', version='v1')
+        # 返回值不能用 MagicMock(name=...)：MagicMock 的 name 参数是子 mock 的名字，
+        # mock.name 会返回子 MagicMock 而非字符串；视图把 name/root_type/status/version
+        # 放入 Response 后，DRF 序列化 mock 时无限递归创建子 mock，内存涨满直至 OOM。
+        # 用 SimpleNamespace 提供真实可序列化字段，避免触发递归（历史覆盖测试卡死根因）。
+        mock_ds = SimpleNamespace(
+            id=42, name='新数据集', root_type='company_doc',
+            status='draft', version='v1',
+        )
         with patch('apps.analytics.offline_eval.create_golden_dataset',
                    return_value=mock_ds) as m:
             resp = self.client.post('/api/v1/analytics/golden-datasets/',
@@ -674,7 +683,10 @@ class TestDocumentQualityReportListAPI(AnalyticsViewsBase):
     """DocumentQualityReportListView 测试"""
 
     def _make_quality_report(self, **kw):
-        doc = self._make_doc(file_name='质量文档.txt', dept_id=self.dept_a.id)
+        # 文档唯一约束 (node, file_name, version_tag)：同一测试内多次建质量报告时
+        # file_name 必须唯一，否则触发 unique_doc_node_name_version 冲突
+        doc = self._make_doc(
+            file_name=f'质量文档{uuid4().hex[:6]}.txt', dept_id=self.dept_a.id)
         defaults = dict(
             document=doc, quality_score=88.0, parse_status='success',
             text_extraction_rate=0.9, chunk_count=5, avg_chunk_chars=200,
@@ -698,7 +710,8 @@ class TestDocumentQualityReportListAPI(AnalyticsViewsBase):
         assert resp.status_code == 200
         row = resp.json()['rows'][0]
         # 序列化器字段：document_name/quality_issues[:5]/evaluated_at
-        assert row['document_name'] == '质量文档.txt'
+        # document_name 由唯一 file_name（uuid 后缀）生成，只断言前缀
+        assert row['document_name'].startswith('质量文档')
         assert len(row['quality_issues']) == 1
         assert row['evaluated_at'] != ''
 

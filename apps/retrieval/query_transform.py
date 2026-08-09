@@ -314,37 +314,47 @@ def build_route_trace(transform: Dict[str, Any]) -> List[Dict[str, Any]]:
 
     route_trace 结构与 graph.router 保持一致：list of {'layer', ..., 'latency_ms'}，
     供评估看板路由分析统计"改写命中率"。开关关闭（无 transform）时返回空列表。
+    个性化检索（PERSONALIZED_RETRIEVAL_ENABLED）的审计信息也挂在 transform 下
+    （见 profile._merge_into_transform），这里一并转成 layer=personalization 条目。
 
     Returns:
         [{'layer': 'query_rewrite', 'query', 'rewritten_query', 'expansions',
           'changed', 'ok', 'error', 'latency_ms'},
          {'layer': 'query_decompose', 'query', 'sub_queries', 'need_decompose',
-          'decomposed', 'ok', 'error', 'latency_ms'}]  # decompose 仅在触发过时存在
+          'decomposed', 'ok', 'error', 'latency_ms'},  # decompose 仅在触发过时存在
+         {'layer': 'personalization', 'applied', 'cold_start', 'weight',
+          'adjusted_count', 'reordered', 'top_personalized',
+          'personalized_hits', 'profile_domains', 'preferred_root_types',
+          'latency_ms'}]  # personalization 仅在个性化链路走过时存在
     """
-    if not transform or not transform.get('enabled'):
-        return []
     trace: List[Dict[str, Any]] = []
-    rw = transform.get('rewrite') or {}
-    trace.append({
-        'layer': 'query_rewrite',
-        'query': rw.get('original', ''),
-        'rewritten_query': rw.get('rewritten_query', ''),
-        'expansions': rw.get('expansions', []),
-        'changed': bool(rw.get('changed', False)),
-        'ok': bool(rw.get('ok', False)),
-        'error': (rw.get('error') or '')[:200],
-        'latency_ms': rw.get('latency_ms', 0),
-    })
-    dc = transform.get('decompose') or {}
-    if dc:
+    if transform and transform.get('enabled'):
+        rw = transform.get('rewrite') or {}
         trace.append({
-            'layer': 'query_decompose',
-            'query': dc.get('original', ''),
-            'sub_queries': dc.get('sub_queries', []),
-            'need_decompose': bool(dc.get('need_decompose', False)),
-            'decomposed': bool(transform.get('decomposed', False)),
-            'ok': bool(dc.get('ok', False)),
-            'error': (dc.get('error') or '')[:200],
-            'latency_ms': dc.get('latency_ms', 0),
+            'layer': 'query_rewrite',
+            'query': rw.get('original', ''),
+            'rewritten_query': rw.get('rewritten_query', ''),
+            'expansions': rw.get('expansions', []),
+            'changed': bool(rw.get('changed', False)),
+            'ok': bool(rw.get('ok', False)),
+            'error': (rw.get('error') or '')[:200],
+            'latency_ms': rw.get('latency_ms', 0),
         })
+        dc = transform.get('decompose') or {}
+        if dc:
+            trace.append({
+                'layer': 'query_decompose',
+                'query': dc.get('original', ''),
+                'sub_queries': dc.get('sub_queries', []),
+                'need_decompose': bool(dc.get('need_decompose', False)),
+                'decomposed': bool(transform.get('decomposed', False)),
+                'ok': bool(dc.get('ok', False)),
+                'error': (dc.get('error') or '')[:200],
+                'latency_ms': dc.get('latency_ms', 0),
+            })
+    pz = (transform or {}).get('personalization')
+    if pz:
+        # 延迟导入避免循环依赖（profile 只依赖 system/memory/chat，不依赖本模块）
+        from .profile import build_personalization_route_trace
+        trace.extend(build_personalization_route_trace(pz))
     return trace

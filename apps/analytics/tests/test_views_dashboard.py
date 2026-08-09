@@ -852,6 +852,51 @@ class TestRouteAnalysisDashboardAPI(AnalyticsViewsBase):
             'rewrite_hit_rate': 0.0, 'decompose_total': 0,
         }
 
+    def test_personalization_stats(self):
+        """个性化命中率：从 QaRecord.route_trace 聚合 applied/reordered/hit/cold_start"""
+        # 生效 2 条：1 条重排且有画像命中、1 条未重排；另 1 条冷启动被跳过
+        self._make_qa(question='年假怎么申请', route_trace=[
+            {'layer': 'personalization', 'enabled': True, 'applied': True,
+             'cold_start': False, 'weight': 0.1, 'adjusted_count': 2,
+             'reordered': True, 'top_personalized': True,
+             'personalized_hits': 3, 'latency_ms': 5},
+        ])
+        self._make_qa(question='报销流程', route_trace=[
+            {'layer': 'personalization', 'enabled': True, 'applied': True,
+             'cold_start': False, 'weight': 0.1, 'adjusted_count': 0,
+             'reordered': False, 'top_personalized': False,
+             'personalized_hits': 0, 'latency_ms': 3},
+        ])
+        self._make_qa(question='新员工问题', route_trace=[
+            {'layer': 'personalization', 'enabled': True, 'applied': False,
+             'cold_start': True, 'latency_ms': 0},
+        ])
+        # 普通 QA（无个性化链路）不影响统计
+        self._make_qa(question='普通问题')
+
+        resp = self.client.get('/api/v1/analytics/eval-dashboard/route-analysis/',
+                               **self.reader_headers)
+        assert resp.status_code == 200
+        stats = resp.json()['personalization_stats']
+        assert stats['personalized_total'] == 2
+        assert stats['cold_start_count'] == 1
+        assert stats['adjusted_count'] == 1
+        assert stats['adjust_rate'] == 0.5
+        assert stats['hit_count'] == 1
+        assert stats['personalized_hit_rate'] == 0.5
+
+    def test_personalization_stats_empty(self):
+        """无个性化链路（开关关闭）→ 全 0（前端可渲染空态）"""
+        self._make_qa(question='普通问题')
+        resp = self.client.get('/api/v1/analytics/eval-dashboard/route-analysis/',
+                               **self.reader_headers)
+        stats = resp.json()['personalization_stats']
+        assert stats == {
+            'personalized_total': 0, 'cold_start_count': 0,
+            'adjusted_count': 0, 'adjust_rate': 0.0,
+            'hit_count': 0, 'personalized_hit_rate': 0.0,
+        }
+
 
 class TestRouteAnalysisAggregateAPI(AnalyticsViewsBase):
     """RouteAnalysisAggregateView 手动触发聚合"""

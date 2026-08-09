@@ -282,6 +282,8 @@ def run_retrieval_evaluation(
                 vector_top_k=vector_top_k,
                 bm25_top_k=bm25_top_k,
                 rerank_top_k=rerank_top_k,
+                # 离线评估衡量基线检索质量，跳过个性化加权，保证指标与用户画像无关
+                personalize=False,
             )
         except Exception as e:
             logger.warning(f'[RetrievalEval] Search failed for question {q.id}: {e}')
@@ -478,6 +480,8 @@ def run_answer_quality_evaluation(
                 query=q.question,
                 user=user,
                 root_types=[rt] if rt and rt != 'all' else None,
+                # 离线评估衡量基线检索质量，跳过个性化加权，保证指标与用户画像无关
+                personalize=False,
             )
             chunks = search_result.get('chunks', [])
 
@@ -629,7 +633,9 @@ def evaluate_all_modes(test_questions: List[Dict], user=None, max_questions: int
             logger.warning(f'[AllModesEval] graphrag 检索失败: {e}')
 
         try:
-            rag_chunks = hybrid_search(question, user, do_rerank=True).get('chunks', [])
+            # 离线评估衡量基线检索质量，跳过个性化加权，保证指标与用户画像无关
+            rag_chunks = hybrid_search(question, user, do_rerank=True,
+                                       personalize=False).get('chunks', [])
             contexts['rag'] = _format_rag_context(rag_chunks)
         except Exception as e:
             logger.warning(f'[AllModesEval] rag 检索失败: {e}')

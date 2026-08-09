@@ -521,3 +521,58 @@ class AnalyticsConfig:
         从 DB 读取可在线变更
         """
         return _get_db_config('LOW_SCORE_REGRESSION_SUGGEST_REMOVE_PASSES', default=3, value_type='int')
+
+    # --- 检索反馈闭环自动化 ---
+    # 用户点击/反馈数据每日聚合后自动调整 KeywordWeight，替代手动加权。
+    # 权重是全局共享数据，因此必须带：总开关 + 单日幅度上限 + 最小样本数，
+    # 防止误伤无反馈关键词的默认排序；AUTO_APPLY=False 时仅记录待复核，人工确认后生效。
+
+    @staticmethod
+    def feedback_loop_enabled() -> bool:
+        """检索反馈闭环总开关（默认开启）
+        关闭后每日聚合任务直接跳过，不会产生任何权重变更。从 DB 读取可在线变更
+        """
+        return _get_db_config('FEEDBACK_LOOP_ENABLED', default=True, value_type='bool')
+
+    @staticmethod
+    def feedback_loop_auto_apply() -> bool:
+        """是否自动应用权重调整（默认开启）
+        False 时任务只聚合+记录，写入 status=pending 待复核记录，
+        由运营在运营工具中逐条"应用/忽略"，实现人工复核开关。从 DB 读取可在线变更
+        """
+        return _get_db_config('FEEDBACK_LOOP_AUTO_APPLY', default=True, value_type='bool')
+
+    @staticmethod
+    def feedback_loop_adopt_threshold() -> float:
+        """采纳率降权阈值（默认 0.3）
+        关键词命中 chunk 的采纳率低于该值 → 基础降权。从 DB 读取可在线变更
+        """
+        return _get_db_config('FEEDBACK_LOOP_ADOPT_THRESHOLD', default=0.3, value_type='float')
+
+    @staticmethod
+    def feedback_loop_bad_threshold() -> int:
+        """负反馈降权阈值（默认 2）
+        当日含该关键词的差评对话数达到该值 → 追加降权。从 DB 读取可在线变更
+        """
+        return _get_db_config('FEEDBACK_LOOP_BAD_THRESHOLD', default=2, value_type='int')
+
+    @staticmethod
+    def feedback_loop_min_show_count() -> int:
+        """最小展示样本数（默认 5）
+        关键词当日展示次数低于该值不调整，避免少量噪声数据干扰全局排序。从 DB 读取可在线变更
+        """
+        return _get_db_config('FEEDBACK_LOOP_MIN_SHOW_COUNT', default=5, value_type='int')
+
+    @staticmethod
+    def feedback_loop_base_delta() -> float:
+        """单次调整基础步长（默认 0.1）
+        采纳率低/负反馈各触发一次基础降权；点击未采纳为半降权。从 DB 读取可在线变更
+        """
+        return _get_db_config('FEEDBACK_LOOP_BASE_DELTA', default=0.1, value_type='float')
+
+    @staticmethod
+    def feedback_loop_max_delta() -> float:
+        """单日单关键词调整幅度上限（默认 0.2，保护机制）
+        无论命中多少条降权规则，单日实际调整幅度绝对值不超过该值。从 DB 读取可在线变更
+        """
+        return _get_db_config('FEEDBACK_LOOP_MAX_DELTA', default=0.2, value_type='float')

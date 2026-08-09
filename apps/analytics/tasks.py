@@ -751,3 +751,38 @@ def batch_evaluate_wiki_quality(days: int = 7, limit: int = None):
         f'[WikiEval] batch done: evaluated={evaluated}, failed={failed}, skipped={skipped}'
     )
     return {'ok': True, 'evaluated': evaluated, 'failed': failed, 'skipped': skipped}
+
+
+# ============================================================================
+# 15. 检索反馈闭环聚合（每日）：点击/反馈 → 关键词权重自动调整
+# ============================================================================
+
+@shared_task(name='analytics.aggregate_keyword_feedback_daily', queue='analytics')
+def aggregate_keyword_feedback_daily(report_date: str = None):
+    """每日聚合关键词点击/反馈并自动调整 KeywordWeight
+
+    - 聚合前一天数据：展示数/点击数/采纳数/负反馈数
+    - 权重规则：采纳率低降权 / 点击未采纳半降权 / 负反馈降权
+    - 保护机制：单日幅度上限 + 最小样本数 + 人工复核开关(AUTO_APPLY=False 只记录不应用)
+    - 幂等：KeywordFeedbackAgg 以 (report_date, keyword, root_type) 唯一，重跑只刷新统计
+    - 总开关 FEEDBACK_LOOP_ENABLED=0 时直接跳过（不影响默认排序）
+
+    Args:
+        report_date: 可选，指定业务日期(YYYY-MM-DD)；None 用昨天
+
+    Returns:
+        {'ok': bool, 'report_date': str, 'total': int, 'applied': int,
+         'pending': int, 'skipped': int}
+    """
+    if not AnalyticsConfig.feedback_loop_enabled():
+        logger.debug('[FeedbackLoop] 反馈闭环已关闭，跳过定时聚合')
+        return {'ok': True, 'skipped': True, 'reason': 'disabled'}
+
+    from apps.analytics.feedback_loop import run_keyword_feedback_loop
+    try:
+        result = run_keyword_feedback_loop(report_date=report_date)
+        logger.info(f'[FeedbackLoop] daily done: {result}')
+        return {'ok': True, **result}
+    except Exception:
+        logger.exception('[FeedbackLoop] 每日聚合失败')
+        return {'ok': False, 'error': 'aggregation_failed'}

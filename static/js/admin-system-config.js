@@ -90,6 +90,14 @@ const CONFIG_METADATA = {
 	// ===== Analytics =====
 	ANALYTICS_REDIS_DB: { label: '统计专用 Redis', description: 'Analytics 专用 Redis DB 编号，避免与 Celery broker/result backend 冲突', sortOrder: 1 },
 	QUEUE_MONITOR_ENABLED: { label: '是否启用队列深度监控', description: '是否启用 Celery 队列深度监控，生产环境故障时可临时关闭以减压', sortOrder: 2 },
+	// 检索反馈闭环：权重全局共享，两个开关标记为高风险（变更走工单+超管复核），阈值参数可直接调整
+	FEEDBACK_LOOP_ENABLED: { label: '检索反馈闭环', description: '每日聚合点击/反馈并自动调整关键词权重；关闭后定时任务跳过，不影响现有排序', sortOrder: 3 },
+	FEEDBACK_LOOP_AUTO_APPLY: { label: '自动应用权重调整', description: '开启则聚合后直接改权重；关闭则只记录待复核，需在运营工具逐条应用（人工复核开关）', sortOrder: 4 },
+	FEEDBACK_LOOP_ADOPT_THRESHOLD: { label: '采纳率降权阈值', description: '关键词命中 chunk 的采纳率低于该值时触发基础降权', sortOrder: 5 },
+	FEEDBACK_LOOP_BAD_THRESHOLD: { label: '负反馈降权阈值', description: '当日含该关键词的差评对话数达到该值时追加降权', unit: '次', sortOrder: 6 },
+	FEEDBACK_LOOP_MIN_SHOW_COUNT: { label: '最小展示样本数', description: '关键词当日展示次数低于该值不调整，避免少量噪声干扰全局排序', unit: '次', sortOrder: 7 },
+	FEEDBACK_LOOP_BASE_DELTA: { label: '单次调整步长', description: '采纳率低/负反馈各触发一次基础降权；点击未采纳为半降权', sortOrder: 8 },
+	FEEDBACK_LOOP_MAX_DELTA: { label: '单日调整幅度上限', description: '无论命中多少条降权规则，单日单关键词实际调整幅度不超过该值（保护机制）', sortOrder: 9 },
 
 	// ===== 评估 =====
 	// 分组排序：总开关/模型 → 生产采样开关/采样率 → 分层限速（分钟/小时/日） → 成本 → 批量回扫 → 指标组 → 低分回归

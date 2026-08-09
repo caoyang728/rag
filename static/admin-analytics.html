@@ -200,6 +200,31 @@
 						<div id="feedbackList2" class="flex flex-col gap-12 overflow-y-auto feedback-list"></div>
 					</div>
 				</div>
+				<div class="card" style="margin-top:16px">
+					<div class="card-title flex justify-between items-center">
+						<span>🔁 反馈闭环自动调整记录</span>
+						<div class="flex gap-8">
+							<button class="btn btn-sm" onclick="runFeedbackLoop()">▶ 立即聚合</button>
+							<button class="btn btn-sm" onclick="loadFeedbackLoopAggs()">刷新</button>
+						</div>
+					</div>
+					<div class="text-sub text-sm mb-8">每日聚合点击/反馈自动调整关键词权重（幅度受控 + 人工复核开关）；「待复核」记录需人工应用后生效，手动 +/- 覆盖优先</div>
+					<table class="table table-bordered">
+						<thead>
+							<tr>
+								<th>日期</th>
+								<th>关键词</th>
+								<th>展示/点击/采纳/差评</th>
+								<th>采纳率</th>
+								<th>权重变化</th>
+								<th>原因</th>
+								<th>状态</th>
+								<th class="th-action">操作</th>
+							</tr>
+						</thead>
+						<tbody id="feedbackAggBody"></tbody>
+					</table>
+				</div>
 				</div>
 			</div>
 			</div><!-- /analytics-content -->
@@ -290,6 +315,20 @@
 					<button class="btn-link btn-sm decr">-0.1</button>
 				</div>
 			</td>
+		</tr>
+	</template>
+
+	<!-- 反馈闭环自动调整记录行 -->
+	<template id="tmpl-fb-agg-row">
+		<tr>
+			<td class="text-sub text-sm"></td>
+			<td class="fw-500"></td>
+			<td class="text-sm"></td>
+			<td class="text-sm"></td>
+			<td class="text-sm"></td>
+			<td class="text-sub text-sm"></td>
+			<td><span class="tag"></span></td>
+			<td><div class="table-actions"></div></td>
 		</tr>
 	</template>
 

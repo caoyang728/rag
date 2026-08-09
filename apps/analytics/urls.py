@@ -87,6 +87,11 @@ urlpatterns = [
     path("coverage/reports/<int:report_id>/", views.CoverageReportDetailView.as_view()),
     path("coverage/reports/<int:report_id>/export/", views.CoverageReportExportView.as_view()),
     path("feedback-loop/", views.FeedbackLoopView.as_view()),
+    # --- 检索反馈闭环自动化（点击埋点 + 聚合记录 + 人工复核 + 手动触发）---
+    path("chunk-clicks/", views.ChunkClickLogView.as_view()),
+    path("feedback-loop/aggregations/", views.KeywordFeedbackAggListView.as_view()),
+    path("feedback-loop/apply/", views.KeywordFeedbackApplyView.as_view()),
+    path("feedback-loop/run/", views.RunFeedbackLoopView.as_view()),
 
     # ========================================================================
     # RAG 质量评估 - 低分对话归因分析

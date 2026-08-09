@@ -812,3 +812,109 @@ class WikiPageQualityScore(models.Model):
 
     def __str__(self):
         return f'WikiScore<{self.page_id}>{self.dimension}={self.score}'
+
+
+# ============================================================================
+# 检索反馈闭环自动化
+# ============================================================================
+
+class ChunkClickLog(models.Model):
+    """溯源来源点击日志 - 用户点击回答引用卡片时记录
+
+    检索反馈闭环自动化的数据源之一，用于统计"关键词命中 chunk 的点击率"。
+    点击发生时前端携带 qa_record_id（本次回答的记录 ID）与 chunk_ids，
+    每日聚合任务按 qa_record_id 关联到 QaRecord 的检索命中，归并出点击指标。
+
+    - 点击是低频用户行为，直接 INSERT 即可，无需缓存
+    - qa_record_id 允许为空：历史消息卡片点击等无法回填 ID 的场景也能落库
+    - 只增不改，作为反馈闭环的原始证据留存
+    """
+
+    id = models.BigAutoField(primary_key=True)
+    user = models.ForeignKey('users.User', on_delete=models.CASCADE,
+                             null=True, blank=True, db_column='user_id',
+                             related_name='chunk_click_logs')
+    qa_record = models.ForeignKey('chat.QaRecord', on_delete=models.CASCADE,
+                                  null=True, blank=True, db_column='qa_record_id',
+                                  related_name='chunk_click_logs',
+                                  help_text='被点击回答对应的 QaRecord.id（前端从流式 done 事件回填）')
+    document_id = models.BigIntegerField(null=True, blank=True,
+                                          help_text='被点击引用对应的文档 ID')
+    chunk_id = models.BigIntegerField(help_text='被点击的 chunk id')
+    root_type = models.CharField(max_length=32, default='all')
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        db_table = 'analytics_chunk_click_log'
+        indexes = [
+            # 聚合按 qa_record 归并点击，按 chunk 统计，联合索引一次命中
+            models.Index(fields=['qa_record_id', 'chunk_id'], name='idx_ccl_qa_chunk'),
+            models.Index(fields=['-created_at'], name='idx_ccl_time'),
+        ]
+
+
+class KeywordFeedbackAgg(models.Model):
+    """关键词反馈聚合日报 - 检索反馈闭环的每日聚合结果与审计
+
+    每天凌晨聚合前一天数据：统计关键词命中 chunk 的 展示数/点击数/采纳数/负反馈数，
+    并按规则计算权重调整量，自动写入 KeywordWeight 或留待人工复核。
+
+    - (report_date, keyword, root_type) 唯一，作为幂等键：同一日期重复执行
+      只会更新统计值，不会重复应用权重调整
+    - old_score/new_score 记录调整前后权重，配合 status/applied_at 实现权重调整全程可追溯
+    - adjust_type 区分 自动(auto) 与 手动(manual)，手动调整记录同样入库，供运营侧统一查看
+    """
+
+    ADJUST_TYPE_CHOICES = [
+        ('auto', '自动'),
+        ('manual', '手动'),
+    ]
+    STATUS_CHOICES = [
+        ('pending', '待复核'),
+        ('applied', '已应用'),
+        ('ignored', '已忽略'),
+    ]
+
+    id = models.BigAutoField(primary_key=True)
+    report_date = models.DateField(help_text='聚合日期（业务日期）')
+    keyword = models.CharField(max_length=64)
+    root_type = models.CharField(max_length=32, default='all')
+
+    # --- 统计指标 ---
+    shown_count = models.IntegerField(default=0, help_text='关键词命中 chunk 的展示次数（retrieval_hits）')
+    click_count = models.IntegerField(default=0, help_text='展示后被点击的次数')
+    adopt_count = models.IntegerField(default=0, help_text='展示并被回答引用的次数（citations 命中）')
+    bad_count = models.IntegerField(default=0, help_text='含该关键词的差评对话数')
+    click_rate = models.FloatField(default=0.0, help_text='点击率 = click/shown')
+    adopt_rate = models.FloatField(default=0.0, help_text='采纳率 = adopt/shown')
+
+    # --- 权重调整 ---
+    old_score = models.FloatField(default=1.0, help_text='调整前权重')
+    new_score = models.FloatField(default=1.0, help_text='调整后权重（未应用时为目标值）')
+    delta = models.FloatField(default=0.0, help_text='本次调整幅度（受单日上限保护）')
+    reason = models.CharField(max_length=128, default='', blank=True,
+                              help_text='调整原因（规则命中说明，如 采纳率低/点击未采纳/负反馈）')
+    adjust_type = models.CharField(max_length=16, choices=ADJUST_TYPE_CHOICES, default='auto')
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default='pending')
+
+    # --- 审计 ---
+    actor = models.ForeignKey('users.User', on_delete=models.SET_NULL,
+                              null=True, blank=True, db_column='actor_id',
+                              related_name='keyword_feedback_aggs',
+                              help_text='操作人（手动调整时必填，自动调整为系统）')
+    applied_at = models.DateTimeField(null=True, blank=True, help_text='权重实际生效时间')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'analytics_keyword_feedback_agg'
+        # 幂等键：同一日期同一关键词只处理一次，防止每日任务重入导致重复调整
+        unique_together = [('report_date', 'keyword', 'root_type')]
+        indexes = [
+            models.Index(fields=['report_date', 'root_type'], name='idx_kfa_date_root'),
+            models.Index(fields=['keyword'], name='idx_kfa_keyword'),
+            models.Index(fields=['status', '-created_at'], name='idx_kfa_status_time'),
+        ]
+
+    def __str__(self):
+        return f'KeywordFeedbackAgg<{self.report_date}>{self.keyword} delta={self.delta:+.2f}'

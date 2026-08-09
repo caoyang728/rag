@@ -124,7 +124,9 @@ class TestUpsertVector:
         v1 = vector_store.upsert_vector(chunk, _vec(0.1))
 
         # 修改文档可见性后再次 upsert，冗余字段应同步刷新
-        Document.objects.filter(id=doc.id).update(visibility_level=VisibilityLevel.DEPT_ONLY)
+        # DEPT_ONLY 需满足 doc_owner_scope_required 约束（部门归属非空）
+        Document.objects.filter(id=doc.id).update(
+            visibility_level=VisibilityLevel.DEPT_ONLY, dept_id=999)
         doc.refresh_from_db()
         v2 = vector_store.upsert_vector(chunk, _vec(0.2))
 

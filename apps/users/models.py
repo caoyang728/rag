@@ -11,7 +11,7 @@ apps.users.models - 用户与权限域（RBAC + 属地授权）
 - User：员工（单主部门 / 单所属团队）
 - Role / Permission / RolePermissionRel：角色与权限点
 - UserRoleRel / UserDeptScopeRel / UserTeamScopeRel：三类授权绑定（全局/部门属地/团队属地）
-- PermissionApprovalTicket：权限变更审批工单
+- TicketList / TicketPermissionDetail：统一审批工单主表 + 权限业务详情子表（TicketFlowLog 流转日志）
 - PermissionAuditLog：统一审计日志（全域、永不删）
 
 权限判定铁律：
@@ -89,6 +89,20 @@ class AuditTargetType(models.TextChoices):
     DOCUMENT = 'DOCUMENT', _('文档')
     TICKET = 'TICKET', _('工单')
     LOGIN = 'LOGIN', _('登录')
+
+
+class TicketBizType(models.TextChoices):
+    """工单业务类型 —— 统一工单主表的类型维度，决定详情子表与执行逻辑
+
+    - permission：权限审批（授权/撤销/角色变更），详情在 TicketPermissionDetail
+    - config：系统配置变更（含调度类配置），业务字段在主表 detail JSON
+    - model：LLM 模型变更（修改/停用/删除），业务字段在主表 detail JSON
+    - schedule：定时任务变更，业务字段在主表 detail JSON
+    """
+    PERMISSION = 'permission', _('权限审批')
+    CONFIG = 'config', _('配置变更')
+    MODEL = 'model', _('模型变更')
+    SCHEDULE = 'schedule', _('定时任务')
 
 
 class UserStatus(models.TextChoices):
@@ -183,7 +197,7 @@ class UserManager(BaseUserManager):
         """创建超级管理员 —— 自动绑定 super_admin 内置角色
 
         super_admin 是系统级快路径角色，鉴权时绕过所有 permission_key 判定。
-        生产环境新增/撤销 super_admin 必须走双人审批工单（见 PermissionApprovalTicket）。
+        生产环境新增/撤销 super_admin 必须走双人审批工单（见 TicketList）。
         """
         extra.setdefault('status', UserStatus.ACTIVE)
         user = self.create_user(username, email, password, **extra)
@@ -451,7 +465,7 @@ class UserRoleRel(models.Model):
     revoked_at = models.DateTimeField(null=True, blank=True)
     revoked_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True,
                                    related_name='+')
-    ticket = models.ForeignKey('PermissionApprovalTicket', on_delete=models.SET_NULL,
+    ticket = models.ForeignKey('TicketList', on_delete=models.SET_NULL,
                                null=True, blank=True, related_name='user_role_rels',
                                help_text=_('关联审批工单（有则填）'))
 
@@ -482,7 +496,7 @@ class UserDeptScopeRel(models.Model):
     revoked_at = models.DateTimeField(null=True, blank=True)
     revoked_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True,
                                    related_name='+')
-    ticket = models.ForeignKey('PermissionApprovalTicket', on_delete=models.SET_NULL,
+    ticket = models.ForeignKey('TicketList', on_delete=models.SET_NULL,
                                null=True, blank=True, related_name='dept_scope_rels')
 
     class Meta:
@@ -521,7 +535,7 @@ class UserTeamScopeRel(models.Model):
     revoked_at = models.DateTimeField(null=True, blank=True)
     revoked_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True,
                                    related_name='+')
-    ticket = models.ForeignKey('PermissionApprovalTicket', on_delete=models.SET_NULL,
+    ticket = models.ForeignKey('TicketList', on_delete=models.SET_NULL,
                                null=True, blank=True, related_name='team_scope_rels')
 
     class Meta:
@@ -543,72 +557,354 @@ class UserTeamScopeRel(models.Model):
 
 
 # ============================================================================
-# 审批工单（授权变更必经流程）
+# 统一工单主表（方案1：统一主表 + 业务详情子表 + 流转日志）
 # ============================================================================
 
-class PermissionApprovalTicket(models.Model):
-    """权限配置审批工单 —— 所有授权表 status=PENDING 记录，仅当工单 EXECUTED 后才改 ACTIVE
+class TicketList(models.Model):
+    """统一工单主表 —— 所有类型工单（权限/配置/模型/定时任务）的公共字段
 
-    审批规则（最终计划）：
-    - 同部门授权（GRANT team_leader/employee）：团队组长单审即可
-    - 跨部门/跨团队/全局角色：双轨审核（审核 + 复核）
-    - super_admin 新增/撤销：强制另一个 super_admin 双人复核
-    - 降级/撤销（REVOKE）：团队组长可直接执行，无需审批（但记审计）
-    - 任一节点 REJECTED → 工单终态 REJECTED，不执行授权表写入
-    - 审批工单永不删除，只改状态
+    设计（工单中心改造，方案1）：
+    - 主表只存公共字段：工单号/任务名/类型/状态/风险/发起人/审批链/时间
+    - 业务差异字段按类型存各自详情子表（均 OneToOne）：
+      权限 → TicketPermissionDetail；配置 → TicketConfigDetail；
+      定时任务 → TicketScheduleDetail；模型 → TicketModelDetail
+    - 列表查询只打主表，biz_type/status 建索引
+    - 审批链（approval_chain + current_step）统一承载所有类型的流程：
+      权限工单 = 共享审批池多节点链；配置/模型工单 = 审核(+超管复核) 短链
+    - 流转日志 TicketFlowLog 关联主表（随工单生命周期）；
+      审计日志 PermissionAuditLog 独立（只增不删，防业务对象删除丢记录）
+
+    状态机：PENDING →(逐节点审批)→ APPROVED → EXECUTED；或 PENDING → REJECTED / CANCELLED
+    审批链节点结构（JSON）：
+      {approver_role, approver_scope_type, approver_scope_id,
+       approver_id, status, approved_at, comment}
     """
-    ticket_no = models.CharField(_('工单号'), max_length=64, unique=True)
-    applicant = models.ForeignKey('User', on_delete=models.CASCADE,
-                                  related_name='applied_tickets',
-                                  help_text=_('发起人'))
-    target_user = models.ForeignKey(User, on_delete=models.CASCADE,
-                                    related_name='targeted_tickets',
-                                    help_text=_('被授权/被撤销对象'))
+    id = models.BigAutoField(primary_key=True)
+    # 工单号 = 类型前缀 + YYYYMMDD + 4 位当日全局序列，如 QX202608080001（全局唯一）
+    ticket_no = models.CharField(_('工单号'), max_length=32, unique=True)
+    # 任务名：列表展示与模糊搜索用，如"给张三授予后端组贡献者"、"修改 LLM 超时配置"
+    title = models.CharField(_('任务名'), max_length=128, blank=True, default='')
+    biz_type = models.CharField(_('工单类型'), max_length=16, choices=TicketBizType.choices, db_index=True)
+    status = models.CharField(_('状态'), max_length=16, choices=TicketStatus.choices, default=TicketStatus.PENDING, db_index=True)
+    risk_level = models.CharField(_('风险等级'), max_length=8, default='normal')
+    applicant = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='tickets_applied',
+                                  help_text=_('发起人（权限工单=提单人；配置/模型工单=创建人）'))
+    # 审批链（统一流程引擎）：节点快照 + 当前节点索引，权限工单全量使用，
+    # 配置/模型工单为 1~2 节点短链（审核 + 超管复核）
+    approval_chain = models.JSONField(default=list, blank=True, help_text=_('审批链快照，顺序执行'))
+    current_step = models.IntegerField(default=0, help_text=_('当前审批节点索引'))
+
+    # 业务详情在各类型 OneToOne 子表：
+    # permission → TicketPermissionDetail；config → TicketConfigDetail；
+    # schedule → TicketScheduleDetail；model → TicketModelDetail
+    # 主表不持有任何业务字段，保证"主表=流程、子表=业务"的统一模式
+
+    # 业务标识（可索引，config/model/schedule 按类型填充，与 system_ticket 对齐）
+    operation = models.CharField(max_length=20, blank=True, default='', verbose_name=_('操作类型'))
+    config_key = models.CharField(max_length=64, null=True, blank=True, db_index=True, verbose_name=_('配置项'))
+    target_model_id = models.BigIntegerField(null=True, blank=True, db_index=True, verbose_name=_('目标模型ID'))
+
+    # 时间
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True, verbose_name=_('创建时间'))
+    updated_at = models.DateTimeField(auto_now=True, verbose_name=_('更新时间'))
+    approved_at = models.DateTimeField(null=True, blank=True, verbose_name=_('审批通过时间'))
+    executed_at = models.DateTimeField(null=True, blank=True, verbose_name=_('生效时间'))
+
+    class Meta:
+        db_table = 'ticket_list'
+        verbose_name = _('统一工单')
+        verbose_name_plural = verbose_name
+        indexes = [
+            models.Index(fields=['biz_type', 'status'], name='uni_biz_status_idx'),
+            models.Index(fields=['applicant', 'status'], name='uni_applicant_status_idx'),
+            models.Index(fields=['status', 'created_at'], name='uni_status_created_idx'),
+        ]
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'{self.ticket_no} {self.get_biz_type_display()} {self.status}'
+
+    # ------------------------------------------------------------------
+    # 各类型工单业务字段代理（对应类型时有效）
+    # 设计说明：主表只存公共流程字段，业务字段在各类详情子表
+    # （permission→TicketPermissionDetail / config→TicketConfigDetail /
+    #  schedule→TicketScheduleDetail / model→TicketModelDetail）。
+    # 此处提供透传代理，让工单服务层/视图层能以 ticket.change_type / ticket.role /
+    # ticket.old_value 等统一形式读取业务字段，避免服务层到处按类型解包。
+    # 非对应类型返回 None/空值（子表不存在时 getattr 兜底）。
+    # ------------------------------------------------------------------
+    @property
+    def _pd(self):
+        # reverse OneToOne 不存在时抛 RelatedObjectDoesNotExist（AttributeError 子类），getattr 兜底
+        return getattr(self, 'permission_detail', None)
+
+    @property
+    def _cd(self):
+        # config 详情子表（biz_type=config 时有效）
+        return getattr(self, 'config_detail', None)
+
+    @property
+    def _sd(self):
+        # schedule 详情子表（biz_type=schedule 时有效）
+        return getattr(self, 'schedule_detail', None)
+
+    @property
+    def _md(self):
+        # model 详情子表（biz_type=model 时有效）
+        return getattr(self, 'model_detail', None)
+
+    @property
+    def change_type(self):
+        d = self._pd
+        return d.change_type if d else None
+
+    @property
+    def target_user(self):
+        d = self._pd
+        return d.target_user if d else None
+
+    @property
+    def target_user_id(self):
+        d = self._pd
+        return d.target_user_id if d else None
+
+    @property
+    def role(self):
+        d = self._pd
+        return d.role if d else None
+
+    @property
+    def role_id(self):
+        d = self._pd
+        return d.role_id if d else None
+
+    @property
+    def previous_role(self):
+        d = self._pd
+        return d.previous_role if d else None
+
+    @property
+    def previous_role_id(self):
+        d = self._pd
+        return d.previous_role_id if d else None
+
+    @property
+    def scope_type(self):
+        d = self._pd
+        return d.scope_type if d else None
+
+    @property
+    def scope_id(self):
+        d = self._pd
+        return d.scope_id if d else None
+
+    @property
+    def effective_from(self):
+        d = self._pd
+        return d.effective_from if d else None
+
+    @property
+    def expires_at(self):
+        d = self._pd
+        return d.expires_at if d else None
+
+    @property
+    def reason(self):
+        # 统一 reason 代理：各类型详情子表各自存储申请/变更原因，按类型依次取
+        for d in (self._pd, self._cd, self._sd, self._md):
+            if d:
+                return d.reason
+        return ''
+
+    # --- config/schedule 共用字段代理（biz_type=config/schedule 时有效） ---
+    @property
+    def config_label(self):
+        for d in (self._cd, self._sd):
+            if d:
+                return d.config_label
+        return ''
+
+    @property
+    def old_value(self):
+        for d in (self._cd, self._sd):
+            if d:
+                return d.old_value
+        return ''
+
+    @property
+    def new_value(self):
+        for d in (self._cd, self._sd):
+            if d:
+                return d.new_value
+        return ''
+
+    @property
+    def change_summary(self):
+        for d in (self._cd, self._sd):
+            if d:
+                return d.change_summary
+        return ''
+
+    # --- model 独有字段代理（biz_type=model 时有效） ---
+    @property
+    def target_model_snapshot(self):
+        d = self._md
+        return d.target_model_snapshot if d else {}
+
+    @property
+    def changed_fields(self):
+        d = self._md
+        return d.changed_fields if d else {}
+
+    @property
+    def dependency_refs(self):
+        d = self._md
+        return d.dependency_refs if d else []
+
+
+class TicketPermissionDetail(models.Model):
+    """权限审批工单详情 —— 授权/撤销/角色变更的业务字段（关联统一主表）
+
+    与主表 TicketList 一对一：主表管流程（审批链/状态/时间），本表管业务
+    （给谁授什么角色、什么范围、有效期、申请理由）。查询权限工单列表时
+    可 select_related 一次性加载，避免 N+1。
+    """
+    ticket = models.OneToOneField(TicketList, on_delete=models.CASCADE,
+                                  related_name='permission_detail',
+                                  help_text=_('关联统一工单主表'))
+    target_user = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True,
+                                    related_name='+', help_text=_('被授权/被撤销对象'))
     change_type = models.CharField(max_length=16, choices=TicketChangeType.choices,
                                    help_text=_('GRANT/REVOKE/SCOPE_CHANGE/EXPIRE_EXTEND/ROLE_CHANGE'))
     role = models.ForeignKey(Role, on_delete=models.PROTECT, null=True, blank=True,
-                             related_name='tickets', help_text=_('涉及角色（GRANT 为新角色，ROLE_CHANGE 为新角色，previous_role 为旧角色）'))
-    # 仅 ROLE_CHANGE 工单使用：记录变更前的旧角色，便于执行时撤销 + 审计回溯
+                             related_name='+', help_text=_('涉及角色（新角色/被撤销角色）'))
+    # 仅 ROLE_CHANGE 使用：记录变更前旧角色，便于执行时撤销 + 审计回溯
     previous_role = models.ForeignKey(Role, on_delete=models.SET_NULL, null=True, blank=True,
-                                      related_name='+',
-                                      help_text=_('角色变更工单的旧角色（仅 ROLE_CHANGE，撤销目标'))
+                                      related_name='+', help_text=_('角色变更工单的旧角色'))
     scope_type = models.CharField(max_length=16, choices=ScopeType.choices,
-                                  default=ScopeType.NONE,
-                                  help_text=_('GLOBAL/DEPT/TEAM/NONE'))
+                                  default=ScopeType.NONE)
     scope_id = models.BigIntegerField(null=True, blank=True,
                                       help_text=_('dept_id 或 team_id（scope_type 对应）'))
     effective_from = models.DateTimeField(null=True, blank=True)
     expires_at = models.DateTimeField(null=True, blank=True)
     reason = models.TextField(blank=True, default='', help_text=_('申请理由'))
 
-    # 审批链快照：[{approver_id, status, approved_at, comment}, ...]
-    # 顺序执行，前一节点通过才到下一节点（不支持会签并行）
-    approval_chain = models.JSONField(default=list, blank=True,
-                                      help_text=_('审批链快照，顺序执行'))
-    current_step = models.IntegerField(default=0, help_text=_('当前审批节点索引'))
-
-    status = models.CharField(max_length=16, choices=TicketStatus.choices,
-                              default=TicketStatus.PENDING)
-    approved_at = models.DateTimeField(null=True, blank=True,
-                                       help_text=_('最终通过时间'))
-    executed_at = models.DateTimeField(null=True, blank=True,
-                                       help_text=_('审批通过后真正写入授权表的时间（异步 worker 执行）'))
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
     class Meta:
-        db_table = 'permission_approval_ticket'
-        verbose_name = _('权限审批工单')
+        db_table = 'permission_ticket_detail'
+        verbose_name = _('权限审批工单详情')
         indexes = [
-            models.Index(fields=['status']),
-            models.Index(fields=['applicant']),
             models.Index(fields=['target_user']),
-            models.Index(fields=['change_type', 'status']),
+            models.Index(fields=['change_type']),
         ]
-        ordering = ['-created_at']
 
     def __str__(self):
-        return f'Ticket<{self.ticket_no}>{self.change_type}:{self.status}'
+        return f'Detail<{self.ticket_id}> {self.change_type}'
+
+
+class TicketConfigDetail(models.Model):
+    """配置变更工单详情 —— 业务字段（关联统一主表，biz_type=config）
+
+    与主表 TicketList 一对一：主表管流程（审批链/状态/时间），本表管业务
+    （配置项显示名/旧值/新值/差异摘要/变更原因）。查询配置工单列表时
+    可 select_related 一次性加载，避免 N+1。
+    """
+    ticket = models.OneToOneField(TicketList, on_delete=models.CASCADE,
+                                  related_name='config_detail',
+                                  help_text=_('关联统一工单主表'))
+    config_label = models.CharField(max_length=128, blank=True, default='',
+                                    help_text=_('配置项显示名'))
+    old_value = models.TextField(blank=True, default='', help_text=_('变更前值'))
+    new_value = models.TextField(blank=True, default='', help_text=_('变更后值'))
+    # 多值类配置的差异摘要（JSON 字符串：{added:[...], removed:[...]}），非多值项为空
+    change_summary = models.TextField(blank=True, default='', help_text=_('差异摘要(JSON 字符串)'))
+    reason = models.TextField(blank=True, default='', help_text=_('变更原因'))
+
+    class Meta:
+        db_table = 'config_ticket_detail'
+        verbose_name = _('配置变更工单详情')
+
+    def __str__(self):
+        return f'ConfigDetail<{self.ticket_id}> {self.config_label}'
+
+
+class TicketScheduleDetail(models.Model):
+    """定时任务变更工单详情 —— 业务字段（关联统一主表，biz_type=schedule）
+
+    调度本质是 SystemConfig 的 schedule 类配置项，字段结构与配置工单一致；
+    独立成表便于按业务域隔离查询与归档。
+    """
+    ticket = models.OneToOneField(TicketList, on_delete=models.CASCADE,
+                                  related_name='schedule_detail',
+                                  help_text=_('关联统一工单主表'))
+    config_label = models.CharField(max_length=128, blank=True, default='',
+                                    help_text=_('调度任务显示名'))
+    old_value = models.TextField(blank=True, default='', help_text=_('变更前调度配置'))
+    new_value = models.TextField(blank=True, default='', help_text=_('变更后调度配置'))
+    change_summary = models.TextField(blank=True, default='', help_text=_('差异摘要(JSON 字符串)'))
+    reason = models.TextField(blank=True, default='', help_text=_('变更原因'))
+
+    class Meta:
+        db_table = 'schedule_ticket_detail'
+        verbose_name = _('定时任务工单详情')
+
+    def __str__(self):
+        return f'ScheduleDetail<{self.ticket_id}> {self.config_label}'
+
+
+class TicketModelDetail(models.Model):
+    """模型变更工单详情 —— 业务字段（关联统一主表，biz_type=model）
+
+    模型变更本质是"快照 + 变更字段"：审批通过后按 changed_fields 应用新值，
+    删除/停用操作据 dependency_refs 做依赖拦截，target_model_snapshot 供审计回溯。
+    """
+    ticket = models.OneToOneField(TicketList, on_delete=models.CASCADE,
+                                  related_name='model_detail',
+                                  help_text=_('关联统一工单主表'))
+    target_model_snapshot = models.JSONField(default=dict, blank=True,
+                                             help_text=_('创建工单时的模型快照（审计回溯用）'))
+    changed_fields = models.JSONField(default=dict, blank=True,
+                                      help_text=_('变更字段：{field: {old, new}}'))
+    dependency_refs = models.JSONField(default=list, blank=True,
+                                       help_text=_('依赖引用清单（停用/删除拦截用）'))
+    reason = models.TextField(blank=True, default='', help_text=_('变更原因'))
+
+    class Meta:
+        db_table = 'model_ticket_detail'
+        verbose_name = _('模型变更工单详情')
+
+    def __str__(self):
+        return f'ModelDetail<{self.ticket_id}>'
+
+
+class TicketFlowLog(models.Model):
+    """工单流转日志 —— 审批时间线（关联主表，随工单生命周期）
+
+    每条记录 = 审批链上的一个动作（提交/通过/驳回/撤回/执行），供详情页时间线渲染。
+    与审计日志（PermissionAuditLog）分离的设计原因：
+    - 流转日志是工单业务对象的一部分：事务内写入，失败随工单回滚，可随工单归档删除
+    - 审计日志是平台级合规留痕：只增不删，写入失败不阻断主业务（审计可丢、业务不可丢）
+    """
+    ticket = models.ForeignKey(TicketList, on_delete=models.CASCADE,
+                               related_name='flow_logs', help_text=_('关联统一工单主表'))
+    # SUBMIT / APPROVE / REJECT / CANCEL / EXECUTE
+    action = models.CharField(max_length=16, help_text=_('流转动作'))
+    actor = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True,
+                              related_name='+', help_text=_('操作人'))
+    # 对应审批链第几步（0=提交动作；审批动作从 0 开始的节点索引）
+    step = models.IntegerField(default=0)
+    comment = models.TextField(blank=True, default='', help_text=_('审批意见'))
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        db_table = 'ticket_flow_log'
+        verbose_name = _('工单流转日志')
+        indexes = [
+            models.Index(fields=['ticket', 'created_at'], name='flow_log_ticket_created_idx'),
+        ]
+        ordering = ['created_at']
+
+    def __str__(self):
+        return f'FlowLog<{self.ticket_id}> {self.action}'
 
 
 # ============================================================================
@@ -878,9 +1174,14 @@ def get_user_managed_depts(user) -> set:
 
 
 def get_user_managed_teams(user) -> set:
-    """获取用户可管理团队集合（含本团队）—— 用于团队级数据过滤
+    """获取用户可管理/可见团队集合（含本团队）—— 用于团队级数据过滤
 
-    来源：UserTeamScopeRel(团队属地授权) ∪ {user.team_id}
+    来源：
+    1. UserTeamScopeRel(团队属地授权，team_leader / 团队级 viewer/contributor)
+    2. UserDeptScopeRel 授权部门下的所有活跃团队
+       (部门级授权：dept_manager / 部门级 viewer/contributor，数据范围覆盖部门内全部团队)
+    3. {user.team_id} 本团队
+
     配合 L3 缓存（perm:scope:team:{uid}）。
     """
     if user is None or not getattr(user, 'is_authenticated', False):
@@ -891,6 +1192,19 @@ def get_user_managed_teams(user) -> set:
             _active_grant_filter(), user=user,
     ).values_list('team_id', flat=True)
     )
+    # 部门属地授权 → 该部门下所有活跃团队也纳入可见范围
+    # (部门级授权人应能看到部门内其他团队的 TEAM_ONLY 文档，而非仅本团队)
+    dept_ids = list(
+        UserDeptScopeRel.objects.filter(
+            _active_grant_filter(), user=user,
+        ).values_list('dept_id', flat=True)
+    )
+    if dept_ids:
+        managed |= set(
+            Team.objects.filter(
+                department_id__in=dept_ids, is_deleted=False,
+            ).values_list('id', flat=True)
+        )
     if user.team_id:
         managed.add(user.team_id)
     return managed

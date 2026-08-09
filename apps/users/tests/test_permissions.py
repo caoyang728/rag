@@ -37,10 +37,14 @@ def _req(user=None, authenticated=True, super_admin=False):
 
 
 def _view(required_perm=None):
-    """构造带/不带 required_perm 的 mock view"""
+    """构造带/不带 required_perm 的 mock view
+
+    显式赋值 required_perm（含 None）：MagicMock 自动属性会拦截 getattr 默认值，
+    不赋值时 getattr(view, 'required_perm', None) 会返回 MagicMock 而非 None，
+    导致权限类拿到的 key 是 mock 对象而非字符串。
+    """
     view = MagicMock()
-    if required_perm is not None:
-        view.required_perm = required_perm
+    view.required_perm = required_perm
     return view
 
 

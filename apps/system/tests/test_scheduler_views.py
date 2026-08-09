@@ -11,7 +11,11 @@ import json
 
 import pytest
 
-from apps.system.models import SystemConfig, ConfigChangeTicket
+from apps.system.models import SystemConfig
+from apps.users.models import (
+    TicketList, TicketStatus, TicketBizType,
+    TicketConfigDetail, TicketScheduleDetail,
+)
 from apps.system.scheduler_registry import (
     schedule_key, serialize_schedule,
 )
@@ -84,8 +88,8 @@ class TestSchedulerConfigPUT(SystemAPITestBase):
                              'reason': '错峰执行'}),
             content_type='application/json', **self.admin_a_headers)
         assert resp.status_code == 201
-        ticket = ConfigChangeTicket.objects.get(config_key=key)
-        assert ticket.status == 'pending'
+        ticket = TicketList.objects.get(biz_type=TicketBizType.SCHEDULE, config_key=key)
+        assert ticket.status == TicketStatus.PENDING
         assert ticket.risk_level == 'high'
         # 变更摘要含 cron 新旧值，便于审批人识别
         summary = json.loads(ticket.change_summary)
@@ -106,25 +110,27 @@ class TestSchedulerConfigPUT(SystemAPITestBase):
                              'reason': '错峰执行'}),
             content_type='application/json', **self.admin_a_headers)
         assert resp.status_code == 201
-        ticket = ConfigChangeTicket.objects.get(config_key=key)
+        ticket = TicketList.objects.get(biz_type=TicketBizType.SCHEDULE, config_key=key)
         # 审核通过（管理员 B）：高风险进入待复核，配置不变
         resp = self.client.post(
-            f'/api/v1/system/config-tickets/{ticket.id}/approve/',
+            f'/api/v1/system/tickets/{ticket.id}/approve/',
             data=json.dumps({'comment': 'ok'}), content_type='application/json',
             **self.admin_b_headers)
         assert resp.status_code == 200
         ticket.refresh_from_db()
-        assert ticket.status == 'first_approved'
+        # 待复核阶段：状态仍为 PENDING，审批链推进到下一节点
+        assert ticket.status == TicketStatus.PENDING
+        assert ticket.current_step == 1
         cfg = SystemConfig.objects.get(key=key)
         assert cfg.value == serialize_schedule('0 2 * * *', True)
         # 超管复核通过（管理员 C）：写库生效
         resp = self.client.post(
-            f'/api/v1/system/config-tickets/{ticket.id}/approve/',
+            f'/api/v1/system/tickets/{ticket.id}/approve/',
             data=json.dumps({'comment': 'ok'}), content_type='application/json',
             **self.admin_c_headers)
         assert resp.status_code == 200
         ticket.refresh_from_db()
-        assert ticket.status == 'approved'
+        assert ticket.status == TicketStatus.EXECUTED
         cfg = SystemConfig.objects.get(key=key)
         assert cfg.value == serialize_schedule('30 2 * * *', True)
 
@@ -137,7 +143,7 @@ class TestSchedulerConfigPUT(SystemAPITestBase):
                              'reason': '暂停评估任务控制成本'}),
             content_type='application/json', **self.admin_a_headers)
         assert resp.status_code == 201
-        ticket = ConfigChangeTicket.objects.get(config_key=key)
+        ticket = TicketList.objects.get(biz_type=TicketBizType.SCHEDULE, config_key=key)
         summary = json.loads(ticket.change_summary)
         assert summary['schedule']['enabled']['old'] is True
         assert summary['schedule']['enabled']['new'] is False
@@ -152,21 +158,39 @@ class TestSchedulerTicketList(SystemAPITestBase):
         SystemConfig.objects.create(
             key=key, value=serialize_schedule('0 2 * * *', True), value_type='json',
             label='过滤测试', category='schedule', risk_level='high')
-        ConfigChangeTicket.objects.create(
-            config_key=key, config_label='过滤测试',
+        schedule_ticket = TicketList.objects.create(
+            ticket_no='SCHEDULEFILTER001', title='过滤测试任务',
+            biz_type=TicketBizType.SCHEDULE, status=TicketStatus.PENDING,
+            risk_level='high', applicant=self.super_admin_b,
+            config_key=key,
+            operation='modify',
+        )
+        TicketScheduleDetail.objects.create(
+            ticket=schedule_ticket,
+            config_label='过滤测试',
+            reason='test',
             old_value=serialize_schedule('0 2 * * *', True),
             new_value=serialize_schedule('30 2 * * *', True),
-            risk_level='high', reason='test', status='pending',
-            creator=self.super_admin_b)
+            change_summary='',
+        )
         # 另一条非调度类工单，不应被过滤出来
-        ConfigChangeTicket.objects.create(
-            config_key='LLM_TIMEOUT', config_label='LLM 超时',
-            old_value='60', new_value='90', risk_level='normal',
-            reason='test', status='pending', creator=self.super_admin_b)
+        config_ticket = TicketList.objects.create(
+            ticket_no='CONFIGFILTER001', title='LLM 超时变更',
+            biz_type=TicketBizType.CONFIG, status=TicketStatus.PENDING,
+            risk_level='normal', applicant=self.super_admin_b,
+            config_key='LLM_TIMEOUT',
+            operation='modify',
+        )
+        TicketConfigDetail.objects.create(
+            ticket=config_ticket,
+            config_label='LLM 超时',
+            reason='test',
+            old_value='60', new_value='90', change_summary='',
+        )
 
         # 以超管 A 查询（A 不是创建人，能出现在待审核列表）
         resp = self.client.get(
-            f'/api/v1/system/config-tickets/?status=pending&config_key={key}',
+            f'/api/v1/system/tickets/?status={TicketStatus.PENDING}&search={key}',
             **self.admin_a_headers)
         assert resp.status_code == 200
         tickets = resp.json()['tickets']

@@ -15,13 +15,13 @@ from pydantic import BaseModel, Field, ValidationError
 
 class SessionRefineSchema(BaseModel):
     summary: str = Field(default="", max_length=512)
-    entities: List[str] = Field(default=[], max_items=20)
-    keywords: List[str] = Field(default=[], max_items=20)
+    entities: List[str] = Field(default=[], max_length=20)
+    keywords: List[str] = Field(default=[], max_length=20)
 
 
 class UserRefineSchema(BaseModel):
-    domain_tags: List[str] = Field(default=[], max_items=10)
-    frequent_topics: List[str] = Field(default=[], max_items=15)
+    domain_tags: List[str] = Field(default=[], max_length=10)
+    frequent_topics: List[str] = Field(default=[], max_length=15)
     preferences: Dict[str, Any] = Field(default={})
     profile_text: str = Field(default="", max_length=500)
 

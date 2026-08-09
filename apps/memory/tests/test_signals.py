@@ -33,9 +33,10 @@ class TestSessionDeleteSignal:
         """删除会话时应调用 ShortTermMemory.clear(会话id)"""
         user = _make_user()
         sess = Session.objects.create(user=user, title='待删会话')
+        session_id = sess.id  # Django 5.2 delete 后主键被置为 None，须在删除前保存
         with patch.object(ShortTermMemory, 'clear') as mock_clear:
             sess.delete()
-        mock_clear.assert_called_once_with(sess.id)
+        mock_clear.assert_called_once_with(session_id)
 
     def test_clear_exception_not_block_delete(self):
         """短时记忆清理抛异常时不应阻断会话删除（日志降级）"""

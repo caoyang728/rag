@@ -131,21 +131,14 @@ function getSidebarGroups() {
 	// 拥有管理权限的角色可见全部管理后台项
 	// 包含：超级管理员 / 文档管理员 / 人员管理员 / 部门经理 / 团队组长
 	const isManagerRole = hasAnyRole('super_admin', 'kb_admin', 'user_admin', 'dept_manager', 'team_leader');
-	// 合规管理员：审计视角，仅可见"权限审批"（看全部工单，不参与审批）
-	const isComplianceOnly = hasAnyRole('compliance_admin') && !isManagerRole;
+	// 工单中心对所有登录用户开放（后端按角色过滤可见范围），无需角色判断
 
 	const adminItems = [];
 	// 用户与角色、反馈与报表、审计与安全：仅管理角色可见
 	if (isManagerRole) {
 		adminItems.push(
-			{ icon: '✅', name: '权限审批', page: 'admin-approvals', key: 'admin-approvals', desc: '权限配置变更审批与复核' },
 			{ icon: '📄', name: '文档审核', page: 'admin-docs', key: 'admin-docs', desc: '文档发布双审与合规复核' },
 			{ icon: '👥', name: '用户与角色', page: 'admin-users', key: 'admin-users', desc: '管理用户、角色与 RBAC 权限' },
-		);
-	} else if (isComplianceOnly) {
-		// 合规管理员仅可见"权限审批"（审计视角，查看全部工单）
-		adminItems.push(
-			{ icon: '✅', name: '权限审批', page: 'admin-approvals', key: 'admin-approvals', desc: '权限配置变更审批与复核' },
 		);
 	}
 	if (isManagerRole) {
@@ -155,10 +148,15 @@ function getSidebarGroups() {
 			{ icon: '🛡️', name: '审计与安全', page: 'admin-audit', key: 'admin-audit', desc: '操作审计日志与安全策略' },
 		);
 	}
-	// 组织架构 & RBAC 权限配置：仅超级管理员和文档管理员可见
-	if (isAdminOrOps()) {
+	// 组织架构：管理端 + 组长/部门经理可见（组长/部门经理在此发起协作角色授权工单）
+	if (isAdminOrOps() || hasAnyRole('team_leader', 'dept_manager')) {
 		adminItems.push(
 			{ icon: '🏢', name: '组织架构', page: 'admin-org', key: 'admin-org', desc: '部门与团队结构管理' },
+		);
+	}
+	// RBAC 权限配置：仅超级管理员和文档管理员可见
+	if (isAdminOrOps()) {
+		adminItems.push(
 			{ icon: '&#9881;&#65039;', name: 'RBAC 权限配置', page: 'admin-rbac', key: 'admin-rbac', desc: '角色权限矩阵配置' },
 		);
 	}
@@ -183,6 +181,8 @@ function getSidebarGroups() {
 	const groups = [
 		{ group: '会话', icon: '💬', items: [{ icon: '💬', name: '智能聊天', page: 'chat', key: 'chat', desc: '基于 RAG 的多轮问答，支持多知识库检索' }] },
 		{ group: '知识库', icon: '🗂️', items: kbItems },
+		// 工单中心：所有登录用户可见，可见范围按角色过滤（超管全量/管理员按域/个人仅自己）
+		{ group: '工单', icon: '🎫', items: [{ icon: '✅', name: '工单中心', page: 'ticket', key: 'ticket', desc: '权限/配置/定时/模型工单统一审批' }] },
 		{ group: '账户', icon: '👤', items: [{ icon: '👤', name: '个人资料', page: 'profile', key: 'profile', desc: '查看与维护个人账号信息' }] },
 	];
 	// 管理分组仅在存在可见项时渲染（权限判定逻辑与重构前一致）

@@ -5,6 +5,10 @@ retrieval.hybrid 单元测试
 import pytest
 from unittest.mock import patch, MagicMock
 
+from apps.llm.embedding import EmbeddingException
+from apps.knowledge.models import KnowledgeNode, Document, DocumentChunk, ImageResource
+from apps.users.models import User
+
 
 class TestRrfFuse:
     """Reciprocal Rank Fusion 算法测试"""
@@ -247,3 +251,112 @@ class TestHybridSearch:
         assert 'rerank_ms' in stats
         assert 'total_ms' in stats
         assert all(isinstance(v, int) for v in stats.values())
+
+
+# ============================================================================
+# hybrid_search 异常分支（Embedding 失败 / 零向量）
+# ============================================================================
+@patch('apps.retrieval.hybrid.logger')
+class TestHybridSearchEmbeddingErrors:
+    """query embedding 失败与零向量防护测试"""
+
+    @patch('apps.retrieval.hybrid.get_embedding_client')
+    def test_embedding_exception_reraises(self, mock_embed_cls, mock_logger):
+        """EmbeddingException 被捕获记录后向上重抛"""
+        mock_embed = MagicMock()
+        mock_embed.embed_one.side_effect = EmbeddingException('服务不可用')
+        mock_embed_cls.return_value = mock_embed
+
+        from apps.retrieval.hybrid import hybrid_search
+        with pytest.raises(EmbeddingException, match='服务不可用'):
+            hybrid_search('q', MagicMock())
+
+    @patch('apps.retrieval.hybrid.get_embedding_client')
+    def test_zero_vector_raises_embedding_exception(self, mock_embed_cls, mock_logger):
+        """embedding 返回零向量时拒绝检索"""
+        mock_embed = MagicMock()
+        mock_embed.embed_one.return_value = [0.0, 0.0]
+        mock_embed_cls.return_value = mock_embed
+
+        from apps.retrieval.hybrid import hybrid_search
+        with pytest.raises(EmbeddingException, match='零向量'):
+            hybrid_search('q', MagicMock())
+
+
+# ============================================================================
+# _enrich_chunks（DB 集成：元信息补全 / 图片数据注入 / 未知文档兜底）
+# ============================================================================
+@pytest.mark.django_db
+@pytest.mark.integration
+class TestEnrichChunks:
+    """_enrich_chunks 元信息补全测试（真实 DB）"""
+
+    def _make_env(self):
+        """构造：用户 → 节点 → 文档 → 切片，返回 (chunk_id, doc_id)"""
+        user = User.objects.create_user(
+            username='hybrid_user', password='x', email='hybrid@test.com')
+        node = KnowledgeNode.objects.create(
+            name='混合检索节点', root_type='company_doc', node_type='folder',
+            node_kind='FOLDER', node_level=4, depth=0, path='/0001/',
+            created_by=user)
+        doc = Document.objects.create(
+            node=node, title='测试文档', file_name='t.txt', file_type='txt',
+            file_size=10, file_hash='h1', file_path='/tmp/t.txt',
+            mime_type='text/plain', owner=user, dept_id=1,
+            visibility_level='PUBLIC', status='done')
+        return user, doc
+
+    def test_enrich_fills_metadata(self):
+        """chunk 元信息（section_path/page_number/content/extra/chunk_type）应补全"""
+        user, doc = self._make_env()
+        chunk = DocumentChunk.objects.create(
+            document=doc, chunk_index=0, chunk_type='text', content='完整内容',
+            section_path='章节一', page_number=2, extra={'group': 1})
+
+        chunks = [{'chunk_id': chunk.id, 'document_id': doc.id, 'content': 'preview'}]
+        from apps.retrieval.hybrid import _enrich_chunks
+        _enrich_chunks(chunks)
+
+        c = chunks[0]
+        assert c['doc_title'] == '测试文档'
+        assert c['section_path'] == '章节一'
+        assert c['page_number'] == 2
+        assert c['content'] == '完整内容'
+        assert c['extra'] == {'group': 1}
+        assert c['chunk_type'] == 'text'
+
+    def test_enrich_unknown_document_title_fallback(self):
+        """文档不存在时 doc_title 兜底为「未知文档」"""
+        user, doc = self._make_env()
+        chunk = DocumentChunk.objects.create(
+            document=doc, chunk_index=0, chunk_type='text', content='c')
+
+        chunks = [{'chunk_id': chunk.id, 'document_id': 999999}]
+        from apps.retrieval.hybrid import _enrich_chunks
+        _enrich_chunks(chunks)
+
+        assert chunks[0]['doc_title'] == '未知文档'
+
+    def test_enrich_image_data_injected(self):
+        """chunk 带 image_id 时图片 base64/尺寸信息应注入 extra"""
+        user, doc = self._make_env()
+        img = ImageResource.objects.create(
+            base64_data='base64xxx', width=100, height=50, mime_type='image/png')
+        chunk = DocumentChunk.objects.create(
+            document=doc, chunk_index=0, chunk_type='image', content='',
+            image_id=img.id, extra={})
+
+        chunks = [{'chunk_id': chunk.id, 'document_id': doc.id, 'extra': {}}]
+        from apps.retrieval.hybrid import _enrich_chunks
+        _enrich_chunks(chunks)
+
+        extra = chunks[0]['extra']
+        assert extra['base64_data'] == 'base64xxx'
+        assert extra['width'] == 100
+        assert extra['height'] == 50
+        assert extra['mime_type'] == 'image/png'
+
+    def test_enrich_empty_list_noop(self):
+        """空列表不应报错"""
+        from apps.retrieval.hybrid import _enrich_chunks
+        _enrich_chunks([])

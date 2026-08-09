@@ -103,7 +103,9 @@ class RequireKnowledgePerm(BasePermission):
             return False
         if u.is_super_admin:
             return True
-        key = getattr(view, 'required_perm', 'kb.document.read')
+        # getattr 默认值仅在属性缺失时生效；视图显式设置 required_perm=None/空时
+        # 需用 or 回退默认（与 RequirePerm 基类保持一致）
+        key = getattr(view, 'required_perm', None) or 'kb.document.read'
         return has_permission(u, key)
 
 
@@ -137,5 +139,6 @@ class CanViewAnalytics(BasePermission):
             return False
         if u.is_super_admin:
             return True
-        perm_key = getattr(view, 'required_perm', 'analytics.org.read')
+        # 同 RequireKnowledgePerm：显式 None/空时回退默认 analytics.org.read
+        perm_key = getattr(view, 'required_perm', None) or 'analytics.org.read'
         return has_permission(u, perm_key)

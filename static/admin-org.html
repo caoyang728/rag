@@ -50,13 +50,8 @@
 				<input id="deptCode" class="input" placeholder="如: yfb">
 			</div>
 			<div class="form-item">
-				<label class="form-label">部门经理</label>
-				<div class="relative">
-					<input id="deptLeaderSearch" class="input" placeholder="搜索用户姓名..." autocomplete="off"
-						oninput="searchDeptLeader()" onfocus="searchDeptLeader()">
-					<div id="deptLeaderResults" class="dropdown-menu"></div>
-				</div>
-				<input type="hidden" id="deptLeaderId">
+				<label class="form-label">部门经理 <span class="form-hint">（通过"任命经理"发起审批工单）</span></label>
+				<div class="text-sub text-sm" id="deptLeaderDisplay"></div>
 			</div>
 		</div>
 		<div class="modal-footer">
@@ -75,13 +70,61 @@
 			<div id="teamManageList"></div>
 		</div>
 		<div class="modal-footer" style="justify-content: space-between;">
-			<button class="btn btn-primary btn-sm" onclick="openTeamForm()">＋ 新增团队</button>
+			<button class="btn btn-primary btn-sm" id="btnAddTeam" onclick="openTeamForm()">＋ 新增团队</button>
 			<button class="btn btn-sm btn-outline" onclick="closeModal('teamManageModal')">关闭</button>
 		</div>
 	</div>
 
 	<div id="mask" class="mask"></div>
 	<div id="toast-wrap" class="toast-wrap"></div>
+
+	<!-- ===== 任命管理岗 Modal（上级发起授予工单） ===== -->
+	<div class="modal" id="nominateModal" style="width:460px">
+		<div class="modal-header">
+			<div class="modal-title" id="nominateModalTitle">任命组长</div>
+			<button class="modal-close" onclick="closeModal('nominateModal')">&times;</button>
+		</div>
+		<div class="modal-body overflow-y-auto" style="max-height:70vh">
+			<input type="hidden" id="nominateMode" value="nominate">
+			<input type="hidden" id="nominateTargetType">
+			<input type="hidden" id="nominateTargetId">
+			<input type="hidden" id="nominateRoleKey">
+			<div class="form-item">
+				<label class="form-label">任命岗位</label>
+				<div class="text-sub text-sm" id="nominateRoleDisplay"></div>
+			</div>
+			<!-- 协作角色授权模式(查看者/贡献者)才显示:角色与授权范围选择 -->
+			<div class="form-item" id="grantRoleItem" style="display:none">
+				<label class="form-label">授权角色</label>
+				<select id="grantRoleSelect" class="select" onchange="loadGrantChainHint()">
+					<option value="viewer">查看者</option>
+					<option value="contributor">贡献者</option>
+				</select>
+			</div>
+			<div class="form-item" id="grantScopeItem" style="display:none">
+				<label class="form-label">授权范围</label>
+				<select id="grantScopeSelect" class="select"></select>
+			</div>
+			<div class="form-item">
+				<label class="form-label">被任命人 <span class="required">*</span></label>
+				<div class="relative">
+					<input id="nominateUserSearch" class="input" placeholder="搜索用户姓名..." autocomplete="off"
+						oninput="searchNominateUser()" onfocus="searchNominateUser()">
+					<div id="nominateUserResults" class="dropdown-menu"></div>
+				</div>
+				<input type="hidden" id="nominateUserId">
+			</div>
+			<div class="form-item">
+				<label class="form-label">任命理由 <span class="required">*</span></label>
+				<textarea id="nominateReason" class="input" rows="2" placeholder="如: 组织任命/团队管理需要"></textarea>
+			</div>
+			<div class="text-sub text-sm" id="nominateChainHint"></div>
+		</div>
+		<div class="modal-footer">
+			<button class="btn btn-sm btn-outline" onclick="closeModal('nominateModal')">取消</button>
+			<button class="btn btn-sm btn-primary" id="nominateSubmitBtn" onclick="submitNominate()">提交任命</button>
+		</div>
+	</div>
 
 	<!-- ===== 模板 ===== -->
 	<template id="tmpl-no-permission">
@@ -102,9 +145,7 @@
 					__LEADER_INFO__
 				</div>
 				<div class="dept-card-actions">
-					<button class="btn btn-sm btn-outline" onclick="openDeptModal(__ID__)">编辑</button>
-					<button class="btn btn-sm btn-outline" onclick="openTeamManageModal(__ID__)">管理团队</button>
-					<button class="btn btn-sm btn-danger" onclick="deleteDept(__ID__,'__NAME_ESC__')">删除</button>
+					__ACTIONS__
 				</div>
 			</div>
 			__TEAMS_HTML__
@@ -125,8 +166,7 @@
 				<span class="team-card-leader">__LEADER__</span>
 			</div>
 			<div class="team-card-actions">
-				<button class="btn btn-sm btn-outline" onclick="editTeam(__TEAM_ID__)">编辑</button>
-				<button class="btn btn-sm btn-danger" onclick="deleteTeam(__TEAM_ID__,'__NAME_ESC__')">删除</button>
+				__ACTIONS__
 			</div>
 		</div>
 		<div id="teamForm-__TEAM_ID__" class="team-form hidden">
@@ -147,15 +187,6 @@
 				<div class="form-item">
 					<label class="form-label">描述</label>
 					<input class="team-form-desc input" placeholder="团队描述">
-				</div>
-				<div class="form-item">
-					<label class="form-label">团队组长</label>
-					<div class="relative">
-						<input class="team-form-leader-search input" placeholder="搜索团队内用户姓名..." autocomplete="off">
-						<div class="team-form-leader-results dropdown-menu"></div>
-					</div>
-					<input type="hidden" class="team-form-leader-id">
-					<div class="team-form-leader-selected text-sub text-sm mt-8"></div>
 				</div>
 				<div class="flex justify-end gap-8 mt-16">
 					<button class="btn btn-sm btn-outline" onclick="cancelTeamEdit()">取消</button>

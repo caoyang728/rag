@@ -129,6 +129,15 @@ class TestAcquireHourlyToken:
             assert production_eval._acquire_hourly_token(rate_per_hour=50) is True
 
     @pytest.mark.unit
+    def test_first_count_sets_expire(self):
+        """首次计数（count=1）→ 设置 3700s EXPIRE"""
+        fake = MagicMock()
+        fake.incr.return_value = 1
+        with patch('apps.analytics.production_eval._get_redis', return_value=fake):
+            assert production_eval._acquire_hourly_token(rate_per_hour=50) is True
+        fake.expire.assert_called_once()
+
+    @pytest.mark.unit
     def test_over_limit(self):
         """计数 > 上限 → False"""
         fake = MagicMock()
@@ -143,6 +152,20 @@ class TestAcquireHourlyToken:
         fake.incr.side_effect = Exception('redis down')
         with patch('apps.analytics.production_eval._get_redis', return_value=fake):
             assert production_eval._acquire_hourly_token(rate_per_hour=50) is False
+
+
+# ============================================================================
+# _get_redis —— Analytics 专用连接
+# ============================================================================
+class TestGetRedis:
+    """Redis 连接复用测试"""
+
+    @pytest.mark.unit
+    def test_reuses_analytics_connection(self):
+        """复用 apps.analytics.realtime._get_redis_safe 的连接"""
+        fake = MagicMock()
+        with patch('apps.analytics.realtime._get_redis_safe', return_value=fake):
+            assert production_eval._get_redis() is fake
 
 
 # ============================================================================
@@ -199,13 +222,18 @@ class TestCheckDailyBudget:
         fake.decr.assert_called_once()
 
     def test_cost_aggregation_error_falls_back_to_quantity(self):
-        """成本聚合查询异常 → 仅按数量限，不阻断评估"""
+        """成本聚合查询异常 → 仅按数量限，不阻断评估
+
+        代码走 filter().aggregate() 链，需让 filter 抛异常才能命中
+        except 分支（patch manager.aggregate 不生效）。
+        """
         fake = MagicMock()
         fake.incr.return_value = 1
         with patch.object(AnalyticsConfig, 'eval_daily_limit', return_value=500), \
              patch.object(AnalyticsConfig, 'eval_cost_limit', return_value=1.0), \
-             patch.object(MultiDimensionScore.objects, 'aggregate',
-                          side_effect=Exception('db down')):
+             patch.object(MultiDimensionScore.objects, 'filter',
+                          side_effect=Exception('db down')), \
+             patch('apps.analytics.production_eval.logger'):
             passed, reason = production_eval._check_daily_budget(fake)
         assert passed is True
         assert reason == ''
@@ -338,6 +366,18 @@ class TestMaybeDispatchEval:
                 production_eval.maybe_dispatch_eval(self._qa())
 
     @pytest.mark.unit
+    def test_daily_budget_error_conservative_skip(self):
+        """日预算检查抛异常 → 保守跳过，不影响主对话流程"""
+        mocks = self._pass_all()
+        with mocks[0], mocks[1], mocks[2], mocks[3], mocks[4], mocks[5], mocks[6], \
+             mocks[7], mocks[8], mocks[9] as mock_task:
+            with patch('apps.analytics.production_eval._check_daily_budget',
+                       side_effect=Exception('redis down')), \
+                 patch('apps.analytics.production_eval.logger'):
+                production_eval.maybe_dispatch_eval(self._qa())
+        mock_task.delay.assert_not_called()
+
+    @pytest.mark.unit
     def test_dispatch_called(self):
         """全部通过 → dispatch evaluate_sampled_qa.delay(qa_id)"""
         mocks = self._pass_all()
@@ -466,3 +506,140 @@ class TestEvaluateSampledQA:
                        side_effect=Exception('redis down')):
                 result = production_eval.evaluate_sampled_qa(self.qa.id)
         assert result['ok'] is True
+
+    def test_provided_batch_id_used(self):
+        """手动评估传入 eval_batch_id 时应原样使用（不自动生成）"""
+        mocks = self._mocks([{'dimension': 'clarity', 'score': 0.8, 'reason': 'ok'}])
+        with mocks[0], mocks[1], mocks[2], mocks[3], mocks[4], mocks[5]:
+            result = production_eval.evaluate_sampled_qa(self.qa.id, eval_batch_id='manual_001')
+        assert result['eval_batch_id'] == 'manual_001'
+
+    def test_low_score_dispatch_failure_ignored(self):
+        """低分归因派发异常 → 忽略，评估结果不受影响"""
+        mocks = self._mocks([{'dimension': 'clarity', 'score': 0.8, 'reason': 'ok'}])
+        with mocks[0], mocks[1], mocks[2], mocks[3], mocks[4], mocks[5] as mock_low, \
+             patch('apps.analytics.production_eval.logger'):
+            mock_low.delay.side_effect = Exception('celery down')
+            result = production_eval.evaluate_sampled_qa(self.qa.id)
+        assert result['ok'] is True
+
+
+# ============================================================================
+# 路由分支 —— wiki / graphrag 上下文重建（_build_context_list 分流）
+# ============================================================================
+class TestRouteContexts:
+    """三层路由回答的评估上下文重建测试"""
+
+    @pytest.mark.unit
+    def test_context_list_wiki_route(self):
+        """route_source='wiki' 时走 wiki 上下文重建"""
+        with patch('apps.analytics.production_eval._build_wiki_route_context',
+                   return_value=['wiki 内容']) as m:
+            ctx = production_eval._build_context_list(SimpleNamespace(
+                route_source='wiki', question='问题'))
+        m.assert_called_once_with('问题')
+        assert ctx == ['wiki 内容']
+
+    @pytest.mark.unit
+    def test_context_list_graphrag_route(self):
+        """route_source 以 graphrag 开头时走图谱上下文重建"""
+        with patch('apps.analytics.production_eval._build_graphrag_route_context',
+                   return_value=['图上下文']) as m:
+            ctx = production_eval._build_context_list(SimpleNamespace(
+                route_source='graphrag_default', question='q', user_id=7))
+        m.assert_called_once_with('q', 7)
+        assert ctx == ['图上下文']
+
+    @pytest.mark.unit
+    def test_wiki_context_success_truncated(self):
+        """wiki 检索成功返回正文并截断 500 字"""
+        with patch('apps.wiki.retriever.search_wiki',
+                   return_value=[{'content': 'W' * 600}]):
+            ctx = production_eval._build_wiki_route_context('q')
+        assert len(ctx) == 1
+        assert len(ctx[0]) == 500
+
+    @pytest.mark.unit
+    def test_wiki_context_search_error_returns_empty(self):
+        """wiki 检索异常 → 空列表"""
+        with patch('apps.wiki.retriever.search_wiki', side_effect=Exception('down')), \
+             patch('apps.analytics.production_eval.logger'):
+            assert production_eval._build_wiki_route_context('q') == []
+
+    @pytest.mark.unit
+    def test_wiki_context_no_results(self):
+        """wiki 无命中结果 → 空列表"""
+        with patch('apps.wiki.retriever.search_wiki', return_value=[]):
+            assert production_eval._build_wiki_route_context('q') == []
+
+    @pytest.mark.unit
+    def test_wiki_context_empty_content(self):
+        """wiki 结果正文为空 → 空列表"""
+        with patch('apps.wiki.retriever.search_wiki', return_value=[{'content': '  '}]):
+            assert production_eval._build_wiki_route_context('q') == []
+
+    @pytest.mark.django_db
+    def test_graphrag_context_uses_user(self):
+        """graphrag 检索应使用指定 user 做权限过滤"""
+        user = User.objects.create_user(
+            username='g_user', password='x', email='g@test.com')
+        with patch('apps.graph.retriever.graphrag_search',
+                   return_value={'context': '图上下文内容'}) as m:
+            ctx = production_eval._build_graphrag_route_context('q', user.id)
+        m.assert_called_once()
+        assert m.call_args[0][1].id == user.id
+        assert ctx == ['图上下文内容']
+
+    @pytest.mark.django_db
+    def test_graphrag_context_user_missing_falls_back_to_system(self):
+        """原用户不存在 → 回退系统用户"""
+        User.objects.create_user(username='system', password='x', email='sys@test.com')
+        with patch('apps.graph.retriever.graphrag_search',
+                   return_value={'context': 'c'}) as m:
+            ctx = production_eval._build_graphrag_route_context('q', 999999)
+        assert m.call_args[0][1].username == 'system'
+        assert ctx == ['c']
+
+    @pytest.mark.unit
+    def test_graphrag_context_no_user_returns_empty(self):
+        """系统用户也不存在 → 空列表"""
+        mock_qs = MagicMock()
+        mock_qs.first.return_value = None
+        with patch('apps.users.models.User.objects.filter', return_value=mock_qs):
+            assert production_eval._build_graphrag_route_context('q', 0) == []
+
+    @pytest.mark.unit
+    def test_graphrag_context_user_lookup_error_falls_back(self):
+        """原用户查询异常 → 捕获后回退系统用户"""
+        system = SimpleNamespace(id=2, username='system')
+        mock_qs = MagicMock()
+        mock_qs.first.return_value = system
+        with patch('apps.users.models.User.objects.filter',
+                   side_effect=[Exception('db down'), mock_qs]), \
+             patch('apps.graph.retriever.graphrag_search',
+                   return_value={'context': 'c'}) as m, \
+             patch('apps.analytics.production_eval.logger'):
+            ctx = production_eval._build_graphrag_route_context('q', 1)
+        assert m.call_args[0][1].username == 'system'
+        assert ctx == ['c']
+
+    @pytest.mark.unit
+    def test_graphrag_context_search_error_returns_empty(self):
+        """图谱检索异常 → 空列表"""
+        user = SimpleNamespace(id=1, username='u')
+        mock_qs = MagicMock()
+        mock_qs.first.return_value = user
+        with patch('apps.users.models.User.objects.filter', return_value=mock_qs), \
+             patch('apps.graph.retriever.graphrag_search', side_effect=Exception('down')), \
+             patch('apps.analytics.production_eval.logger'):
+            assert production_eval._build_graphrag_route_context('q', 1) == []
+
+    @pytest.mark.unit
+    def test_graphrag_context_empty_result_returns_empty(self):
+        """图谱检索结果无上下文 → 空列表"""
+        user = SimpleNamespace(id=1, username='u')
+        mock_qs = MagicMock()
+        mock_qs.first.return_value = user
+        with patch('apps.users.models.User.objects.filter', return_value=mock_qs), \
+             patch('apps.graph.retriever.graphrag_search', return_value={'context': ' '}):
+            assert production_eval._build_graphrag_route_context('q', 1) == []

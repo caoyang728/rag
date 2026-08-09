@@ -36,9 +36,10 @@ from apps.knowledge.serializers import (
 )
 from apps.knowledge.access import resolve_doc_access, build_user_context, build_grants_map
 from apps.knowledge.storage import get_document_storage
-# 权限体系：ResourceShare/ResourceBlockList(文档级共享与黑名单) + PermissionApprovalTicket(审批工单)
+# 权限体系：ResourceShare/ResourceBlockList(文档级共享与黑名单) + TicketList(统一审批工单)
 from apps.users.models import (
-    User, Role, UserRoleRel, PermissionApprovalTicket, TicketStatus, TicketChangeType,
+    User, Role, UserRoleRel, TicketList, TicketPermissionDetail, TicketFlowLog,
+    TicketStatus, TicketChangeType, TicketBizType, ScopeType,
     has_permission, get_user_managed_teams, get_user_managed_depts,
 )
 from apps.users.permissions import IsAdminOrOps
@@ -304,22 +305,22 @@ def _validate_visibility_level(user, visibility_level):
     if visibility_level in (VisibilityLevel.TEAM_ONLY, VisibilityLevel.DEPT_ONLY):
         return True, None
 
-    # PUBLIC 需要审批（通过 PermissionApprovalTicket 流程），但创建时可以设置
+    # PUBLIC 需要审批（通过统一工单流程），但创建时可以设置
     return True, None
 
 
 def _encode_ticket_reason(target_type, target_id, action, user_reason=''):
-    """将访问申请/可见范围变更的目标信息编码到 PermissionApprovalTicket.reason 字段
+    """将访问申请/可见范围变更的目标信息编码到工单 reason 字段
 
-    PermissionApprovalTicket 无 target_type/target_id 字段（它是 RBAC 角色审批工单），
-    文档/节点访问申请复用该表，通过 reason 前缀编码目标。
+    权限工单详情（TicketPermissionDetail）不区分文档/节点目标，
+    文档/节点访问申请复用统一工单，通过 reason 前缀编码目标。
     格式: [doc:{doc_id}:{action}] 或 [node:{node_id}:{action}] 后接用户申请理由
     """
     return f"[{target_type}:{target_id}:{action}] {user_reason or ''}"
 
 
 def _decode_ticket_reason(reason):
-    """从 PermissionApprovalTicket.reason 解析目标信息
+    """从工单 reason 解析目标信息
 
     返回 (target_type, target_id, action, user_reason)：
     - target_type: 'doc' 文档工单 / 'node' 节点工单 / None 无法解析
@@ -335,7 +336,7 @@ def _decode_ticket_reason(reason):
 
 
 def _extract_last_comment(approval_chain):
-    """从 PermissionApprovalTicket.approval_chain 提取最近一条审批意见
+    """从工单 approval_chain 提取最近一条审批意见
 
     approval_chain 格式: [{step, approver_id, status, comment, approved_at}, ...]
     用于在申请列表中展示审批人意见。
@@ -347,6 +348,37 @@ def _extract_last_comment(approval_chain):
         if isinstance(step, dict) and step.get('comment'):
             return step['comment']
     return ''
+
+
+def _create_doc_ticket(applicant, target_user, change_type, reason, chain):
+    """创建文档访问/可见性变更统一工单 —— 主表 + 权限详情子表 + SUBMIT 流转日志
+
+    文档/节点目标信息编码在 reason（见 _encode_ticket_reason），
+    详情子表记录发起人/目标人/变更类型，role 为空（文档域工单不涉及角色授权）。
+    主表走统一工单号（QX + 日期 + 当日序列），保证与工单中心一致。
+    """
+    from apps.users.ticket_service import _gen_ticket_no
+    ticket = TicketList.objects.create(
+        ticket_no=_gen_ticket_no(TicketBizType.PERMISSION),
+        title=f'文档权限·{change_type}'.strip(),
+        biz_type=TicketBizType.PERMISSION,
+        status=TicketStatus.PENDING,
+        risk_level='normal',
+        applicant=applicant,
+        approval_chain=chain,
+        current_step=0,
+    )
+    TicketPermissionDetail.objects.create(
+        ticket=ticket,
+        target_user=target_user,
+        change_type=change_type,
+        role=None,
+        scope_type=ScopeType.NONE,
+        scope_id=None,
+        reason=reason,
+    )
+    TicketFlowLog.objects.create(ticket=ticket, action='SUBMIT', actor=applicant)
+    return ticket
 
 
 ALLOWED_EXTENSIONS = {
@@ -406,13 +438,13 @@ def _extract_text_content(content: bytes, file_type: str, filename: str) -> str:
     # PDF
     if file_type == "pdf" or ext == ".pdf":
         try:
-            from PyPDF2 import PdfReader
+            from pypdf import PdfReader
             import io
             reader = PdfReader(io.BytesIO(content))
             text = "\n\n".join(page.extract_text() or "" for page in reader.pages)
             return text if text.strip() else "PDF 文档无文本内容"
         except ImportError:
-            return "需要安装 PyPDF2 才能预览 PDF 内容"
+            return "需要安装 pypdf 才能预览 PDF 内容"
         except Exception as e:
             logger.error(f"PDF extract failed: {e}")
             return f"PDF 解析失败: {str(e)}"
@@ -830,22 +862,16 @@ class KnowledgeNodeViewSet(viewsets.ModelViewSet):
             old_desc = dict(VisibilityLevel.choices).get(old_obj.visibility_level, '继承父级')
             new_desc = dict(VisibilityLevel.choices).get(
                 new_visibility_level, '继承父级') if new_visibility_level else '继承父级'
-            import uuid as _uuid
-            PermissionApprovalTicket.objects.create(
-                ticket_no=f'NODE-VIS-{_uuid.uuid4().hex[:12].upper()}',
-                applicant=user,
-                target_user=user,
-                change_type=TicketChangeType.SCOPE_CHANGE,
-                reason=_encode_ticket_reason(
+            _create_doc_ticket(
+                user, user, TicketChangeType.SCOPE_CHANGE,
+                _encode_ticket_reason(
                     'node', old_obj.id, 'visibility_change',
                     f"申请将节点可见范围从「{old_desc}」调整为「{new_desc}」 "
                     f"目标值:{new_visibility_level or 'INHERIT'}"
                 ),
-                status=TicketStatus.PENDING,
                 # 审批链按发起人角色动态指派：团队级=部门经理，部门级=文档管理员/超管，
                 # 超管/文档管理员=双管理员复核（_build_visibility_chain）
-                approval_chain=_build_visibility_chain(user, old_obj),
-                current_step=0,
+                _build_visibility_chain(user, old_obj),
             )
             raise PermissionDenied(
                 "修改节点可见范围需要审批，已自动提交审批工单，审批通过后可见范围生效"
@@ -993,26 +1019,19 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 VisibilityLevel.PUBLIC: 2,
             }
             if scope_order.get(new_visibility_level, 0) > scope_order.get(old_obj.visibility_level, 0):
-                # 创建 PermissionApprovalTicket 审批工单
-                # 文档目标信息编码在 reason 字段前缀，approval_chain 记录双层审批步骤
-                import uuid as _uuid
-                ticket = PermissionApprovalTicket.objects.create(
-                    ticket_no=f'DOC-VIS-{_uuid.uuid4().hex[:12].upper()}',
-                    applicant=user,
-                    target_user=user,
-                    change_type=TicketChangeType.SCOPE_CHANGE,
-                    reason=_encode_ticket_reason(
+                # 创建统一工单（文档目标信息编码在 reason 字段前缀，approval_chain 记录双层审批步骤）
+                _create_doc_ticket(
+                    user, user, TicketChangeType.SCOPE_CHANGE,
+                    _encode_ticket_reason(
                         'doc', old_obj.id, 'visibility_change',
                         f"申请将文档可见性从「{old_obj.get_visibility_level_display()}」"
                         f"扩大为「{dict(VisibilityLevel.choices).get(new_visibility_level, new_visibility_level)}」"
                     ),
-                    status=TicketStatus.PENDING,
                     # 双层审批链：两位不同管理员先后审批
-                    approval_chain=[
+                    [
                         {'step': 0, 'approver_id': None, 'status': 'pending', 'comment': '', 'approved_at': None},
                         {'step': 1, 'approver_id': None, 'status': 'pending', 'comment': '', 'approved_at': None},
                     ],
-                    current_step=0,
                 )
                 raise PermissionDenied(
                     "扩大可见性层级需要双层审批，已自动提交审批工单，需两位管理员先后审批"
@@ -1256,7 +1275,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
         """POST /documents/{id}/request_access/  {action, reason?}
         注意：申请者通常尚无读取权限，故不走 get_object 的 can_read 校验。
 
-        通过 PermissionApprovalTicket 管理审批工单：
+        通过统一工单（TicketList）管理审批工单：
         文档目标信息编码在 reason 前缀 [doc:{doc_id}:{action}]。
         """
         doc = Document.objects.filter(id=pk, is_deleted=False).first()
@@ -1270,27 +1289,20 @@ class DocumentViewSet(viewsets.ModelViewSet):
         encoded_reason = _encode_ticket_reason('doc', doc.id, action, user_reason)
 
         # 已有相同 pending 申请则不重复创建（通过 reason 前缀匹配文档目标）
-        exists = PermissionApprovalTicket.objects.filter(
+        exists = TicketList.objects.filter(
             applicant=request.user,
-            change_type=TicketChangeType.GRANT,
-            reason=encoded_reason,
             status=TicketStatus.PENDING,
+            permission_detail__change_type=TicketChangeType.GRANT,
+            permission_detail__reason=encoded_reason,
         ).exists()
         if exists:
             return Response({"ok": False, "detail": "已存在待审批的相同申请"}, status=200)
 
-        import uuid as _uuid
-        ticket = PermissionApprovalTicket.objects.create(
-            ticket_no=f'DOC-REQ-{_uuid.uuid4().hex[:12].upper()}',
-            applicant=request.user,
-            target_user=request.user,
-            change_type=TicketChangeType.GRANT,
-            reason=encoded_reason,
-            status=TicketStatus.PENDING,
-            approval_chain=[
+        ticket = _create_doc_ticket(
+            request.user, request.user, TicketChangeType.GRANT, encoded_reason,
+            [
                 {'step': 0, 'approver_id': None, 'status': 'pending', 'comment': '', 'approved_at': None},
             ],
-            current_step=0,
         )
         logger.info(f"[AccessRequest] doc={doc.id} applicant={request.user.username} action={action}")
         return Response({
@@ -1507,13 +1519,13 @@ class DocumentViewSet(viewsets.ModelViewSet):
     def my_access_requests(self, request):
         """GET /documents/my_access_requests/  我发起的访问申请
 
-        通过 PermissionApprovalTicket 管理审批工单：
+        通过统一工单（TicketList + TicketPermissionDetail）管理审批工单：
         文档目标信息从 reason 前缀 [doc:{id}:{action}] 解析。
         """
-        qs = PermissionApprovalTicket.objects.filter(
+        qs = TicketList.objects.filter(
             applicant=request.user,
-            change_type=TicketChangeType.GRANT,
-        ).order_by("-created_at")[:100]
+            permission_detail__change_type=TicketChangeType.GRANT,
+        ).select_related('permission_detail').order_by("-created_at")[:100]
         data = []
         for ticket in qs:
             target_type, target_id, action, user_reason = _decode_ticket_reason(ticket.reason)
@@ -1534,16 +1546,16 @@ class DocumentViewSet(viewsets.ModelViewSet):
     def pending_access_requests(self, request):
         """GET /documents/pending_access_requests/  待我（所有者/管理员）审批的申请
 
-        通过 PermissionApprovalTicket 管理审批工单。
+        通过统一工单（TicketList + TicketPermissionDetail）管理审批工单。
         管理员看全部待审批工单；非管理员仅看自己文档对应的工单。
         """
         user = request.user
         is_manager = (getattr(user, 'is_super_admin', False)
                        or getattr(user, 'is_kb_admin', False))
-        qs = PermissionApprovalTicket.objects.filter(
+        qs = TicketList.objects.filter(
             status=TicketStatus.PENDING,
-            change_type=TicketChangeType.GRANT,
-        ).select_related("applicant")
+            permission_detail__change_type=TicketChangeType.GRANT,
+        ).select_related("applicant", "permission_detail")
         # 管理员看全部；非管理员仅看自己文档的申请（通过 reason 前缀匹配 doc_id）
         if not is_manager:
             owned_doc_ids = list(
@@ -1554,7 +1566,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 import django.db.models as dm
                 q = dm.Q()
                 for did in owned_doc_ids:
-                    q |= dm.Q(reason__startswith=f'[doc:{did}:')
+                    q |= dm.Q(permission_detail__reason__startswith=f'[doc:{did}:')
                 qs = qs.filter(q)
             else:
                 qs = qs.none()
@@ -1582,15 +1594,18 @@ class DocumentViewSet(viewsets.ModelViewSet):
     def approve_access_request(self, request):
         """POST /documents/approve_access_request/  {request_id, comment?}  批准并创建授权
 
-        通过 PermissionApprovalTicket 管理审批工单：
+        通过统一工单（TicketList + TicketPermissionDetail）管理审批工单：
         - 双层审批通过 approval_chain（JSON 数组）记录每步审批人/意见/时间
+        - 每步审批写 TicketFlowLog（APPROVE），最终通过后写 EXECUTE
         - 复核通过后写入 ResourceShare（文档级个人共享）
         - visibility_change 类型工单通过后修改 doc.visibility_level
         """
         req_id = request.data.get("request_id")
         try:
-            ticket = PermissionApprovalTicket.objects.get(id=req_id, status=TicketStatus.PENDING)
-        except PermissionApprovalTicket.DoesNotExist:
+            ticket = TicketList.objects.select_related(
+                'applicant', 'permission_detail',
+            ).get(id=req_id, status=TicketStatus.PENDING)
+        except TicketList.DoesNotExist:
             raise Http404("申请不存在或已处理")
 
         # 从 reason 解析目标信息（doc 文档工单 / node 节点可见范围工单）
@@ -1627,101 +1642,115 @@ class DocumentViewSet(viewsets.ModelViewSet):
         chain = list(ticket.approval_chain or [])
         need_double = len(chain) > 1
 
-        if need_double:
-            current_step = ticket.current_step or 0
-            step_info = chain[current_step] if current_step < len(chain) else {}
-            # 审核：不能与已审步骤为同一人（复核校验）
-            for prev in chain[:current_step]:
-                if prev.get('approver_id') == reviewer.id:
-                    raise PermissionDenied("双层审批不能由同一管理员完成，请另一位管理员审批")
-            # 记录当前步骤审批结果
-            step_info['approver_id'] = reviewer.id
-            step_info['status'] = 'approved'
-            step_info['comment'] = comment
-            step_info['approved_at'] = timezone.now().isoformat()
-            chain[current_step] = step_info
+        with transaction.atomic():
+            if need_double:
+                current_step = ticket.current_step or 0
+                step_info = chain[current_step] if current_step < len(chain) else {}
+                # 审核：不能与已审步骤为同一人（复核校验）
+                for prev in chain[:current_step]:
+                    if prev.get('approver_id') == reviewer.id:
+                        raise PermissionDenied("双层审批不能由同一管理员完成，请另一位管理员审批")
+                # 记录当前步骤审批结果
+                step_info['approver_id'] = reviewer.id
+                step_info['status'] = 'approved'
+                step_info['comment'] = comment
+                step_info['approved_at'] = timezone.now().isoformat()
+                chain[current_step] = step_info
 
-            if current_step + 1 < len(chain):
-                # 还有后续步骤，保持 pending
+                if current_step + 1 < len(chain):
+                    # 还有后续步骤，保持 pending
+                    ticket.approval_chain = chain
+                    ticket.current_step = current_step + 1
+                    ticket.save(update_fields=["approval_chain", "current_step"])
+                    TicketFlowLog.objects.create(
+                        ticket=ticket, action='APPROVE', actor=reviewer,
+                        comment=comment, step=current_step,
+                    )
+                    logger.info(f"[AccessRequest] step {current_step} approved id={ticket.id} by={reviewer.username} (pending next step)")
+                    return Response({
+                        "id": ticket.id,
+                        "status": TicketStatus.PENDING,
+                        "message": f"第 {current_step + 1} 审已通过，等待后续审批",
+                    })
+                # 所有步骤完成，最终通过
                 ticket.approval_chain = chain
-                ticket.current_step = current_step + 1
-                ticket.save(update_fields=["approval_chain", "current_step"])
-                logger.info(f"[AccessRequest] step {current_step} approved id={ticket.id} by={reviewer.username} (pending next step)")
-                return Response({
-                    "id": ticket.id,
-                    "status": TicketStatus.PENDING,
-                    "message": f"第 {current_step + 1} 审已通过，等待后续审批",
-                })
-            # 所有步骤完成，最终通过
-            ticket.approval_chain = chain
-            ticket.status = TicketStatus.APPROVED
-            ticket.approved_at = timezone.now()
-            ticket.save(update_fields=["approval_chain", "status", "approved_at"])
-        else:
-            # 普通单层审批
-            if chain:
-                chain[0]['approver_id'] = reviewer.id
-                chain[0]['status'] = 'approved'
-                chain[0]['comment'] = comment
-                chain[0]['approved_at'] = timezone.now().isoformat()
-            ticket.approval_chain = chain
-            ticket.status = TicketStatus.APPROVED
-            ticket.approved_at = timezone.now()
-            ticket.save(update_fields=["approval_chain", "status", "approved_at"])
-
-        # 审批通过后执行授权写入
-        if action == 'visibility_change' and (doc or node):
-            # visibility_change 工单：修改文档/节点可见性层级
-            # 从 user_reason 中解析目标 visibility_level（创建工单时编码在 reason 文本中）
-            # 兜底使用 PUBLIC（扩大审批通常目标就是全局公开）
-            new_level = VisibilityLevel.PUBLIC
-            m = re.search(r'目标值:(\w+)', user_reason or '')
-            if m:
-                # 显式编码的目标值（INHERIT 表示继承父级，写回 NULL）
-                new_level = m.group(1) if m.group(1) in VisibilityLevel.values else None
+                ticket.status = TicketStatus.APPROVED
+                ticket.approved_at = timezone.now()
+                ticket.save(update_fields=["approval_chain", "status", "approved_at"])
+                TicketFlowLog.objects.create(
+                    ticket=ticket, action='APPROVE', actor=reviewer,
+                    comment=comment, step=current_step,
+                )
             else:
-                # 兼容旧格式：从申请文本中匹配枚举值，未命中兜底 PUBLIC
-                for level in VisibilityLevel.values:
-                    if level in (user_reason or ''):
-                        new_level = level
-                        break
-            if node:
-                # 节点可见范围变更：写回节点（NULL=继承父级，工单目标通常为具体三档值）
-                node.visibility_level = new_level
-                node.save(update_fields=['visibility_level', 'updated_at'])
-                _log_operation(request, 'node_visibility_change', node=node,
-                               detail={'ticket_id': ticket.id, 'applicant': ticket.applicant.username,
-                                       'new_visibility_level': new_level})
-            else:
-                doc.visibility_level = new_level
-                doc.save(update_fields=['visibility_level', 'updated_at'])
-                _log_operation(request, 'doc_visibility_change', document=doc,
-                               detail={'ticket_id': ticket.id, 'applicant': ticket.applicant.username,
-                                       'new_visibility_level': new_level})
-        elif target_id and doc:
-            # 文档访问申请：创建 ResourceShare 个人级共享
-            ResourceShare.objects.get_or_create(
-                resource_type=ResourceType.DOCUMENT,
-                resource_id=target_id,
-                share_scope_type=ShareScopeType.USER,
-                share_scope_id=ticket.applicant_id,
-                defaults={
-                    'access_level': AccessLevel.READ,
-                    'granted_by': reviewer,
-                    'status': ShareStatus.ACTIVE,
-                },
-            )
-            if not doc.has_resource_share:
-                doc.has_resource_share = True
-                doc.save(update_fields=['has_resource_share'])
-            _log_operation(request, 'doc_grant', document=doc,
-                           detail={'ticket_id': ticket.id, 'applicant': ticket.applicant.username,
-                                   'action': action, 'type': 'allow_user'})
+                # 普通单层审批
+                if chain:
+                    chain[0]['approver_id'] = reviewer.id
+                    chain[0]['status'] = 'approved'
+                    chain[0]['comment'] = comment
+                    chain[0]['approved_at'] = timezone.now().isoformat()
+                ticket.approval_chain = chain
+                ticket.status = TicketStatus.APPROVED
+                ticket.approved_at = timezone.now()
+                ticket.save(update_fields=["approval_chain", "status", "approved_at"])
+                TicketFlowLog.objects.create(
+                    ticket=ticket, action='APPROVE', actor=reviewer,
+                    comment=comment, step=0,
+                )
 
-        # 标记工单已执行
-        ticket.status = TicketStatus.EXECUTED
-        ticket.executed_at = timezone.now()
-        ticket.save(update_fields=['status', 'executed_at'])
+            # 审批通过后执行授权写入
+            if action == 'visibility_change' and (doc or node):
+                # visibility_change 工单：修改文档/节点可见性层级
+                # 从 user_reason 中解析目标 visibility_level（创建工单时编码在 reason 文本中）
+                # 兜底使用 PUBLIC（扩大审批通常目标就是全局公开）
+                new_level = VisibilityLevel.PUBLIC
+                m = re.search(r'目标值:(\w+)', user_reason or '')
+                if m:
+                    # 显式编码的目标值（INHERIT 表示继承父级，写回 NULL）
+                    new_level = m.group(1) if m.group(1) in VisibilityLevel.values else None
+                else:
+                    # 兼容旧格式：从申请文本中匹配枚举值，未命中兜底 PUBLIC
+                    for level in VisibilityLevel.values:
+                        if level in (user_reason or ''):
+                            new_level = level
+                            break
+                if node:
+                    # 节点可见范围变更：写回节点（NULL=继承父级，工单目标通常为具体三档值）
+                    node.visibility_level = new_level
+                    node.save(update_fields=['visibility_level', 'updated_at'])
+                    _log_operation(request, 'node_visibility_change', node=node,
+                                   detail={'ticket_id': ticket.id, 'applicant': ticket.applicant.username,
+                                           'new_visibility_level': new_level})
+                else:
+                    doc.visibility_level = new_level
+                    doc.save(update_fields=['visibility_level', 'updated_at'])
+                    _log_operation(request, 'doc_visibility_change', document=doc,
+                                   detail={'ticket_id': ticket.id, 'applicant': ticket.applicant.username,
+                                           'new_visibility_level': new_level})
+            elif target_id and doc:
+                # 文档访问申请：创建 ResourceShare 个人级共享
+                ResourceShare.objects.get_or_create(
+                    resource_type=ResourceType.DOCUMENT,
+                    resource_id=target_id,
+                    share_scope_type=ShareScopeType.USER,
+                    share_scope_id=ticket.applicant_id,
+                    defaults={
+                        'access_level': AccessLevel.READ,
+                        'granted_by': reviewer,
+                        'status': ShareStatus.ACTIVE,
+                    },
+                )
+                if not doc.has_resource_share:
+                    doc.has_resource_share = True
+                    doc.save(update_fields=['has_resource_share'])
+                _log_operation(request, 'doc_grant', document=doc,
+                               detail={'ticket_id': ticket.id, 'applicant': ticket.applicant.username,
+                                       'action': action, 'type': 'allow_user'})
+
+            # 标记工单已执行
+            ticket.status = TicketStatus.EXECUTED
+            ticket.executed_at = timezone.now()
+            ticket.save(update_fields=['status', 'executed_at'])
+            TicketFlowLog.objects.create(ticket=ticket, action='EXECUTE', actor=reviewer)
 
         logger.info(f"[AccessRequest] approved id={ticket.id} applicant={ticket.applicant.username} target={target_type}:{target_id}")
         return Response({
@@ -1737,13 +1766,16 @@ class DocumentViewSet(viewsets.ModelViewSet):
     def reject_access_request(self, request):
         """POST /documents/reject_access_request/  {request_id, comment?}  驳回
 
-        通过 PermissionApprovalTicket 管理审批工单。
-        驳回时在 approval_chain 当前步骤记录驳回意见，工单状态置为 REJECTED。
+        通过统一工单（TicketList + TicketPermissionDetail）管理审批工单。
+        驳回时在 approval_chain 当前步骤记录驳回意见并写 TicketFlowLog(REJECT)，
+        工单状态置为 REJECTED。
         """
         req_id = request.data.get("request_id")
         try:
-            ticket = PermissionApprovalTicket.objects.get(id=req_id, status=TicketStatus.PENDING)
-        except PermissionApprovalTicket.DoesNotExist:
+            ticket = TicketList.objects.select_related(
+                'applicant', 'permission_detail',
+            ).get(id=req_id, status=TicketStatus.PENDING)
+        except TicketList.DoesNotExist:
             raise Http404("申请不存在或已处理")
         target_type, target_id, action, user_reason = _decode_ticket_reason(ticket.reason)
         doc = None
@@ -1769,15 +1801,20 @@ class DocumentViewSet(viewsets.ModelViewSet):
         # 在 approval_chain 当前步骤记录驳回
         chain = list(ticket.approval_chain or [])
         current_step = ticket.current_step or 0
-        if current_step < len(chain):
-            chain[current_step]['approver_id'] = request.user.id
-            chain[current_step]['status'] = 'rejected'
-            chain[current_step]['comment'] = comment
-            chain[current_step]['approved_at'] = timezone.now().isoformat()
+        with transaction.atomic():
+            if current_step < len(chain):
+                chain[current_step]['approver_id'] = request.user.id
+                chain[current_step]['status'] = 'rejected'
+                chain[current_step]['comment'] = comment
+                chain[current_step]['approved_at'] = timezone.now().isoformat()
 
-        ticket.approval_chain = chain
-        ticket.status = TicketStatus.REJECTED
-        ticket.save(update_fields=["approval_chain", "status"])
+            ticket.approval_chain = chain
+            ticket.status = TicketStatus.REJECTED
+            ticket.save(update_fields=["approval_chain", "status"])
+            TicketFlowLog.objects.create(
+                ticket=ticket, action='REJECT', actor=request.user,
+                comment=comment, step=current_step,
+            )
         _log_operation(request, 'doc_grant_reject', document=doc, node=node,
                        detail={'ticket_id': ticket.id, 'applicant': ticket.applicant.username,
                                'action': action, 'target_type': target_type, 'target_id': target_id})

@@ -250,9 +250,11 @@ class TestEvalDashboardTrendAPI(AnalyticsViewsBase):
         assert data['dimension'] == 'all'
 
     def test_with_data(self):
-        qa = self._make_qa(is_success=True, answer_type='rag')
-        self._make_score(qa, 'faithfulness', 0.7)
-        self._make_score(qa, 'faithfulness', 0.9, status='pending')  # 同维度多条
+        # MultiDimensionScore 对 (qa_record, dimension) 唯一，同维度多条须用不同 qa
+        qa1 = self._make_qa(is_success=True, answer_type='rag')
+        qa2 = self._make_qa(is_success=True, answer_type='rag')
+        self._make_score(qa1, 'faithfulness', 0.7)
+        self._make_score(qa2, 'faithfulness', 0.9, status='pending')  # 同维度多条
         resp = self.client.get('/api/v1/analytics/eval-dashboard/trend/',
                                **self.reader_headers)
         assert resp.status_code == 200
@@ -699,10 +701,11 @@ class TestLowScoreAnalysisAPI(AnalyticsViewsBase):
         assert data['by_method']['llm'] == 1
 
     def test_stats_only_completed(self):
-        # 仅统计 status=completed 的记录
-        qa = self._make_qa()
-        self._make_low_analysis(qa, status='completed')
-        self._make_low_analysis(qa, status='pending', avg_score=0.2)
+        # 仅统计 status=completed 的记录（LowScoreAnalysis 对 qa_record 唯一，两条须用不同 qa）
+        qa1 = self._make_qa()
+        qa2 = self._make_qa()
+        self._make_low_analysis(qa1, status='completed')
+        self._make_low_analysis(qa2, status='pending', avg_score=0.2)
         resp = self.client.get('/api/v1/analytics/low-score-analysis/stats/',
                                **self.reader_headers)
         assert resp.status_code == 200

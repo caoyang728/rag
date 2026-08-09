@@ -1,19 +1,9 @@
 """
 测试配置 conftest.py
 - 提供共享的 fixtures
-- 测试间自动间隔 1 秒，避免 teardown 与下一个 setup 之间的资源竞争
 """
-import time
-
 import pytest
 from django.test.client import Client
-
-
-@pytest.fixture(autouse=True)
-def _sleep_between_tests():
-    """每个测试结束后等待 1 秒再执行下一个，避免 IOPS / DB 连接瞬时竞争"""
-    yield
-    time.sleep(1)
 
 
 @pytest.fixture

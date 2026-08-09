@@ -197,11 +197,12 @@ class TestSensitiveFilterCheck:
         assert hits[0].word == '警告词'
 
     @pytest.mark.unit
-    def test_check_disabled(self):
-        """SENSITIVE_FILTER_ENABLED=False 时 check 返回空列表
+    @patch.object(SensitiveFilter, '_is_enabled', return_value=False)
+    def test_check_disabled(self, _mock_enabled):
+        """审查关闭（_is_enabled=False）时 check 返回空列表
 
-        test_settings 中 SENSITIVE_FILTER_ENABLED 默认为 False，
-        _is_enabled 读 settings 得到 False，check 直接返回 []。
+        显式 mock _is_enabled 而非依赖全局 settings：不同环境（test_settings 默认关闭 /
+        生产 settings 默认开启）下测试行为保持确定，不受 DJANGO_SETTINGS_MODULE 覆盖影响。
         """
         sf = _build_filter([('违规词', 'other', 'block', False)])
         hits = sf.check('这段话包含违规词内容')
@@ -317,9 +318,12 @@ class TestSensitiveFilterFeed:
         assert hit is None
 
     @pytest.mark.unit
-    def test_disabled_passthrough(self):
+    @patch.object(SensitiveFilter, '_is_enabled', return_value=False)
+    def test_disabled_passthrough(self, _mock_enabled):
         """审查关闭时 feed 透传 delta（先把 buffer 残余下发，再透传 delta）
 
+        显式 mock _is_enabled 而非依赖全局 settings：不同环境（test_settings 默认关闭 /
+        生产 settings 默认开启）下测试行为保持确定，不受 DJANGO_SETTINGS_MODULE 覆盖影响。
         关闭审查不能影响正常输出，delta 原样下发。
         """
         sf = _build_filter([('违规', 'other', 'block', False)])

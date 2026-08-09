@@ -306,7 +306,7 @@ class Document(models.Model):
             # 归属约束：非公开文档必须归属于团队或部门（无个人级文档）；
             # PUBLIC 全局公开文档允许无组织归属（如 root 下公共文件夹的全局文档）
             models.CheckConstraint(
-                check=models.Q(visibility_level=VisibilityLevel.PUBLIC)
+                condition=models.Q(visibility_level=VisibilityLevel.PUBLIC)
                 | models.Q(team_id__isnull=False)
                 | models.Q(dept_id__isnull=False),
                 name='doc_owner_scope_required',
@@ -580,7 +580,7 @@ class ImageResource(models.Model):
         # CHECK 约束：base64 模式必须有 base64_data，oss 模式必须有 oss_url
         constraints = [
             models.CheckConstraint(
-                check=(
+                condition=(
                     (models.Q(storage_mode='base64') & ~models.Q(base64_data=''))
                     | (models.Q(storage_mode='oss') & ~models.Q(oss_url=''))
                 ),

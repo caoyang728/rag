@@ -67,7 +67,7 @@ docker compose exec django python manage.py init_system
 rag/
 ├── apps/
 │   ├── users/                  # 用户系统（User + RBAC 权限 + 部门/团队 + 文档级权限 + 审批工单）
-│   │   ├── models.py           # User/Department/Team/Role/Permission + Scope 关联表 + PermissionApprovalTicket/RoleConflictRule/PermissionAuditLog
+│   │   ├── models.py           # User/Department/Team/Role/Permission + Scope 关联表 + TicketList 统一工单体系（明细表 4 张）+ RoleConflictRule/PermissionAuditLog
 │   │   ├── signals.py          # 部门/团队变更 → 自动同步 KnowledgeNode 树 + 缓存失效
 │   │   ├── views.py            # 部门/团队 CRUD（含删除保护：有成员/有文档→禁止删除）
 │   │   ├── perm_cache.py       # RBAC 权限分层缓存 L1~L5 + 延迟双删（super_admin 不走缓存）
@@ -103,7 +103,7 @@ rag/
 │   ├── audit/                  # 审计日志（sha256 哈希链防篡改）
 │   ├── security/               # 验证码 / IP 黑白名单 / 登录失败锁定 / 敏感词
 │   ├── analytics/              # 关键词权重 / 准确率日报 / 趋势统计 / 系统监控 / RAG 质量评估
-│   │   ├── models.py           # 15 个模型：关键词权重/日报/系统指标/组织报表/队列深度 + 8 个质量评估模型 + LowScoreAnalysis + RouteAnalysis（三层路由评估）
+│   │   ├── models.py           # 16 个模型：关键词权重/日报/系统指标/组织报表/队列深度 + 9 个质量评估模型 + LowScoreAnalysis + RouteAnalysis（三层路由评估）
 │   │   ├── deepeval_metrics.py # DeepEval 12 维 LLM-as-Judge 评估（检索1+答案6+安全2+业务3）
 │   │   ├── production_eval.py  # 生产对话自动评估（采样率 + 分层限速 + 日预算四重保护）
 │   │   ├── regression_eval.py  # 低分回归测试集（沉淀 + 全链路评估 + pass_count 淘汰）
@@ -118,11 +118,15 @@ rag/
 │   │   └── management/commands/ragas_eval.py  # Ragas 评估管理命令
 │   ├── notification/           # 邮件订阅 / 发送日志
 │   ├── system/                 # 系统配置 / 模型管理 / 变更工单 / Celery 任务日志 / LLM 调用日志
-│   │   ├── models.py           # SystemConfig + LLMModel + ConfigChangeTicket + ModelChangeTicket + CeleryTaskLog + LlmCallLog + DataExportLog
+│   │   ├── models.py           # SystemConfig + LLMModel + CeleryTaskLog + LlmCallLog + DataExportLog（工单模型已统一迁移至 users.TicketList）
 │   │   ├── config_loader.py    # 配置加载器（优先 DB，回退 .env）
 │   │   ├── middleware.py       # 系统级中间件
 │   │   ├── views.py            # 配置/模型/工单/健康检查接口
-│   │   └── management/commands/init_system.py  # 初始化系统数据（角色/权限/配置默认值）
+│   │   ├── scheduler_registry.py # 定时任务注册表（任务清单 + 默认 cron + 中文解释 + 调度工单摘要）
+│   │   ├── schedulers.py       # SystemConfigScheduler（运行期从 SystemConfig 热更新 Beat 调度）
+│   │   └── management/commands/
+│   │       ├── init_system.py  # 初始化系统数据入口（角色/权限/配置默认值，组装 init/ 各模块）
+│   │       └── init/           # 初始化数据模块（roles / permissions / role_permissions / departments / teams / users / global_memories / system_configs / common + initial_data.yaml）
 │   ├── graph/                  # 知识图谱（实体抽取/关系/社区检测/向量检索，Graph RAG）
 │   │   ├── models.py           # GraphEntity + GraphRelation + GraphCommunity（Louvain 社区 + 摘要）
 │   │   ├── extractor.py        # LLM 实体/关系抽取与去重合并
@@ -141,15 +145,13 @@ rag/
 │       └── tasks.py            # Celery 任务（每日刷新过期 Wiki 页面）
 ├── rag_project/                # Django 项目配置、根 URL、Celery、ASGI/WSGI
 │   ├── settings.py             # 主配置（数据库/缓存/队列/中间件/模型）
-│   ├── urls.py                 # 根路由
-│   ├── celery.py               # 5 队列 + 16 个 Beat 定时任务
+│   ├── urls.py                 # 根路由（含前端静态页面路由 + 开发环境 coverage 报告路由）
+│   ├── celery.py               # 5 队列 + 18 个 Beat 定时任务（调度默认值来自 scheduler_registry）
+│   ├── config.py               # 环境配置辅助（.env 加载 / 敏感凭证读取）
+│   ├── test_runner.py          # 自定义测试运行器
+│   ├── pagination.py           # 统一分页类
 │   ├── asgi.py / wsgi.py       # ASGI/WSGI 入口
 │   └── test_settings.py        # 测试专用配置
-├── docs/
-│   └── permission-design.md    # 权限体系设计文档（最终方案）
-├── scripts/
-│   ├── batch_import_docs.py    # 批量导入文档（双阶段异步导入）
-│   └── clean_docs.py           # 清理文档相关数据（Document/Chunk/Vector/Log）
 ├── static/                     # 前端静态资源（开发源码）
 │   ├── css/                    # 公共 common.css + layout.css + 各页面 page.css
 │   ├── fonts/                  # 字体文件（验证码使用 DejaVuSans-Bold.ttf）
@@ -160,6 +162,11 @@ rag/
 │   │   ├── multi-select.js     # 多选下拉组件（搜索 + 全选 + 部门→团队联动）
 │   │   ├── chat.js             # 会话问答（流式 + AbortController + TTFB 展示）
 │   │   ├── upload.js           # 文档上传（版本管理 + 三选项对话框 + 历史轮询）
+│   │   ├── preview-doc.js      # 文档原文预览（分页 + 高亮）
+│   │   ├── ticket-center.js    # 工单中心
+│   │   ├── index.js            # 首页看板
+│   │   ├── graph.js            # 知识图谱可视化页
+│   │   ├── wiki.js             # Wiki 页面浏览页
 │   │   ├── login.js            # 登录（含验证码）
 │   │   ├── profile.js          # 个人资料
 │   │   ├── reset-password.js   # 修改密码
@@ -169,10 +176,11 @@ rag/
 │   │   ├── admin-rbac.js       # 角色权限管理
 │   │   ├── admin-nodes.js      # 知识节点管理（动态加载根类型）
 │   │   ├── admin-docs.js       # 文档审核（待审列表 + 通过/驳回）
-│   │   ├── admin-approvals.js  # 权限审批中心（四视角：待我审批/我已审批/我发起的/全部工单）
+│   │   ├── ticket.js           # 工单中心（四视角：待我审批/我已审批/我的工单/全部工单）
 │   │   ├── admin-analytics.js  # 统计分析
 │   │   ├── admin-eval.js       # 质量评估中心（黄金集/检索/回答/文档/覆盖率/反馈/归因）
 │   │   ├── admin-system-config.js # 系统配置（KV 配置 + 模型管理 + 工单审批）
+│   │   ├── admin-scheduler.js  # 定时任务调度管理（清单 + 修改走工单审批）
 │   │   └── admin-audit.js      # 审计日志
 │   ├── index.html              # 首页
 │   ├── login.html              # 登录页
@@ -185,13 +193,20 @@ rag/
 │   ├── admin-rbac.html         # 角色权限管理页
 │   ├── admin-nodes.html        # 知识节点管理页
 │   ├── admin-docs.html         # 文档审核页
-│   ├── admin-approvals.html    # 权限审批中心页
+│   ├── ticket.html             # 工单中心页
 │   ├── admin-analytics.html    # 统计分析页
 │   ├── admin-eval.html         # 质量评估中心页
 │   ├── admin-system-config.html # 系统配置页
-│   └── admin-audit.html        # 审计日志页
+│   ├── admin-scheduler.html    # 定时任务调度页
+│   ├── admin-audit.html        # 审计日志页
+│   ├── graph.html              # 知识图谱可视化页
+│   └── wiki.html               # Wiki 页面页
+├── scripts/
+│   ├── batch_import_docs.py    # 批量导入文档（双阶段异步导入）
+│   ├── clean_docs.py           # 清理文档相关数据（Document/Chunk/Vector/Log）
+│   └── init_db.sql             # 初始化数据库脚本（含 pgvector 扩展）
 ├── manage.py                   # Django 管理入口
-├── pytest.ini                  # pytest 配置（marker 分层 / DB 复用）
+├── pytest.ini                  # pytest 配置（marker 分层 / DB 复用 / coverage 范围）
 ├── conftest.py                 # pytest 公共 fixture
 ├── Dockerfile
 ├── docker-compose.yml
@@ -225,12 +240,12 @@ rag/
 | GET | `/api/v1/permissions/approvers/` | 可用审批人列表 |
 | GET | `/api/v1/permissions/assignable-roles/` | 可申请角色清单 |
 | POST | `/api/v1/permissions/approval-chain-preview/` | 审批链预览（申请前展示） |
-| GET | `/api/v1/permissions/pending-approvals/` | 待我审批工单（共享审批池） |
-| GET | `/api/v1/permissions/processed-tickets/` | 我已审批工单 |
-| GET | `/api/v1/permissions/my-tickets/` | 我发起的工单 |
-| GET | `/api/v1/permissions/all-tickets/` | 全部工单（仅超管/合规管理员） |
-| POST | `/api/v1/permissions/tickets/{id}/approve/` | 工单通过 |
-| POST | `/api/v1/permissions/tickets/{id}/reject/` | 工单驳回 |
+| GET | `/api/v1/auth/tickets/` | 统一工单中心（四视角 + 类型/状态/搜索 + 分页，默认每页 20） |
+| POST | `/api/v1/auth/tickets/{id}/approve/` | 统一审批通过（按类型路由） |
+| POST | `/api/v1/auth/tickets/{id}/reject/` | 统一驳回（按类型路由） |
+| POST | `/api/v1/auth/tickets/{id}/withdraw/` | 创建人撤回（按类型路由） |
+| POST | `/api/v1/permissions/tickets/{id}/approve/` | 权限域工单通过（工单中心委托） |
+| POST | `/api/v1/permissions/tickets/{id}/reject/` | 权限域工单驳回（工单中心委托） |
 | GET/POST | `/api/v1/permissions/applications/` | 权限申请单（双轨：申请拉） |
 | POST | `/api/v1/permissions/applications/{id}/withdraw/` | 撤回权限申请 |
 
@@ -284,23 +299,20 @@ rag/
 | GET | `/api/v1/security/captcha/` | 验证码图片（140×41，6 干扰线，30次/分钟限流） |
 | GET | `/api/v1/audit/logs/` | 审计日志列表 |
 | POST | `/api/v1/audit/verify-chain/` | 哈希链完整性校验 |
-| GET | `/api/v1/security/ip-whitelist/` `/ip-blacklist/` | IP 黑白名单 |
+| GET | `/api/v1/security/ip-whitelist/` `/ip-blacklist/` | IP 黑白名单（含明细 CRUD） |
+| GET | `/api/v1/security/login-attempts/` | 登录尝试记录（失败锁定） |
+| CRUD | `/api/v1/security/sensitive-words/` | 敏感词词库管理 |
 | GET | `/api/v1/system/health/` | 健康检查 |
 | GET | `/api/v1/system/stats/` | 首页看板 |
-| GET | `/api/v1/system/search/` | 全局搜索（文档、代码、会话） |
 | GET | `/api/v1/system/configs/` | 系统配置列表（按 category 分组） |
-| GET/PUT | `/api/v1/system/configs/<key>/` | 查看/修改单个配置（走工单流程） |
+| GET/PUT | `/api/v1/system/configs/<key>/` | 查看/修改单个配置（走工单流程，调度类走 SCHEDULE_ 前缀专属校验） |
+| GET | `/api/v1/system/scheduler/tasks/` | 定时任务调度清单（默认 cron + 当前值 + 待审批工单数） |
 | CRUD | `/api/v1/system/llm-models/` | LLM/Embedding/Rerank 模型管理 |
-| GET/POST | `/api/v1/system/config-tickets/` | 配置变更工单列表/创建 |
-| GET | `/api/v1/system/config-tickets/{id}/` | 配置变更工单详情 |
-| POST | `/api/v1/system/config-tickets/{id}/approve/` | 配置工单通过（高风险需超管复核） |
-| POST | `/api/v1/system/config-tickets/{id}/reject/` | 配置工单驳回 |
-| POST | `/api/v1/system/config-tickets/{id}/withdraw/` | 配置工单撤回 |
-| GET | `/api/v1/system/model-tickets/` | 模型变更工单列表 |
-| GET | `/api/v1/system/model-tickets/{id}/` | 模型变更工单详情 |
-| POST | `/api/v1/system/model-tickets/{id}/approve/` | 模型工单通过（删除需超管复核） |
-| POST | `/api/v1/system/model-tickets/{id}/reject/` | 模型工单驳回 |
-| POST | `/api/v1/system/model-tickets/{id}/withdraw/` | 模型工单撤回 |
+| GET/POST | `/api/v1/system/tickets/` | 统一变更工单列表/创建（配置 / 调度 / 模型变更合并） |
+| GET | `/api/v1/system/tickets/{id}/` | 统一变更工单详情 |
+| POST | `/api/v1/system/tickets/{id}/approve/` | 工单通过（高风险 / 删除模型需超管复核） |
+| POST | `/api/v1/system/tickets/{id}/reject/` | 工单驳回 |
+| POST | `/api/v1/system/tickets/{id}/withdraw/` | 工单撤回 |
 
 ### 通知（notification）
 
@@ -308,6 +320,20 @@ rag/
 |--------|------|------|
 | CRUD | `/api/v1/notification/subscriptions/` | 邮件订阅管理 |
 | GET | `/api/v1/notification/send-logs/` | 邮件发送日志 |
+
+### 知识图谱（graph）
+
+| Method | Path | 说明 |
+|--------|------|------|
+| CRUD | `/api/v1/graph/entities/` | 图谱实体（可视化 + 实体检索） |
+| CRUD | `/api/v1/graph/communities/` | 图谱社区（Louvain 社区检测结果 + 摘要） |
+
+### Wiki（wiki）
+
+| Method | Path | 说明 |
+|--------|------|------|
+| CRUD | `/api/v1/wiki/pages/` | Wiki 页面管理（挂载到知识节点 / 图谱社区） |
+| POST | `/api/v1/wiki/pages/generate/` | 手动触发 Wiki 页面生成 |
 
 ### 系统监控（analytics）
 
@@ -323,6 +349,7 @@ rag/
 | GET | `/api/v1/analytics/queue-depth/` | Celery 队列深度（实时 + 历史 7 天趋势） |
 | GET | `/api/v1/analytics/realtime/` | 实时指标快照（5 分钟刷新 + last_flush_at） |
 | GET | `/api/v1/analytics/bad-feedbacks/` | 差评反馈列表 |
+| GET | `/api/v1/analytics/bad-feedbacks/{id}/` | 差评反馈详情（含关联 chunk） |
 
 ### RAG 质量评估（analytics）
 
@@ -337,6 +364,7 @@ rag/
 | POST | `/api/v1/analytics/eval/retrieval/` | 触发离线检索评估（Recall@K/MRR/NDCG） |
 | POST | `/api/v1/analytics/eval/answer/` | 触发回答质量评估 |
 | GET | `/api/v1/analytics/eval/retrieval-reports/` | 检索评估报告列表 |
+| GET | `/api/v1/analytics/doc-quality/` | 文档质量报告列表（明细） |
 | POST | `/api/v1/analytics/doc-quality/evaluate/` | 触发文档质量评估 |
 | GET | `/api/v1/analytics/doc-quality/reports/` | 文档质量报告列表 |
 | POST | `/api/v1/analytics/multi-dim-eval/` | 触发多维度回答评估（DeepEval 12 维） |
@@ -345,6 +373,10 @@ rag/
 | GET | `/api/v1/analytics/eval-dashboard/trend/` | 评估趋势（按日聚合） |
 | GET | `/api/v1/analytics/eval-dashboard/low-score-qa/` | 低分 QA 列表 |
 | GET | `/api/v1/analytics/eval-dashboard/qa-detail/` | 单条 QA 评估详情（12 维分数） |
+| GET | `/api/v1/analytics/eval-dashboard/route-analysis/` | 三层路由分析看板（wiki/graphrag_local/graphrag_global/rag 命中率 + 均分对比） |
+| POST | `/api/v1/analytics/route-analysis/aggregate/` | 手动触发路由分析日聚合（可回补指定日期） |
+| POST | `/api/v1/analytics/wiki-quality/evaluate/` | 触发 Wiki 页面质量评估（忠实度/完整性） |
+| GET | `/api/v1/analytics/wiki-quality/` | Wiki 页面质量报告列表 |
 | POST | `/api/v1/analytics/coverage/generate/` | 生成知识库覆盖率报告 |
 | GET | `/api/v1/analytics/coverage/reports/` | 覆盖率报告列表 |
 | GET | `/api/v1/analytics/coverage/reports/{id}/` | 覆盖率报告详情 |
@@ -392,7 +424,12 @@ rag/
 | UserRoleRel | `user_role_global_rel` | 用户↔全局角色关联 |
 | UserDeptScopeRel | `user_role_dept_scope_rel` | 用户↔部门范围角色关联（限定部门） |
 | UserTeamScopeRel | `user_role_team_scope_rel` | 用户↔团队范围角色关联（限定团队） |
-| PermissionApprovalTicket | `permission_approval_ticket` | 权限配置审批工单（共享审批池 + 顺序执行 + 状态机） |
+| TicketList | `ticket_list` | 统一变更工单主表（权限/配置/调度/模型四类，共享审批池 + 顺序执行 + 状态机） |
+| TicketPermissionDetail | `permission_ticket_detail` | 权限变更工单明细（原 PermissionApprovalTicket 迁移至此） |
+| TicketConfigDetail | `config_ticket_detail` | 配置变更工单明细（高风险需超管复核） |
+| TicketScheduleDetail | `schedule_ticket_detail` | 定时任务调度变更工单明细（高风险需超管复核） |
+| TicketModelDetail | `model_ticket_detail` | 模型变更工单明细（修改/停用/删除，删除需超管复核） |
+| TicketFlowLog | `ticket_flow_log` | 工单流转日志（审批操作留痕） |
 | RoleConflictRule | `role_conflict_rule` | 角色冲突规则（互斥角色校验） |
 | PermissionAuditLog | `permission_audit_log` | 权限审计日志（只 INSERT 不删，失败不阻断主业务） |
 
@@ -434,6 +471,7 @@ rag/
 | CoverageReport | `analytics_coverage_report` | 知识库覆盖率报告（热门覆盖 + 知识空白 + 重复检测） |
 | LowScoreAnalysis | `analytics_low_score_analysis` | 低分对话归因分析（规则归因为主 + LLM 个性化建议 + 分层触发） |
 | RouteAnalysis | `analytics_route` | 三层路由决策分析（wiki / graphrag_local / graphrag_global / rag，命中率与质量对比） |
+| WikiPageQualityScore | `analytics_wiki_page_quality_score` | Wiki 页面质量评估（忠实度/完整性） |
 
 ### 系统配置与日志（system）
 
@@ -441,11 +479,11 @@ rag/
 |------|------|------|
 | SystemConfig | `system_config` | 系统配置 KV（按 category 分组 + 风险等级 + 只读标记） |
 | LLMModel | `system_llm_model` | LLM/Embedding/Rerank 模型配置（多 Provider 支持） |
-| ConfigChangeTicket | `system_config_ticket` | 配置变更工单（普通审核 + 高风险超管复核） |
-| ModelChangeTicket | `system_model_ticket` | 模型变更工单（修改/停用/删除，删除需超管复核） |
 | CeleryTaskLog | `system_celery_task_log` | Celery 异步任务日志（状态/耗时/重试） |
 | LlmCallLog | `system_llm_call_log` | LLM 调用日志（Token/成本/延迟，成本可观测） |
 | DataExportLog | `system_data_export_log` | 数据导出日志（审计 + 防越权） |
+
+> 配置/模型变更工单已统一迁移至 users 的 `ticket_list` + 明细表体系（见上文），system 侧不再有独立工单表。
 
 ### 会话与反馈（chat）
 
@@ -567,22 +605,22 @@ super_admin 可绕过双审直接发布。
 
 权限判定遵循 **Deny > Allow** 不可变原则，优先级从高到低（[apps/knowledge/access.py](apps/knowledge/access.py) `resolve_doc_access`）：
 
-0. **super_admin** → 全权限（系统级快路径，鉴权绕过 permission_key；**但不绕过黑名单**）
-1. **Owner** → 全权限（绕过黑名单，Owner 不被自己文档拉黑）
-2. **黑名单拦截**（ResourceBlockList，仅个人）→ 全部拒绝（Deny Override 铁律，对超管也生效，独立表独立优先级）
-3. **kb_admin / 团队组长** → 全权限
-4. **visibility_level='PUBLIC'** → 放行
-5. **visibility_level='DEPT_ONLY' 且同部门** → 放行
-6. **visibility_level='TEAM_ONLY' 且同团队**（支持多团队） → 放行
-7. **主动共享命中**（ResourceShare，部门/团队/个人统一表，未过期，支持节点级子树继承）→ 放行
+0. **Owner** → 全权限（绕过黑名单，Owner 不被自己文档拉黑——所有权原则，唯一绕过黑名单的角色）
+1. **黑名单拦截**（ResourceBlockList，仅个人，文档级 + 节点级继承）→ 全部拒绝（Deny Override 铁律，对超管也生效，独立表独立优先级）
+2. **super_admin** → 全权限（系统级快路径，鉴权绕过 permission_key；**但不绕过黑名单**）
+3. **kb_admin / 团队组长**（kb.manage_all 或文档归属团队在管理范围内，支持多团队）→ 全权限
+4. **自然可见范围**（visibility_level：PUBLIC 全员 / DEPT_ONLY 部门含祖先链 / TEAM_ONLY 团队）→ 可读
+5. **跨范围共享命中**（ResourceShare，部门/团队/个人统一表，未过期，支持节点级子树继承）→ 可读
+6. **兜底拒绝**
 
 否则拒绝。检索层与文档层均做权限过滤，Agent 在混合检索后做二次权限校验。
+非管理员可读用户可下载/分享取决于文档自身 `allow_download` / `allow_share` 标志。
 
 > 设计要点：黑名单是 Deny Override 铁律，对超管也生效，只有 Owner 绕过（所有权原则）。ResourceShare 单表 + 枚举（部门/团队/个人统一），覆盖索引 0 回表；节点级继承通过 KnowledgeNode.path 前缀匹配（LIKE '/1/5/12/%'）一次搞定，无需递归。ResourceBlockList 独立表独立鉴权优先级，绝不和 Allow 混表，避免 SQL 逻辑判断顺序出错导致 Deny 被覆盖。
 
 ### 7.6 权限申请双轨制
 
-- **轨道 1（申请拉取）**：用户提交 PermissionApprovalTicket → 共享审批池顺序审批 → 写入 ResourceShare
+- **轨道 1（申请拉取）**：用户提交 TicketList（权限类型）→ 共享审批池顺序审批 → 写入 ResourceShare
 - **轨道 2（授权推送）**：组长/管理员直接操作 ResourceShare 表授予
 
 审批规则：
@@ -920,6 +958,12 @@ docker compose exec django pytest -m unit                  # 仅单元测试
 docker compose exec django pytest -m integration           # 仅集成测试
 docker compose exec django pytest -m smoke                 # 冒烟测试（CI 门禁用）
 docker compose exec django pytest apps/users/tests/        # 指定 app
+
+# 覆盖率统计（覆盖范围与报告目录由 .coveragerc 控制：source=apps，排除 tests/migrations，
+# HTML 报告输出到 coverage_report/，与前端 /coverage/ 静态服务目录一致）
+docker compose exec django pytest --cov=apps --cov-report=term-missing  # 终端输出覆盖率明细
+docker compose exec django pytest --cov=apps --cov-report=html          # 生成 HTML 覆盖率报告（coverage_report/）
+# 生成后可访问 http://localhost:8000/coverage/ 查看（仅开发环境挂载，生产 DEBUG=False 时 404）
 ```
 
 ---

@@ -21,12 +21,14 @@ from apps.retrieval.permission import build_permission_q
 def _apply_ef_search(cursor, ef: int):
     """设置本次连接的 HNSW ef_search 参数
 
-    使用参数化查询避免 SQL 注入：ef 来自 settings/调用方传入，虽已 int() 钳制，
-    但仍统一走占位符，避免动态拼接 SQL 字符串。
+    PostgreSQL 的 SET LOCAL 语句不支持参数占位符（$1），参数化写法会在语法层面
+    失败并将当前事务标记为 aborted，导致后续同一事务内的 SQL 全部报错
+    （InFailedSqlTransaction）。因此改用 set_config('hnsw.ef_search', value, true)
+    函数调用：第三个参数 is_local=true 等价于 SET LOCAL，且支持参数化绑定，无注入风险。
     """
     try:
-        # 参数化查询：ef 已在外层 int() 钳制为整数，此处用占位符防止 SQL 注入
-        cursor.execute('SET LOCAL hnsw.ef_search = %s;', (int(ef),))
+        # set_config 支持参数化：ef 已在外层 int() 钳制为整数，此处用占位符防止 SQL 注入
+        cursor.execute("SELECT set_config('hnsw.ef_search', %s, true)", (str(int(ef)),))
     except Exception as e:
         logger.warning(f'[VectorStore] set hnsw.ef_search failed: {e}')
 

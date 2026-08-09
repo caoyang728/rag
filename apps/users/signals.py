@@ -43,7 +43,14 @@ def _invalidate_visibility_cache():
 def _delayed_invalidate_cache(delay=5):
     """延迟删除缓存（延迟双删）"""
     try:
-        # 尝试使用Celery
+        # 测试/调试环境（CELERY_TASK_ALWAYS_EAGER=True）下 send_task 不会真正派发任务，
+        # Celery 会抛 AlwaysEagerIgnored 告警，这里直接同步执行任务体，保证缓存失效真实生效
+        from django.conf import settings
+        if getattr(settings, "CELERY_TASK_ALWAYS_EAGER", False):
+            _invalidate_visibility_cache()
+            logger.debug("Invalidated visibility cache synchronously (eager mode)")
+            return
+        # 生产环境使用 Celery 延迟双删，避免修改后并发读命中旧缓存
         from celery import current_app
         current_app.send_task('apps.users.tasks.delayed_invalidate_visibility_cache', countdown=delay)
         logger.debug("Scheduled delayed cache invalidation via Celery")

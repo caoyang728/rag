@@ -17,6 +17,7 @@ import pytest
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import Client
 from django.utils import timezone
+from rest_framework.exceptions import PermissionDenied
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.knowledge.models import (
@@ -26,7 +27,7 @@ from apps.knowledge.models import (
 from apps.knowledge.views import (
     _normalize_visibility_level, _encode_ticket_reason, _decode_ticket_reason,
     _extract_last_comment, _detect_file_type, _build_tree, _get_user_role,
-    DocumentUploadView,
+    DocumentUploadView, KnowledgeNodeViewSet,
 )
 from apps.knowledge.tests.test_views import (
     _get_or_create_role, _create_test_user, _auth_headers, _create_document,
@@ -34,7 +35,7 @@ from apps.knowledge.tests.test_views import (
 )
 from apps.users.models import (
     User, Role, UserRoleRel, GrantStatus, Department, Team, Permission, RolePermissionRel,
-    PermissionApprovalTicket, TicketStatus, TicketChangeType,
+    TicketList, TicketStatus, TicketChangeType,
 )
 
 
@@ -332,8 +333,8 @@ class TestNodeUpdate(KnowledgeViewsExtraBase):
             **_auth_headers(self.super_admin))
         assert resp.status_code == 403
         assert '工单' in resp.json()['details']['detail']
-        ticket = PermissionApprovalTicket.objects.filter(
-            reason__startswith=f'[node:{self.category_node.id}:visibility_change]',
+        ticket = TicketList.objects.filter(
+            permission_detail__reason__startswith=f'[node:{self.category_node.id}:visibility_change]',
             status=TicketStatus.PENDING,
         ).first()
         assert ticket is not None
@@ -352,8 +353,8 @@ class TestNodeUpdate(KnowledgeViewsExtraBase):
             content_type='application/json',
             **_auth_headers(self.super_admin))
         assert resp.status_code == 200
-        assert PermissionApprovalTicket.objects.filter(
-            reason__startswith=f'[node:{self.category_node.id}:visibility_change]',
+        assert TicketList.objects.filter(
+            permission_detail__reason__startswith=f'[node:{self.category_node.id}:visibility_change]',
         ).count() == 0
 
     def _make_dept_manager(self):
@@ -382,8 +383,8 @@ class TestNodeUpdate(KnowledgeViewsExtraBase):
             content_type='application/json',
             **_auth_headers(self.team_leader))
         assert resp.status_code == 403
-        ticket = PermissionApprovalTicket.objects.filter(
-            reason__startswith=f'[node:{self.category_node.id}:visibility_change]',
+        ticket = TicketList.objects.filter(
+            permission_detail__reason__startswith=f'[node:{self.category_node.id}:visibility_change]',
             status=TicketStatus.PENDING,
         ).first()
         assert ticket is not None
@@ -402,8 +403,8 @@ class TestNodeUpdate(KnowledgeViewsExtraBase):
             content_type='application/json',
             **_auth_headers(mgr))
         assert resp.status_code == 403
-        ticket = PermissionApprovalTicket.objects.filter(
-            reason__startswith=f'[node:{self.category_node.id}:visibility_change]',
+        ticket = TicketList.objects.filter(
+            permission_detail__reason__startswith=f'[node:{self.category_node.id}:visibility_change]',
             status=TicketStatus.PENDING,
         ).first()
         assert ticket is not None
@@ -419,8 +420,8 @@ class TestNodeUpdate(KnowledgeViewsExtraBase):
             data=json.dumps({'visibility_level': 'PUBLIC'}),
             content_type='application/json',
             **_auth_headers(self.team_leader))
-        ticket = PermissionApprovalTicket.objects.filter(
-            reason__startswith=f'[node:{self.category_node.id}:visibility_change]',
+        ticket = TicketList.objects.filter(
+            permission_detail__reason__startswith=f'[node:{self.category_node.id}:visibility_change]',
             status=TicketStatus.PENDING,
         ).first()
         # 部门经理审批（匹配 DEPT_LEADER scope）
@@ -442,8 +443,8 @@ class TestNodeUpdate(KnowledgeViewsExtraBase):
             data=json.dumps({'visibility_level': 'PUBLIC'}),
             content_type='application/json',
             **_auth_headers(self.team_leader))
-        ticket = PermissionApprovalTicket.objects.filter(
-            reason__startswith=f'[node:{self.category_node.id}:visibility_change]',
+        ticket = TicketList.objects.filter(
+            permission_detail__reason__startswith=f'[node:{self.category_node.id}:visibility_change]',
             status=TicketStatus.PENDING,
         ).first()
         # 普通用户（无 user.manage、非管理员）审批 → 403
@@ -464,8 +465,8 @@ class TestNodeUpdate(KnowledgeViewsExtraBase):
             data=json.dumps({'visibility_level': 'PUBLIC'}),
             content_type='application/json',
             **_auth_headers(self.super_admin))
-        ticket = PermissionApprovalTicket.objects.filter(
-            reason__startswith=f'[node:{self.category_node.id}:visibility_change]',
+        ticket = TicketList.objects.filter(
+            permission_detail__reason__startswith=f'[node:{self.category_node.id}:visibility_change]',
             status=TicketStatus.PENDING,
         ).first()
         assert len(ticket.approval_chain) == 2
@@ -556,4 +557,131 @@ class TestNodeDestroy(KnowledgeViewsExtraBase):
 # ============================================================================
 # DocumentViewSet restore / hard_delete / reparse / download / raw_content
 # ============================================================================
+
+
+# ============================================================================
+# KnowledgeNodeViewSet 辅助方法 / 角色领地分支
+# ============================================================================
+class TestNodeViewSetHelpers(KnowledgeViewsExtraBase):
+    """KnowledgeNodeViewSet 辅助方法异常兜底与领地校验"""
+
+    def _make_dept_manager(self, dept):
+        """构造部门经理：user.manage 权限 + 主部门归属"""
+        user = _create_test_user('mgr2_' + dept.code)
+        user.department = dept
+        user.save(update_fields=['department'])
+        role = _get_or_create_role('dept_manager')
+        perm, _ = Permission.objects.get_or_create(
+            permission_key='user.manage',
+            defaults={'permission_name': '用户管理', 'module': 'user'})
+        RolePermissionRel.objects.get_or_create(
+            role=role, permission=perm,
+            defaults={'granted_by': self.super_admin, 'is_active': True})
+        UserRoleRel.objects.get_or_create(
+            user=user, role=role,
+            defaults={'status': GrantStatus.ACTIVE})
+        return user
+
+    @pytest.mark.integration
+    @patch('apps.users.models.Team.objects.filter',
+           side_effect=RuntimeError('db down'))
+    def test_get_team_leader_paths_exception_returns_empty(self, mock_filter):
+        """Team 反查异常 → 兜底空列表"""
+        assert KnowledgeNodeViewSet()._get_team_leader_paths(self.team_leader) == []
+
+    @pytest.mark.integration
+    def test_is_admin_user_exception_returns_false(self):
+        """is_kb_admin 属性异常 → 兜底 False"""
+        from unittest.mock import PropertyMock
+        with patch.object(User, 'is_kb_admin', new_callable=PropertyMock,
+                          side_effect=RuntimeError('perm cache down')):
+            assert KnowledgeNodeViewSet()._is_admin_user(self.normal_user) is False
+
+    @pytest.mark.integration
+    def test_check_dept_node_write_folder_outside_dept_denied(self):
+        """FOLDER 节点不在本部门子树 → PermissionDenied"""
+        mgr = self._make_dept_manager(self.dept)
+        other_dept = Department.objects.create(name='市场部', code='mk')
+        other_dept_node = self._create_node(
+            '市场部', 'folder', node_level=2, parent=self.root_node,
+            ref_id=other_dept.id)
+        other_folder = self._create_node(
+            '市场分类', 'folder', node_level=3, parent=other_dept_node)
+        with pytest.raises(PermissionDenied):
+            KnowledgeNodeViewSet()._check_dept_node_write(other_folder, mgr)
+
+    @pytest.mark.integration
+    def test_check_dept_node_write_own_folder_ok(self):
+        """本部门子树 FOLDER → 校验通过"""
+        mgr = self._make_dept_manager(self.dept)
+        KnowledgeNodeViewSet()._check_dept_node_write(self.category_node, mgr)
+
+
+class TestNodeDestroyRoleBranch(KnowledgeViewsExtraBase):
+    """KnowledgeNodeViewSet.destroy 非管理员领地分支"""
+
+    def _make_dept_manager(self, dept):
+        """构造部门经理：user.manage 权限 + 主部门归属"""
+        user = _create_test_user('mgr3_' + dept.code)
+        user.department = dept
+        user.save(update_fields=['department'])
+        role = _get_or_create_role('dept_manager')
+        perm, _ = Permission.objects.get_or_create(
+            permission_key='user.manage',
+            defaults={'permission_name': '用户管理', 'module': 'user'})
+        RolePermissionRel.objects.get_or_create(
+            role=role, permission=perm,
+            defaults={'granted_by': self.super_admin, 'is_active': True})
+        UserRoleRel.objects.get_or_create(
+            user=user, role=role,
+            defaults={'status': GrantStatus.ACTIVE})
+        return user
+
+    @pytest.mark.integration
+    def test_destroy_by_dept_manager_own_dept_204(self):
+        """部门经理删除本部门空文件夹 → 204
+
+        基类 _create_node 按 node_level 推导 node_kind（3→ORG），此处需
+        显式置为 FOLDER：部门经理领地校验只认 FOLDER 分支（path 前缀匹配），
+        且 destroy 的节点保护会拦截非 FOLDER。
+        """
+        mgr = self._make_dept_manager(self.dept)
+        folder = self._create_node(
+            '部门空文件夹', 'folder', node_level=3, parent=self.dept_node)
+        folder.node_kind = 'FOLDER'
+        folder.save(update_fields=['node_kind'])
+        resp = self.client.delete(
+            f'/api/v1/knowledge/nodes/{folder.id}/',
+            **_auth_headers(mgr))
+        assert resp.status_code == 204
+        folder.refresh_from_db()
+        assert folder.is_deleted is True
+
+    @pytest.mark.integration
+    def test_destroy_by_normal_user_403(self):
+        """普通用户删除文件夹 → 403"""
+        empty = self._create_node(
+            '普通文件夹', 'folder', node_level=5, parent=self.team_node)
+        resp = self.client.delete(
+            f'/api/v1/knowledge/nodes/{empty.id}/',
+            **_auth_headers(self.normal_user))
+        assert resp.status_code == 403
+        # 统一错误响应：原始 detail 位于 details 内
+        assert '没有删除文件夹的权限' in resp.json()['details']['detail']
+
+
+class TestNodeUpdateRoleBranch(KnowledgeViewsExtraBase):
+    """KnowledgeNodeViewSet.perform_update 非管理员领地分支"""
+
+    @pytest.mark.integration
+    def test_update_by_normal_user_403(self):
+        """普通用户修改文件夹 → 403"""
+        resp = self.client.patch(
+            f'/api/v1/knowledge/nodes/{self.category_node.id}/',
+            data=json.dumps({'name': '改名'}),
+            content_type='application/json',
+            **_auth_headers(self.normal_user))
+        assert resp.status_code == 403
+        # 统一错误响应：原始 detail 位于 details 内
+        assert '没有修改文件夹的权限' in resp.json()['details']['detail']
 

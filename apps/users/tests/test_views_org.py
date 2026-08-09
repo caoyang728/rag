@@ -16,7 +16,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from apps.users.models import (
     User, Role, Department, Team, Permission, RolePermissionRel,
     UserRoleRel, UserDeptScopeRel, UserTeamScopeRel,
-    PermissionApprovalTicket, TicketStatus, TicketChangeType, ScopeType,
+    TicketList, TicketStatus, TicketChangeType, ScopeType,
     GrantStatus, RoleType, DataScope,
 )
 from apps.users.tests.test_views_base import (
@@ -47,17 +47,20 @@ class TestDepartmentViewSet(UsersAPIExtraBase):
 
     @pytest.mark.integration
     def test_create_by_admin_201_with_auto_code(self):
-        """超管创建部门 → 201，未传 code 时自动生成拼音首字母编码"""
+        """超管创建部门 → 201，未传 code 时自动生成拼音首字母编码
+
+        注意:部门名避开公共基座已建的"测试部"(UsersAPITestBase),防同名唯一冲突。
+        """
         resp = self.client.post(
             '/api/v1/auth/departments/',
-            data=json.dumps({'name': '测试部'}),
+            data=json.dumps({'name': '测试部X'}),
             content_type='application/json', **self.admin_headers,
         )
         assert resp.status_code == 201
         data = resp.json()
-        assert data['name'] == '测试部'
+        assert data['name'] == '测试部X'
         assert data['code']  # 自动编码非空
-        assert Department.objects.filter(name='测试部', is_deleted=False).exists()
+        assert Department.objects.filter(name='测试部X', is_deleted=False).exists()
 
     @pytest.mark.integration
     def test_create_normal_user_403(self):
@@ -81,11 +84,11 @@ class TestDepartmentViewSet(UsersAPIExtraBase):
         assert '已存在' in resp.json().get('detail', '')
 
     @pytest.mark.integration
-    def test_create_with_invalid_leader_ignored_201(self):
-        """create 传无效 leader_id → 201 但 leader 不落库（create 未校验，仅 update 校验）
+    def test_create_with_leader_id_ignored_201(self):
+        """create 传 leader_id → 201 但 leader 不落库
 
-        实际实现：create 中 _set_leader 的返回值被忽略，无效 leader 静默不设置，
-        与 update 路径（返回 400）行为不一致 —— 本用例记录该实际行为。
+        部门经理改由"任命工单"(GRANT dept_manager)设置,审批通过后同步 leader_id,
+        组织 CRUD 不再直接写 leader_id。
         """
         resp = self.client.post(
             '/api/v1/auth/departments/',
@@ -123,8 +126,8 @@ class TestDepartmentViewSet(UsersAPIExtraBase):
         assert self.dept_a.name == '研发一部'
 
     @pytest.mark.integration
-    def test_update_set_leader_success(self):
-        """设置部门 leader（活跃用户）→ 200，leader 落库"""
+    def test_update_leader_id_ignored(self):
+        """PATCH leader_id → 200 但 leader 不落库(任命工单设置,CRUD 不再直接写)"""
         resp = self.client.patch(
             f'/api/v1/auth/departments/{self.dept_a.id}/',
             data=json.dumps({'leader_id': self.normal_user.id}),
@@ -132,17 +135,17 @@ class TestDepartmentViewSet(UsersAPIExtraBase):
         )
         assert resp.status_code == 200
         self.dept_a.refresh_from_db()
-        assert self.dept_a.leader_id == self.normal_user.id
+        assert self.dept_a.leader_id is None
 
     @pytest.mark.integration
-    def test_update_invalid_leader_400(self):
-        """leader_id 指向不存在用户 → 400（_set_leader 校验）"""
+    def test_update_invalid_leader_ignored_200(self):
+        """leader_id 指向不存在用户 → 200 且被忽略(不再走 _set_leader 校验)"""
         resp = self.client.patch(
             f'/api/v1/auth/departments/{self.dept_a.id}/',
             data=json.dumps({'leader_id': 999999}),
             content_type='application/json', **self.admin_headers,
         )
-        assert resp.status_code == 400
+        assert resp.status_code == 200
 
     @pytest.mark.integration
     def test_destroy_with_users_400(self):
@@ -252,8 +255,8 @@ class TestTeamViewSet(UsersAPIExtraBase):
         assert resp.status_code == 403
 
     @pytest.mark.integration
-    def test_create_with_leader(self):
-        """创建团队并指定 leader → 201"""
+    def test_create_with_leader_id_ignored(self):
+        """创建团队并传 leader_id → 201 但组长不落库(任命工单设置,CRUD 不再直接写)"""
         resp = self.client.post(
             '/api/v1/auth/teams/',
             data=json.dumps({
@@ -263,7 +266,7 @@ class TestTeamViewSet(UsersAPIExtraBase):
             content_type='application/json', **self.admin_headers,
         )
         assert resp.status_code == 201
-        assert resp.json()['leader_id'] == self.normal_user.id
+        assert resp.json()['leader_id'] is None
 
     @pytest.mark.integration
     def test_create_restores_deleted_team(self):

@@ -112,7 +112,8 @@ class TestWriteAuditDB:
         assert log.before_snapshot == {'role': 'viewer'}
         assert log.after_snapshot == {'role': 'contributor'}
         assert log.result == 'SUCCESS'
-        assert log.ip_address == '10.0.0.1'
+        # GenericIPAddressField 读回为 IPv4Address 对象，需 str() 后与字符串比较
+        assert str(log.ip_address) == '10.0.0.1'
         assert log.user_agent == 'curl/8'
 
     def test_write_audit_actor_none_allowed(self):

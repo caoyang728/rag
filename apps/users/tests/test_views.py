@@ -64,6 +64,13 @@ class UsersAPITestBase:
     @pytest.fixture(autouse=True)
     def _env(self):
         """pytest fixture：注入 client/超管/普通用户/部门/团队 + JWT header"""
+        self._setup_env()
+
+    def _setup_env(self):
+        """公共环境初始化：client/超管/普通用户/部门/团队 + JWT header
+
+        抽成普通方法而非 fixture 内联，便于子类基座(UsersAPIExtraBase)复用。
+        """
         self.client = Client()
         # 预建 viewer 角色（UserSerializer 兜底展示依赖）
         _get_or_create_role('viewer')

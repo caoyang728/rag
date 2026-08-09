@@ -19,7 +19,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from apps.users.models import (
-    User, Role, UserRoleRel, GrantStatus, Department, Team)
+    User, Role, UserRoleRel, UserDeptScopeRel, UserTeamScopeRel, RolePermissionRel,
+    Permission, GrantStatus, Department, Team)
 from apps.users import signals
 from apps.users.tasks import delayed_invalidate_visibility_cache
 from apps.memory.models import UserMemory, Session, SessionMemory
@@ -70,17 +71,29 @@ class TestInvalidateVisibilityCache:
 
 
 class TestDelayedInvalidateCache:
-    """_delayed_invalidate_cache 延迟双删调度测试"""
+    """_delayed_invalidate_cache 延迟双删调度测试
+
+    eager 模式（测试环境 CELERY_TASK_ALWAYS_EAGER=True）下同步执行任务体；
+    生产环境通过 Celery send_task 延迟派发。
+    """
 
     @pytest.mark.unit
-    def test_send_task_with_countdown(self):
-        """应通过 Celery 发送延迟任务，countdown=5"""
+    def test_send_task_with_countdown_when_not_eager_then_calls_send_task(self):
+        """非 eager 模式应通过 Celery 发送延迟任务，countdown=5"""
         mock_app = MagicMock()
         # current_app 在 signals 内部 import（celery），patch 原模块路径
-        with patch('celery.current_app', mock_app):
+        with patch('celery.current_app', mock_app), \
+                patch('django.conf.settings.CELERY_TASK_ALWAYS_EAGER', False):
             signals._delayed_invalidate_cache()
         mock_app.send_task.assert_called_once_with(
             'apps.users.tasks.delayed_invalidate_visibility_cache', countdown=5)
+
+    @pytest.mark.unit
+    def test_delayed_invalidate_when_eager_then_calls_invalidate_synchronously(self):
+        """eager 模式下不派发 Celery 任务，同步执行缓存失效"""
+        with patch('apps.users.signals._invalidate_visibility_cache') as mock_inv:
+            signals._delayed_invalidate_cache()
+        mock_inv.assert_called_once()
 
 
 @pytest.fixture
@@ -159,3 +172,306 @@ class TestDelayedInvalidateTask:
         with patch('apps.users.tasks._invalidate_visibility_cache') as mock_inv:
             delayed_invalidate_visibility_cache()
         mock_inv.assert_called_once()
+
+
+class TestVisibilityCacheErrorBranches:
+    """_invalidate_visibility_cache 兜底异常分支测试"""
+
+    @pytest.mark.unit
+    def test_delete_pattern_error_logged(self):
+        """delete_pattern 兜底也失败 → 记录 error 不抛出"""
+        with patch('django_redis.get_redis_connection',
+                   side_effect=RuntimeError('redis down')), \
+                patch('apps.users.signals.cache') as mock_cache, \
+                patch('apps.users.signals.logger') as mock_logger:
+            mock_cache.delete_pattern.side_effect = RuntimeError('cache down')
+            signals._invalidate_visibility_cache()
+        mock_logger.error.assert_called_once()
+
+
+class TestDelayedInvalidateThreadFallback:
+    """_delayed_invalidate_cache Celery 不可用时回退线程测试"""
+
+    @pytest.mark.unit
+    def test_celery_unavailable_uses_thread(self):
+        """Celery ImportError → 创建守护线程延迟删除"""
+        with patch('django.conf.settings.CELERY_TASK_ALWAYS_EAGER', False), \
+                patch.dict('sys.modules', {'celery': None}), \
+                patch('apps.users.signals._invalidate_visibility_cache') as mock_inv, \
+                patch('threading.Thread') as mock_thread:
+            signals._delayed_invalidate_cache(delay=0)
+            # 线程为异步执行，手动调用 target 验证内部逻辑
+            target = mock_thread.call_args.kwargs['target']
+            target()
+        mock_inv.assert_called_once()
+
+
+class TestDeptTeamDeleteSignals:
+    """部门/团队删除 → 缓存失效信号测试"""
+
+    @pytest.mark.django_db
+    def test_department_delete_invalidates_cache(self):
+        """部门删除应清理可见性缓存并延迟清理"""
+        dept = Department.objects.create(name='临时部')
+        with patch('apps.users.signals._invalidate_visibility_cache') as mock_inv, \
+                patch('apps.users.signals._delayed_invalidate_cache') as mock_delayed:
+            dept.delete()
+        mock_inv.assert_called_once()
+        mock_delayed.assert_called_once()
+
+    @pytest.mark.django_db
+    def test_team_delete_invalidates_cache(self):
+        """团队删除应清理可见性缓存并延迟清理"""
+        dept = Department.objects.create(name='父部')
+        team = Team.objects.create(name='子组', department=dept)
+        with patch('apps.users.signals._invalidate_visibility_cache') as mock_inv, \
+                patch('apps.users.signals._delayed_invalidate_cache') as mock_delayed:
+            team.delete()
+        mock_inv.assert_called_once()
+        mock_delayed.assert_called_once()
+
+
+class TestNodeSyncSignals:
+    """部门/团队保存 → 知识节点树同步信号测试"""
+
+    @pytest.mark.django_db
+    def test_department_save_raw_skips_sync(self):
+        """raw=True（fixture 加载）→ 跳过节点同步"""
+        dept = Department.objects.create(name='raw部')
+        with patch('apps.knowledge.node_sync.sync_dept_node') as mock_sync:
+            signals.on_department_node_sync(sender=Department, instance=dept, raw=True)
+        mock_sync.assert_not_called()
+
+    @pytest.mark.django_db
+    def test_department_save_syncs_node(self):
+        """部门保存应同步知识节点树"""
+        with patch('apps.knowledge.node_sync.sync_dept_node') as mock_sync:
+            Department.objects.create(name='sync部')
+        mock_sync.assert_called_once()
+
+    @pytest.mark.django_db
+    def test_department_sync_error_logged(self):
+        """节点同步异常 → 记录 error 不阻断"""
+        dept = Department.objects.create(name='err部')
+        with patch('apps.knowledge.node_sync.sync_dept_node',
+                   side_effect=Exception('db down')), \
+                patch('apps.users.signals.logger') as mock_logger:
+            signals.on_department_node_sync(sender=Department, instance=dept)
+        mock_logger.error.assert_called_once()
+
+    @pytest.mark.django_db
+    def test_team_save_raw_skips_sync(self):
+        """团队保存 raw=True → 跳过节点同步"""
+        dept = Department.objects.create(name='raw部组')
+        team = Team.objects.create(name='raw组', department=dept)
+        with patch('apps.knowledge.node_sync.sync_team_node') as mock_sync:
+            signals.on_team_node_sync(sender=Team, instance=team, raw=True)
+        mock_sync.assert_not_called()
+
+    @pytest.mark.django_db
+    def test_team_save_syncs_node(self):
+        """团队保存应同步知识节点树"""
+        with patch('apps.knowledge.node_sync.sync_team_node') as mock_sync:
+            dept = Department.objects.create(name='sync部组')
+            Team.objects.create(name='sync组', department=dept)
+        mock_sync.assert_called_once()
+
+    @pytest.mark.django_db
+    def test_team_sync_error_logged(self):
+        """团队节点同步异常 → 记录 error 不阻断"""
+        dept = Department.objects.create(name='err部组')
+        team = Team.objects.create(name='err组', department=dept)
+        with patch('apps.knowledge.node_sync.sync_team_node',
+                   side_effect=Exception('db down')), \
+                patch('apps.users.signals.logger') as mock_logger:
+            signals.on_team_node_sync(sender=Team, instance=team)
+        mock_logger.error.assert_called_once()
+
+
+class TestUserMemorySignalsEdge:
+    """用户记忆初始化/清理的异常分支测试"""
+
+    @pytest.mark.django_db
+    def test_user_create_raw_skips_init_memory(self):
+        """raw=True（fixture 加载）→ 跳过 UserMemory 初始化"""
+        user = _make_user(username='raw-mem')
+        with patch('apps.memory.models.UserMemory.objects.get_or_create') as mock_get:
+            signals.on_user_create_init_memory(
+                sender=User, instance=user, created=True, raw=True)
+        mock_get.assert_not_called()
+
+    @pytest.mark.django_db
+    def test_user_create_memory_init_error_logged(self):
+        """UserMemory 初始化异常 → 记录 error 不阻断"""
+        user = _make_user(username='err-mem')
+        with patch('apps.memory.models.UserMemory.objects.get_or_create',
+                   side_effect=Exception('db down')), \
+                patch('apps.users.signals.logger') as mock_logger:
+            signals.on_user_create_init_memory(sender=User, instance=user, created=True)
+        mock_logger.error.assert_called_once()
+
+    @pytest.mark.django_db
+    def test_user_update_skips_memory_init(self):
+        """用户更新（非创建）→ 跳过 UserMemory 初始化"""
+        user = _make_user(username='upd-mem')
+        with patch('apps.memory.models.UserMemory.objects.get_or_create') as mock_get:
+            signals.on_user_create_init_memory(sender=User, instance=user, created=False)
+        mock_get.assert_not_called()
+
+    @pytest.mark.django_db
+    def test_user_delete_session_memory_cleanup_error_logged(self):
+        """清理单条会话记忆异常 → 记录 error 后继续"""
+        user = _make_user(username='cleanup-err')
+        Session.objects.create(user=user, title='s')
+        with patch('apps.memory.short_term.ShortTermMemory') as mock_st, \
+                patch('apps.users.signals.logger') as mock_logger:
+            mock_st.return_value.clear.side_effect = Exception('cache down')
+            signals.on_user_delete_clean_memory(sender=User, instance=user)
+        mock_logger.error.assert_called_once()
+
+    @pytest.mark.django_db
+    def test_user_delete_memory_outer_error_logged(self):
+        """用户记忆清理整体异常 → 记录 error 不抛出"""
+        user = _make_user(username='outer-err')
+        with patch('apps.memory.models.UserMemory.objects.filter',
+                   side_effect=Exception('db down')), \
+                patch('apps.users.signals.logger') as mock_logger:
+            signals.on_user_delete_clean_memory(sender=User, instance=user)
+        mock_logger.error.assert_called_once()
+
+
+class TestSafeInvalidateErrors:
+    """_safe_invalidate_user / _safe_invalidate_role 异常兜底测试"""
+
+    @pytest.mark.unit
+    def test_safe_invalidate_user_error_logged(self):
+        """失效用户缓存异常 → 记录 error 不抛出"""
+        with patch('apps.users.perm_cache.invalidate_user_perms',
+                   side_effect=Exception('cache down')), \
+                patch('apps.users.signals.logger') as mock_logger:
+            signals._safe_invalidate_user(42)
+        mock_logger.error.assert_called_once()
+
+    @pytest.mark.unit
+    def test_safe_invalidate_role_error_logged(self):
+        """失效角色缓存异常 → 记录 error 不抛出"""
+        with patch('apps.users.perm_cache.invalidate_role_perms',
+                   side_effect=Exception('cache down')), \
+                patch('apps.users.signals.logger') as mock_logger:
+            signals._safe_invalidate_role(7)
+        mock_logger.error.assert_called_once()
+
+
+class TestScopeRelCacheInvalidation:
+    """属地/角色权限绑定变更 → 权限缓存失效信号测试"""
+
+    @pytest.mark.django_db
+    def test_dept_scope_rel_save_invalidates_user(self):
+        """UserDeptScopeRel 创建 → 失效该用户权限缓存"""
+        user = _make_user(username='dept-scope')
+        role = _make_role()
+        dept = Department.objects.create(name='D')
+        with patch('apps.users.perm_cache.invalidate_user_perms') as mock_inv:
+            UserDeptScopeRel.objects.create(
+                user=user, role=role, dept=dept, status=GrantStatus.ACTIVE)
+        mock_inv.assert_called_once_with(user.id)
+
+    @pytest.mark.django_db
+    def test_dept_scope_rel_delete_invalidates_user(self):
+        """UserDeptScopeRel 删除 → 失效该用户权限缓存"""
+        user = _make_user(username='dept-scope2')
+        role = _make_role()
+        dept = Department.objects.create(name='D2')
+        rel = UserDeptScopeRel.objects.create(
+            user=user, role=role, dept=dept, status=GrantStatus.ACTIVE)
+        with patch('apps.users.perm_cache.invalidate_user_perms') as mock_inv:
+            rel.delete()
+        mock_inv.assert_called_once_with(user.id)
+
+    @pytest.mark.django_db
+    def test_team_scope_rel_save_invalidates_user(self):
+        """UserTeamScopeRel 创建 → 失效该用户权限缓存"""
+        user = _make_user(username='team-scope')
+        role = _make_role()
+        dept = Department.objects.create(name='D3')
+        team = Team.objects.create(name='T', department=dept)
+        with patch('apps.users.perm_cache.invalidate_user_perms') as mock_inv:
+            UserTeamScopeRel.objects.create(
+                user=user, role=role, team=team, status=GrantStatus.ACTIVE)
+        mock_inv.assert_called_once_with(user.id)
+
+    @pytest.mark.django_db
+    def test_team_scope_rel_delete_invalidates_user(self):
+        """UserTeamScopeRel 删除 → 失效该用户权限缓存"""
+        user = _make_user(username='team-scope2')
+        role = _make_role()
+        dept = Department.objects.create(name='D4')
+        team = Team.objects.create(name='T2', department=dept)
+        rel = UserTeamScopeRel.objects.create(
+            user=user, role=role, team=team, status=GrantStatus.ACTIVE)
+        with patch('apps.users.perm_cache.invalidate_user_perms') as mock_inv:
+            rel.delete()
+        mock_inv.assert_called_once_with(user.id)
+
+    @pytest.mark.django_db
+    def test_role_permission_rel_save_invalidates_role(self):
+        """RolePermissionRel 创建 → 失效所有持有该角色的用户缓存"""
+        role = _make_role()
+        perm = Permission.objects.create(
+            permission_key='test.module.action', permission_name='测试权限',
+            module='test', is_builtin=False)
+        with patch('apps.users.perm_cache.invalidate_role_perms') as mock_inv:
+            RolePermissionRel.objects.create(role=role, permission=perm)
+        mock_inv.assert_called_once_with(role.id)
+
+    @pytest.mark.django_db
+    def test_role_permission_rel_delete_invalidates_role(self):
+        """RolePermissionRel 删除 → 失效所有持有该角色的用户缓存"""
+        role = _make_role()
+        perm = Permission.objects.create(
+            permission_key='test.module.action2', permission_name='测试权限2',
+            module='test', is_builtin=False)
+        rel = RolePermissionRel.objects.create(role=role, permission=perm)
+        with patch('apps.users.perm_cache.invalidate_role_perms') as mock_inv:
+            rel.delete()
+        mock_inv.assert_called_once_with(role.id)
+
+    @pytest.mark.unit
+    def test_dept_scope_rel_save_raw_skips_invalidation(self):
+        """属地授权保存 raw=True → 跳过缓存失效"""
+        with patch('apps.users.signals._safe_invalidate_user') as mock_safe:
+            signals.on_user_dept_scope_rel_changed(
+                sender=UserDeptScopeRel, instance=object(), raw=True)
+        mock_safe.assert_not_called()
+
+    @pytest.mark.unit
+    def test_team_scope_rel_save_raw_skips_invalidation(self):
+        """团队属地授权保存 raw=True → 跳过缓存失效"""
+        with patch('apps.users.signals._safe_invalidate_user') as mock_safe:
+            signals.on_user_team_scope_rel_changed(
+                sender=UserTeamScopeRel, instance=object(), raw=True)
+        mock_safe.assert_not_called()
+
+    @pytest.mark.unit
+    def test_role_permission_rel_save_raw_skips_invalidation(self):
+        """角色权限绑定保存 raw=True → 跳过缓存失效"""
+        with patch('apps.users.signals._safe_invalidate_role') as mock_safe:
+            signals.on_role_permission_rel_changed(
+                sender=RolePermissionRel, instance=object(), raw=True)
+        mock_safe.assert_not_called()
+
+    @pytest.mark.unit
+    def test_user_role_rel_save_raw_skips_invalidation(self):
+        """全局角色授权保存 raw=True → 跳过缓存失效"""
+        with patch('apps.users.signals._safe_invalidate_user') as mock_safe:
+            signals.on_user_role_rel_changed(
+                sender=UserRoleRel, instance=object(), raw=True)
+        mock_safe.assert_not_called()
+
+    @pytest.mark.django_db
+    def test_user_org_change_invalidates_perms(self):
+        """用户调岗（部门/团队变化）→ 全量失效该用户权限缓存"""
+        user = _make_user(username='org-change')
+        with patch('apps.users.perm_cache.invalidate_user_perms') as mock_inv:
+            signals.on_user_org_changed(sender=User, instance=user)
+        mock_inv.assert_called_once_with(user.id)

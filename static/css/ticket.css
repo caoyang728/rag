@@ -1,7 +1,7 @@
 /* ============================================================================
- * admin-approvals.css —— 权限审批中心专属样式
+ * ticket.css —— 工单中心专属样式
  *
- * 仅用于 /admin-approvals/ 页面：
+ * 仅用于 /ticket/ 页面：
  * - tab 切换
  * - 审批弹窗美化（#approvalModal）
  * - 审批链时间轴
@@ -189,3 +189,8 @@
 	opacity: 0.9
 }
 
+/* ==================== 分页（复用 common.css .pagination/.page-btn） ==================== */
+.page-btn-ellipsis {
+	border: none;
+	background: transparent
+}

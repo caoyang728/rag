@@ -40,8 +40,13 @@ def auth_headers():
 # ============================================================================
 # DebugSearchView
 # ============================================================================
+@pytest.mark.django_db
 class TestDebugSearchView:
-    """DebugSearchView POST 接口测试"""
+    """DebugSearchView POST 接口测试
+
+    Django 测试客户端请求会经过 IpFilterMiddleware（查询 IpWhitelist 表），
+    auth_headers fixture 也需建用户，故类级启用 DB。
+    """
 
     @pytest.mark.integration
     def test_anonymous_401(self):

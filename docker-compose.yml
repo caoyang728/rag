@@ -24,6 +24,8 @@ services:
   #     interval: 5s
   #     timeout: 5s
   #     retries: 10
+  #   networks:
+  #     - data_network
 
   # redis:
   #   image: redis:7-alpine
@@ -39,15 +41,17 @@ services:
   #     interval: 5s
   #     timeout: 5s
   #     retries: 5
+  #   networks:
+  #     - data_network
 
   django:
     build: .
     container_name: rag_django
     restart: unless-stopped
+    mem_limit: 2g   # 开发期间, 服务器内存太小, 所以限制 
     env_file:
       - .env
     environment:
-      DJANGO_SETTINGS_MODULE: rag_project.settings
       PG_DB_HOST: postgres
       REDIS_DB_HOST: redis
       TZ: Asia/Shanghai
@@ -67,7 +71,6 @@ services:
     env_file:
       - .env
     environment:
-      DJANGO_SETTINGS_MODULE: rag_project.settings
       PG_DB_HOST: postgres
       REDIS_DB_HOST: redis
       TZ: Asia/Shanghai
@@ -84,7 +87,6 @@ services:
     env_file:
       - .env
     environment:
-      DJANGO_SETTINGS_MODULE: rag_project.settings
       PG_DB_HOST: postgres
       REDIS_DB_HOST: redis
       TZ: Asia/Shanghai
@@ -107,8 +109,8 @@ services:
   #     - ./media:/usr/share/nginx/media:ro
 
 volumes:
-  # postgres_data:
-  # redis_data:
+  postgres_data:
+  redis_data:
   static_data:
 
 networks:

@@ -614,6 +614,36 @@ system_configs:
     is_secret: false
     is_readonly: false
 
+  - key: QUERY_TRANSFORM_ENABLED
+    value: false
+    value_type: bool
+    category: retrieval
+    label: "查询改写/分解开关"
+    description: "开启后，检索前先对用户 Query 做 LLM 改写/同义词扩展，改写后置信度不足时再拆分为多个子查询分别召回后合并；关闭时行为与现状一致"
+    is_secret: false
+    is_readonly: false
+    risk_level: normal
+
+  - key: QUERY_DECOMPOSE_THRESHOLD
+    value: 0.35
+    value_type: float
+    category: retrieval
+    label: "改写后置信度阈值"
+    description: "改写后检索结果的置信度低于该值时触发查询分解（0-1），越低越容易触发分解；0.35 大致对应改写后无命中片段"
+    is_secret: false
+    is_readonly: false
+    risk_level: normal
+
+  - key: QUERY_DECOMPOSE_MAX_SUB
+    value: 3
+    value_type: int
+    category: retrieval
+    label: "最大子查询数"
+    description: "查询分解时最多生成的子查询数量（1-5），防止过度拆分导致检索延迟过高"
+    is_secret: false
+    is_readonly: false
+    risk_level: normal
+
   # ==================== 存储（category: storage）====================
   - key: IMAGE_STORAGE_MODE
     value: "base64"

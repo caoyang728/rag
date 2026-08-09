@@ -4,6 +4,8 @@
 - RRF 公式：score(d) = Σ 1 / (k + rank_i(d))，k=60（论文经验值）
 - 权限过滤在两路 recall 中都完成，Rerank 层无需再判权
 - 并发执行两路检索，减少延迟
+- hybrid_search 为对外入口：总开关 QUERY_TRANSFORM_ENABLED 开启时，
+  内部先做查询改写/分解（见 query_transform.search_with_transform），关闭时行为不变
 """
 from loguru import logger
 import time
@@ -48,7 +50,40 @@ def hybrid_search(query: str,
                   rrf_top_k: int = 30,
                   rerank_top_k: int = None,
                   do_rerank: bool = True) -> Dict[str, Any]:
-    """三级混合检索
+    """混合检索对外入口（对外契约不变）
+
+    - 总开关 QUERY_TRANSFORM_ENABLED 关闭（默认）时：行为与现状完全一致，
+      直接走 _search_core 原链路
+    - 开关开启时：检索前先做查询改写/同义词扩展，改写后置信度不足再查询分解
+      （透明链路），返回结构不变，额外带 'transform' 审计信息，
+      供 QaRecord.route_trace 记录改写/分解的输入输出
+    """
+    from .query_transform import transform_enabled, search_with_transform
+
+    if transform_enabled():
+        return search_with_transform(
+            query, user, root_types=root_types, node_path_prefix=node_path_prefix,
+            node_ids=node_ids, vector_top_k=vector_top_k, bm25_top_k=bm25_top_k,
+            rrf_top_k=rrf_top_k, rerank_top_k=rerank_top_k, do_rerank=do_rerank,
+        )
+    return _search_core(
+        query, user, root_types=root_types, node_path_prefix=node_path_prefix,
+        node_ids=node_ids, vector_top_k=vector_top_k, bm25_top_k=bm25_top_k,
+        rrf_top_k=rrf_top_k, rerank_top_k=rerank_top_k, do_rerank=do_rerank,
+    )
+
+
+def _search_core(query: str,
+                 user,
+                 root_types: Optional[List[str]] = None,
+                 node_path_prefix: Optional[str] = None,
+                 node_ids: Optional[List[int]] = None,
+                 vector_top_k: int = None,
+                 bm25_top_k: int = None,
+                 rrf_top_k: int = 30,
+                 rerank_top_k: int = None,
+                 do_rerank: bool = True) -> Dict[str, Any]:
+    """三级混合检索核心（原 hybrid_search 实现，供包装层与查询改写/分解复用）
     返回: {
       'chunks': [...],  # Rerank 后的最终结果
       'stats': {'vector_ms','bm25_ms','rrf_ms','rerank_ms','total_ms'},

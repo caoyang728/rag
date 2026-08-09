@@ -2299,6 +2299,38 @@ ROUTE_LABELS = {
 }
 
 
+def _aggregate_query_transform_stats(qs):
+    """从窗口内 QaRecord.route_trace 实时聚合查询改写/分解统计（改写命中率）
+
+    改写链路不沉淀到 RouteAnalysis 表（主链 RAG 的 route_source 为空会被排除），
+    故直接从 QaRecord.route_trace 统计：
+    - rewrite_total: 走了改写链路的问答数（含 LLM 改写失败降级为原始 Query 的情况）
+    - rewrite_changed: 其中 LLM 实际改写并改变了查询表述的次数
+    - rewrite_hit_rate: rewrite_changed / rewrite_total，无改写链路时为 0
+    - decompose_total: 触发查询分解的问答数（含分解失败降级的尝试）
+    """
+    rows = (qs.exclude(route_trace__isnull=True)
+              .exclude(route_trace=[])
+              .only('id', 'route_trace')
+              .iterator())
+    rewrite_total = rewrite_changed = decompose_total = 0
+    for qa in rows:
+        for entry in (qa.route_trace or []):
+            layer = entry.get('layer')
+            if layer == 'query_rewrite':
+                rewrite_total += 1
+                if entry.get('changed'):
+                    rewrite_changed += 1
+            elif layer == 'query_decompose':
+                decompose_total += 1
+    return {
+        'rewrite_total': rewrite_total,
+        'rewrite_changed': rewrite_changed,
+        'rewrite_hit_rate': round(rewrite_changed / rewrite_total, 4) if rewrite_total else 0.0,
+        'decompose_total': decompose_total,
+    }
+
+
 class RouteAnalysisDashboardView(APIView):
     """GET /api/v1/analytics/eval-dashboard/route-analysis/?days=7&dept_id=&team_id=
 
@@ -2307,6 +2339,7 @@ class RouteAnalysisDashboardView(APIView):
     - coverage_by_route: 每层命中数/占比/平均置信度/平均延迟/平均质量分
     - quality_by_route: 各层 12 维均分对比（按 4 大类分组，柱状/雷达图用）
     - daily_trend: 按天各层命中数（命中趋势堆叠图用）
+    - query_transform_stats: 查询改写/分解统计（改写命中率，从 QaRecord.route_trace 实时聚合）
 
     时间窗口按 qa_created_at（提问时间）过滤；组织筛选按提问用户归属子查询
     （qa_record_id 为 BigInteger 非外键，无法直接 JOIN QaRecord，用子查询收敛）。
@@ -2340,6 +2373,9 @@ class RouteAnalysisDashboardView(APIView):
                 'coverage_by_route': [],
                 'quality_by_route': {},
                 'daily_trend': [],
+                'query_transform_stats': _aggregate_query_transform_stats(
+                    _apply_org_filter_on_qa(QaRecord.objects.filter(created_at__gte=since),
+                                            dept_id, team_id)),
             })
 
         # 1. 每层命中统计（一次 GROUP BY 拿全）
@@ -2423,6 +2459,10 @@ class RouteAnalysisDashboardView(APIView):
             'coverage_by_route': coverage_by_route,
             'quality_by_route': quality_by_route,
             'daily_trend': daily_trend,
+            # 查询改写/分解统计（改写命中率，与路由链路同窗口、同组织过滤）
+            'query_transform_stats': _aggregate_query_transform_stats(
+                _apply_org_filter_on_qa(QaRecord.objects.filter(created_at__gte=since),
+                                        dept_id, team_id)),
         })
 
 

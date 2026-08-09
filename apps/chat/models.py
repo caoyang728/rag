@@ -181,8 +181,8 @@ class HotQaCache(models.Model):
     id = models.BigAutoField(primary_key=True)
     question_hash = models.CharField(max_length=64, help_text='sha256(normalized_question)')
     root_type = models.CharField(max_length=32)
-    visibility_scope = models.CharField(max_length=16, default='public',
-                                         help_text='public/team/private')
+    visibility_scope = models.CharField(max_length=64, default='public',
+                                         help_text='缓存权限组：public / org_d3_t7（组织分组）')
     question = models.TextField()
     answer = models.TextField()
     citations = models.JSONField(default=list, blank=True)

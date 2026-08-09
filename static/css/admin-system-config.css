@@ -191,14 +191,15 @@
 	white-space: nowrap;
 }
 
-/* 解释（灰色小字，与控件对齐） */
+/* 解释（灰色小字，与控件对齐）：占满剩余空间，过长自动换行 */
 .config-item-hint {
 	font-size: 11px;
 	color: var(--text-sub, #888);
 	line-height: 1.5;
 	flex: 1;
 	min-width: 0;
-	max-width: 580px;
+	white-space: normal;
+	word-break: break-word;
 }
 
 /* 上次修改时间（右侧灰色小字） */

@@ -190,36 +190,117 @@ class TestNormalizeAndHash:
 
 
 # ---------------------------------------------------------------------------
-# _cache_scope
+# _build_org_scope
 # ---------------------------------------------------------------------------
 
-class TestCacheScope:
-    """_cache_scope 缓存作用域判定"""
+@pytest.mark.django_db
+class TestBuildOrgScope:
+    """_build_org_scope：按引用文档组织归属计算缓存权限组"""
 
-    def test_cache_scope_when_anonymous_then_returns_global_key(self):
-        from apps.agent.executor import _cache_scope
-        assert _cache_scope(None) == 'anonymous'
+    def _make_doc(self, node, owner, dept_id=None, team_id=None,
+                  visibility_level='PUBLIC'):
+        # 同一 node 下 (file_name, version_tag) 唯一，需按序递增避免重复创建冲突
+        from apps.knowledge.models import Document
+        self._doc_seq = getattr(self, '_doc_seq', 0) + 1
+        return Document.objects.create(
+            node=node, owner=owner, title='缓存测试文档',
+            file_name=f't{self._doc_seq}.txt',
+            file_type='txt', file_hash='h', root_type='test_root',
+            dept_id=dept_id, team_id=team_id, visibility_level=visibility_level,
+        )
 
-    def test_cache_scope_when_not_authenticated_then_returns_global_key(self):
-        from apps.agent.executor import _cache_scope
-        user = MagicMock()
-        user.is_authenticated = False
-        assert _cache_scope(user) == 'anonymous'
+    @pytest.fixture(autouse=True)
+    def _org_env(self):
+        """pytest fixture：注入文档 Owner 与根节点"""
+        from apps.knowledge.models import KnowledgeNode
+        self.owner = User.objects.create_user(
+            username='org_owner', email='org@example.com', password='x')
+        self.node = KnowledgeNode.objects.create(
+            name='root', node_type='root', root_type='test_root',
+            created_by=self.owner)
 
-    def test_cache_scope_when_super_admin_then_returns_global_key(self):
-        from apps.agent.executor import _cache_scope
-        user = MagicMock()
-        user.is_authenticated = True
-        user.is_super_admin = True
-        assert _cache_scope(user) == 'super'
+    def test_build_org_scope_when_no_docs_then_public(self):
+        from apps.agent.executor import _build_org_scope
+        assert _build_org_scope([]) == 'public'
 
-    def test_cache_scope_when_normal_user_then_returns_user_specific_key(self):
-        from apps.agent.executor import _cache_scope
-        user = MagicMock()
-        user.is_authenticated = True
-        user.is_super_admin = False
-        user.id = 42
-        assert _cache_scope(user) == 'user_42'
+    def test_build_org_scope_when_all_public_docs_then_public(self):
+        from apps.agent.executor import _build_org_scope
+        doc = self._make_doc(self.node, self.owner, visibility_level='PUBLIC')
+        assert _build_org_scope([doc.id]) == 'public'
+
+    def test_build_org_scope_when_team_doc_then_org_team(self):
+        from apps.agent.executor import _build_org_scope
+        doc = self._make_doc(self.node, self.owner, team_id=7,
+                             visibility_level='TEAM_ONLY')
+        assert _build_org_scope([doc.id]) == 'org_t7'
+
+    def test_build_org_scope_when_dept_doc_then_org_dept(self):
+        from apps.agent.executor import _build_org_scope
+        doc = self._make_doc(self.node, self.owner, dept_id=3,
+                             visibility_level='DEPT_ONLY')
+        assert _build_org_scope([doc.id]) == 'org_d3'
+
+    def test_build_org_scope_when_mixed_orgs_then_sorted(self):
+        from apps.agent.executor import _build_org_scope
+        doc1 = self._make_doc(self.node, self.owner, dept_id=9,
+                              visibility_level='DEPT_ONLY')
+        doc2 = self._make_doc(self.node, self.owner, team_id=3,
+                              visibility_level='TEAM_ONLY')
+        assert _build_org_scope([doc1.id, doc2.id]) == 'org_d9_t3'
+
+    def test_build_org_scope_when_public_and_team_then_only_team(self):
+        from apps.agent.executor import _build_org_scope
+        doc1 = self._make_doc(self.node, self.owner, visibility_level='PUBLIC')
+        doc2 = self._make_doc(self.node, self.owner, team_id=5,
+                              visibility_level='TEAM_ONLY')
+        assert _build_org_scope([doc1.id, doc2.id]) == 'org_t5'
+
+
+# ---------------------------------------------------------------------------
+# _user_covers_org_scope
+# ---------------------------------------------------------------------------
+
+@pytest.mark.django_db
+class TestUserCoversOrgScope:
+    """_user_covers_org_scope：用户可见组织范围覆盖权限组判定"""
+
+    @pytest.fixture(autouse=True)
+    def _org_env(self):
+        """pytest fixture：部门 A/B + 团队 A1（用户归属 A1）"""
+        from apps.users.models import Department, Team
+        self.dept_a = Department.objects.create(name='缓存部门A')
+        self.dept_b = Department.objects.create(name='缓存部门B')
+        self.team_a1 = Team.objects.create(name='团队A1', department=self.dept_a)
+        self.user = User.objects.create_user(
+            username='org_user', email='orguser@example.com', password='x')
+        self.user.department_id = self.dept_a.id
+        self.user.team_id = self.team_a1.id
+        self.user.save()
+
+    def test_covers_when_own_dept_then_true(self):
+        from apps.agent.executor import _user_covers_org_scope
+        assert _user_covers_org_scope(self.user, f'org_d{self.dept_a.id}') is True
+
+    def test_covers_when_other_dept_then_false(self):
+        from apps.agent.executor import _user_covers_org_scope
+        assert _user_covers_org_scope(self.user, f'org_d{self.dept_b.id}') is False
+
+    def test_covers_when_own_team_then_true(self):
+        from apps.agent.executor import _user_covers_org_scope
+        assert _user_covers_org_scope(self.user, f'org_t{self.team_a1.id}') is True
+
+    def test_covers_when_team_in_visible_dept_then_true(self):
+        """同部门其他团队：部门级可见覆盖下属团队"""
+        from apps.users.models import Team
+        from apps.agent.executor import _user_covers_org_scope
+        team_a2 = Team.objects.create(name='团队A2', department=self.dept_a)
+        assert _user_covers_org_scope(self.user, f'org_t{team_a2.id}') is True
+
+    def test_covers_when_other_dept_team_then_false(self):
+        from apps.users.models import Team
+        from apps.agent.executor import _user_covers_org_scope
+        team_b1 = Team.objects.create(name='团队B1', department=self.dept_b)
+        assert _user_covers_org_scope(self.user, f'org_t{team_b1.id}') is False
 
 
 # ---------------------------------------------------------------------------
@@ -452,7 +533,7 @@ class TestTryCache:
         from apps.agent.executor import _hash
         defaults = dict(
             question_hash=_hash('测试问题'), root_type='company_doc',
-            visibility_scope='anonymous', question='测试问题', answer='缓存答案',
+            visibility_scope='public', question='测试问题', answer='缓存答案',
             citations=[], hit_count=0,
         )
         defaults.update(kwargs)
@@ -463,7 +544,7 @@ class TestTryCache:
         assert _try_cache('测试问题', 'company_doc', None) is None
 
     def test_try_cache_when_hit_then_increments_and_returns(self):
-        """匿名命中：返回 answer/citations 且 hit_count 自增"""
+        """匿名命中 public 缓存（无引用）：返回 answer/citations 且 hit_count 自增"""
         from apps.agent.executor import _try_cache
         obj = self._mk_cache()
         result = _try_cache('测试问题', 'company_doc', None)
@@ -476,47 +557,70 @@ class TestTryCache:
         self._mk_cache(expires_at=timezone.now() - timedelta(hours=1))
         assert _try_cache('测试问题', 'company_doc', None) is None
 
-    def test_try_cache_when_auth_user_then_can_hit_super_scope(self):
-        """已登录普通用户可命中 super 作用域缓存（scopes 追加 'super'）"""
+    def test_try_cache_when_auth_user_hits_public_group(self):
+        """普通用户可命中 public 组缓存（无引用，无需权限校验）"""
         from apps.agent.executor import _try_cache
-        self._mk_cache(visibility_scope='super')
+        self._mk_cache(visibility_scope='public', cited_doc_ids=[], citations=[])
         result = _try_cache('测试问题', 'company_doc', self.user)
-        assert result is not None
+        assert result['answer'] == '缓存答案'
 
-    def test_try_cache_when_permission_revoked_then_skips(self):
-        """缓存引用文档的权限已被回收时跳过缓存"""
+    def test_try_cache_when_org_not_covered_then_skips(self):
+        """组织组：用户可见组织不含该部门 → 跳过缓存（重新生成）"""
         from apps.agent.executor import _try_cache
-        self._mk_cache(visibility_scope=f'user_{self.user.id}',
-                       citations=[{'chunk_ids': [999]}])
-        mock_chunk = MagicMock(document_id=123)
-        with patch('apps.knowledge.models.DocumentChunk.objects.filter') as mock_qs, \
-                patch('apps.agent.executor.filter_accessible_doc_ids', return_value=[]) as mock_filter:
-            mock_qs.return_value.first.return_value = mock_chunk
+        self._mk_cache(visibility_scope='org_d3', cited_doc_ids=[123])
+        with patch('apps.agent.executor.build_user_context',
+                   return_value={'visible_depts': {1}, 'visible_teams': set()}):
             assert _try_cache('测试问题', 'company_doc', self.user) is None
-            mock_filter.assert_called_once_with(self.user, [123])
 
-    def test_try_cache_when_permission_allowed_then_returns(self):
-        """权限仍有效时正常命中缓存"""
+    def test_try_cache_when_org_covered_then_hits(self):
+        """组织组：可见组织覆盖 + 引用文档可访问 → 命中"""
         from apps.agent.executor import _try_cache
-        self._mk_cache(visibility_scope=f'user_{self.user.id}',
-                       citations=[{'chunk_ids': [999]}])
-        mock_chunk = MagicMock(document_id=123)
-        with patch('apps.knowledge.models.DocumentChunk.objects.filter') as mock_qs, \
+        self._mk_cache(visibility_scope='org_d3', cited_doc_ids=[123])
+        with patch('apps.agent.executor.build_user_context',
+                   return_value={'visible_depts': {3}, 'visible_teams': set()}), \
                 patch('apps.agent.executor.filter_accessible_doc_ids', return_value=[123]):
-            mock_qs.return_value.first.return_value = mock_chunk
             result = _try_cache('测试问题', 'company_doc', self.user)
             assert result['answer'] == '缓存答案'
 
-    def test_try_cache_when_citation_chunk_missing_then_skips_check(self):
-        """引用对应的 chunk 已删除时跳过权限校验直接命中"""
+    def test_try_cache_when_org_covered_but_doc_blacklisted_then_skips(self):
+        """组织覆盖通过但引用文档被黑名单拦截 → 文档级兜底不命中"""
         from apps.agent.executor import _try_cache
-        self._mk_cache(visibility_scope=f'user_{self.user.id}',
-                       citations=[{'chunk_ids': [999]}])
-        with patch('apps.knowledge.models.DocumentChunk.objects.filter') as mock_qs, \
-                patch('apps.agent.executor.filter_accessible_doc_ids') as mock_filter:
-            mock_qs.return_value.first.return_value = None
+        self._mk_cache(visibility_scope='org_d3', cited_doc_ids=[123, 456])
+        with patch('apps.agent.executor.build_user_context',
+                   return_value={'visible_depts': {3}, 'visible_teams': set()}), \
+                patch('apps.agent.executor.filter_accessible_doc_ids', return_value=[123]):
+            # 456 被黑名单过滤掉 → 引用不全可访问 → 不命中
+            assert _try_cache('测试问题', 'company_doc', self.user) is None
+
+    def test_try_cache_when_org_groups_isolated_then_hits_own_group(self):
+        """不同权限组各自独立缓存互不覆盖：用户命中自己可见的组织组"""
+        from apps.agent.executor import _try_cache
+        self._mk_cache(question='测试问题', visibility_scope='org_d3',
+                       answer='部门3答案', cited_doc_ids=[123])
+        self._mk_cache(question='测试问题', visibility_scope='org_d5',
+                       answer='部门5答案', cited_doc_ids=[456])
+        with patch('apps.agent.executor.build_user_context',
+                   return_value={'visible_depts': {3}, 'visible_teams': set()}), \
+                patch('apps.agent.executor.filter_accessible_doc_ids', return_value=[123]):
+            result = _try_cache('测试问题', 'company_doc', self.user)
+            assert result['answer'] == '部门3答案'
+
+    def test_try_cache_when_no_citations_then_any_user_can_hit(self):
+        """缓存无引用（纯 LLM 知识答案）时任意用户可命中，无需权限校验"""
+        from apps.agent.executor import _try_cache
+        self._mk_cache(visibility_scope='public', cited_doc_ids=[], citations=[])
+        with patch('apps.agent.executor.filter_accessible_doc_ids') as mock_filter:
             result = _try_cache('测试问题', 'company_doc', self.user)
             assert result['answer'] == '缓存答案'
+            mock_filter.assert_not_called()
+
+    def test_try_cache_when_legacy_without_permission_group_then_skips(self):
+        """旧数据无权限组标记（cited_doc_ids 空但有引用）：非超管用户保守跳过"""
+        from apps.agent.executor import _try_cache
+        self._mk_cache(visibility_scope='public', cited_doc_ids=[],
+                       citations=[{'doc_title': 'A'}])
+        with patch('apps.agent.executor.filter_accessible_doc_ids') as mock_filter:
+            assert _try_cache('测试问题', 'company_doc', self.user) is None
             mock_filter.assert_not_called()
 
 
@@ -537,11 +641,45 @@ class TestUpdateCache:
         assert obj.answer == '答案'
         assert obj.citations == [{'doc_title': 'A'}]
         assert obj.question == '问题'
+        # 无 chunk_ids 的引用 → 权限组为空 → public 组（任意用户可命中）
+        assert obj.cited_doc_ids == []
+        assert obj.visibility_scope == 'public'
+
+    def test_update_cache_when_citations_with_chunks_then_writes_permission_group(self):
+        """缓存写入时提取引用文档集合；无对应文档归属 → 权限组为 public"""
+        from apps.agent.executor import _update_cache, _hash
+        with patch('apps.knowledge.models.DocumentChunk.objects.filter') as mock_qs:
+            mock_qs.return_value.values_list.return_value.distinct.return_value = [123]
+            _update_cache('问题', 'company_doc', None, '答案',
+                          [{'doc_title': 'A', 'chunk_ids': [999]}])
+        obj = HotQaCache.objects.get(question_hash=_hash('问题'))
+        assert obj.cited_doc_ids == [123]
+        assert obj.visibility_scope == 'public'
+
+    def test_update_cache_when_citations_ref_team_doc_then_org_group(self):
+        """引用团队归属文档 → 缓存权限组为 org_t{team_id}"""
+        from apps.knowledge.models import KnowledgeNode, Document
+        from apps.agent.executor import _update_cache, _hash
+        node = KnowledgeNode.objects.create(
+            name='root', node_type='root', root_type='test_root', created_by=self.user)
+        doc = Document.objects.create(node=node, owner=self.user, title='doc',
+                                      file_name='d.txt', file_type='txt', file_hash='h',
+                                      root_type='test_root', team_id=7,
+                                      visibility_level='TEAM_ONLY')
+        with patch('apps.knowledge.models.DocumentChunk.objects.filter') as mock_qs:
+            # 反查的 document_id 必须指向真实文档，_build_org_scope 才能算出组织归属
+            mock_qs.return_value.values_list.return_value.distinct.return_value = [doc.id]
+            _update_cache('问题', 'company_doc', self.user, '答案',
+                          [{'doc_title': 'doc', 'chunk_ids': [999]}])
+        obj = HotQaCache.objects.get(question_hash=_hash('问题'))
+        assert obj.cited_doc_ids == [doc.id]
+        # 权限组取文档的组织归属（team_id=7），非文档自身 id
+        assert obj.visibility_scope == 'org_t7'
 
     def test_update_cache_when_existing_then_updates(self):
         from apps.agent.executor import _update_cache, _hash
         HotQaCache.objects.create(question_hash=_hash('问题'), root_type='company_doc',
-                                  visibility_scope='anonymous', question='问题',
+                                  visibility_scope='public', question='问题',
                                   answer='旧答案', citations=[])
         _update_cache('问题', 'company_doc', None, '新答案', [])
         obj = HotQaCache.objects.get(question_hash=_hash('问题'))
@@ -551,5 +689,34 @@ class TestUpdateCache:
         """缓存写入失败仅记录日志，不向上抛异常"""
         from apps.agent.executor import _update_cache
         with patch('apps.agent.executor.HotQaCache') as mock_cache_cls:
-            mock_cache_cls.objects.update_or_create.side_effect = Exception('db down')
+            mock_cache_cls.objects.get_or_create.side_effect = Exception('db down')
             _update_cache('问题', 'company_doc', None, '答案', [])  # 不应抛异常
+
+    def test_update_cache_when_existing_then_preserves_hit_count(self):
+        """已存在缓存记录时更新答案但保留 hit_count 累计（不被重置为 1）"""
+        from apps.agent.executor import _update_cache, _hash
+        HotQaCache.objects.create(question_hash=_hash('问题'), root_type='company_doc',
+                                  visibility_scope='public', question='问题',
+                                  answer='旧答案', citations=[], hit_count=7)
+        _update_cache('问题', 'company_doc', None, '新答案', [{'doc_title': 'A'}])
+        obj = HotQaCache.objects.get(question_hash=_hash('问题'))
+        assert obj.answer == '新答案'
+        assert obj.hit_count == 7
+
+    def test_should_update_cache_when_general_and_not_filtered_then_true(self):
+        """general（未调用工具）成功回答也应写缓存，否则同问题每次都完整 LLM 生成"""
+        from apps.agent.executor import _should_update_cache
+        assert _should_update_cache('general', False)
+        assert _should_update_cache('agent', False)
+        assert _should_update_cache('rag', False)
+
+    def test_should_update_cache_when_refused_then_false(self):
+        """拒答/无资料（refused）不写缓存：内容审查词库会更新，且无引用可复用"""
+        from apps.agent.executor import _should_update_cache
+        assert not _should_update_cache('refused', False)
+
+    def test_should_update_cache_when_filtered_then_false(self):
+        """审查拦截命中不写缓存，避免违规内容被缓存复用"""
+        from apps.agent.executor import _should_update_cache
+        assert not _should_update_cache('rag', True)
+        assert not _should_update_cache('general', True)

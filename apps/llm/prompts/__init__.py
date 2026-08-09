@@ -10,6 +10,10 @@ from .memory_refine import (
     USER_REFINE_INCREMENTAL_SYSTEM, USER_REFINE_INCREMENTAL_USER_TEMPLATE,
 )
 from .agent import AGENT_SYSTEM_PROMPT, build_agent_messages
+from .query_transform import (
+    REWRITE_SYSTEM, REWRITE_USER_TEMPLATE,
+    DECOMPOSE_SYSTEM, DECOMPOSE_USER_TEMPLATE,
+)
 
 __all__ = [
     'SYSTEM_PROMPT', 'QA_USER_TEMPLATE', 'build_qa_messages', 'build_context_block',
@@ -19,4 +23,6 @@ __all__ = [
     'USER_REFINE_SYSTEM', 'USER_REFINE_USER_TEMPLATE',
     'USER_REFINE_INCREMENTAL_SYSTEM', 'USER_REFINE_INCREMENTAL_USER_TEMPLATE',
     'AGENT_SYSTEM_PROMPT', 'build_agent_messages',
+    'REWRITE_SYSTEM', 'REWRITE_USER_TEMPLATE',
+    'DECOMPOSE_SYSTEM', 'DECOMPOSE_USER_TEMPLATE',
 ]

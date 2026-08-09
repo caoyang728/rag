@@ -12,6 +12,7 @@ pgvector HNSW 索引 + 冗余权限字段（visibility_level/dept_id/team_id/own
 - node_id / node_path：挂载节点 ID + 路径（节点级共享继承用 path 前缀匹配）
 - has_resource_share：是否有跨范围共享（标志位，跳过空共享子查询）
 - has_block_user：是否有黑名单（标志位，跳过空黑名单子查询）
+- is_active：文档是否活跃版本（检索只召回活跃版本，切换活跃时由 vector_store 同步）
 """
 from django.db import models
 from django.contrib.postgres.fields import ArrayField
@@ -60,12 +61,10 @@ class DocumentVector(models.Model):
     node_path = models.CharField(max_length=512, default='/',
                                   help_text='冗余：节点路径，支持前缀过滤（节点级共享继承）')
     # 标志位：加速检索跳过空子查询（90% 文档无共享/无黑名单，跳过子查询）
-    has_resource_share = models.BooleanField(default=False,
-                                             help_text='冗余：是否有跨范围共享')
-    has_block_user = models.BooleanField(default=False,
-                                         help_text='冗余：是否有黑名单用户')
-    chunk_type = models.CharField(max_length=16, default='text',
-                                   help_text='冗余：切片类型，方便按类型过滤')
+    has_resource_share = models.BooleanField(default=False, help_text='冗余：是否有跨范围共享')
+    has_block_user = models.BooleanField(default=False, help_text='冗余：是否有黑名单用户')
+    is_active = models.BooleanField(default=True, help_text='冗余：文档是否活跃版本（检索只召回活跃版本，由 vector_store 同步）')
+    chunk_type = models.CharField(max_length=16, default='text', help_text='冗余：切片类型，方便按类型过滤')
 
     # 辅助字段：BM25 关键词 & 内容摘要，避免检索命中后回表
     content_preview = models.TextField(default='', help_text='切片前 200 字，用于快速展示')

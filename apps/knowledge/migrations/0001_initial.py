@@ -155,7 +155,7 @@ class Migration(migrations.Migration):
             name='DocOperationLog',
             fields=[
                 ('id', models.BigAutoField(primary_key=True, serialize=False)),
-                ('action', models.CharField(choices=[('doc_create', '上传文档'), ('doc_delete', '删除文档'), ('doc_visibility_change', '修改可见范围'), ('doc_download', '下载文档'), ('doc_reparse', '重新解析'), ('doc_restore', '恢复文档'), ('node_create', '创建节点'), ('node_update', '修改节点'), ('node_delete', '删除节点'), ('doc_audit_team_pass', '团队审核通过'), ('doc_audit_team_reject', '团队审核驳回'), ('doc_audit_compliance_pass', '合规复核通过'), ('doc_audit_compliance_reject', '合规复核驳回'), ('doc_archive', '归档文档'), ('doc_physical_destroy', '物理销毁')], db_index=True, max_length=32)),
+                ('action', models.CharField(choices=[('doc_create', '上传文档'), ('doc_delete', '删除文档'), ('doc_visibility_change', '修改可见范围'), ('doc_download', '下载文档'), ('doc_reparse', '重新解析'), ('doc_restore', '恢复文档'), ('doc_set_active', '切换活跃版本'), ('node_create', '创建节点'), ('node_update', '修改节点'), ('node_delete', '删除节点'), ('doc_audit_team_pass', '团队审核通过'), ('doc_audit_team_reject', '团队审核驳回'), ('doc_audit_compliance_pass', '合规复核通过'), ('doc_audit_compliance_reject', '合规复核驳回'), ('doc_archive', '归档文档'), ('doc_physical_destroy', '物理销毁')], db_index=True, max_length=32)),
                 ('operator_name', models.CharField(blank=True, default='', max_length=128)),
                 ('detail', models.JSONField(blank=True, default=dict, help_text='操作详情，如变更前后的值、目标用户等')),
                 ('ip_address', models.GenericIPAddressField(blank=True, null=True)),

@@ -574,6 +574,10 @@ function loadDocList(page) {
 	var typeFilter = document.getElementById('docTypeFilter').value;
 	if (typeFilter) params.push('file_type=' + encodeURIComponent(typeFilter));
 
+	// 含旧版本：勾选后列表展示全部版本（含被新版本替换的非活跃版本），用于回溯与切换
+	var showAll = document.getElementById('docShowAll');
+	if (showAll && showAll.checked) params.push('version=all');
+
 	if (docListNodeFilter) params.push('node=' + docListNodeFilter);
 
 	var tbody = document.getElementById('docListTbody');
@@ -607,7 +611,14 @@ function renderDocList(docs) {
 	docs.forEach(function (d) {
 		var clone = tmpl.content.cloneNode(true);
 		var fileEl = clone.querySelector('.dr-file');
-		fileEl.innerHTML = fileTypeIcon(d.file_type) + ' ' + escapeHtml(d.file_name);
+		// 活跃标记：有多版本时标注当前生效版本；非活跃版本（?version=all 可见）标注旧版本
+		var versionMarker = '';
+		if (d.version_count > 1) {
+			versionMarker = d.is_active
+				? ' <span class="tag tag-success" style="margin-left:4px">活跃</span>'
+				: ' <span class="tag" style="margin-left:4px;background:#eee;color:#888">旧版本</span>';
+		}
+		fileEl.innerHTML = fileTypeIcon(d.file_type) + ' ' + escapeHtml(d.file_name) + versionMarker;
 		fileEl.title = d.file_name;
 		clone.querySelector('.dr-type').textContent = d.file_type || '-';
 		clone.querySelector('.dr-owner').textContent = d.owner_name || '-';
@@ -633,6 +644,10 @@ function renderDocActions(d) {
 	// 预览：支持预览的文件类型才展示（所有人可见）
 	if (isPreviewable(d.file_type)) {
 		actions.push('<button class="btn-link btn-sm" onclick="previewDoc(' + d.id + ')">预览</button>');
+	}
+	// 版本切换：同组存在多个版本时展示入口（活跃/旧版本均可打开版本历史弹窗）
+	if (d.version_count > 1) {
+		actions.push('<button class="btn-link btn-sm" onclick="showVersionModal(' + d.id + ')">版本</button>');
 	}
 	// 权限区分
 	if (d.is_owner || d.is_manager) {

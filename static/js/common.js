@@ -213,6 +213,119 @@ function closeModal(id) {
 	}
 }
 
+/* ============ 文档版本历史弹窗（版本切换） ============ */
+// 处理状态标签映射（与各页面 statusTag 保持一致，供版本弹窗复用）
+const _VERSION_STATUS_MAP = {
+	'done': ['success', '已完成'], 'parsing': ['warning', '解析中'], 'failed': ['danger', '失败'],
+	'pending': ['default', '等待'], 'desensitizing': ['warning', '脱敏中'], 'chunking': ['warning', '切片中'],
+	'embedding': ['warning', '向量化中'], 'embedding_failed': ['danger', '向量化失败']
+};
+function _versionStatusTag(s) {
+	const m = _VERSION_STATUS_MAP[s] || ['default', s || '-'];
+	return '<span class="tag tag-' + m[0] + '">' + escapeHtml(m[1]) + '</span>';
+}
+
+/**
+ * 显示文档版本历史弹窗
+ * 从 /documents/{id}/versions/ 拉取同组（node+file_name+部门+团队）全部版本，
+ * 非活跃版本可一键设为活跃。上传新版本 / 切换活跃后旧版本自动失效。
+ * 弹窗标题取活跃版本标题，避免调用方在 onclick 属性中嵌入含引号的用户输入。
+ * 调用方（列表页）可在切换成功后自行刷新列表数据。
+ *
+ * @param {number} docId - 当前文档 ID（以其同组版本为数据源）
+ */
+function showVersionModal(docId) {
+	// 懒初始化：首次调用时创建弹窗骨架（各页面共用，避免重复 HTML）
+	let modal = document.getElementById('docVersionModal');
+	if (!modal) {
+		modal = document.createElement('div');
+		modal.id = 'docVersionModal';
+		modal.className = 'modal';
+		modal.innerHTML =
+			'<div class="modal-content" style="width:720px;max-height:85vh">' +
+			'  <div class="modal-header">' +
+			'    <div class="modal-title" id="docVersionModalTitle"></div>' +
+			'    <button class="modal-close" onclick="closeModal(\'docVersionModal\')">&times;</button>' +
+			'  </div>' +
+			'  <div class="modal-body" style="max-height:calc(85vh - 90px);overflow:auto">' +
+			'    <table class="table">' +
+			'      <thead><tr>' +
+			'        <th style="min-width:140px">文件名</th><th style="width:70px">版本</th>' +
+			'        <th style="width:70px">状态</th><th style="width:90px">处理状态</th>' +
+			'        <th style="width:80px">大小</th><th style="width:150px">上传时间</th>' +
+			'        <th style="width:110px">操作</th>' +
+			'      </tr></thead>' +
+			'      <tbody id="docVersionTbody"></tbody>' +
+			'    </table>' +
+			'  </div>' +
+			'</div>';
+		document.body.appendChild(modal);
+	}
+	const titleEl = document.getElementById('docVersionModalTitle');
+	titleEl.textContent = '版本历史';
+	const tbody = document.getElementById('docVersionTbody');
+	tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text-sub);padding:20px">加载中...</td></tr>';
+	showModal('docVersionModal');
+
+	api.getJson('/api/v1/knowledge/documents/' + docId + '/versions/').then(function (data) {
+		const docs = data.documents || [];
+		if (!docs.length) {
+			tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text-sub);padding:20px">暂无版本记录</td></tr>';
+			return;
+		}
+		// 弹窗标题取活跃版本标题（无活跃时取最新一条）
+		const titleDoc = docs.find(function (v) { return v.is_active; }) || docs[0];
+		if (titleDoc && titleDoc.title) titleEl.textContent = '版本历史 · ' + titleDoc.title;
+		tbody.innerHTML = '';
+		docs.forEach(function (v) {
+			const tr = document.createElement('tr');
+			// 活跃标记：当前生效版本 vs 被替换的旧版本
+			const stateTag = v.is_active
+				? '<span class="tag tag-success">活跃</span>'
+				: '<span class="tag" style="background:#eee;color:#888">旧版本</span>';
+			let opsHtml;
+			if (v.is_active) {
+				opsHtml = '<span class="text-sub text-xs">当前</span>';
+			} else if (v.is_owner) {
+				opsHtml = '<button class="btn-link btn-sm" onclick="setDocVersionActive(' + v.id + ', ' + docId + ')">设为活跃</button>';
+			} else {
+				opsHtml = '<span class="text-sub text-xs">仅上传者可切换</span>';
+			}
+			tr.innerHTML =
+				'<td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + escapeHtml(v.title || '') + '">' + escapeHtml(v.title || '-') + '</td>' +
+				'<td>' + escapeHtml(v.version_tag || ('v' + v.version)) + '</td>' +
+				'<td>' + stateTag + '</td>' +
+				'<td>' + _versionStatusTag(v.status) + '</td>' +
+				'<td class="text-sub">' + formatFileSize(v.file_size) + '</td>' +
+				'<td class="text-sub" title="' + formatDate(v.created_at) + '">' + (formatDateShort ? formatDateShort(v.created_at) : formatDate(v.created_at)) + '</td>' +
+				'<td>' + opsHtml + '</td>';
+			tbody.appendChild(tr);
+		});
+	}).catch(function (e) {
+		tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--danger);padding:20px">加载失败：' + escapeHtml((e && e.message) || '') + '</td></tr>';
+	});
+}
+
+/**
+ * 将指定文档版本设为活跃（版本历史弹窗按钮调用）
+ * 成功后刷新版本列表与调用方页面提供的列表刷新函数（loadDocList / loadUploadHistory）。
+ *
+ * @param {number} versionId - 目标版本文档 ID
+ * @param {number} docId - 当前文档 ID（刷新版本弹窗数据源）
+ */
+function setDocVersionActive(versionId, docId) {
+	api.postJson('/api/v1/knowledge/documents/' + versionId + '/set_active/').then(function (res) {
+		toast('已切换为活跃版本', 'success');
+		// 刷新弹窗内的版本列表（标题将按新活跃版本重新推导）
+		showVersionModal(docId);
+		// 调用方页面刷新列表（存在时才刷新，避免跨页报错）
+		if (window.loadDocList) loadDocList();
+		if (window.loadUploadHistory) loadUploadHistory();
+	}).catch(function (e) {
+		toast((e && e.message) || '切换失败', 'error');
+	});
+}
+
 /* 统一 API 请求服务已迁至 api.js（内部 logout 依赖 toast，需在 common.js 之后加载） */
 
 /* ============ MPA 页面跳转 ============ */

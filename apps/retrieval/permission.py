@@ -200,6 +200,9 @@ def build_permission_q(user, root_types=None, node_path_prefix=None, node_ids=No
 
         q = q_natural | q_owner | q_doc_share | q_node_share
 
+    # 3e) 仅召回活跃版本：非活跃旧版本（被新版本替换）不参与检索，权限判定优先级不变
+    q &= Q(is_active=True)
+
     # 4) 黑名单剔除（文档级，has_block_user 标志位跳过空子查询）
     #    对所有用户生效（含超管，Deny Override 铁律）；Owner 绕过由 access.py 二次过滤保证。
     #    节点级黑名单留 access.py 二次过滤（涉及 path 前缀匹配，SQL 复杂）

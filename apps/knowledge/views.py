@@ -5,6 +5,7 @@ knowledge views
 - 文档 chunks 查看
 """
 import hashlib
+import difflib
 import magic
 import os
 import re
@@ -419,6 +420,83 @@ FILE_TYPE_MAP = {
 def _detect_file_type(filename: str) -> str:
     ext = os.path.splitext(filename)[1].lower()
     return FILE_TYPE_MAP.get(ext, "other")
+
+
+# ============================================================================
+# 文档活跃版本判定（同组文件：「新版本」 vs 「恰好同名的独立文档」）
+# ============================================================================
+# 文本类文件可直接读取内容做相似度判定；二进制（pdf/docx/xlsx 等）上传时无法
+# 即时提取文本，默认按「新版本」处理（见 _is_version_upload）。
+_VERSION_TEXT_FILE_TYPES = ('txt', 'markdown', 'code', 'config')
+# 同组文件内容相似度 >= 对应阈值 → 视为同一文档的新版本（旧版本自动置非活跃）；
+# 低于阈值 → 视为恰好同名的独立文档（全部保留活跃，如不同项目的同名代码文件）。
+# 阈值按文件类型区分：
+# - txt/markdown 业务文档：多为增量更新（如年会名单），内容相近即视为新版本
+# - code/config 代码配置：同名文件常为不同项目的独立实现（如两个项目的 views.py），
+#   需内容高度相似（近乎同一文件）才视为新版本，避免互相覆盖
+VERSION_SIMILARITY_THRESHOLD = 0.3
+_VERSION_SIMILARITY_THRESHOLDS = {
+    'txt': 0.3,
+    'markdown': 0.3,
+    'code': 0.8,
+    'config': 0.8,
+}
+# 内容样本截取上限：先按原始字节截断（避免解码超大文件），再按字符截断。
+VERSION_SAMPLE_MAX_BYTES = 8192
+VERSION_SAMPLE_MAX_CHARS = 4000
+
+
+def _capture_content_sample(raw_bytes, file_type):
+    """从上传文件原始字节中截取规范化文本样本，用于版本相似度判定
+
+    仅文本类文件（txt/markdown/code/config）可即时解码；二进制文件返回空串，
+    调用方会将其按「新版本」处理。样本统一折叠空白，换行/缩进差异不影响相似度。
+    """
+    if file_type not in _VERSION_TEXT_FILE_TYPES or not raw_bytes:
+        return ''
+    text = raw_bytes.decode('utf-8', errors='ignore')
+    return re.sub(r'\s+', ' ', text).strip()[:VERSION_SAMPLE_MAX_CHARS]
+
+
+def _text_similarity(s1, s2):
+    """两个文本样本的相似度 [0,1]（difflib 序列比对）
+
+    用于区分「同一文档的新版本」（相似度高）与「恰好同名的独立文档」（相似度低）。
+    """
+    if not s1 or not s2:
+        return 0.0
+    return difflib.SequenceMatcher(None, s1, s2).ratio()
+
+
+def _is_version_upload(file_type, content_sample, siblings):
+    """判断本次上传是否为同组已有文档的「新版本」
+
+    返回 True 时，同组（node+file_name+dept_id+team_id）其他文档将自动置非活跃。
+    - 无同组文档：False（首传，无需置非活跃）
+    - 二进制文件 / 无文本样本：True（无法即时读文，保守按新版本处理）
+    - 文本类：与同组任一文档样本相似度 >= 对应文件类型阈值 → True，否则 False（视为独立文档）
+    """
+    if not siblings:
+        return False
+    if file_type not in _VERSION_TEXT_FILE_TYPES or not content_sample:
+        return True
+    threshold = _VERSION_SIMILARITY_THRESHOLDS.get(file_type, VERSION_SIMILARITY_THRESHOLD)
+    return any(
+        sib.content_sample
+        and _text_similarity(content_sample, sib.content_sample) >= threshold
+        for sib in siblings
+    )
+
+
+def _sync_vectors_active(doc_ids, is_active):
+    """同步文档的检索向量活跃标志（DocumentVector 冗余字段，检索层无需 JOIN 主表）
+
+    在活跃版本切换（上传新版本 / set_active）后调用，保证检索层即时生效。
+    """
+    if not doc_ids:
+        return
+    from apps.retrieval.models import DocumentVector
+    DocumentVector.objects.filter(document_id__in=list(doc_ids)).update(is_active=is_active)
 
 
 def _extract_text_content(content: bytes, file_type: str, filename: str) -> str:
@@ -911,6 +989,13 @@ class DocumentViewSet(viewsets.ModelViewSet):
         if not include_deleted:
             qs = qs.filter(is_deleted=False)
 
+        # 活跃版本过滤：列表默认只返回活跃版本（检索/浏览视角），?version=all 返回全部。
+        # 仅作用于 list 动作——detail 动作（retrieve/versions/set_active/update/destroy）必须
+        # 能访问非活跃版本（版本切换、回溯旧版本），越权由 get_object 的 can_read 拦截。
+        if (self.action == 'list'
+                and self.request.query_params.get("version") != "all"):
+            qs = qs.filter(is_active=True)
+
         # 部门筛选：Document.dept_id 直接存储部门组织 ID（非节点 ID），无需再查节点
         dept_id = self.request.query_params.get("dept_id")
         if dept_id:
@@ -952,10 +1037,93 @@ class DocumentViewSet(viewsets.ModelViewSet):
         if page is not None:
             ctx = self.get_serializer_context()
             ctx["_grants_map"] = build_grants_map(request.user, [d.id for d in page])
+            ctx["_version_count_map"] = self._build_version_count_map(page)
             serializer = self.get_serializer(page, many=True, context=ctx)
             return self.get_paginated_response(serializer.data)
         serializer = self.get_serializer(queryset, many=True)
         return Response(serializer.data)
+
+    def _build_version_count_map(self, docs):
+        """单次查询统计每个文档同组（node+file_name+dept_id+team_id）的版本总数
+
+        列表页「版本切换」入口需要知道某文档是否还有其他版本；同组判定与上传/去重
+        逻辑一致（含非活跃版本、跨分页），一次 SQL 完成，避免逐行 N+1 查询。
+        """
+        ids = [d.id for d in docs if d.id]
+        if not ids:
+            return {}
+        group_keys = list(
+            Document.objects.filter(pk__in=ids, is_deleted=False)
+            .values_list('node_id', 'file_name', 'dept_id', 'team_id')
+        )
+        if not group_keys:
+            return {}
+        q = models.Q()
+        for node_id, file_name, dept_id, team_id in group_keys:
+            q |= models.Q(node_id=node_id, file_name=file_name,
+                          dept_id=dept_id, team_id=team_id)
+        rows = (Document.objects.filter(is_deleted=False).filter(q)
+                .values('node_id', 'file_name', 'dept_id', 'team_id')
+                .annotate(cnt=models.Count('id')))
+        counts = {(r['node_id'], r['file_name'], r['dept_id'], r['team_id']): r['cnt']
+                  for r in rows}
+        return {d.id: counts.get((d.node_id, d.file_name, d.dept_id, d.team_id), 1)
+                for d in docs}
+
+    @action(detail=True, methods=["get"])
+    def versions(self, request, pk=None):
+        """GET /documents/{id}/versions/ 获取文档的同组版本列表（版本切换弹窗数据源）
+
+        返回同组（node+file_name+dept_id+team_id）全部未删除版本，含版本号、活跃标记、
+        处理状态与是否可切换（is_owner）；不校验写权限，读取元信息即可。
+        """
+        doc = self.get_object()
+        siblings = (Document.objects.filter(
+            node=doc.node, file_name=doc.file_name,
+            dept_id=doc.dept_id, team_id=doc.team_id, is_deleted=False,
+        ).order_by('-version', '-created_at'))
+        is_admin = getattr(request.user, 'is_super_admin', False) or getattr(request.user, 'is_kb_admin', False)
+        data = [{
+            'id': d.id,
+            'title': d.title,
+            'version': d.version,
+            'version_tag': d.version_tag or '',
+            'is_active': d.is_active,
+            'status': d.status,
+            'file_size': d.file_size,
+            'created_at': d.created_at,
+            # 仅 Owner / 管理员可执行「设为活跃」
+            'is_owner': d.owner_id == request.user.id or is_admin,
+        } for d in siblings]
+        return Response({'documents': data})
+
+    @action(detail=True, methods=["post"])
+    def set_active(self, request, pk=None):
+        """POST /documents/{id}/set_active/ 将指定版本设为活跃版本
+
+        同组（node+file_name+dept_id+team_id）其他版本自动置非活跃，并同步检索向量表的
+        活跃标志；仅文档 Owner 或管理员可操作。幂等：已是活跃版本直接返回成功。
+        """
+        doc = self.get_object()
+        self._require_write(doc)
+        if doc.is_deleted:
+            return Response({"detail": "已删除文档不能设置为活跃版本"}, status=400)
+        if not doc.is_active:
+            with transaction.atomic():
+                deactivated_qs = Document.objects.filter(
+                    node=doc.node, file_name=doc.file_name,
+                    dept_id=doc.dept_id, team_id=doc.team_id, is_deleted=False,
+                ).exclude(id=doc.id)
+                deactivated_ids = list(deactivated_qs.values_list('id', flat=True))
+                deactivated_qs.update(is_active=False)
+                _sync_vectors_active(deactivated_ids, False)
+                doc.is_active = True
+                doc.save(update_fields=['is_active', 'updated_at'])
+                _sync_vectors_active([doc.id], True)
+            _log_operation(request, 'doc_set_active', document=doc, node=doc.node,
+                           detail={'doc_id': doc.id, 'version_tag': doc.version_tag,
+                                   'deactivated_ids': deactivated_ids})
+        return Response({'id': doc.id, 'is_active': True})
 
     @action(detail=False, methods=["get"])
     def available_depts(self, request):
@@ -1957,37 +2125,6 @@ class DocumentUploadView(APIView):
         visibility_depts = request.data.getlist("visibility_depts", [])
         visibility_teams = request.data.getlist("visibility_teams", [])
 
-        h = hashlib.sha256()
-        total = 0
-        for c in f.chunks():
-            h.update(c)
-            total += len(c)
-        file_hash = h.hexdigest()
-
-        version_tag = request.data.get("version_tag", "").strip()
-
-        if not version_tag:
-            max_version = Document.objects.filter(
-                node=node, file_name=f.name[:256], is_deleted=False
-            ).aggregate(models.Max('version'))['version__max'] or 0
-            version_tag = f'v{max_version + 1}'
-            version = max_version + 1
-        else:
-            existing_with_tag = Document.objects.filter(
-                node=node, file_name=f.name[:256], version_tag=version_tag, is_deleted=False
-            ).first()
-            if existing_with_tag:
-                version = existing_with_tag.version
-            else:
-                max_version = Document.objects.filter(
-                    node=node, file_name=f.name[:256], is_deleted=False
-                ).aggregate(models.Max('version'))['version__max'] or 0
-                version = max_version + 1
-
-        exist = Document.objects.filter(
-            node=node, file_name=f.name[:256], version_tag=version_tag, is_deleted=False
-        ).first()
-
         title = request.data.get("title") or f.name
         file_type = _detect_file_type(f.name)
 
@@ -2025,6 +2162,54 @@ class DocumentUploadView(APIView):
                           "仅支持上传为「全局公开」文档，请切换可见范围或选择其他节点"
             }, status=400)
 
+        # 计算文件哈希 + 截取内容样本（单次读取流，避免二次 IO）
+        h = hashlib.sha256()
+        total = 0
+        sample_raw = bytearray()
+        for c in f.chunks():
+            h.update(c)
+            total += len(c)
+            if len(sample_raw) < VERSION_SAMPLE_MAX_BYTES:
+                sample_raw.extend(c[:VERSION_SAMPLE_MAX_BYTES - len(sample_raw)])
+        file_hash = h.hexdigest()
+        content_sample = _capture_content_sample(bytes(sample_raw), file_type)
+
+        # 版本判定按「同组」进行：node + file_name + dept_id + team_id。
+        # 不同部门/团队上传同名文档互不干扰（各自独立），
+        # 避免团队 A 的文档被团队 B 的同名同内容上传误置非活跃。
+        group_filter = dict(node=node, file_name=f.name[:256],
+                            dept_id=dept_id, team_id=team_id, is_deleted=False)
+
+        version_tag = request.data.get("version_tag", "").strip()
+
+        if not version_tag:
+            max_version = Document.objects.filter(
+                **group_filter
+            ).aggregate(models.Max('version'))['version__max'] or 0
+            version_tag = f'v{max_version + 1}'
+            version = max_version + 1
+        else:
+            existing_with_tag = Document.objects.filter(
+                version_tag=version_tag, **group_filter
+            ).first()
+            if existing_with_tag:
+                version = existing_with_tag.version
+            else:
+                max_version = Document.objects.filter(
+                    **group_filter
+                ).aggregate(models.Max('version'))['version__max'] or 0
+                version = max_version + 1
+
+        # 同版本标签去重：软删旧记录后重建（dedup 语义与旧版一致，仅收敛到同组范围）
+        exist = Document.objects.filter(
+            version_tag=version_tag, **group_filter
+        ).first()
+
+        # 组内其余文档（不含将被去重替换的 exist）→ 判定本次上传是「新版本」还是「独立文档」
+        siblings = [s for s in Document.objects.filter(**group_filter)
+                    if s.id != (exist.id if exist else -1)]
+        is_version_upload = _is_version_upload(file_type, content_sample, siblings)
+
         file_path = None
         doc = None
 
@@ -2060,7 +2245,18 @@ class DocumentUploadView(APIView):
                     status="pending",
                     version=version,
                     version_tag=version_tag,
+                    content_sample=content_sample,
+                    is_active=True,
                 )
+
+                # 新版本：同组旧版本自动置非活跃，并同步检索向量表的活跃标志
+                if is_version_upload:
+                    # 事务内按同组条件重新查询（排除刚创建的新文档）后批量置非活跃，
+                    # 避免基于事务外预加载的 siblings 在并发上传下造成误判
+                    deactivated_qs = Document.objects.filter(**group_filter).exclude(id=doc.id)
+                    deactivated_ids = list(deactivated_qs.values_list('id', flat=True))
+                    deactivated_qs.update(is_active=False)
+                    _sync_vectors_active(deactivated_ids, False)
 
                 # visibility_teams：为指定团队创建跨团队共享
                 if visibility_teams:
@@ -2088,7 +2284,8 @@ class DocumentUploadView(APIView):
                                detail={'file_name': f.name, 'file_size': total, 'file_hash': file_hash,
                                        'visibility_level': visibility_level, 'version_tag': version_tag,
                                        'visibility_teams': visibility_teams, 'visibility_depts': visibility_depts,
-                                       'dept_id': dept_id, 'team_id': team_id})
+                                       'dept_id': dept_id, 'team_id': team_id,
+                                       'is_version_upload': is_version_upload})
         except Exception as e:
             if file_path:
                 try:
@@ -2117,6 +2314,8 @@ class DocumentUploadView(APIView):
             "celery_ok": celery_ok,
             "celery_error": celery_error,
             "version": doc.version,
+            "is_active": doc.is_active,
+            "is_version_upload": is_version_upload,
         }, status=201)
 
     def _check_node_upload_permission(self, user, node):

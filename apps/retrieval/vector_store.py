@@ -87,7 +87,7 @@ def upsert_vector(chunk, embedding: List[float]) -> DocumentVector:
 
     从 chunk.document 同步冗余权限字段到 DocumentVector，保证检索时无需 JOIN document 表。
     字段对齐：visibility_level / dept_id / team_id / owner_id / node_id / node_path /
-              has_resource_share / has_block_user / root_type
+              has_resource_share / has_block_user / root_type / is_active
     """
     doc = chunk.document
     # 团队/部门归属直接从 Document 冗余字段读取（写入文档时已同步）
@@ -112,6 +112,7 @@ def upsert_vector(chunk, embedding: List[float]) -> DocumentVector:
             'node_path': node_path,
             'has_resource_share': doc.has_resource_share,
             'has_block_user': doc.has_block_user,
+            'is_active': doc.is_active,
             'chunk_type': chunk.chunk_type,
             'content_preview': (chunk.content or '')[:200],
             'keywords': keywords,

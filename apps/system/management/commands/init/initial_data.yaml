@@ -953,6 +953,77 @@ system_configs:
     is_secret: false
     is_readonly: false
 
+  # ==================== 检索反馈闭环自动化（category: analytics）====================
+  # 用户点击/反馈每日聚合后自动调整关键词权重。权重是全局共享数据，
+  # 总开关与自动应用开关标记为 high 风险（变更需工单 + 超管复核），
+  # 阈值参数为普通项可直接调整。
+  - key: FEEDBACK_LOOP_ENABLED
+    value: true
+    value_type: bool
+    category: analytics
+    label: "检索反馈闭环"
+    description: "每日聚合点击/反馈并自动调整关键词权重；关闭后定时任务跳过，不影响现有排序"
+    is_secret: false
+    is_readonly: false
+    risk_level: high
+
+  - key: FEEDBACK_LOOP_AUTO_APPLY
+    value: true
+    value_type: bool
+    category: analytics
+    label: "自动应用权重调整"
+    description: "开启则聚合后直接改权重；关闭则只记录待复核，需在运营工具逐条应用（人工复核开关）"
+    is_secret: false
+    is_readonly: false
+    risk_level: high
+
+  - key: FEEDBACK_LOOP_ADOPT_THRESHOLD
+    value: 0.3
+    value_type: float
+    category: analytics
+    label: "采纳率降权阈值"
+    description: "关键词命中 chunk 的采纳率低于该值时触发基础降权"
+    is_secret: false
+    is_readonly: false
+
+  - key: FEEDBACK_LOOP_BAD_THRESHOLD
+    value: 2
+    value_type: int
+    category: analytics
+    label: "负反馈降权阈值"
+    description: "当日含该关键词的差评对话数达到该值时追加降权"
+    unit: "次"
+    is_secret: false
+    is_readonly: false
+
+  - key: FEEDBACK_LOOP_MIN_SHOW_COUNT
+    value: 5
+    value_type: int
+    category: analytics
+    label: "最小展示样本数"
+    description: "关键词当日展示次数低于该值不调整，避免少量噪声干扰全局排序"
+    unit: "次"
+    is_secret: false
+    is_readonly: false
+
+  - key: FEEDBACK_LOOP_BASE_DELTA
+    value: 0.1
+    value_type: float
+    category: analytics
+    label: "单次调整步长"
+    description: "采纳率低/负反馈各触发一次基础降权；点击未采纳为半降权"
+    is_secret: false
+    is_readonly: false
+
+  - key: FEEDBACK_LOOP_MAX_DELTA
+    value: 0.2
+    value_type: float
+    category: analytics
+    label: "单日调整幅度上限"
+    description: "无论命中多少条降权规则，单日单关键词实际调整幅度不超过该值（保护机制）"
+    is_secret: false
+    is_readonly: false
+
   # ==================== 评估（category: eval）====================
   - key: EVAL_ENABLED
     value: true

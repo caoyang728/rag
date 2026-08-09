@@ -90,6 +90,10 @@
 							<option value="config">配置</option>
 						</select>
 						<button class="btn btn-sm btn-primary" onclick="loadDocList(1)">查询</button>
+						<label class="filter-check" style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;user-select:none">
+							<input type="checkbox" id="docShowAll" onchange="loadDocList(1)">
+							<span class="text-sm text-sub">含旧版本</span>
+						</label>
 					</div>
 					<div class="table-container">
 						<table class="table doc-list-table">

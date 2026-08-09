@@ -202,6 +202,15 @@ SCHEDULED_TASKS: List[dict] = [
         'description': '批量评估 Wiki 页面质量（忠实度/完整性，LLM-as-Judge 成本高）',
     },
     {
+        'name': 'keyword-feedback-loop-daily',
+        'task': 'apps.analytics.tasks.aggregate_keyword_feedback_daily',
+        'cron': '20 2 * * *',
+        'enabled': True,
+        'estimated_minutes': 10,
+        'label': '关键词反馈闭环聚合',
+        'description': '每日聚合点击/反馈并自动调整关键词权重（幅度保护 + 人工复核开关）',
+    },
+    {
         'name': 'wiki-refresh-expired',
         'task': 'apps.wiki.tasks.refresh_expired_wiki_pages',
         'cron': '0 4 * * *',

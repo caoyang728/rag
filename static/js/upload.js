@@ -118,7 +118,14 @@ async function loadUploadHistory(page = 1) {
 			const row = document.importNode(rowTpl, true).querySelector('tr');
 			row.setAttribute('data-doc-id', h.id);
 			row.querySelector('.up-row-icon').textContent = fileTypeIcon(h.file_type);
-			row.querySelector('.up-row-name').textContent = h.file_name;
+			// 活跃标记：同组存在多版本时标注当前生效版本；非活跃旧版本标注灰色「旧版本」
+			let versionMarker = '';
+			if (h.version_count > 1) {
+				versionMarker = h.is_active
+					? ' <span class="tag tag-success" style="margin-left:4px">活跃</span>'
+					: ' <span class="tag" style="margin-left:4px;background:#eee;color:#888">旧版本</span>';
+			}
+			row.querySelector('.up-row-name').innerHTML = escapeHtml(h.file_name) + versionMarker;
 			row.querySelector('.up-row-type').textContent = fileTypeByExt(h.file_name);
 			row.querySelector('.up-row-node').textContent = h.node_name || '-';
 			row.querySelector('.up-row-owner').textContent = h.owner_name || '-';
@@ -159,6 +166,14 @@ async function loadUploadHistory(page = 1) {
 				row.querySelector('.up-row-view').onclick = function () { viewDocument(h.id); };
 				row.querySelector('.up-row-reparse').onclick = function () { reparseDocument(h.id); };
 				row.querySelector('.up-row-delete').onclick = function () { deleteDocument(h.id); };
+				// 版本切换入口：同组存在多版本时展示（版本历史弹窗由 common.js 提供）
+				if (h.version_count > 1) {
+					const verBtn = document.createElement('button');
+					verBtn.className = 'btn-link btn-sm';
+					verBtn.textContent = '版本';
+					verBtn.onclick = function () { showVersionModal(h.id); };
+					row.querySelector('.table-actions').appendChild(verBtn);
+				}
 			}
 			tbody.appendChild(row);
 		});

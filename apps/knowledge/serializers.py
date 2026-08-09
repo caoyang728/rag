@@ -69,6 +69,8 @@ class DocumentSerializer(serializers.ModelSerializer):
     can_share = serializers.SerializerMethodField()
     # 前端友好字段：visibility_level → visible_scope（team/dept/public）
     visible_scope = serializers.SerializerMethodField()
+    # 同组版本总数（node+file_name+dept_id+team_id），>1 时前端展示「版本切换」入口
+    version_count = serializers.SerializerMethodField()
 
     class Meta:
         model = Document
@@ -83,7 +85,7 @@ class DocumentSerializer(serializers.ModelSerializer):
             "has_block_user", "has_resource_share", "allow_download", "allow_share",
             # 轻量申请入口（最终计划）
             "allow_share_request", "preview_content", "preview_chunks",
-            "version", "version_tag", "tags",
+            "version", "version_tag", "tags", "is_active", "version_count",
             "root_type", "status", "error_message", "chunk_count",
             "is_deleted", "delete_time", "created_at", "updated_at",
             "restored_at", "restored_by", "restored_by_name",
@@ -91,6 +93,8 @@ class DocumentSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ["uuid", "file_hash", "status", "chunk_count",
                             "created_at", "updated_at", "restored_at", "restored_by",
+                            # 活跃标志由版本管理逻辑维护，不允许通过 API 直接修改
+                            "is_active", "version_count",
                             # 冗余标志位由授权操作维护，不允许直接通过 API 修改
                             "has_block_user", "has_resource_share"]
 
@@ -127,6 +131,18 @@ class DocumentSerializer(serializers.ModelSerializer):
             'DEPT_ONLY': 'dept',
             'PUBLIC': 'public',
         }.get(obj.visibility_level, obj.visibility_level)
+
+    def get_version_count(self, obj):
+        """同组版本总数：列表页优先用 view 层预计算的 _version_count_map（一次 SQL），
+        详情/单个场景回退为实时统计（同组判定与上传/去重逻辑一致）"""
+        ctx = self.context.get("_version_count_map")
+        if ctx is not None:
+            return ctx.get(obj.id, 1)
+        from apps.knowledge.models import Document
+        return Document.objects.filter(
+            node=obj.node, file_name=obj.file_name,
+            dept_id=obj.dept_id, team_id=obj.team_id, is_deleted=False,
+        ).count()
 
 
 class DocumentChunkSerializer(serializers.ModelSerializer):

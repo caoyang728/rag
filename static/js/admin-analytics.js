@@ -55,6 +55,7 @@ function switchTab(name) {
 		case 'tools':
 			loadKeywords('keywordsTableBody2');
 			loadBadFeedbacks('feedbackList2');
+			loadFeedbackLoopAggs();
 			break;
 	}
 }
@@ -75,6 +76,7 @@ function reloadCurrentTab() {
 		case 'tools':
 			loadKeywords('keywordsTableBody2');
 			loadBadFeedbacks('feedbackList2');
+			loadFeedbackLoopAggs();
 			break;
 	}
 }
@@ -300,7 +302,72 @@ async function adjustKeywordWeight(id, delta, tbodyId) {
 	try {
 		await api.put(`/api/v1/analytics/keywords/${id}/`, { delta: delta });
 		toast(delta > 0 ? '已加权 +0.1' : '已降权 -0.1', 'success');
-		// 刷新关键词表
+		// 刷新关键词表 + 自动调整记录（手动调整也写入审计）
+		loadKeywords('keywordsTableBody2');
+		loadFeedbackLoopAggs();
+	} catch (e) {
+		toast(e.message || '操作失败', 'error');
+	}
+}
+
+/* ---- 反馈闭环自动调整记录 ---- */
+async function loadFeedbackLoopAggs() {
+	const body = document.getElementById('feedbackAggBody');
+	if (!body) return;
+	try {
+		const data = await api.getJson('/api/v1/analytics/feedback-loop/aggregations/?limit=100');
+		const rows = data.rows || [];
+		const kwTpl = tpl('tmpl-fb-agg-row');
+		body.innerHTML = rows.length === 0
+			? '<tr><td colspan="8" class="empty">暂无自动调整记录（点击/反馈数据不足或尚未聚合）</td></tr>'
+			: rows.map(r => {
+				const row = kwTpl.content.cloneNode(true).firstElementChild;
+				const tds = row.querySelectorAll('td');
+				tds[0].textContent = r.report_date;
+				tds[1].textContent = escapeHtml(r.keyword);
+				tds[2].textContent = `${r.shown_count || 0} / ${r.click_count || 0} / ${r.adopt_count || 0} / ${r.bad_count || 0}`;
+				tds[3].textContent = Math.round((r.adopt_rate || 0) * 100) + '%';
+				tds[4].textContent = (r.old_score || 1).toFixed(2) + ' → ' + (r.new_score || 1).toFixed(2);
+				tds[5].textContent = escapeHtml(r.reason || '-');
+				const tag = row.querySelector('.tag');
+				const statusMap = { pending: ['待复核', 'tag-warning'], applied: ['已应用', 'tag-success'], ignored: ['已忽略', ''] };
+				const st = statusMap[r.status] || [r.status || '', ''];
+				tag.textContent = st[0];
+				if (st[1]) tag.classList.add(st[1]);
+				const actions = row.querySelector('.table-actions');
+				if (r.status === 'pending') {
+					actions.innerHTML =
+						`<button class="btn-link btn-sm" onclick="applyFeedbackAgg(${r.id},'apply')">应用</button>` +
+						`<button class="btn-link btn-sm" onclick="applyFeedbackAgg(${r.id},'ignore')">忽略</button>`;
+				} else {
+					actions.innerHTML = '<span class="text-sub text-sm">' + (r.adjust_type === 'manual' ? '手动' : '自动') + '</span>';
+				}
+				return row.outerHTML;
+			}).join('');
+	} catch (e) {
+		body.innerHTML = '<tr><td colspan="8" class="error-block">加载自动调整记录失败</td></tr>';
+		console.error('load feedback loop aggs failed:', e);
+	}
+}
+
+/* 手动触发一次反馈闭环聚合（默认聚合昨天，支持运营即时回补） */
+async function runFeedbackLoop() {
+	try {
+		await api.postJson('/api/v1/analytics/feedback-loop/run/', {});
+		toast('聚合完成，已刷新记录', 'success');
+		loadFeedbackLoopAggs();
+		loadKeywords('keywordsTableBody2');
+	} catch (e) {
+		toast(e.message || '聚合失败', 'error');
+	}
+}
+
+/* 人工复核：应用/忽略一条待复核的自动调整 */
+async function applyFeedbackAgg(id, action) {
+	try {
+		await api.postJson('/api/v1/analytics/feedback-loop/apply/', { id: id, action: action });
+		toast(action === 'apply' ? '已应用调整' : '已忽略', 'success');
+		loadFeedbackLoopAggs();
 		loadKeywords('keywordsTableBody2');
 	} catch (e) {
 		toast(e.message || '操作失败', 'error');

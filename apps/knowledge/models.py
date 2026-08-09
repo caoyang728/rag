@@ -270,6 +270,15 @@ class Document(models.Model):
     version = models.IntegerField(default=1)
     version_tag = models.CharField(max_length=64, default='', blank=True,
                                     help_text=_('版本标签，如 v1.0、v2.1'))
+    # 活跃版本标记：同组（node+file_name+dept_id+team_id）通常仅一个活跃版本，
+    # 检索与文档列表默认只召回活跃版本；?version=all 可回溯全部版本。
+    # 注意：同组中"恰好同名但内容不同"的独立文档（如不同项目的同名代码文件）可并存多个活跃版本。
+    is_active = models.BooleanField(default=True,
+                                    help_text=_('是否活跃版本（检索/列表默认只召回活跃版本）'))
+    # 文本类文件上传时截取的规范化内容样本，用于判定同组文件是「新版本」还是「独立文档」：
+    # 相似度 >= 阈值视为新版本（旧版本自动置非活跃），否则视为独立文档（全部保留）。
+    content_sample = models.TextField(blank=True, default='',
+                                      help_text=_('文本内容样本（空白归一化后截断），用于版本相似度判定'))
     tags = ArrayField(models.CharField(max_length=32), default=list, blank=True)
     extra = models.JSONField(default=dict, blank=True)
 
@@ -294,12 +303,14 @@ class Document(models.Model):
             models.Index(fields=['status'], name='idx_doc_status'),
             models.Index(fields=['visibility_level', 'root_type'], name='idx_doc_visroot'),
             models.Index(fields=['file_hash'], name='idx_doc_hash'),
-            models.Index(fields=['node', 'file_name', 'version_tag'], name='idx_doc_node_name_version'),
+            models.Index(fields=['node', 'file_name', 'dept_id', 'team_id', 'version_tag'],
+                         name='idx_doc_node_name_version'),
         ]
         constraints = [
-            # 同节点下同文件名+版本标签不重复
+            # 同节点下同文件名+版本标签不重复（按部门/团队归属隔离：
+            # 团队 A / 团队 B 各自上传同名文档互不冲突，也不互相触发版本替换）
             models.UniqueConstraint(
-                fields=['node', 'file_name', 'version_tag'],
+                fields=['node', 'file_name', 'dept_id', 'team_id', 'version_tag'],
                 condition=models.Q(is_deleted=False),
                 name='unique_doc_node_name_version',
             ),
@@ -611,6 +622,7 @@ class DocOperationLog(models.Model):
         ('doc_download', '下载文档'),
         ('doc_reparse', '重新解析'),
         ('doc_restore', '恢复文档'),
+        ('doc_set_active', '切换活跃版本'),
         # 节点操作
         ('node_create', '创建节点'),
         ('node_update', '修改节点'),

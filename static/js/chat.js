@@ -359,13 +359,13 @@ function updateScopeBadge() {
  * @param {Array} toolTraces - Agent 工具调用链（含 text2sql/web_search 等）
  * @param {boolean} isPending - Agent 工具尚未返回时先不渲染 LLM 占位，避免闪烁
  */
-function buildSourceHtml(citations, routeSource, toolTraces, isPending) {
+function buildSourceHtml(citations, routeSource, toolTraces, isPending, qaRecordId) {
 	const cards = [];
 	const traces = Array.isArray(toolTraces) ? toolTraces : [];
 
 	// 1. 文档引用卡片（可点击跳转预览）
 	(Array.isArray(citations) ? citations : []).forEach(c => {
-		cards.push(buildDocSourceCard(c, routeSource));
+		cards.push(buildDocSourceCard(c, routeSource, qaRecordId));
 	});
 
 	// 2. 数据库来源（text2sql 工具调用）
@@ -396,8 +396,9 @@ function buildSourceHtml(citations, routeSource, toolTraces, isPending) {
 	});
 }
 
-/* 文档引用卡片：徽标 + 可点击标题（有 document_id 时跳转预览并定位页码） */
-function buildDocSourceCard(c, routeSource) {
+/* 文档引用卡片：徽标 + 可点击标题（有 document_id 时跳转预览并定位页码）
+ * qaRecordId 用于反馈闭环点击埋点（本次回答的 QaRecord.id，未知时传 0） */
+function buildDocSourceCard(c, routeSource, qaRecordId) {
 	return htmlFromTpl('tmpl-source-card', (frag) => {
 		const badgeEl = frag.querySelector('.source-card-badge');
 		// Wiki / GraphRAG 路由下的引用同属文档来源，细分徽标便于用户识别检索层
@@ -415,7 +416,9 @@ function buildDocSourceCard(c, routeSource) {
 			titleEl.classList.add('source-card-title-link');
 			titleEl.setAttribute('title', '点击预览文档');
 			const page = (Array.isArray(c.page) && c.page[0]) || 1;
-			titleEl.setAttribute('onclick', 'previewCitation(' + docId + ', ' + page + ')');
+			const chunkIds = (Array.isArray(c.chunk_ids) ? c.chunk_ids : []).join(',');
+			titleEl.setAttribute('onclick',
+				'previewCitation(' + docId + ', ' + page + ', ' + (parseInt(qaRecordId, 10) || 0) + ', "' + chunkIds + '")');
 		}
 
 		// 元信息（章节/页码/引用数）inline 排列，节省纵向空间
@@ -523,9 +526,22 @@ function toggleSourceSql(btn) {
 	btn.textContent = sqlEl.classList.contains('hidden') ? '查看 SQL ▾' : '收起 SQL ▴';
 }
 
-/* 从引用卡片跳转文档预览并定位页码（复用 preview-doc.js；document_id 由后端在 citations 中带出） */
-function previewCitation(docId, page) {
+/* 从引用卡片跳转文档预览并定位页码（复用 preview-doc.js；document_id 由后端在 citations 中带出）
+ * 同时做反馈闭环点击埋点：把本次点击的 chunk/qa_record 上报，供每日聚合调整关键词权重 */
+function previewCitation(docId, page, qaRecordId, chunkIdsStr) {
 	if (!docId) return;
+	// 点击埋点为尽力而为，失败不影响预览主流程
+	try {
+		const chunkIds = String(chunkIdsStr || '').split(',').map(s => parseInt(s, 10)).filter(n => n > 0);
+		const qaId = parseInt(qaRecordId, 10) || null;
+		for (const cid of chunkIds) {
+			api.postJson('/api/v1/analytics/chunk-clicks/', {
+				chunk_id: cid,
+				document_id: docId,
+				qa_record_id: qaId,
+			}).catch(() => {});
+		}
+	} catch (e) { /* 忽略埋点异常 */ }
 	previewTargetId = docId;
 	previewDocPage(docId, page || 1);
 }
@@ -817,7 +833,7 @@ async function sendChat() {
 					}
 					const sourceArea = answerFrag.querySelector('.ai-source-area');
 					// Agent 模式下工具尚未执行完，先不渲染"基于模型知识"占位，避免闪烁
-					const sourceHtml = buildSourceHtml(citations, chunk.route_source, undefined, !!chunk.is_agent);
+					const sourceHtml = buildSourceHtml(citations, chunk.route_source, undefined, !!chunk.is_agent, 0);
 					if (sourceHtml) sourceArea.innerHTML = sourceHtml;
 					// message_id 此时未知，先用 0 占位，done 时回填
 					answerFrag.querySelector('.feedback-good').setAttribute('onclick', "submitFeedback('" + mid + "', 0, 1)");
@@ -920,7 +936,7 @@ async function sendChat() {
 						// 刷新溯源区
 						const sourceArea = answerContentEl.querySelector('.ai-source-area');
 						if (sourceArea) {
-							const sourceHtml = buildSourceHtml(citations, chunk.route_source, doneToolTraces);
+							const sourceHtml = buildSourceHtml(citations, chunk.route_source, doneToolTraces, undefined, messageId);
 							sourceArea.innerHTML = sourceHtml || '';
 						}
 						// 回填真实 message_id 到反馈按钮
@@ -946,6 +962,8 @@ async function sendChat() {
 							}
 						}
 					}
+					// 同一问答再次渲染时恢复历史反馈状态（刷新/切换会话重载后）
+					if (answerContentEl) restoreAllFeedbackBars(answerContentEl);
 					// 思考区摘要收尾：补全总耗时；若全流程无工具调用，则移除空思考区
 					if (thinkingAreaEl) {
 						if (toolCallCount === 0) {
@@ -1227,6 +1245,81 @@ function formatLatencyText(stats) {
 }
 
 /* ---- 反馈 ---- */
+
+// 反馈状态本地持久化：key=qa_id，value={rating, ts}
+// 刷新页面后恢复已反馈状态并锁定按钮，防止重复反馈（覆盖原始评价）
+const FEEDBACK_STATE_KEY = 'chat_feedback_states';
+const FEEDBACK_STATE_MAX = 200;           // 最多保留最近 200 条反馈状态，防止 localStorage 膨胀
+const FEEDBACK_STATE_TTL = 90 * 86400000; // 90 天后视为失效自动清理
+
+function getFeedbackStates() {
+	try {
+		return JSON.parse(localStorage.getItem(FEEDBACK_STATE_KEY)) || {};
+	} catch (e) {
+		return {};
+	}
+}
+
+function setFeedbackStates(states) {
+	try {
+		localStorage.setItem(FEEDBACK_STATE_KEY, JSON.stringify(states));
+	} catch (e) {
+		// localStorage 存满（配额超限）时静默降级：仅本次刷新不恢复状态，不影响反馈提交
+	}
+}
+
+function saveFeedbackState(qaId, rating) {
+	const states = getFeedbackStates();
+	states[qaId] = { rating: rating, ts: Date.now() };
+	// 容量保护：仅保留最近 FEEDBACK_STATE_MAX 条，避免长期使用后本地存储膨胀
+	const keys = Object.keys(states);
+	if (keys.length > FEEDBACK_STATE_MAX) {
+		keys.sort((a, b) => (states[b].ts || 0) - (states[a].ts || 0));
+		keys.slice(FEEDBACK_STATE_MAX).forEach(k => delete states[k]);
+	}
+	setFeedbackStates(states);
+}
+
+function getFeedbackState(qaId) {
+	const states = getFeedbackStates();
+	const s = states[qaId];
+	if (!s) return null;
+	// 过期状态自动清理，避免长期占用存储
+	if (Date.now() - (s.ts || 0) > FEEDBACK_STATE_TTL) {
+		delete states[qaId];
+		setFeedbackStates(states);
+		return null;
+	}
+	return s.rating;
+}
+
+/* 锁定反馈栏：高亮已选评价并禁用全部反馈按钮（含详细反馈），防止重复提交 */
+function lockFeedbackBar(bar, rating) {
+	const good = bar.querySelector('.feedback-good');
+	const bad = bar.querySelector('.feedback-bad');
+	const detailBtn = bar.querySelector('.feedback-detail-btn');
+	if (good) good.classList.remove('active', 'active-neg');
+	if (bad) bad.classList.remove('active', 'active-neg');
+	if (rating === 1 && good) good.classList.add('active');
+	if (rating === -1 && bad) bad.classList.add('active-neg');
+	[good, bad, detailBtn].forEach(b => { if (b) b.disabled = true; });
+}
+
+/* 恢复容器内所有消息的已反馈状态（刷新/切换会话重新渲染后调用） */
+function restoreAllFeedbackBars(container) {
+	if (!container) return;
+	container.querySelectorAll('.feedback-bar').forEach(bar => {
+		const detail = bar.nextElementSibling;
+		if (!detail || !detail.id || !detail.id.startsWith('fbd-')) return;
+		// detail.id 形如 'fbd-m123'，提取真实 qa_id；生成中(id=0)等未回填状态跳过
+		const m = String(detail.id.slice(4)).match(/^m?(\d+)$/);
+		if (!m) return;
+		const rating = getFeedbackState(m[1]);
+		if (rating == null) return;
+		lockFeedbackBar(bar, rating);
+	});
+}
+
 async function submitFeedback(mid, qaId, rating) {
 	try {
 		await api.postJson('/api/v1/chat/feedback/', {
@@ -1236,14 +1329,10 @@ async function submitFeedback(mid, qaId, rating) {
 		});
 		toast(rating === 1 ? '感谢反馈，已记录为满意' : '感谢反馈，将用于优化召回', 'success');
 
+		// 持久化反馈状态并锁定按钮：刷新页面后不再允许重复反馈
+		saveFeedbackState(qaId, rating);
 		const bar = document.querySelector('#fbd-' + mid)?.previousElementSibling;
-		if (bar) {
-			bar.querySelectorAll('.feedback-btn').forEach((b, i) => {
-				if (i < 2) b.classList.remove('active', 'active-neg');
-			});
-			const btn = bar.querySelector(rating === 1 ? '.feedback-btn:nth-child(1)' : '.feedback-btn:nth-child(2)');
-			if (btn) btn.classList.add(rating === 1 ? 'active' : 'active-neg');
-		}
+		if (bar) lockFeedbackBar(bar, rating);
 	} catch (e) {
 		console.error('submit feedback failed:', e);
 		toast('反馈提交失败', 'error');
@@ -1463,6 +1552,7 @@ async function switchToSession(id, options = {}) {
 		const records = Array.isArray(data) ? data : (data.records || []);
 		if (msgs) {
 			msgs.innerHTML = renderMessagesFromRecords(records);
+			restoreAllFeedbackBars(msgs);
 			scrollChatBottom();
 		}
 		// 写入缓存

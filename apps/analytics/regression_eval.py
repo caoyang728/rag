@@ -257,6 +257,8 @@ def run_regression_evaluation(
                     query=q.question,
                     user=user,
                     root_types=[rt] if rt and rt != 'all' else None,
+                    # 离线评估衡量基线检索质量，跳过个性化加权，保证指标与用户画像无关
+                    personalize=False,
                 )
                 chunks = search_result.get('chunks', [])
                 chunk_ids = [c.get('chunk_id') for c in chunks[:5] if c.get('chunk_id')]

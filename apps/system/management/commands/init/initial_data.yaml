@@ -644,6 +644,26 @@ system_configs:
     is_readonly: false
     risk_level: normal
 
+  - key: PERSONALIZED_RETRIEVAL_ENABLED
+    value: false
+    value_type: bool
+    category: retrieval
+    label: "个性化检索开关"
+    description: "开启后，基于用户历史问答/画像对检索结果做轻量加权排序（默认影响≤10%）；关闭时行为与现状完全一致，冷启动用户无副作用"
+    is_secret: false
+    is_readonly: false
+    risk_level: normal
+
+  - key: PERSONALIZED_WEIGHT
+    value: 0.1
+    value_type: float
+    category: retrieval
+    label: "个性化加权系数"
+    description: "个性化排序加权系数（0-0.2，默认 0.1 即影响不超过 10%）。数值越大个性化对排序影响越明显，过高会导致画像污染全局检索结果"
+    is_secret: false
+    is_readonly: false
+    risk_level: normal
+
   # ==================== 存储（category: storage）====================
   - key: IMAGE_STORAGE_MODE
     value: "base64"

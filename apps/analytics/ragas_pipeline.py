@@ -358,7 +358,10 @@ def run_rag_for_question(question: str, user, model: Optional[str] = None) -> Di
     }
 
     try:
-        search_result = hybrid_search(query=question, user=user)
+        # 复用生产 hybrid_search(含权限过滤 + 向量/BM25/RRF/Rerank 全链路),
+        # 保证评估对象与生产管线一致,而非一个简化版 mock。
+        # 离线评估衡量基线检索质量,跳过个性化加权,保证指标与用户画像无关
+        search_result = hybrid_search(query=question, user=user, personalize=False)
     except Exception as e:
         logger.warning(f'[RagasPipeline] 检索失败: {e}, question={question[:60]}')
         result['error'] = f'retrieval_failed: {e}'

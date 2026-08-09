@@ -2465,6 +2465,47 @@ def _aggregate_query_transform_stats(qs):
     }
 
 
+def _aggregate_personalization_stats(qs):
+    """从窗口内 QaRecord.route_trace 实时聚合个性化检索统计（个性化命中率）
+
+    个性化链路与改写链路一致，不沉淀到 RouteAnalysis 表，直接从 route_trace 统计：
+    - personalized_total: 实际生效个性化加权的问答数（applied=True）
+    - cold_start_count: 开关开启但用户无画像被跳过（验证无副作用）的问答数
+    - adjusted_count: 加权后排序相对原始发生变化的问答数
+    - adjust_rate: adjusted_count / personalized_total，排序变化占比
+    - hit_count: 加权后 Top-N 命中画像相关 chunk（personalized_hits>0）的问答数
+    - personalized_hit_rate: hit_count / personalized_total，个性化命中率
+
+    开关关闭（无 trace 数据）时各项为 0/0.0，运营对比开关前后的看板数值即可
+    得到"开启 vs 关闭"的效果差异。
+    """
+    rows = (qs.exclude(route_trace__isnull=True)
+              .exclude(route_trace=[])
+              .only('id', 'route_trace')
+              .iterator())
+    total = adjusted = hit = cold_start = 0
+    for qa in rows:
+        for entry in (qa.route_trace or []):
+            if entry.get('layer') != 'personalization':
+                continue
+            if entry.get('applied'):
+                total += 1
+                if entry.get('reordered'):
+                    adjusted += 1
+                if entry.get('personalized_hits', 0) > 0:
+                    hit += 1
+            else:
+                cold_start += 1
+    return {
+        'personalized_total': total,
+        'cold_start_count': cold_start,
+        'adjusted_count': adjusted,
+        'adjust_rate': round(adjusted / total, 4) if total else 0.0,
+        'hit_count': hit,
+        'personalized_hit_rate': round(hit / total, 4) if total else 0.0,
+    }
+
+
 class RouteAnalysisDashboardView(APIView):
     """GET /api/v1/analytics/eval-dashboard/route-analysis/?days=7&dept_id=&team_id=
 
@@ -2508,6 +2549,9 @@ class RouteAnalysisDashboardView(APIView):
                 'quality_by_route': {},
                 'daily_trend': [],
                 'query_transform_stats': _aggregate_query_transform_stats(
+                    _apply_org_filter_on_qa(QaRecord.objects.filter(created_at__gte=since),
+                                            dept_id, team_id)),
+                'personalization_stats': _aggregate_personalization_stats(
                     _apply_org_filter_on_qa(QaRecord.objects.filter(created_at__gte=since),
                                             dept_id, team_id)),
             })
@@ -2595,6 +2639,10 @@ class RouteAnalysisDashboardView(APIView):
             'daily_trend': daily_trend,
             # 查询改写/分解统计（改写命中率，与路由链路同窗口、同组织过滤）
             'query_transform_stats': _aggregate_query_transform_stats(
+                _apply_org_filter_on_qa(QaRecord.objects.filter(created_at__gte=since),
+                                        dept_id, team_id)),
+            # 个性化检索统计（个性化命中率，开关关闭时全 0，用于对比开/关效果）
+            'personalization_stats': _aggregate_personalization_stats(
                 _apply_org_filter_on_qa(QaRecord.objects.filter(created_at__gte=since),
                                         dept_id, team_id)),
         })

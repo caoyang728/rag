@@ -49,7 +49,8 @@ def hybrid_search(query: str,
                   bm25_top_k: int = None,
                   rrf_top_k: int = 30,
                   rerank_top_k: int = None,
-                  do_rerank: bool = True) -> Dict[str, Any]:
+                  do_rerank: bool = True,
+                  personalize: bool = True) -> Dict[str, Any]:
     """混合检索对外入口（对外契约不变）
 
     - 总开关 QUERY_TRANSFORM_ENABLED 关闭（默认）时：行为与现状完全一致，
@@ -57,20 +58,29 @@ def hybrid_search(query: str,
     - 开关开启时：检索前先做查询改写/同义词扩展，改写后置信度不足再查询分解
       （透明链路），返回结构不变，额外带 'transform' 审计信息，
       供 QaRecord.route_trace 记录改写/分解的输入输出
+    - 个性化检索总开关 PERSONALIZED_RETRIEVAL_ENABLED 开启时（默认关闭）：
+      对检索结果按用户画像轻量加权重排（默认影响 ≤10%），返回额外带
+      'personalization' 审计信息；关闭时行为与现状完全一致。
+      离线评估链路传 personalize=False，保证评估对象与用户画像无关
     """
     from .query_transform import transform_enabled, search_with_transform
+    from .profile import apply_personalization
 
     if transform_enabled():
-        return search_with_transform(
+        result = search_with_transform(
             query, user, root_types=root_types, node_path_prefix=node_path_prefix,
             node_ids=node_ids, vector_top_k=vector_top_k, bm25_top_k=bm25_top_k,
             rrf_top_k=rrf_top_k, rerank_top_k=rerank_top_k, do_rerank=do_rerank,
         )
-    return _search_core(
-        query, user, root_types=root_types, node_path_prefix=node_path_prefix,
-        node_ids=node_ids, vector_top_k=vector_top_k, bm25_top_k=bm25_top_k,
-        rrf_top_k=rrf_top_k, rerank_top_k=rerank_top_k, do_rerank=do_rerank,
-    )
+    else:
+        result = _search_core(
+            query, user, root_types=root_types, node_path_prefix=node_path_prefix,
+            node_ids=node_ids, vector_top_k=vector_top_k, bm25_top_k=bm25_top_k,
+            rrf_top_k=rrf_top_k, rerank_top_k=rerank_top_k, do_rerank=do_rerank,
+        )
+    if personalize:
+        return apply_personalization(result, user, query)
+    return result
 
 
 def _search_core(query: str,

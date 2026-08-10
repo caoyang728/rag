@@ -90,6 +90,7 @@ class ChatAskStreamView(APIView):
         node_ids = request.data.get("node_ids")
         use_cache = bool(request.data.get("use_cache", True))
         do_task_split = bool(request.data.get("do_task_split", False))
+        do_workflow = bool(request.data.get("do_workflow", False))
 
         # 动态获取默认根类型
         if not root_types or not root_types[0]:
@@ -128,6 +129,7 @@ class ChatAskStreamView(APIView):
             node_ids=node_ids,
             use_cache=use_cache,
             do_task_split=do_task_split,
+            do_workflow=do_workflow,
             do_rerank=True,
             mode=mode,
         )

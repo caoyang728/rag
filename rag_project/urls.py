@@ -110,9 +110,7 @@ if settings.DEBUG:
     # 仅开发环境：暴露 pytest-cov 生成的测试覆盖率报告（HTML 静态文件）
     # 生产环境 DEBUG=False 时此路由不挂载，访问 /coverage/ 直接 404
     # 原因：覆盖率报告含完整源码路径，属于内部开发信息，不应在生产环境暴露
-    # 注意：staticfiles 的 serve 对目录路径（/coverage/）不自动补 index.html，
-    # 需先重定向到 index.html 才能正常渲染报告首页
+    # 报告由 .coveragerc 输出到 static/coverage/，走 WhiteNoise 服务（gzip + 长缓存）；
     urlpatterns += [
-        path("coverage/", RedirectView.as_view(url="/coverage/index.html", permanent=False), name="coverage-index"),
-        *static('/coverage/', document_root=settings.BASE_DIR / 'coverage_report'),
+        path("coverage/", RedirectView.as_view(url="/static/coverage/index.html", permanent=False), name="coverage-index"),
     ]

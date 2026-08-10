@@ -98,11 +98,13 @@ class TicketBizType(models.TextChoices):
     - config：系统配置变更（含调度类配置），业务字段在主表 detail JSON
     - model：LLM 模型变更（修改/停用/删除），业务字段在主表 detail JSON
     - schedule：定时任务变更，业务字段在主表 detail JSON
+    - agent：Agent 工作流人工确认（HITL），详情在 TicketAgentApprovalDetail
     """
     PERMISSION = 'permission', _('权限审批')
     CONFIG = 'config', _('配置变更')
     MODEL = 'model', _('模型变更')
     SCHEDULE = 'schedule', _('定时任务')
+    AGENT = 'agent', _('Agent审批')
 
 
 class UserStatus(models.TextChoices):
@@ -654,6 +656,11 @@ class TicketList(models.Model):
         return getattr(self, 'model_detail', None)
 
     @property
+    def _ad(self):
+        # agent 人工确认详情子表（biz_type=agent 时有效）
+        return getattr(self, 'agent_approval_detail', None)
+
+    @property
     def change_type(self):
         d = self._pd
         return d.change_type if d else None
@@ -711,7 +718,7 @@ class TicketList(models.Model):
     @property
     def reason(self):
         # 统一 reason 代理：各类型详情子表各自存储申请/变更原因，按类型依次取
-        for d in (self._pd, self._cd, self._sd, self._md):
+        for d in (self._pd, self._cd, self._sd, self._md, self._ad):
             if d:
                 return d.reason
         return ''
@@ -874,6 +881,35 @@ class TicketModelDetail(models.Model):
 
     def __str__(self):
         return f'ModelDetail<{self.ticket_id}>'
+
+
+class TicketAgentApprovalDetail(models.Model):
+    """Agent 工作流人工确认（HITL）工单详情 —— 关联统一主表，biz_type=agent
+
+    与主表 TicketList 一对一：主表管流程（审批链/状态/时间），本表管业务
+    （哪个工作流的哪个节点需要人工确认，确认理由）。
+
+    reason 固定带前缀 [agent:{workflow_id}:approval]，用于审计检索与工单中心
+    快速识别人工确认工单的来源；工单永不删除只改状态（与统一工单一致）。
+    """
+    ticket = models.OneToOneField(TicketList, on_delete=models.CASCADE,
+                                  related_name='agent_approval_detail',
+                                  help_text=_('关联统一工单主表'))
+    workflow_id = models.BigIntegerField(db_index=True,
+                                         help_text=_('Agent 工作流 ID'))
+    node_id = models.CharField(max_length=64, help_text=_('待确认节点 ID'))
+    reason = models.TextField(blank=True, default='',
+                              help_text=_('确认理由（前缀 [agent:{wf_id}:approval]）'))
+
+    class Meta:
+        db_table = 'agent_ticket_detail'
+        verbose_name = _('Agent 工作流人工确认工单详情')
+        indexes = [
+            models.Index(fields=['workflow_id'], name='idx_agent_detail_wf'),
+        ]
+
+    def __str__(self):
+        return f'AgentApprovalDetail<{self.ticket_id}> wf={self.workflow_id}'
 
 
 class TicketFlowLog(models.Model):

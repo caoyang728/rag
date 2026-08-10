@@ -56,6 +56,8 @@ scripts/upload/*
 .coverage
 .coverage.*
 coverage_report/
+# 覆盖率 HTML 报告输出到 static/coverage/（由 WhiteNoise 服务，见 .coveragerc）
+static/coverage/
 
 # Django 模板预留目录（保留结构，模板源码入 git）
 templates/*

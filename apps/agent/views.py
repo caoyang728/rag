@@ -108,3 +108,89 @@ class AgentTaskRunView(APIView):
         except Exception as e:
             logger.exception("agent run error")
             return Response({"detail": f"内部错误: {e}"}, status=500)
+
+
+class AgentWorkflowDetailView(APIView):
+    """GET /api/v1/agent/workflows/{workflow_id}/
+
+    工作流详情（含节点执行轨迹）：发起人本人或超管可查看。
+    前端在人工确认通过/驳回后轮询此接口获取最终执行结果。
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, workflow_id):
+        from apps.agent.models import AgentWorkflow
+
+        try:
+            workflow = AgentWorkflow.objects.get(id=workflow_id)
+        except AgentWorkflow.DoesNotExist:
+            return Response({"detail": "工作流不存在"}, status=404)
+        # 权限：仅发起人本人或超管可见（轨迹含工具输入输出，属敏感信息）
+        if workflow.user_id != request.user.id and not request.user.is_super_admin:
+            return Response({"detail": "无权查看该工作流"}, status=403)
+
+        nodes = []
+        for r in workflow.node_runs.all():
+            nodes.append({
+                'node_id': r.node_id,
+                'node_name': r.node_name,
+                'step_type': r.step_type,
+                'status': r.status,
+                'attempt': r.attempt,
+                'input': r.input,
+                'output': (r.output or {}).get('output', '')[:2000],
+                'ok': (r.output or {}).get('ok', False),
+                'error': r.error[:500],
+                'ticket_id': r.ticket_id,
+                'latency_ms': r.latency_ms,
+                'started_at': r.started_at.isoformat() if r.started_at else None,
+                'finished_at': r.finished_at.isoformat() if r.finished_at else None,
+            })
+
+        result = workflow.result or {}
+        return Response({
+            'id': workflow.id,
+            'question': workflow.question,
+            'status': workflow.status,
+            'status_display': workflow.get_status_display(),
+            'max_nodes': workflow.max_nodes,
+            'max_duration_sec': workflow.max_duration_sec,
+            'definition': workflow.definition,
+            'nodes': nodes,
+            'result': {
+                'answer': result.get('answer', ''),
+                'citations': result.get('citations', []),
+                'degraded_reasons': result.get('degraded_reasons', []),
+                'qa_id': result.get('qa_id'),
+                'filtered': result.get('filtered', False),
+            },
+            'created_at': workflow.created_at.isoformat() if workflow.created_at else None,
+            'started_at': workflow.started_at.isoformat() if workflow.started_at else None,
+            'finished_at': workflow.finished_at.isoformat() if workflow.finished_at else None,
+        })
+
+
+class AgentWorkflowListView(APIView):
+    """GET /api/v1/agent/workflows/?status=running
+
+    当前用户的工作流列表（按创建时间倒序），供前端展示工作流记录与审批中状态。
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from apps.agent.models import AgentWorkflow
+
+        qs = AgentWorkflow.objects.filter(user=request.user)
+        status = request.query_params.get('status')
+        if status:
+            qs = qs.filter(status=status)
+        workflows = qs[:50]
+        return Response([{
+            'id': w.id,
+            'question': w.question,
+            'status': w.status,
+            'status_display': w.get_status_display(),
+            'qa_id': (w.result or {}).get('qa_id'),
+            'created_at': w.created_at.isoformat() if w.created_at else None,
+            'finished_at': w.finished_at.isoformat() if w.finished_at else None,
+        } for w in workflows])

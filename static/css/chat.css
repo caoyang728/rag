@@ -1043,3 +1043,210 @@
 .content-filtered-card .filtered-cancel-btn:hover {
 	background: var(--hover);
 }
+
+/* ============ 多 Agent 工作流轨迹区 ============ */
+/* 工作流节点 DAG 可视化 + HITL 审批卡片，样式与思考过程区（thinking-area）保持一致 */
+.workflow-area {
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	margin: 4px 0 10px;
+	background: var(--bg-card, #fff);
+	overflow: hidden;
+}
+
+.workflow-area:empty {
+	display: none;
+}
+
+.workflow-header {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 8px 12px;
+	background: var(--bg, #f8fafc);
+	border-bottom: 1px solid var(--border);
+	font-size: 13px;
+}
+
+.workflow-icon {
+	font-size: 14px;
+}
+
+.workflow-title {
+	font-weight: 600;
+	color: var(--text, #1e293b);
+}
+
+.workflow-status {
+	margin-left: auto;
+	font-size: 12px;
+	color: var(--text-sub);
+}
+
+.workflow-status.waiting_approval,
+.workflow-status.running {
+	color: #b45309;
+}
+
+.workflow-status.succeeded {
+	color: #047857;
+}
+
+.workflow-status.failed {
+	color: var(--danger);
+}
+
+.workflow-status.degraded {
+	color: #b45309;
+}
+
+.workflow-body {
+	padding: 8px 12px;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+/* 单节点卡片 */
+.wf-node {
+	border: 1px solid var(--border);
+	border-radius: var(--radius-sm);
+	padding: 6px 10px;
+	font-size: 12px;
+	background: #fff;
+}
+
+.wf-node-header {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+
+.wf-node-icon {
+	font-size: 13px;
+	flex-shrink: 0;
+}
+
+.wf-node-name {
+	font-weight: 500;
+	color: var(--text, #1e293b);
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.wf-node-status {
+	font-size: 11px;
+	flex-shrink: 0;
+}
+
+.wf-node-status.running {
+	color: #b45309;
+}
+
+.wf-node-status.running::before {
+	content: '⏳ ';
+}
+
+.wf-node-status.succeeded {
+	color: #047857;
+}
+
+.wf-node-status.succeeded::before {
+	content: '✅ ';
+}
+
+.wf-node-status.failed {
+	color: var(--danger);
+}
+
+.wf-node-status.failed::before {
+	content: '❌ ';
+}
+
+.wf-node-status.blocked,
+.wf-node-status.pending {
+	color: #b45309;
+}
+
+.wf-node-status.blocked::before {
+	content: '⏸ ';
+}
+
+.wf-node-status.approved::before {
+	content: '✅ ';
+	color: #047857;
+}
+
+.wf-node-status.rejected {
+	color: var(--danger);
+}
+
+.wf-node-status.rejected::before {
+	content: '⛔ ';
+}
+
+.wf-node-status.skipped {
+	color: var(--text-sub);
+}
+
+.wf-node-status.skipped::before {
+	content: '⏭ ';
+}
+
+.wf-node-latency {
+	font-size: 11px;
+	color: var(--text-sub);
+	flex-shrink: 0;
+}
+
+.wf-node-detail {
+	margin-top: 4px;
+	color: var(--text-sub);
+	font-size: 11px;
+	line-height: 1.5;
+	white-space: pre-wrap;
+	word-break: break-all;
+	display: none;
+}
+
+.wf-node.done .wf-node-detail {
+	display: block;
+}
+
+/* 审批确认卡片（HITL） */
+.wf-approval {
+	margin-top: 6px;
+	padding: 10px 12px;
+	background: #fffbeb;
+	border: 1px solid #fde68a;
+	border-left: 3px solid #f59e0b;
+	border-radius: var(--radius-sm);
+}
+
+.wf-approval-title {
+	font-size: 13px;
+	font-weight: 600;
+	color: #92400e;
+}
+
+.wf-approval-reason {
+	margin-top: 4px;
+	font-size: 12px;
+	color: #78350f;
+	line-height: 1.6;
+}
+
+.wf-approval-actions {
+	margin-top: 8px;
+	display: flex;
+	gap: 8px;
+	align-items: center;
+}
+
+.wf-approval-actions .btn {
+	font-size: 12px;
+	padding: 5px 12px;
+}

@@ -13,6 +13,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 # 系统依赖：build-essential(安全网,以备原生扩展编译)/ libmagic(MIME检测)/ ca-certificates(HTTPS)/ tzdata(时区)/ 字体
+# LibreOffice(headless)：docx/xlsx/pptx 转 PDF 在线预览（文档预览功能依赖；
+#   仅装 writer/calc/impress 三个组件 + --no-install-recommends 控制体积；
 # 使用清华 apt 镜像加速(国内网络显著提速)
 RUN sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null; \
     apt-get update && apt-get install -y --no-install-recommends \
@@ -21,6 +23,10 @@ RUN sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.li
     ca-certificates \
     tzdata \
     fonts-dejavu-core \
+    fonts-noto-cjk \
+    libreoffice-writer \
+    libreoffice-calc \
+    libreoffice-impress \
     && ln -sf /usr/share/zoneinfo/${TZ} /etc/localtime \
     && echo ${TZ} > /etc/timezone \
     && rm -rf /var/lib/apt/lists/*

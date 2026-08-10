@@ -3,14 +3,168 @@
    依赖 common.css 的 .modal / .btn / .hidden 等基础组件
    ========================================================== */
 
-/* 文档预览正文（纯文本，禁止复制） */
+/* 文档预览正文容器（禁止复制） */
 .doc-preview-content {
+	user-select: none;
+	-webkit-user-select: none;
+}
+
+/* 预览弹窗容器设为相对定位：水印层 absolute 相对它定位，覆盖 body 可视区域 */
+#docPreviewModal .modal-content {
+	position: relative;
+}
+
+/* 预览水印：覆盖 header 与 footer 之间的可视区域，防截图泄密（不阻挡交互）
+   位于滚动容器之外，长内容滚动时水印固定不动 */
+.doc-preview-watermark {
+	position: absolute;
+	top: 48px;      /* modal-header 高度（common.css --modal-header-height） */
+	left: 0;
+	right: 0;
+	bottom: 48px;   /* modal-footer 高度（common.css --modal-footer-height） */
+	pointer-events: none;
+	overflow: hidden;
+	z-index: 20;
+	display: grid;
+	grid-template-columns: repeat(3, 1fr);
+	grid-template-rows: repeat(4, 1fr);
+	place-items: center;
+	user-select: none;
+	-webkit-user-select: none;
+}
+
+.doc-preview-watermark span {
+	transform: rotate(-30deg);
+	font-size: 14px;
+	white-space: nowrap;
+	color: var(--text-sub);
+	opacity: 0.18;
+}
+
+/* 首次加载占位：转圈动画 + 提示文字（PDF/Office 转图与行模式大文件分块耗时较长） */
+.doc-preview-loading {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 14px;
+	padding: 64px 20px;
+	color: var(--text-sub);
+	font-size: 13px;
+}
+
+.doc-preview-loading-spinner {
+	width: 30px;
+	height: 30px;
+	border: 3px solid var(--border);
+	border-top-color: var(--primary);
+	border-radius: 50%;
+	animation: doc-preview-spin 0.8s linear infinite;
+}
+
+@keyframes doc-preview-spin {
+	to { transform: rotate(360deg); }
+}
+
+/* 文档预览纯文本（不可复制） */
+.doc-preview-text {
 	font-size: 14px;
 	line-height: 1.8;
 	color: var(--text);
 	white-space: pre-wrap;
 	word-break: break-word;
 }
+
+/* 页图模式：图片居中展示，等比例缩放，防止撑破弹窗 */
+.doc-preview-image-wrap {
+	text-align: center;
+	padding: 8px 0;
+}
+
+.doc-preview-image {
+	max-width: 100%;
+	height: auto;
+	border: 1px solid var(--border);
+	border-radius: var(--radius-lg);
+	background: #fff;
+	box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
+	user-select: none;
+	-webkit-user-select: none;
+}
+
+/* 降级提示条（如 Office 未安装格式转换组件，以文本模式预览） */
+.doc-preview-notice {
+	margin-bottom: 12px;
+	padding: 8px 12px;
+	font-size: 13px;
+	color: #9a6700;
+	background: #fff8e1;
+	border: 1px solid #f0d98c;
+	border-radius: var(--radius-lg);
+}
+
+/* 代码模式：行号 + 高亮代码（不可复制） */
+.doc-preview-code {
+	font-family: ui-monospace, SFMono-Regular, Consolas, "Courier New", monospace;
+	font-size: 13px;
+	line-height: 1.7;
+	background: #fbfbfc;
+	border: 1px solid var(--border);
+	border-radius: var(--radius-lg);
+	overflow: auto;
+	user-select: none;
+	-webkit-user-select: none;
+}
+
+.doc-preview-code-row {
+	display: flex;
+	/* 长文本/代码滚动优化：跳过视口外行的渲染与布局，
+	   contain-intrinsic-size 提供行高占位避免滚动条跳动 */
+	content-visibility: auto;
+	contain-intrinsic-size: auto 22px;
+}
+
+.doc-preview-code-ln {
+	flex: 0 0 48px;
+	padding: 0 10px;
+	text-align: right;
+	color: var(--text-sub);
+	background: #f3f4f6;
+	border-right: 1px solid var(--border);
+	user-select: none;
+	-webkit-user-select: none;
+}
+
+.doc-preview-code-txt {
+	flex: 1;
+	padding: 0 12px;
+	white-space: pre;
+	word-break: normal;
+}
+
+/* 文本模式（text-flow）：长段落允许自动换行，避免横向滚动（代码保持单行横向滚动） */
+.doc-preview-code.text-flow .doc-preview-code-txt {
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+/* 连续滚动触底哨兵（追加加载提示） */
+.doc-preview-sentinel {
+	padding: 10px 0;
+	text-align: center;
+	font-size: 12px;
+	color: var(--text-sub);
+}
+
+/* 行模式 footer：隐藏上一页/下一页分页按钮，仅保留行信息与关闭 */
+.doc-preview-footer.no-pager .doc-preview-pager {
+	display: none;
+}
+
+/* 轻量高亮配色 */
+.doc-preview-code-txt .tok-kw { color: #0550ae; font-weight: 600; }
+.doc-preview-code-txt .tok-str { color: #0a7a33; }
+.doc-preview-code-txt .tok-com { color: #6e7781; font-style: italic; }
+.doc-preview-code-txt .tok-num { color: #953800; }
 
 /* 原文不可用 / 无内容提示 */
 .doc-preview-disabled {
@@ -69,6 +223,9 @@
 .doc-preview-footer > button:last-child {
 	justify-self: end;
 	white-space: nowrap;
+	/* 显式固定在第 3 列：行模式 no-pager 时中间 pager 隐藏，
+	   关闭按钮不再被自动放置到中间列，始终靠右 */
+	grid-column: 3;
 }
 
 .doc-preview-footer #docPreviewInfo {

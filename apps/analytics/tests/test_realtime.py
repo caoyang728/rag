@@ -120,19 +120,31 @@ class TestUpdateQueueDepth:
     """队列深度更新测试（DB 断言 QueueDepthLog）"""
 
     def _fake_redis(self, depths):
-        """构造假 Redis：pipeline 两次返回同一对象，execute 返回 LLEN 结果"""
+        """构造假 Redis：pipeline 返回同一对象，execute 返回 LLEN 结果"""
         fake = MagicMock(name='redis_conn')
         pipe = MagicMock(name='pipeline')
         pipe.execute.return_value = depths
         fake.pipeline.return_value = pipe
         return fake
 
+    def _fake_broker(self, depths):
+        """构造假 broker Redis：LLEN 由 pipeline.execute 返回（模拟 CELERY_BROKER_URL 连接）"""
+        fake = MagicMock(name='broker_conn')
+        pipe = MagicMock(name='broker_pipeline')
+        pipe.execute.return_value = depths
+        fake.pipeline.return_value = pipe
+        return fake
+
     def test_writes_queue_depth_logs(self):
-        """5 个队列全部写入 PG，depth 与 Redis LLEN 结果一致，minute_bucket 精确到分钟"""
-        fake_r = self._fake_redis([3, 0, 2, 1, 5])
+        """5 个队列全部写入 PG，depth 与 broker LLEN 结果一致，minute_bucket 精确到分钟"""
+        depths = [3, 0, 2, 1, 5]
+        fake_r = self._fake_redis(depths)
+        # LLEN 从 broker 连接读取（队列消息所在 Redis DB），写入 current 键走 Analytics DB
+        fake_broker = self._fake_broker(depths)
         celery_app = MagicMock()
         celery_app.control.inspect.return_value = None
         with patch('apps.analytics.realtime._get_redis_safe', return_value=fake_r), \
+             patch('apps.analytics.realtime._get_broker_redis', return_value=fake_broker), \
              patch('rag_project.celery.app', celery_app):
             realtime.update_queue_depth()
         logs = list(QueueDepthLog.objects.order_by('queue_name'))
@@ -140,18 +152,25 @@ class TestUpdateQueueDepth:
         depth_map = {l.queue_name: l.depth for l in logs}
         assert depth_map == {'default': 3, 'parse': 0, 'memory': 2, 'email': 1, 'analytics': 5}
         assert all(l.worker_count == 0 for l in logs)
+        # Celery Redis 传输层队列 key 即队列名本身（如 parse），不带 celery: 前缀；
+        # 若误加前缀 LLEN 恒为 0，此处断言防止回归
+        llen_calls = [c.args[0] for c in fake_broker.pipeline.return_value.llen.call_args_list]
+        assert llen_calls == QUEUE_NAMES
         # minute_bucket 无秒级成分（截断到分钟）
         assert all(l.minute_bucket.second == 0 and l.minute_bucket.microsecond == 0
                    for l in logs)
 
     def test_worker_count_from_inspect(self):
         """Celery inspect 返回活跃 worker → worker_count 记录到每条日志"""
-        fake_r = self._fake_redis([1, 1, 1, 1, 1])
+        depths = [1] * 5
+        fake_r = self._fake_redis(depths)
+        fake_broker = self._fake_broker(depths)
         celery_app = MagicMock()
         insp = MagicMock()
         insp.active.return_value = {'worker1': ['t1'], 'worker2': ['t2']}
         celery_app.control.inspect.return_value = insp
         with patch('apps.analytics.realtime._get_redis_safe', return_value=fake_r), \
+             patch('apps.analytics.realtime._get_broker_redis', return_value=fake_broker), \
              patch('rag_project.celery.app', celery_app):
             realtime.update_queue_depth()
         assert QueueDepthLog.objects.first().worker_count == 2
@@ -159,9 +178,11 @@ class TestUpdateQueueDepth:
     def test_inspect_failure_degrades_worker_zero(self):
         """inspect 抛异常 → worker_count=0，不影响核心指标落库"""
         fake_r = self._fake_redis([0] * 5)
+        fake_broker = self._fake_broker([0] * 5)
         celery_app = MagicMock()
         celery_app.control.inspect.side_effect = Exception('broker down')
         with patch('apps.analytics.realtime._get_redis_safe', return_value=fake_r), \
+             patch('apps.analytics.realtime._get_broker_redis', return_value=fake_broker), \
              patch('rag_project.celery.app', celery_app):
             realtime.update_queue_depth()
         assert QueueDepthLog.objects.count() == 5
@@ -170,9 +191,11 @@ class TestUpdateQueueDepth:
     def test_bulk_create_conflict_ignored(self):
         """Beat 重入触发唯一约束冲突 → 静默跳过不抛错"""
         fake_r = self._fake_redis([0] * 5)
+        fake_broker = self._fake_broker([0] * 5)
         celery_app = MagicMock()
         celery_app.control.inspect.return_value = None
         with patch('apps.analytics.realtime._get_redis_safe', return_value=fake_r), \
+             patch('apps.analytics.realtime._get_broker_redis', return_value=fake_broker), \
              patch('rag_project.celery.app', celery_app), \
              patch.object(QueueDepthLog.objects, 'bulk_create',
                           side_effect=Exception('duplicate key')):
@@ -201,16 +224,21 @@ class TestGetQueueDepthSnapshot:
 
     @pytest.mark.unit
     def test_llen_fallback(self):
-        """current 键缺失（服务重启）→ 降级直接 LLEN"""
+        """current 键缺失（服务重启）→ 降级直接 LLEN（broker 连接）"""
         fake_r = MagicMock(name='redis_conn')
         fake_r.get.return_value = None
-        fake_r.llen.return_value = 4
+        fake_broker = MagicMock(name='broker_conn')
+        fake_broker.llen.return_value = 4
         with patch('apps.analytics.realtime._get_redis_safe', return_value=fake_r), \
+             patch('apps.analytics.realtime._get_broker_redis', return_value=fake_broker), \
              patch('rag_project.celery.app', MagicMock()):
             result = realtime.get_queue_depth_snapshot()
         for q in QUEUE_NAMES:
             assert result[q]['size'] == 4
-        assert fake_r.llen.call_count == len(QUEUE_NAMES)
+        # 降级 LLEN 直接查队列名（如 parse），而非 celery:parse（误加前缀恒为 0）
+        llen_calls = [c.args[0] for c in fake_broker.llen.call_args_list]
+        assert llen_calls == QUEUE_NAMES
+        assert fake_broker.llen.call_count == len(QUEUE_NAMES)
 
     @pytest.mark.unit
     def test_worker_stats_aggregated(self):
@@ -223,7 +251,8 @@ class TestGetQueueDepthSnapshot:
         pipe.get.side_effect = ['2', '1', '0']
         pipe.execute.return_value = ['2', '1', '0']
         fake_r.pipeline.return_value = pipe
-        with patch('apps.analytics.realtime._get_redis_safe', return_value=fake_r):
+        with patch('apps.analytics.realtime._get_redis_safe', return_value=fake_r), \
+             patch('apps.analytics.realtime._get_broker_redis', return_value=None):
             result = realtime.get_queue_depth_snapshot()
         entry = result['default']
         assert entry['active'] == 2

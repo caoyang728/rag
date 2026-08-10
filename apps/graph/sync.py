@@ -17,6 +17,88 @@ from loguru import logger
 from django.utils import timezone
 
 
+def _graph_enabled() -> bool:
+    """图谱抽取开关（SystemConfig.GRAPH_ENABLED，默认开启）
+
+    配置关闭时文档解析完成后标记 skipped，不派发抽取任务。
+    """
+    from apps.system.config_loader import get_config_value
+    return get_config_value('GRAPH_ENABLED', default=True, value_type='bool')
+
+
+def _dispatch_node_graph_task(doc) -> bool:
+    """节点级防抖派发图谱抽取任务
+
+    文档完成/更新后调用：
+    1. 配置关闭或无切片数据 → 标记该文档 graph_status=skipped，不派发
+    2. 置文档 graph_status=pending（待构建）
+    3. 原子 check-and-set 节点 graph_pending：仅首个文档完成者派发任务，
+       同节点后续完成的文档合并到同一次任务中批量处理
+
+    Args:
+        doc: Document 实例（需含 node_id / chunk_count）
+
+    Returns:
+        True=已派发任务，False=跳过（配置关闭/无数据/已由他人派发）
+    """
+    from apps.knowledge.models import Document, KnowledgeNode
+
+    if not _graph_enabled():
+        Document.objects.filter(id=doc.id).update(graph_status='skipped')
+        return False
+    if not doc.node_id:
+        return False
+    # 无切片可抽取（如空文件解析成功），标记未启用，避免无意义的空抽取
+    if doc.chunk_count == 0:
+        Document.objects.filter(id=doc.id).update(graph_status='skipped')
+        return False
+
+    Document.objects.filter(id=doc.id).update(graph_status='pending')
+    from apps.graph.tasks import graph_extract_task
+    dispatched = KnowledgeNode.objects.filter(
+        id=doc.node_id, is_deleted=False, graph_pending=False
+    ).update(graph_pending=True)
+    if dispatched:
+        graph_extract_task.delay(doc.node_id)
+        return True
+    return False
+
+
+def on_document_done(document_id: int):
+    """文档解析完成后的增量同步入口：防抖派发节点级图谱抽取
+
+    graph_extract_task 内部会先调用 _clean_graph_data 清理各文档旧数据，
+    再执行抽取，保证重复解析场景数据一致性。
+
+    Args:
+        document_id: 文档 ID
+    """
+    from apps.knowledge.models import Document
+
+    doc = Document.objects.filter(id=document_id).only('id', 'node_id', 'chunk_count').first()
+    if doc is None:
+        return
+    dispatched = _dispatch_node_graph_task(doc)
+    if dispatched:
+        logger.info(f'[Graph Sync] 文档 {document_id} 完成，触发节点 {doc.node_id} 图谱抽取')
+
+
+def on_document_updated(document_id: int):
+    """文档更新后的处理：防抖派发节点级图谱重新抽取（清理 + 抽取由任务内部完成）
+
+    Args:
+        document_id: 文档 ID
+    """
+    from apps.knowledge.models import Document
+
+    doc = Document.objects.filter(id=document_id).only('id', 'node_id', 'chunk_count').first()
+    if doc is None:
+        return
+    dispatched = _dispatch_node_graph_task(doc)
+    if dispatched:
+        logger.info(f'[Graph Sync] 文档 {document_id} 更新，触发节点 {doc.node_id} 图谱重新抽取')
+
+
 def _clean_graph_data(document_id: int) -> dict:
     """清理某文档产生的图谱旧数据（关系 + 实体引用）
 
@@ -64,31 +146,6 @@ def _clean_graph_data(document_id: int) -> dict:
     }
 
 
-def on_document_done(document_id: int):
-    """文档解析完成后的增量同步入口：触发图谱抽取
-
-    graph_extract_task 内部会先调用 _clean_graph_data 清理该文档旧数据，
-    再执行抽取，保证重复解析场景数据一致性。
-
-    Args:
-        document_id: 文档 ID
-    """
-    from apps.graph.tasks import graph_extract_task
-    graph_extract_task.delay(document_id)
-    logger.info(f'[Graph Sync] 文档 {document_id} 完成，触发图谱抽取')
-
-
-def on_document_updated(document_id: int):
-    """文档更新后的处理：触发重新抽取（清理 + 抽取由任务内部完成）
-
-    Args:
-        document_id: 文档 ID
-    """
-    from apps.graph.tasks import graph_extract_task
-    graph_extract_task.delay(document_id)
-    logger.info(f'[Graph Sync] 文档 {document_id} 更新，触发图谱重新抽取')
-
-
 def on_document_deleted(document_id: int):
     """文档删除后的处理：清理图谱数据并标记社区待刷新
 
@@ -98,6 +155,13 @@ def on_document_deleted(document_id: int):
         document_id: 文档 ID
     """
     from apps.graph.models import GraphCommunity
+
+    # 文档删除可能发生在节点任务派发后尚未执行期间：清除该节点待处理标记，
+    # 避免残留 True 导致该节点后续文档完成时不再派发（自愈）
+    from apps.knowledge.models import Document, KnowledgeNode
+    node_id = Document.objects.filter(id=document_id).values_list('node_id', flat=True).first()
+    if node_id:
+        KnowledgeNode.objects.filter(id=node_id).update(graph_pending=False)
 
     stats = _clean_graph_data(document_id)
     # 图谱结构变化，标记社区待刷新（下次社区检测会重建）

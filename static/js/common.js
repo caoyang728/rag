@@ -213,16 +213,51 @@ function closeModal(id) {
 	}
 }
 
-/* ============ 文档版本历史弹窗（版本切换） ============ */
-// 处理状态标签映射（与各页面 statusTag 保持一致，供版本弹窗复用）
-const _VERSION_STATUS_MAP = {
-	'done': ['success', '已完成'], 'parsing': ['warning', '解析中'], 'failed': ['danger', '失败'],
-	'pending': ['default', '等待'], 'desensitizing': ['warning', '脱敏中'], 'chunking': ['warning', '切片中'],
-	'embedding': ['warning', '向量化中'], 'embedding_failed': ['danger', '向量化失败']
-};
-function _versionStatusTag(s) {
-	const m = _VERSION_STATUS_MAP[s] || ['default', s || '-'];
+/* ============ 文档处理状态映射（上传流水线共享） ============ */
+// 可预览文件类型：文本/代码走行模式，PDF/Office 走页图模式（未知二进制类型 'other' 除外）
+function isPreviewableFileType(fileType) {
+	return ['markdown', 'txt', 'code', 'config', 'pdf', 'docx', 'spreadsheet', 'presentation'].indexOf(fileType) !== -1;
+}
+
+// 文档上传流水线合并状态：主解析状态(status) + 图谱(graph_status) + Wiki(wiki_status)
+// 优先级：解析失败 > 向量失败 > 主状态 > 图谱/wiki 失败 > 构建中 > 等待构建 > 未启用 > 已完成
+function pipelineStatus(doc) {
+	const s = doc.status;
+	if (s === 'failed') return ['danger', '解析失败'];
+	if (s === 'embedding_failed') return ['danger', '向量构建失败'];
+	const main = {
+		pending: ['default', '等待解析'],
+		parsing: ['warning', '解析中'],
+		desensitizing: ['warning', '解析中'],   // 脱敏并入解析阶段展示
+		chunking: ['warning', '切片中'],
+		embedding: ['warning', '向量构建中'],
+	}[s];
+	if (main) return main;
+	if (s !== 'done') return ['default', s || '未知'];
+
+	// 解析完成：合并图谱/wiki 阶段状态
+	const g = doc.graph_status || 'pending';
+	const w = doc.wiki_status || 'pending';
+	if (g === 'failed') return ['danger', '图谱构建失败'];
+	if (w === 'failed') return ['danger', 'wiki 构建失败'];
+	if (g === 'extracting') return ['warning', '图谱构建中'];
+	if (w === 'extracting') return ['warning', 'wiki 构建中'];
+	if (g === 'pending') return ['default', '图谱等待构建'];
+	if (w === 'pending') return ['default', '等待构建 wiki'];
+	if (g === 'skipped' && w === 'done') return ['default', '图谱未启用'];
+	if (g === 'done' && w === 'skipped') return ['default', 'wiki 未启用'];
+	return ['success', '已完成'];
+}
+
+function pipelineStatusTag(doc) {
+	const m = pipelineStatus(doc);
 	return '<span class="tag tag-' + m[0] + '">' + escapeHtml(m[1]) + '</span>';
+}
+
+/* ============ 文档版本历史弹窗（版本切换） ============ */
+// 版本列表复用共享流水线状态（含图谱/wiki 阶段），与上传历史/管理端保持一致
+function _versionStatusTag(doc) {
+	return pipelineStatusTag(doc || {});
 }
 
 /**
@@ -284,20 +319,28 @@ function showVersionModal(docId) {
 				? '<span class="tag tag-success">活跃</span>'
 				: '<span class="tag" style="background:#eee;color:#888">旧版本</span>';
 			let opsHtml;
-			if (v.is_active) {
+			// 预览：支持预览的文件类型且有阅读权限才展示（后端二次校验）
+			const canPreview = v.can_read !== false && isPreviewableFileType(v.file_type);
+			if (canPreview) {
+				opsHtml = '<button class="btn-link btn-sm" onclick="previewDoc(' + v.id + ')">预览</button>';
+				if (!v.is_active && v.is_owner) {
+					opsHtml += '<button class="btn-link btn-sm" onclick="setDocVersionActive(' + v.id + ', ' + docId + ')">设为活跃</button>';
+				}
+			} else if (v.is_active) {
 				opsHtml = '<span class="text-sub text-xs">当前</span>';
 			} else if (v.is_owner) {
 				opsHtml = '<button class="btn-link btn-sm" onclick="setDocVersionActive(' + v.id + ', ' + docId + ')">设为活跃</button>';
 			} else {
 				opsHtml = '<span class="text-sub text-xs">仅上传者可切换</span>';
 			}
+			// TODO 差异展示：后续版本支持选择两个版本对比内容差异（需后端提供 diff 接口）
 			tr.innerHTML =
 				'<td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + escapeHtml(v.title || '') + '">' + escapeHtml(v.title || '-') + '</td>' +
 				'<td>' + escapeHtml(v.version_tag || ('v' + v.version)) + '</td>' +
 				'<td>' + stateTag + '</td>' +
-				'<td>' + _versionStatusTag(v.status) + '</td>' +
+				'<td>' + _versionStatusTag(v) + '</td>' +
 				'<td class="text-sub">' + formatFileSize(v.file_size) + '</td>' +
-				'<td class="text-sub" title="' + formatDate(v.created_at) + '">' + (formatDateShort ? formatDateShort(v.created_at) : formatDate(v.created_at)) + '</td>' +
+				'<td class="text-sub" title="' + formatDate(v.created_at) + '">' + formatDateShort(v.created_at) + '</td>' +
 				'<td>' + opsHtml + '</td>';
 			tbody.appendChild(tr);
 		});
@@ -385,6 +428,14 @@ function formatDate(dt) {
 	if (!dt) return '-';
 	const d = new Date(dt);
 	return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0') + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+}
+// 短日期格式（YYYY-MM-DD）：版本历史等紧凑表格场景使用；
+// 定义在 common.js 供所有页面复用（此前仅 admin-nodes.js 定义，
+// 上传页等未加载该文件的页面会因函数未定义而渲染失败）
+function formatDateShort(dt) {
+	if (!dt) return '-';
+	const d = new Date(dt);
+	return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
 }
 function formatFileSize(bytes) {
 	if (bytes == null || isNaN(bytes)) return '-';

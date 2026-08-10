@@ -94,8 +94,9 @@ class ApiEmbeddingClient:
 
         results: List[List[float]] = []
         max_retries = 3
-        # 调试日志：显示完整请求信息
-        logger.info(f'[API Embedding] 请求 - base_url: {self.base_url}, model: {self.embed_model}, texts: {len(texts)}')
+        # 调试日志：显示完整请求信息（每个文档一次，排障时开启 debug 查看）
+        # 常规运行仅保留下方"全部处理完成"一条 info 汇总，避免每次向量化都刷屏
+        logger.debug(f'[API Embedding] 请求 - base_url: {self.base_url}, model: {self.embed_model}, texts: {len(texts)}')
 
         for i in range(0, len(texts), batch_size):
             batch = texts[i:i + batch_size]
@@ -131,7 +132,8 @@ class ApiEmbeddingClient:
 
                     for item in data.get('data', []):
                         results.append(item['embedding'])
-                    logger.info(f'[API Embedding] 批次处理成功，生成{len(results)}个向量')
+                    # 批次级进度降为 debug：整体结果由下方"全部处理完成"info 汇总一次即可
+                    logger.debug(f'[API Embedding] 批次处理成功，生成{len(results)}个向量')
                     break
 
                 except requests.exceptions.HTTPError as e:

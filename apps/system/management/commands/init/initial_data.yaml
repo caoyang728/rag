@@ -504,6 +504,26 @@ system_configs:
     is_secret: false
     is_readonly: false
 
+  # ==================== 知识构建（category: knowledge）====================
+  # 图谱抽取 / Wiki 生成开关：关闭时文档解析完成后对应阶段标记"未启用"并跳过
+  - key: GRAPH_ENABLED
+    value: "true"
+    value_type: bool
+    category: knowledge
+    label: "图谱抽取"
+    description: "文档解析完成后是否自动抽取知识图谱（实体/关系），关闭时标记未启用并跳过"
+    is_secret: false
+    is_readonly: false
+
+  - key: WIKI_ENABLED
+    value: "true"
+    value_type: bool
+    category: knowledge
+    label: "Wiki 生成"
+    description: "文档解析完成后是否自动生成节点 Wiki 页面，关闭时标记未启用并跳过"
+    is_secret: false
+    is_readonly: false
+
   # ==================== Embedding / Rerank（category: embedding）====================
   # API Key 仍保留在 .env（EMBEDDING_API_KEY）
   # base_url 已迁移到模型管理（LLMModel 表），不再作为系统配置项

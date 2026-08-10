@@ -23,6 +23,8 @@ async function initUploadPage() {
 	await loadUploadHistory();
 	initSearchFilter();
 	await loadFilterOptions();
+	// 队列深度展示（异步刷新，不阻塞页面主流程）
+	refreshQueueDepth();
 	const visRadio = document.querySelector('#visRow .upload-radio-inline.selected input');
 	if (visRadio && visRadio.value === 'org') {
 		await loadUploadDeptTeamOptions();
@@ -161,7 +163,7 @@ async function loadUploadHistory(page = 1) {
 					}
 				}
 			} else {
-				row.querySelector('.up-row-status').innerHTML = statusTag(h.status);
+				row.querySelector('.up-row-status').innerHTML = pipelineStatusTag(h);
 				row.querySelector('.up-row-time').textContent = formatDate(h.created_at);
 				row.querySelector('.up-row-view').onclick = function () { viewDocument(h.id); };
 				row.querySelector('.up-row-reparse').onclick = function () { reparseDocument(h.id); };
@@ -273,7 +275,7 @@ async function reparseDocument(docId) {
 			const row = document.querySelector(`#uploadHistoryBody tr[data-doc-id="${docId}"]`);
 			if (row) {
 				const statusEl = row.querySelector('.up-row-status');
-				if (statusEl) statusEl.innerHTML = statusTag('pending');
+				if (statusEl) statusEl.innerHTML = pipelineStatusTag({ status: 'pending' });
 			}
 		}
 		// 立即重启轮询（确保不被 hasProcessingDocuments 判断停止）
@@ -289,7 +291,7 @@ async function reparseDocument(docId) {
 			const row = document.querySelector(`#uploadHistoryBody tr[data-doc-id="${docId}"]`);
 			if (row) {
 				const statusEl = row.querySelector('.up-row-status');
-				if (statusEl) statusEl.innerHTML = statusTag(currentDocs[docIdx].status || 'failed');
+				if (statusEl) statusEl.innerHTML = pipelineStatusTag(currentDocs[docIdx]);
 			}
 		}
 		toast(e.message || '操作失败', 'error');
@@ -549,7 +551,8 @@ function isAllowedFile(name) {
 
 /* ============ 添加文件到列表 ============ */
 function addFiles(fileList) {
-	const maxFiles = 20;
+	// 单批次文件数上限：允许最多 100 个文件同时排队上传（每个文件独立请求，后端无批次限制）
+	const maxFiles = 100;
 	let added = 0, skipped = 0;
 
 	for (const f of fileList) {
@@ -659,6 +662,8 @@ function finishUpload() {
 	$('#fileList').innerHTML = '';
 	updateFileCount();
 	loadUploadHistory();
+	// 上传完成后立即刷新队列积压，让用户直观看到有多少任务在排队
+	refreshQueueDepth();
 }
 
 /* ============ 清空列表 ============ */
@@ -670,13 +675,15 @@ function clearFileList() {
 }
 
 /* ============ 单文件上传（自动作为新版本） ============ */
-async function uploadSingleFile(info, nodeId, visibility, token, depts = [], teams = []) {
+async function uploadSingleFile(info, nodeId, visibility, token, depts = [], teams = [], forceNewVersion = false) {
 	const bar = document.querySelector('#' + info.id + ' .file-item-progress-bar');
 
 	const formData = new FormData();
 	formData.append('file', info.file, info.name);
 	formData.append('node_id', nodeId);
 	formData.append('visible_scope', visibility);
+	// 相同内容文件默认被后端拦截（409 duplicate_file），用户选择"强制新建版本"时携带该标记跳过拦截
+	formData.append('force_new_version', forceNewVersion ? 'true' : 'false');
 	if (depts.length > 0) {
 		depts.forEach(function (id) { formData.append('visibility_depts', id); });
 	}
@@ -696,15 +703,21 @@ async function uploadSingleFile(info, nodeId, visibility, token, depts = [], tea
 				}
 			});
 			xhr.addEventListener('load', () => {
+				let data = {};
+				try { data = JSON.parse(xhr.responseText || '{}'); } catch (e) { /* 解析失败按空对象处理 */ }
+				// 同内容重复上传：返回标记由调用方弹窗选择（取消/查看现有/强制新建版本）
+				if (xhr.status === 409 && data.code === 'duplicate_file') {
+					resolve({ duplicate: true, existing: data.existing || {} });
+					return;
+				}
 				if (xhr.status >= 200 && xhr.status < 300) {
-					const data = JSON.parse(xhr.responseText || '{}');
 					if (data.status === 'failed') {
 						reject(new Error(data.detail || '上传失败'));
 					} else {
 						resolve(data);
 					}
 				} else {
-					reject(new Error(xhr.status + ' ' + (JSON.parse(xhr.responseText || '{}').detail || xhr.statusText)));
+					reject(new Error(xhr.status + ' ' + (data.detail || xhr.statusText)));
 				}
 			});
 			xhr.addEventListener('error', () => reject(new Error('网络错误')));
@@ -807,7 +820,19 @@ async function startUpload() {
 		if (statusEl) statusEl.innerHTML = '<span class="tag tag-info">上传中</span>';
 
 		try {
-			const responseData = await uploadSingleFile(info, nodeId, visibility, token, depts, teams);
+			let responseData = await uploadSingleFile(info, nodeId, visibility, token, depts, teams);
+
+			// 同内容重复上传：弹窗让用户选择（取消 / 查看现有文件 / 强制新建版本）
+			if (responseData && responseData.duplicate) {
+				const choice = await showDuplicateFileDialog(responseData.existing || {});
+				if (choice === 'cancel') {
+					if (statusEl) statusEl.innerHTML = '<span class="tag tag-default">已跳过</span>';
+					if (metaEl) metaEl.innerHTML = info.type + ' · ' + formatSize(info.size) + ' · 已跳过（内容重复）';
+					return 'skipped';
+				}
+				// force：携带 force_new_version=true 重新提交，绕过同内容拦截
+				responseData = await uploadSingleFile(info, nodeId, visibility, token, depts, teams, true);
+			}
 
 			if (bar) bar.style.width = '100%';
 
@@ -960,6 +985,39 @@ function updateCeleryStatusUI(ok, detail) {
 	}
 }
 
+/* ============ 队列深度展示（页头 tag，低成本 Redis 读取，任何登录用户可访问） ============ */
+async function refreshQueueDepth() {
+	try {
+		const data = await api.getJson('/api/v1/knowledge/queues/depth/');
+		renderQueueDepthBrief(data.queues || {});
+	} catch (e) {
+		// 队列深度非关键信息，失败时隐藏且不打扰用户
+		console.warn('queue depth refresh failed:', e);
+		const el = document.getElementById('queueDepthBrief');
+		if (el) el.classList.add('hidden');
+	}
+}
+
+function renderQueueDepthBrief(queues) {
+	const el = document.getElementById('queueDepthBrief');
+	if (!el) return;
+	const names = Object.keys(queues);
+	if (!names.length) {
+		el.classList.add('hidden');
+		return;
+	}
+	const parseSize = Number((queues.parse || {}).size) || 0;
+	const total = names.reduce(function (acc, n) { return acc + (Number(queues[n].size) || 0); }, 0);
+	el.classList.remove('hidden');
+	if (total > 0) {
+		el.innerHTML = '📥 队列积压 <b>' + total + '</b>' + (parseSize ? '（解析 ' + parseSize + '）' : '');
+		el.className = 'tag tag-warning flex items-center gap-6';
+	} else {
+		el.textContent = '📥 队列空闲';
+		el.className = 'tag tag-success flex items-center gap-6';
+	}
+}
+
 /* ============ Celery 状态检查 ============ */
 async function checkCeleryStatusBeforeUpload() {
 	try {
@@ -999,11 +1057,16 @@ async function checkCeleryStatusBeforeUpload() {
 
 /* ============ 上传状态轮询（合并状态轮询和历史刷新）=========== */
 const PROCESSING_STATUSES = new Set(['pending', 'parsing', 'desensitizing', 'chunking', 'embedding', 'embedding_failed']);
+// 图谱/wiki 构建阶段仍在进行的状态（解析完成后继续轮询直至全部完成/失败/跳过）
+const BUILDING_STATUSES = new Set(['pending', 'extracting']);
 let uploadPollingInterval = null;
 
 function hasProcessingDocuments(docs) {
 	const targetDocs = docs || currentDocs;
-	return targetDocs?.some(d => PROCESSING_STATUSES.has(d.status));
+	return targetDocs?.some(d =>
+		PROCESSING_STATUSES.has(d.status) ||
+		(d.status === 'done' && (BUILDING_STATUSES.has(d.graph_status) || BUILDING_STATUSES.has(d.wiki_status)))
+	);
 }
 
 function startUploadPolling() {
@@ -1013,6 +1076,8 @@ function startUploadPolling() {
 		try {
 			if (hasProcessingDocuments()) {
 				loadUploadHistory(uploadHistoryCurrentPage);
+				// 处理期间同步刷新队列积压（低成本 Redis 读取）
+				refreshQueueDepth();
 			} else {
 				stopUploadPolling();
 			}
@@ -1162,9 +1227,8 @@ function visTag(v) {
 }
 
 function statusTag(s) {
-	const map = { 'done': 'success', 'parsing': 'warning', 'failed': 'danger', 'pending': 'default', 'desensitizing': 'warning', 'chunking': 'warning', 'embedding': 'warning', 'embedding_failed': 'danger' };
-	const labelMap = { 'done': '已完成', 'parsing': '解析中', 'failed': '失败', 'pending': '等待', 'desensitizing': '脱敏中', 'chunking': '切片中', 'embedding': '向量化中', 'embedding_failed': '向量化失败' };
-	return `<span class="tag tag-${map[s] || 'default'}">${escapeHtml(labelMap[s] || s)}</span>`;
+	// 兼容旧调用：仅传状态字符串时构造最小对象交给共享流水线渲染
+	return pipelineStatusTag(typeof s === 'string' ? { status: s } : s);
 }
 
 /* ============ 已删除文件三选项对话框 ============ */
@@ -1194,6 +1258,43 @@ function showDeletedFileDialog(existing) {
 			}
 		};
 		document.addEventListener('keydown', escHandler);
+
+		document.body.appendChild(overlay);
+	});
+}
+
+/* ============ 同内容重复上传对话框 ============ */
+function showDuplicateFileDialog(existing) {
+	return new Promise((resolve) => {
+		const tpl = document.getElementById('tmpl-duplicate-dialog').content;
+		const overlay = document.importNode(tpl, true).querySelector('.conflict-overlay');
+		const dialog = overlay.querySelector('.conflict-dialog');
+
+		dialog.querySelector('.con-filename').textContent = existing.file_name || '';
+		dialog.querySelector('.con-owner').textContent = existing.owner_name || '未知';
+		dialog.querySelector('.con-time').textContent = formatDate(existing.created_at) || '';
+
+		// 点击"查看现有文件"只打开预览弹窗，不关闭本对话框：
+		// 用户查看完内容后可继续决定"取消"或"强制新建版本"，
+		// 因此本 Promise 只在取消/强制两个动作时 resolve
+		dialog.querySelector('.dup-btn-view').addEventListener('click', function () {
+			previewDoc(existing.id);
+		});
+		dialog.querySelector('.dup-btn-cancel').addEventListener('click', function () { closeAndResolve('cancel'); });
+		dialog.querySelector('.dup-btn-force').addEventListener('click', function () { closeAndResolve('force'); });
+
+		const escHandler = (e) => {
+			if (e.key === 'Escape') {
+				closeAndResolve('cancel');
+			}
+		};
+		document.addEventListener('keydown', escHandler);
+
+		function closeAndResolve(value) {
+			document.body.removeChild(overlay);
+			document.removeEventListener('keydown', escHandler);
+			resolve(value);
+		}
 
 		document.body.appendChild(overlay);
 	});

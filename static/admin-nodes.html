@@ -66,13 +66,12 @@
 						<select class="select" id="docStatusFilter" style="width:130px">
 							<option value="">全部状态</option>
 							<option value="done">已完成</option>
-							<option value="pending">等待</option>
+							<option value="pending">等待解析</option>
 							<option value="parsing">解析中</option>
-							<option value="desensitizing">脱敏中</option>
 							<option value="chunking">切片中</option>
-							<option value="embedding">向量化中</option>
-							<option value="embedding_failed">向量化失败</option>
-							<option value="failed">失败</option>
+							<option value="embedding">向量构建中</option>
+							<option value="embedding_failed">向量构建失败</option>
+							<option value="failed">解析失败</option>
 						</select>
 						<select class="select" id="docVisFilter" style="width:130px">
 							<option value="">全部可见范围</option>

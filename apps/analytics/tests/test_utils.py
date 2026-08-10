@@ -393,10 +393,13 @@ class TestGetQueueDepthHistory:
 
         by_name = {r['queue_name']: r for r in result}
 
-        # 有 minute_bucket：直接使用其字符串表示
+        # 有 minute_bucket：转本地时间并格式化为 YYYYMMDDHHmm（12 位数字），
+        # 前端 slice(8,10):slice(10,12) 即得 HH:MM；不能用 str() 直出 ISO 字符串
         r1 = by_name['default']
-        assert r1['minute_bucket'] == str(
-            QueueDepthLog.objects.get(queue_name='default').minute_bucket)
+        assert re.search(r'^\d{12}$', r1['minute_bucket'])
+        assert r1['minute_bucket'] == timezone.localtime(
+            QueueDepthLog.objects.get(queue_name='default').minute_bucket
+        ).strftime('%Y%m%d%H%M')
         assert r1['queued_size'] == 5   # 模型无该字段 → 回退 depth
         assert r1['active_size'] == 0   # 模型无该字段 → 0
         assert r1['failed_count'] == 0  # 模型无该字段 → 0

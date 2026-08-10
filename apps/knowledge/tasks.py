@@ -51,24 +51,74 @@ from apps.users.models import User
 def _notify_admin_on_embedding_failure(doc: Document, error_msg: str):
     """
     预留邮件通知接口 - 当embedding失败时通知管理员
-    
-    当前实现：仅记录日志
-    后续可扩展：发送邮件/Slack/DingTalk等通知给运维人员
-    
+
+    实现逻辑：
+    - 查询 EmailSubscription 中订阅 system_notice 且已启用的用户邮箱
+    - 逐个发送告警邮件（失败仅记录日志，不阻断主业务）
+    - 每次发送记录 EmailSendLog 落库（落库失败同样不阻断），便于审计追溯
+    - 无任何订阅者时退化为仅记录日志
+
     :param doc: 失败的文档对象
     :param error_msg: 错误信息
     """
+    from apps.notification.models import EmailSubscription, EmailSendLog
+
     logger.error(f'[Embedding Notify] embedding失败，文档ID={doc.id}, 文件名={doc.file_name}, 错误={error_msg}')
-    
-    # TODO: 预留邮件发送接口
-    # 可在此处调用邮件发送服务，通知管理员及时排查问题
-    # 示例：
-    # from apps.system.mail import send_admin_notification
-    # send_admin_notification(
-    #     subject=f"【RAG系统】文档embedding失败 - {doc.file_name}",
-    #     body=f"文档ID: {doc.id}\n文件名: {doc.file_name}\n错误信息: {error_msg}\n"
-    #          f"上传时间: {doc.created_at}\n上传者: {doc.owner.username if doc.owner else '未知'}"
-    # )
+
+    # 收集订阅 system_notice 的启用用户邮箱（去重，用户可能多订阅记录）
+    emails = set(
+        EmailSubscription.objects.filter(
+            category='system_notice', is_enabled=True, user__is_deleted=False
+        ).exclude(user__email='').values_list('user__email', flat=True)
+    )
+
+    # 无订阅者：与旧行为一致，仅日志告警
+    if not emails:
+        logger.warning(f'[Embedding Notify] 无订阅 system_notice 的用户，跳过邮件通知，文档ID={doc.id}')
+        return
+
+    subject = f'【知库 Agent】文档 Embedding 失败 - {doc.file_name}'
+    body = (
+        '文档 Embedding 失败，请及时排查。\n\n'
+        f'文档ID: {doc.id}\n'
+        f'文件名: {doc.file_name}\n'
+        f'错误信息: {error_msg}\n'
+        f'上传时间: {doc.created_at}\n'
+        f'上传者: {doc.owner.username if doc.owner else "未知"}'
+    )
+
+    from django.conf import settings
+    from django.core.mail import send_mail
+    for email in emails:
+        status = 'success'
+        err_msg = ''
+        try:
+            send_mail(
+                subject=subject,
+                message=body,
+                from_email=settings.EMAIL_FROM,
+                recipient_list=[email],
+                fail_silently=True,
+            )
+        except Exception as e:
+            status = 'failed'
+            err_msg = str(e)[:500]
+            logger.error(f'[Embedding Notify] 发送邮件失败 {email}: {e}')
+        try:
+            EmailSendLog.objects.create(
+                to_email=email,
+                subject=subject[:256],
+                body=body,
+                category='system_notice',
+                status=status,
+                error_message=err_msg,
+                sent_at=timezone.now() if status == 'success' else None,
+            )
+        except Exception as e:
+            # 邮件日志落库失败不阻断主业务（审计可丢、业务不可丢）
+            logger.error(f'[Embedding Notify] EmailSendLog 落库失败: {e}')
+
+    logger.error(f'[Embedding Notify] embedding失败，文档ID={doc.id}，已通知 {len(emails)} 个订阅用户')
 
 
 

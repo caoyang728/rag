@@ -16,6 +16,7 @@ const CATEGORY_MAP = {
 	memory: { label: '记忆', icon: '🧠' },
 	analytics: { label: 'Analytics', icon: '📊' },
 	eval: { label: '评估', icon: '🎯' },
+	knowledge: { label: '知识构建', icon: '📚' },
 };
 
 // 配置项元数据映射：前端硬编码 label/description/unit/sortOrder
@@ -26,6 +27,10 @@ const CONFIG_METADATA = {
 	LLM_BASE_MODEL: { label: '基础模型', description: '用于简单任务，节约 token，速度快', sortOrder: 1 },
 	LLM_ADVANCED_MODEL: { label: '高级模型', description: '用于复杂任务，推理能力强', sortOrder: 2 },
 	LLM_TIMEOUT: { label: 'LLM 调用超时', description: '调用 LLM 接口的超时时间，超时后请求中断并返回错误', unit: '秒', sortOrder: 3 },
+
+	// ===== 知识构建 =====
+	GRAPH_ENABLED: { label: '图谱抽取', description: '文档解析完成后是否自动抽取知识图谱（实体/关系），关闭时标记未启用并跳过', sortOrder: 1 },
+	WIKI_ENABLED: { label: 'Wiki 生成', description: '文档解析完成后是否自动生成节点 Wiki 页面，关闭时标记未启用并跳过', sortOrder: 2 },
 
 	// ===== Embedding / Rerank =====
 	EMBEDDING_MODEL: { label: 'Embedding 模型名', description: '用于文档向量化的模型标识，需与模型管理中的 model_name 一致', sortOrder: 1 },
@@ -125,7 +130,7 @@ const CONFIG_METADATA = {
 };
 
 // 分类显示顺序（非字母序，按业务逻辑排序）
-const CATEGORY_ORDER = ['llm', 'embedding', 'retrieval', 'storage', 'email', 'agent', 'security', 'memory', 'analytics', 'eval'];
+const CATEGORY_ORDER = ['llm', 'embedding', 'retrieval', 'storage', 'email', 'agent', 'security', 'memory', 'analytics', 'eval', 'knowledge'];
 
 // 当前页面状态
 let _allConfigs = {};       // 全部配置，按 category 分组：{ llm: [...], embedding: [...], ... }

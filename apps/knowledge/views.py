@@ -6,6 +6,7 @@ knowledge views
 """
 import hashlib
 import difflib
+import django_filters
 import magic
 import os
 import re
@@ -415,6 +416,7 @@ FILE_TYPE_MAP = {
     ".dps": "presentation",  # WPS 演示，尝试用 presentation 解析
     ".py": "code", ".java": "code", ".go": "code", ".js": "code",
     ".ts": "code", ".c": "code", ".cpp": "code", ".rs": "code",
+    ".jsx": "code", ".tsx": "code", ".h": "code", ".css": "code",  # 前端源码/样式并入代码类
     ".yaml": "config", ".yml": "config", ".json": "config",
     ".toml": "config", ".ini": "config", ".conf": "config",
 }
@@ -1229,14 +1231,34 @@ class KnowledgeNodeViewSet(viewsets.ModelViewSet):
                        detail={'old': old_data, 'new': new_data})
 
 
+class DocumentFilter(django_filters.FilterSet):
+    """文档列表筛选器：status 归一化处理
+
+    前端共享流水线将 desensitizing 并入"解析中"展示，因此筛选 status=parsing
+    时需一并命中 desensitizing 状态的文档，保持筛选与展示一致。
+    """
+
+    status = django_filters.CharFilter(method='filter_status')
+
+    def filter_status(self, queryset, name, value):
+        if value == 'parsing':
+            return queryset.filter(models.Q(status='parsing') | models.Q(status='desensitizing'))
+        return queryset.filter(status=value)
+
+    class Meta:
+        model = Document
+        fields = ["node", "status", "file_type", "visibility_level",
+                  "root_type", "owner", "is_deleted", "dept_id", "team_id"]
+
+
 class DocumentViewSet(viewsets.ModelViewSet):
     """/api/v1/knowledge/documents/"""
     queryset = Document.objects.order_by("-created_at")
     serializer_class = DocumentSerializer
     permission_classes = [IsAuthenticated]
+    # 状态筛选走 DocumentFilter（解析中=parsing 时并入 desensitizing）
+    filterset_class = DocumentFilter
     # 支持按 visibility_level / dept_id / team_id 过滤
-    filterset_fields = ["node", "status", "file_type", "visibility_level",
-                        "root_type", "owner", "is_deleted", "dept_id", "team_id"]
     search_fields = ["title", "file_name", "owner__username", "owner__real_name"]
 
     def get_queryset(self):
@@ -1342,17 +1364,25 @@ class DocumentViewSet(viewsets.ModelViewSet):
             dept_id=doc.dept_id, team_id=doc.team_id, is_deleted=False,
         ).order_by('-version', '-created_at'))
         is_admin = getattr(request.user, 'is_super_admin', False) or getattr(request.user, 'is_kb_admin', False)
+        # 批量计算版本权限（can_read 供前端预览按钮显隐），避免逐版本走 resolve_doc_access N+1
+        user_ctx = build_user_context(request.user)
+        grants_map = build_grants_map(request.user, [d.id for d in siblings], ctx=user_ctx)
         data = [{
             'id': d.id,
             'title': d.title,
             'version': d.version,
             'version_tag': d.version_tag or '',
             'is_active': d.is_active,
+            # 处理状态需完整返回：主解析 status + 图谱/wiki 阶段（前端共享流水线状态渲染）
             'status': d.status,
+            'graph_status': d.graph_status,
+            'wiki_status': d.wiki_status,
+            'file_type': d.file_type,
             'file_size': d.file_size,
             'created_at': d.created_at,
             # 仅 Owner / 管理员可执行「设为活跃」
             'is_owner': d.owner_id == request.user.id or is_admin,
+            'can_read': resolve_doc_access(request.user, d, ctx=user_ctx, grants_map=grants_map)['can_read'],
         } for d in siblings]
         return Response({'documents': data})
 
@@ -1573,9 +1603,26 @@ class DocumentViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def reparse(self, request, pk=None):
-        """重新解析文档：删除旧向量/切片/代码块/图片资源，基于原文件重新解析"""
+        """重新解析文档：删除旧向量/切片/代码块/图片资源，基于原文件重新解析
+
+        特例：解析已完成(done)但图谱/Wiki 构建失败时，仅重派对应构建阶段任务，
+        避免整篇文档重新解析（LLM 与向量成本更高）。
+        """
         doc = self.get_object()
         self._require_write(doc)
+
+        # 仅失败阶段重试：图谱/wiki 构建失败不需重跑解析链路
+        if doc.status == 'done' and (doc.graph_status == 'failed' or doc.wiki_status == 'failed'):
+            from apps.graph.sync import on_document_done
+            from apps.wiki.sync import on_document_done_for_wiki
+            if doc.graph_status == 'failed':
+                on_document_done(doc.id)
+            if doc.wiki_status == 'failed':
+                on_document_done_for_wiki(doc.id)
+            _log_operation(request, 'doc_reparse', document=doc,
+                           detail={'title': doc.title, 'stage': 'graph/wiki retry'})
+            return Response({"ok": True, "status": "done", "detail": "已重新触发失败阶段的构建"})
+
         doc.status = "pending"
         doc.error_message = ""
         doc.save(update_fields=["status", "error_message"])
@@ -2549,6 +2596,28 @@ class DocumentUploadView(APIView):
             version_tag=version_tag, **group_filter
         ).first()
 
+        # 同内容去重：同组已存在 file_hash 完全一致的活跃文档时，默认拦截并交由前端弹窗选择。
+        # 用户选择"强制新建版本"时携带 force_new_version=true 跳过拦截，
+        # 否则相同内容的重复上传会无限堆积版本记录（exclude exist 避免与待重建的同标签记录冲突）
+        force_new_version = str(request.data.get('force_new_version', '')).lower() in ('true', '1', 'yes')
+        if not force_new_version:
+            dup = Document.objects.filter(
+                **group_filter, file_hash=file_hash
+            ).exclude(id=exist.id if exist else -1).first()
+            if dup:
+                return Response({
+                    'detail': '同节点已存在相同内容的文件，未重复上传',
+                    'code': 'duplicate_file',
+                    'existing': {
+                        'id': dup.id,
+                        'file_name': dup.file_name,
+                        'owner_name': dup.owner.username if dup.owner else '',
+                        'created_at': dup.created_at.isoformat() if dup.created_at else None,
+                        'version_tag': dup.version_tag or f'v{dup.version}',
+                        'status': dup.status,
+                    },
+                }, status=status.HTTP_409_CONFLICT)
+
         # 组内其余文档（不含将被去重替换的 exist）→ 判定本次上传是「新版本」还是「独立文档」
         siblings = [s for s in Document.objects.filter(**group_filter)
                     if s.id != (exist.id if exist else -1)]
@@ -2829,6 +2898,25 @@ class CeleryStatusView(APIView):
             "celery_ok": False,
             "detail": "消息队列连接正常，但文档解析服务未运行",
         }, status=200)
+
+
+class QueueDepthView(APIView):
+    """GET /api/v1/knowledge/queues/depth/ — 各队列实时积压深度（上传页展示用）
+
+    仅做低成本 Redis 读取（current 键 / LLEN 兜底），不做 Celery inspect，
+    任何登录用户可访问：上传文档后用于展示"解析队列有多少积压"。
+    返回：{queues: {queue_name: {size, length, queued, active, idle, failed}}}
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        try:
+            from apps.analytics.realtime import get_queue_depth_snapshot
+            queues = get_queue_depth_snapshot()
+        except Exception as e:
+            logger.warning(f'[QueueDepth] 快照获取失败: {e}')
+            queues = {}
+        return Response({'queues': queues})
 
 
 class PendingDocsView(APIView):

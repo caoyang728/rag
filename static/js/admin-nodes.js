@@ -624,7 +624,7 @@ function renderDocList(docs) {
 		clone.querySelector('.dr-owner').textContent = d.owner_name || '-';
 		clone.querySelector('.dr-team').textContent = getDocTeamName(d);
 		clone.querySelector('.dr-vis').innerHTML = visTagHtml(d.visible_scope);
-		clone.querySelector('.dr-status').innerHTML = statusTagHtml(d.status);
+		clone.querySelector('.dr-status').innerHTML = statusTagHtml(d);
 		var dateEl = clone.querySelector('.dr-date');
 		dateEl.textContent = formatDateShort(d.created_at);
 		dateEl.title = formatDate(d.created_at);
@@ -635,14 +635,14 @@ function renderDocList(docs) {
 
 /* ---- 渲染操作按钮（按权限） ---- */
 function isPreviewable(fileType) {
-	// 可预览类型：文本/代码走行模式，PDF/Office 走页图模式（未知二进制类型 'other' 除外）
-	return ['markdown', 'txt', 'code', 'config', 'pdf', 'docx', 'spreadsheet', 'presentation'].indexOf(fileType) !== -1;
+	// 复用 common.js 共享判断（版本历史弹窗等场景保持一致）
+	return isPreviewableFileType(fileType);
 }
 
 function renderDocActions(d) {
 	var actions = [];
-	// 预览：支持预览的文件类型才展示（所有人可见）
-	if (isPreviewable(d.file_type)) {
+	// 预览：支持预览的文件类型且用户有阅读权限才展示（无权限时隐藏，后端仍会二次校验）
+	if (isPreviewable(d.file_type) && d.can_read !== false) {
 		actions.push('<button class="btn-link btn-sm" onclick="previewDoc(' + d.id + ')">预览</button>');
 	}
 	// 版本切换：同组存在多个版本时展示入口（活跃/旧版本均可打开版本历史弹窗）
@@ -658,12 +658,6 @@ function renderDocActions(d) {
 		actions.push('<button class="btn-link btn-sm" onclick="openReqModal(' + d.id + ')" style="color:var(--warning)">申请权限</button>');
 	}
 	return '<div class="table-actions">' + actions.join('') + '</div>';
-}
-
-function formatDateShort(dt) {
-	if (!dt) return '-';
-	var d = new Date(dt);
-	return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
 }
 
 /* ---- 分页（使用 tmpl-doc-pagination 模板） ---- */
@@ -1226,8 +1220,7 @@ function visTagHtml(v) {
 	return '<span class="tag tag-' + (cls[v] || 'default') + '">' + escapeHtml(map[v] || v) + '</span>';
 }
 
-function statusTagHtml(s) {
-	var cls = { done: 'success', parsing: 'warning', failed: 'danger', pending: 'default', desensitizing: 'warning', chunking: 'warning', embedding: 'warning', embedding_failed: 'danger' };
-	var label = { done: '已完成', parsing: '解析中', failed: '失败', pending: '等待', desensitizing: '脱敏中', chunking: '切片中', embedding: '向量化中', embedding_failed: '向量化失败' };
-	return '<span class="tag tag-' + (cls[s] || 'default') + '">' + escapeHtml(label[s] || s) + '</span>';
+function statusTagHtml(doc) {
+	// 复用共享流水线状态（主解析 + 图谱/wiki 阶段）
+	return pipelineStatusTag(doc || {});
 }

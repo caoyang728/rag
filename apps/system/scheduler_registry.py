@@ -57,7 +57,9 @@ def is_schedule_key(key: str) -> bool:
 SCHEDULED_TASKS: List[dict] = [
     {
         'name': 'system-metrics-daily',
-        'task': 'apps.analytics.tasks.compute_system_metrics_daily',
+        # task 必须用 Celery 注册名（@shared_task 显式 name），不能用模块路径：
+        # 模块路径未注册进 app.tasks，Beat 派发后 worker 会以 unknown task 丢弃，任务永不执行
+        'task': 'analytics.compute_system_metrics',
         'cron': '0 2 * * *',
         'enabled': True,
         'label': '系统指标日聚合',
@@ -65,7 +67,7 @@ SCHEDULED_TASKS: List[dict] = [
     },
     {
         'name': 'org-usage-daily',
-        'task': 'apps.analytics.tasks.compute_org_usage_daily',
+        'task': 'analytics.compute_org_usage',
         'cron': '10 2 * * *',
         'enabled': True,
         'estimated_minutes': 10,
@@ -74,7 +76,7 @@ SCHEDULED_TASKS: List[dict] = [
     },
     {
         'name': 'queue-depth-snapshot',
-        'task': 'apps.analytics.tasks.update_queue_depth_snapshot',
+        'task': 'analytics.update_queue_depth',
         'cron': '*/5 * * * *',
         'enabled': True,
         'label': '队列深度快照',
@@ -82,7 +84,7 @@ SCHEDULED_TASKS: List[dict] = [
     },
     {
         'name': 'realtime-metrics-flush',
-        'task': 'apps.analytics.tasks.flush_realtime_metrics_task',
+        'task': 'analytics.flush_realtime',
         'cron': '*/5 * * * *',
         'enabled': True,
         'estimated_minutes': 1,
@@ -91,7 +93,7 @@ SCHEDULED_TASKS: List[dict] = [
     },
     {
         'name': 'expire-ip-blacklist',
-        'task': 'apps.security.tasks.expire_ip_blacklist',
+        'task': 'security.expire_ip_blacklist',
         'cron': '*/5 * * * *',
         'enabled': True,
         'label': 'IP 封禁过期清理',
@@ -99,24 +101,15 @@ SCHEDULED_TASKS: List[dict] = [
     },
     {
         'name': 'refine-user-memory',
-        'task': 'apps.memory.tasks.refine_user_memory',
+        'task': 'memory.refine_user',
         'cron': '30 2 * * *',
         'enabled': True,
         'label': '用户长期记忆提炼',
         'description': '提炼稳定的用户偏好到长期记忆',
     },
     {
-        'name': 'handle-feedback',
-        'task': 'apps.chat.tasks.handle_feedback',
-        'cron': '15 * * * *',
-        'enabled': True,
-        'estimated_minutes': 5,
-        'label': '差评反馈处理',
-        'description': '处理未处理的差评反馈',
-    },
-    {
         'name': 'cleanup-old-analytics-data',
-        'task': 'apps.analytics.tasks.cleanup_old_data',
+        'task': 'analytics.cleanup_old_data',
         'cron': '30 3 * * *',
         'enabled': True,
         'label': '监控数据清理',
@@ -124,7 +117,7 @@ SCHEDULED_TASKS: List[dict] = [
     },
     {
         'name': 'doc-quality-daily',
-        'task': 'apps.analytics.tasks.batch_evaluate_document_quality',
+        'task': 'analytics.batch_evaluate_document_quality',
         'cron': '0 4 * * *',
         'enabled': True,
         'estimated_minutes': 60,
@@ -133,7 +126,7 @@ SCHEDULED_TASKS: List[dict] = [
     },
     {
         'name': 'coverage-report-daily',
-        'task': 'apps.analytics.tasks.generate_coverage_report_daily',
+        'task': 'analytics.generate_coverage_report_daily',
         'cron': '30 4 * * *',
         'enabled': True,
         'estimated_minutes': 30,
@@ -142,7 +135,7 @@ SCHEDULED_TASKS: List[dict] = [
     },
     {
         'name': 'multi-dim-evaluation',
-        'task': 'apps.analytics.tasks.run_multi_dimension_evaluation',
+        'task': 'analytics.run_multi_dimension_evaluation',
         'cron': '30 */2 * * *',
         'enabled': True,
         'estimated_minutes': 30,
@@ -151,7 +144,7 @@ SCHEDULED_TASKS: List[dict] = [
     },
     {
         'name': 'periodic-retrieval-eval',
-        'task': 'apps.analytics.tasks.periodic_retrieval_evaluation',
+        'task': 'analytics.periodic_retrieval_evaluation',
         'cron': '0 5 * * 1',
         'enabled': True,
         'label': '离线检索回归评估',
@@ -159,7 +152,7 @@ SCHEDULED_TASKS: List[dict] = [
     },
     {
         'name': 'siphon-low-score-regression',
-        'task': 'apps.analytics.tasks.siphon_low_score_regression',
+        'task': 'analytics.siphon_low_score_regression',
         'cron': '30 5 * * *',
         'enabled': True,
         'estimated_minutes': 20,
@@ -168,7 +161,7 @@ SCHEDULED_TASKS: List[dict] = [
     },
     {
         'name': 'run-regression-evaluation',
-        'task': 'apps.analytics.tasks.run_regression_evaluation_task',
+        'task': 'analytics.run_regression_evaluation',
         'cron': '0 6 * * 1',
         'enabled': True,
         'label': '回归测试集全链路评估',
@@ -185,7 +178,7 @@ SCHEDULED_TASKS: List[dict] = [
     },
     {
         'name': 'route-analysis-daily',
-        'task': 'apps.analytics.tasks.aggregate_route_analysis_daily',
+        'task': 'analytics.aggregate_route_analysis_daily',
         'cron': '50 2 * * *',
         'enabled': True,
         'estimated_minutes': 10,
@@ -194,7 +187,7 @@ SCHEDULED_TASKS: List[dict] = [
     },
     {
         'name': 'wiki-quality-daily',
-        'task': 'apps.analytics.tasks.batch_evaluate_wiki_quality',
+        'task': 'analytics.batch_evaluate_wiki_quality',
         'cron': '45 4 * * *',
         'enabled': True,
         'estimated_minutes': 60,
@@ -203,7 +196,7 @@ SCHEDULED_TASKS: List[dict] = [
     },
     {
         'name': 'keyword-feedback-loop-daily',
-        'task': 'apps.analytics.tasks.aggregate_keyword_feedback_daily',
+        'task': 'analytics.aggregate_keyword_feedback_daily',
         'cron': '20 2 * * *',
         'enabled': True,
         'estimated_minutes': 10,

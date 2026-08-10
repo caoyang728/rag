@@ -33,9 +33,10 @@ from apps.knowledge.models import (
     KnowledgeNode, VisibilityLevel,
 )
 from apps.knowledge.tasks import (
-    _log_batch_import_failure, _sanitize_content, _sanitize_dict,
+    _log_batch_import_failure, _notify_admin_on_embedding_failure, _sanitize_content, _sanitize_dict,
     batch_import_single_file, cleanup_deleted_docs, parse_document,
 )
+from apps.notification.models import EmailSendLog, EmailSubscription
 from apps.users.models import Department, Team, User
 
 
@@ -563,3 +564,74 @@ class TestBatchImportSingleFile:
         assert 'disk full' in result['error']
         assert os.path.exists(tmp)  # 失败保留临时文件
         os.remove(tmp)
+
+
+# ============================================================================
+# _notify_admin_on_embedding_failure —— embedding 失败管理员邮件通知
+# ============================================================================
+@pytest.mark.django_db
+class TestNotifyAdminOnEmbeddingFailure:
+    """embedding 失败邮件通知测试（订阅查询 + send_mail + EmailSendLog 落库）"""
+
+    @pytest.fixture(autouse=True)
+    def _env(self):
+        """构造管理员/上传者与待通知文档"""
+        self.admin = User.objects.create_user(
+            username='admin', password='pass123', email='admin@test.com')
+        self.owner = User.objects.create_user(
+            username='owner', password='pass123', email='owner@test.com')
+        self.dept = Department.objects.create(name='研发部', code='rd')
+        self.team = Team.objects.create(
+            name='后端组', code='rd-backend', department=self.dept)
+        self.root = KnowledgeNode.objects.create(
+            name='知识库', node_type='root', node_level=1,
+            root_type='company_doc', parent=None, depth=0, created_by=self.owner)
+        padded = f'{self.root.id:04d}'
+        self.root.path = f'/{padded}/'
+        self.root.save(update_fields=['path'])
+        self.doc = Document.objects.create(
+            node=self.root, title='坏文档.txt', file_name='坏文档.txt',
+            file_type='txt', file_size=10, file_hash=uuid_lib.uuid4().hex,
+            file_path='/tmp/bad.txt', mime_type='text/plain', owner=self.owner,
+            dept_id=self.dept.id, team_id=self.team.id,
+            visibility_level=VisibilityLevel.TEAM_ONLY,
+            root_type='company_doc', status='embedding_failed')
+
+    def test_no_subscribers_then_no_mail_and_no_log(self):
+        """无 system_notice 订阅 → 不发送邮件、不落 EmailSendLog"""
+        with patch('django.core.mail.send_mail') as m_send:
+            _notify_admin_on_embedding_failure(self.doc, 'boom')
+        m_send.assert_not_called()
+        assert EmailSendLog.objects.count() == 0
+
+    def test_disabled_subscriber_then_skipped(self):
+        """订阅但停用 → 视为无订阅者，不发送邮件"""
+        EmailSubscription.objects.create(
+            user=self.admin, category='system_notice', is_enabled=False)
+        with patch('django.core.mail.send_mail') as m_send:
+            _notify_admin_on_embedding_failure(self.doc, 'boom')
+        m_send.assert_not_called()
+        assert EmailSendLog.objects.count() == 0
+
+    def test_with_subscribers_then_mail_sent_and_logged(self):
+        """有启用订阅者 → 发送邮件并落 EmailSendLog(success)"""
+        EmailSubscription.objects.create(
+            user=self.admin, category='system_notice', is_enabled=True)
+        with patch('django.core.mail.send_mail') as m_send:
+            _notify_admin_on_embedding_failure(self.doc, 'boom')
+        m_send.assert_called_once()
+        log = EmailSendLog.objects.get()
+        assert log.to_email == 'admin@test.com'
+        assert log.status == 'success'
+        assert 'Embedding 失败' in log.subject
+
+    def test_mail_failure_then_log_failed(self):
+        """send_mail 抛异常 → EmailSendLog 记录 failed，不阻断"""
+        EmailSubscription.objects.create(
+            user=self.admin, category='system_notice', is_enabled=True)
+        with patch('django.core.mail.send_mail',
+                   side_effect=RuntimeError('smtp down')):
+            _notify_admin_on_embedding_failure(self.doc, 'boom')
+        log = EmailSendLog.objects.get()
+        assert log.status == 'failed'
+        assert 'smtp down' in log.error_message

@@ -87,11 +87,13 @@ class DocumentSerializer(serializers.ModelSerializer):
             "allow_share_request", "preview_content", "preview_chunks",
             "version", "version_tag", "tags", "is_active", "version_count",
             "root_type", "status", "error_message", "chunk_count",
+            "graph_status", "wiki_status",
             "is_deleted", "delete_time", "created_at", "updated_at",
             "restored_at", "restored_by", "restored_by_name",
             "is_owner", "is_manager", "can_read", "can_download", "can_share",
         ]
         read_only_fields = ["uuid", "file_hash", "status", "chunk_count",
+                            "graph_status", "wiki_status",
                             "created_at", "updated_at", "restored_at", "restored_by",
                             # 活跃标志由版本管理逻辑维护，不允许通过 API 直接修改
                             "is_active", "version_count",

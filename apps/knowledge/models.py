@@ -137,6 +137,10 @@ class KnowledgeNode(models.Model):
                                     related_name='created_nodes')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    # 图谱/Wiki 防抖合并派发标记：文档完成时原子 check-and-set，
+    # 仅首个文档触发任务派发，任务执行时批量处理节点下所有待构建文档
+    graph_pending = models.BooleanField(default=False, help_text=_('图谱待构建标记（防抖合并派发）'))
+    wiki_pending = models.BooleanField(default=False, help_text=_('Wiki 待构建标记（防抖合并派发）'))
 
     class Meta:
         db_table = 'knowledge_node'
@@ -183,6 +187,14 @@ class Document(models.Model):
         ('embedding_failed', 'embedding_failed'),
         ('done', 'done'),
         ('failed', 'failed'),
+    ]
+    # 图谱/Wiki 构建阶段状态（解析完成后由节点级防抖任务驱动）
+    PIPELINE_STATUS_CHOICES = [
+        ('pending', 'pending'),      # 待构建（等待节点级防抖任务）
+        ('extracting', 'extracting'),  # 构建中
+        ('done', 'done'),            # 构建完成
+        ('failed', 'failed'),        # 构建失败（可手动重试）
+        ('skipped', 'skipped'),      # 未启用（配置关闭或无数据可构建）
     ]
     FILE_TYPE_CHOICES = [
         ('pdf', 'pdf'),
@@ -265,6 +277,12 @@ class Document(models.Model):
                                help_text=_('处理状态: pending/parsing/.../done/failed'))
     error_message = models.TextField(blank=True, default='')
     chunk_count = models.IntegerField(default=0)
+    # 图谱/Wiki 构建阶段状态：解析完成(done)后由节点级防抖任务驱动流转，
+    # 失败态可手动重试；skipped=配置未启用或无数据可构建
+    graph_status = models.CharField(max_length=16, choices=PIPELINE_STATUS_CHOICES, default='pending',
+                                    help_text=_('图谱构建状态: pending/extracting/done/failed/skipped'))
+    wiki_status = models.CharField(max_length=16, choices=PIPELINE_STATUS_CHOICES, default='pending',
+                                   help_text=_('Wiki 构建状态: pending/extracting/done/failed/skipped'))
 
     # ── 版本管理 ───────────────────────────────────────────
     version = models.IntegerField(default=1)

@@ -45,6 +45,7 @@ class SystemConfig(models.Model):
         ('memory', 'memory'),                # 记忆 Token 预算
         ('analytics', 'analytics'),          # Redis DB / 队列监控
         ('eval', 'eval'),                    # 评估与回归测试
+        ('knowledge', 'knowledge'),          # 知识构建（图谱 / Wiki）
     ]
 
     id = models.BigAutoField(primary_key=True)

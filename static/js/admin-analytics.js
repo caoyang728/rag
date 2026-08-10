@@ -160,7 +160,9 @@ function renderTrendChart(trend) {
 		return '<div class="empty">仅 1 天数据，暂无法绘制趋势图</div>';
 	}
 
-	const w = 740, h = 280, pad = 28, padR = 48;
+	// 画布宽度 1710、高度 520（宽度-5%），与队列历史图风格一致；
+	// 左右留白增大容纳更大刻度字号
+	const w = 1710, h = 520, pad = 60, padR = 80;
 	const days = trend.map(t => t.date.slice(5));
 	const sat = trend.map(t => (t.accuracy || 0) * 100);
 	/* 单位 ms → 转换为 s（左轴 ms，右轴 s，统一用 s 比较直观） */
@@ -204,18 +206,18 @@ function renderTrendChart(trend) {
 		grid += `<line x1="${pad}" y1="${y}" x2="${w - padR}" y2="${y}" stroke="#e5e7eb" stroke-dasharray="3 3"/>`;
 		if (showAccuracy) {
 			const leftLabel = (y1Max - (y1Max - y1Min) * i / 5).toFixed(0);
-			grid += `<text x="${pad - 6}" y="${y + 4}" text-anchor="end" font-size="10" fill="#2563eb">${leftLabel}%</text>`;
+			grid += `<text x="${pad - 10}" y="${y + 5}" text-anchor="end" font-size="16" font-weight="600" fill="#2563eb">${leftLabel}%</text>`;
 		}
 		if (showLat) {
 			const rightLabel = (y2Max - (y2Max - y2Min) * i / 5).toFixed(2);
-			grid += `<text x="${w - padR + 6}" y="${y + 4}" text-anchor="start" font-size="10" fill="#a16207">${rightLabel}s</text>`;
+			grid += `<text x="${w - padR + 10}" y="${y + 5}" text-anchor="start" font-size="16" font-weight="600" fill="#a16207">${rightLabel}s</text>`;
 		}
 	}
 
-	const xLabels = days.map((d, i) => `<text x="${pad + i * xStep}" y="${h - pad + 14}" text-anchor="middle" font-size="10" fill="#6b7280">${d}</text>`).join('');
-	const dotSat = showAccuracy ? sat.map((v, i) => `<circle cx="${pad + i * xStep}" cy="${yLeft(v)}" r="2.5" fill="#2563eb"/>`).join('') : '';
-	const dotTtft = showTtft ? ttftSec.map((v, i) => `<circle cx="${pad + i * xStep}" cy="${yRight(v)}" r="2.5" fill="#a16207"/>`).join('') : '';
-	const dotTotal = showTotal ? totalSec.map((v, i) => `<circle cx="${pad + i * xStep}" cy="${yRight(v)}" r="2.5" fill="#ef4444"/>`).join('') : '';
+	const xLabels = days.map((d, i) => `<text x="${pad + i * xStep}" y="${h - pad + 28}" text-anchor="middle" font-size="16" font-weight="600" fill="#4b5563">${d}</text>`).join('');
+	const dotSat = showAccuracy ? sat.map((v, i) => `<circle cx="${pad + i * xStep}" cy="${yLeft(v)}" r="4" fill="#2563eb"/>`).join('') : '';
+	const dotTtft = showTtft ? ttftSec.map((v, i) => `<circle cx="${pad + i * xStep}" cy="${yRight(v)}" r="4" fill="#a16207"/>`).join('') : '';
+	const dotTotal = showTotal ? totalSec.map((v, i) => `<circle cx="${pad + i * xStep}" cy="${yRight(v)}" r="4" fill="#ef4444"/>`).join('') : '';
 
 	/* 左侧勾选框列 */
 	const sidebarHtml = `
@@ -225,11 +227,11 @@ function renderTrendChart(trend) {
       <label class="checkbox"><input type="checkbox" ${showTotal ? 'checked' : ''} data-metric="total"><span class="metric-dot dot-red"></span>整体耗时</label>
     </div>`;
 
-	const svgHtml = `<svg class="chart-svg" viewBox="0 0 ${w} ${h}" preserveAspectRatio="xMidYMid meet">
+	const svgHtml = `<svg class="chart-svg" viewBox="0 0 ${w} ${h}" preserveAspectRatio="xMidYMin meet">
     ${grid}${xLabels}
-    ${showAccuracy ? `<polyline points="${pSat}" fill="none" stroke="#2563eb" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>` : ''}
-    ${showTtft ? `<polyline points="${pTtft}" fill="none" stroke="#a16207" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="6 3"/>` : ''}
-    ${showTotal ? `<polyline points="${pTotal}" fill="none" stroke="#ef4444" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>` : ''}
+    ${showAccuracy ? `<polyline points="${pSat}" fill="none" stroke="#2563eb" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>` : ''}
+    ${showTtft ? `<polyline points="${pTtft}" fill="none" stroke="#a16207" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="6 3"/>` : ''}
+    ${showTotal ? `<polyline points="${pTotal}" fill="none" stroke="#ef4444" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>` : ''}
     ${dotSat}${dotTtft}${dotTotal}
   </svg>`;
 
@@ -237,7 +239,7 @@ function renderTrendChart(trend) {
 	return `
     <div class="chart-row">
       ${sidebarHtml}
-      <div class="chart-container chart-container-flex" style="height:${h + 18}px">
+      <div class="chart-container chart-container-flex">
         ${svgHtml}
       </div>
     </div>`;
@@ -921,7 +923,9 @@ function renderQueueDepthChart(history) {
 		if (total > globalMax) globalMax = total;
 	}
 
-	const w = Math.max(800, buckets.length * 12), h = 400, pad = 48;
+	// 画布比例：高度 470、宽度 1800~3600（宽度-5%），与概述图一致；
+	// 24h/7d 窗口仍封顶避免过密
+	const w = Math.max(1800, Math.min(buckets.length * 24, 3600)), h = 470, pad = 80;
 	const xStep = (w - 2 * pad) / (buckets.length - 1);
 	const maxY = globalMax;
 	const yPos = v => h - pad - (v / maxY) * (h - 2 * pad);
@@ -932,7 +936,7 @@ function renderQueueDepthChart(history) {
 		const y = pad + (h - 2 * pad) * i / 5;
 		const val = Math.round(maxY * (1 - i / 5));
 		grid += `<line x1="${pad}" y1="${y}" x2="${w - pad}" y2="${y}" stroke="#e5e7eb" stroke-dasharray="3 3"/>`;
-		grid += `<text x="${pad - 6}" y="${y + 4}" text-anchor="end" font-size="10" fill="#9ca3af">${val}</text>`;
+		grid += `<text x="${pad - 10}" y="${y + 6}" text-anchor="end" font-size="24" font-weight="600" fill="#4b5563">${val}</text>`;
 	}
 
 	// 折线：每个队列一条，从 Map 查询（O(1)）替代 .find()（O(H)）
@@ -943,7 +947,7 @@ function renderQueueDepthChart(history) {
 			const val = depthMap.get(`${b}||${q}`) || 0;
 			return `${pad + bi * xStep},${yPos(val)}`;
 		}).join(' ');
-		polylines += `<polyline points="${pts}" fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`;
+		polylines += `<polyline points="${pts}" fill="none" stroke="${color}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>`;
 	});
 
 	// X 轴标签：只显示首尾 + 中间
@@ -951,19 +955,19 @@ function renderQueueDepthChart(history) {
 	const xLabels = labelIdx.map(i => {
 		const b = buckets[i] || '';
 		const hm = b.slice(8, 10) + ':' + b.slice(10, 12);
-		return `<text x="${pad + i * xStep}" y="${h - pad + 18}" text-anchor="middle" font-size="11" fill="#6b7280">${hm}</text>`;
+		return `<text x="${pad + i * xStep}" y="${h - pad + 42}" text-anchor="middle" font-size="24" font-weight="600" fill="#4b5563">${hm}</text>`;
 	}).join('');
 
-	// 图例
+	// 图例放在 SVG 前面，CSS flex-direction: row 让图例在左侧、图表在右侧
 	const legend = queues.map((q, qi) =>
 		`<div class="legend-item"><span class="legend-dot" style="background:${palette[qi % palette.length]}"></span>${escapeHtml(q)}</div>`
 	).join('');
 
 	return `
+    <div class="chart-legend">${legend}</div>
     <svg class="chart-svg chart-svg-fluid" viewBox="0 0 ${w} ${h}" preserveAspectRatio="xMidYMid meet">
       ${grid}${polylines}${xLabels}
-    </svg>
-    <div class="chart-legend">${legend}</div>`;
+    </svg>`;
 }
 
 /* ---- Tab 5: 部门/团队使用统计 ---- */

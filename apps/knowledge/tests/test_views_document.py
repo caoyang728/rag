@@ -496,6 +496,41 @@ class TestDocumentUploadExtra(KnowledgeViewsExtraBase):
             share_scope_type=ShareScopeType.TEAM,
             share_scope_id=self.team.id, status=ShareStatus.ACTIVE).exists()
 
+    @pytest.mark.integration
+    @patch('apps.knowledge.tasks.parse_document')
+    @patch('apps.knowledge.views.magic')
+    @patch.object(DocumentUploadView, '_save_file', return_value='/tmp/dup.txt')
+    def test_upload_duplicate_content_when_no_force_then_409(self, mock_save, mock_magic, mock_parse):
+        """同内容、同归属节点重复上传 → 409 duplicate_file，不产生新文档
+
+        同内容去重拦截：默认拒绝重复上传，交由前端弹窗让用户选择
+        （取消 / 查看现有文件 / 强制新建版本），避免相同文件无限堆积版本记录。
+        """
+        mock_magic.from_buffer.return_value = 'text/plain'
+        first = self._upload(self.super_admin)
+        assert first.status_code == 201
+        doc1 = Document.objects.get(pk=first.json()['document_id'])
+
+        second = self._upload(self.super_admin)
+        assert second.status_code == 409
+        body = second.json()
+        assert body['code'] == 'duplicate_file'
+        assert body['existing']['id'] == doc1.id
+        # 未产生新文档（仍只有第一条同名同内容记录）
+        assert Document.objects.filter(node=self.category_node, file_name='文档.txt').count() == 1
+
+    @pytest.mark.integration
+    @patch('apps.knowledge.tasks.parse_document')
+    @patch('apps.knowledge.views.magic')
+    @patch.object(DocumentUploadView, '_save_file', return_value='/tmp/dup2.txt')
+    def test_upload_duplicate_content_when_force_new_version_then_201(self, mock_save, mock_magic, mock_parse):
+        """同内容重复上传 + force_new_version=true → 跳过拦截，正常创建"""
+        mock_magic.from_buffer.return_value = 'text/plain'
+        self._upload(self.super_admin)
+        forced = self._upload(self.super_admin, force_new_version='true')
+        assert forced.status_code == 201
+        assert Document.objects.filter(node=self.category_node, file_name='文档.txt').count() == 2
+
 
 # ============================================================================
 # PendingDocsView（待处理文档列表 + 重试解析）
@@ -597,6 +632,35 @@ class TestDocumentListFilters(KnowledgeViewsExtraBase):
         assert resp.status_code == 200
         levels = {d['visibility_level'] for d in resp.json()['results']}
         assert levels == {VisibilityLevel.TEAM_ONLY}
+
+    @pytest.mark.integration
+    def test_list_filter_status_parsing_includes_desensitizing(self):
+        """status=parsing 筛选需一并命中 desensitizing（前端展示合并为"解析中"）"""
+        self.doc_own_private.status = 'desensitizing'
+        self.doc_own_private.save(update_fields=['status'])
+        self.doc_other_public.status = 'parsing'
+        self.doc_other_public.save(update_fields=['status'])
+        resp = self.client.get(
+            '/api/v1/knowledge/documents/?status=parsing',
+            **_auth_headers(self.super_admin))
+        assert resp.status_code == 200
+        ids = {d['id'] for d in resp.json()['results']}
+        assert self.doc_own_private.id in ids
+        assert self.doc_other_public.id in ids
+
+    @pytest.mark.integration
+    def test_list_filter_status_parsing_excludes_done(self):
+        """status=parsing 不返回已完成文档"""
+        self.doc_own_private.status = 'parsing'
+        self.doc_own_private.save(update_fields=['status'])
+        resp = self.client.get(
+            '/api/v1/knowledge/documents/?status=parsing',
+            **_auth_headers(self.super_admin))
+        assert resp.status_code == 200
+        ids = {d['id'] for d in resp.json()['results']}
+        assert self.doc_own_private.id in ids
+        assert self.doc_other_public.id not in ids
+        assert self.doc_other_private.id not in ids
 
     @pytest.mark.integration
     def test_available_depts_cached(self):

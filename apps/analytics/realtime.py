@@ -72,6 +72,31 @@ def _get_redis():
     )
 
 
+def _get_broker_redis():
+    """获取 Celery broker 的 Redis 连接（用于 LLEN 真实队列长度）
+
+    - 队列消息存于 Celery broker 的 Redis DB（默认 1，见 CELERY_BROKER_URL），
+      与 Analytics 专用 DB（3）不同；此前直接复用 _get_redis() 会查错 DB，
+      导致即使有积压任务队列深度也恒为 0
+    - 直接从 settings.CELERY_BROKER_URL 解析端点（含 host/port/password/db），
+      连接失败时返回 None，调用方按队列长度为 0 降级
+    """
+    import redis as redis_lib
+    from django.conf import settings
+
+    broker_url = getattr(settings, 'CELERY_BROKER_URL', '')
+    if not broker_url:
+        return None
+    try:
+        return redis_lib.Redis.from_url(
+            broker_url, decode_responses=True,
+            socket_connect_timeout=2, socket_timeout=2,
+        )
+    except Exception:
+        logger.debug('[QueueDepth] broker URL 解析失败，队列长度按 0 处理')
+        return None
+
+
 def _get_redis_safe():
     """获取 Redis 连接（带健康检查，TTL 缓存避免热点路径开销）
 
@@ -117,11 +142,19 @@ def update_queue_depth():
     now = timezone.now()
 
     # 先用 pipeline 批量查询所有队列长度（LLEN），
-    # 避免逐个 LLEN 产生多次网络往返
-    llen_pipe = r.pipeline()
-    for queue_name in QUEUE_NAMES:
-        llen_pipe.llen(f'celery:{queue_name}')
-    depths = llen_pipe.execute()
+    # 避免逐个 LLEN 产生多次网络往返。
+    # 队列消息在 broker Redis（默认 DB1），不能用 Analytics DB（3）查询，否则恒为 0；
+    # Celery Redis 传输层的队列 key 就是队列名本身（如 parse），不带 celery: 前缀
+    depths = [0] * len(QUEUE_NAMES)
+    broker = _get_broker_redis()
+    if broker:
+        try:
+            llen_pipe = broker.pipeline()
+            for queue_name in QUEUE_NAMES:
+                llen_pipe.llen(queue_name)
+            depths = llen_pipe.execute()
+        except Exception as e:
+            logger.warning(f'[QueueDepth] broker LLEN 查询失败: {e}')
 
     pipeline = r.pipeline()
     logs = []
@@ -231,6 +264,9 @@ def get_queue_depth_snapshot():
     r = _get_redis_safe()
     result = {}
 
+    # 降级 LLEN 用的 broker 连接（队列消息所在 DB），只创建一次复用
+    broker = _get_broker_redis()
+
     # 1) 获取 Worker 状态：只读 Redis（键由 update_queue_depth 任务写入），
     #    缺失/异常时为 None（前端显示 "-"），不影响队列长度返回
     worker_stats = {'queued': None, 'active': None, 'idle': None, 'failed': None}
@@ -251,10 +287,16 @@ def get_queue_depth_snapshot():
         val = r.get(current_key)
         if val is not None:
             size = int(val)
+        elif broker:
+            # 降级：直接 LLEN（Celery Redis 传输层队列 key 为队列名本身），
+            # broker 连接失败时按 0 处理
+            try:
+                size = broker.llen(queue_name) or 0
+            except Exception as e:
+                logger.debug(f'[QueueSnapshot] LLEN failed for {queue_name}: {e}')
+                size = 0
         else:
-            # 降级：直接 LLEN（Celery 默认队列 key 格式 celery:队列名）
-            queue_key = f'celery:{queue_name}'
-            size = r.llen(queue_key) or 0
+            size = 0
         result[queue_name] = {
             'size': size,
             'length': size,      # 兼容 JS：d.size || d.length

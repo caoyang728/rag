@@ -31,15 +31,18 @@
 							<span id="celeryIcon">⏳</span>
 							<span id="celeryText">检查文档解析服务状态...</span>
 						</span>
+						<span id="queueDepthBrief" class="tag tag-default flex items-center gap-6 hidden"></span>
 					</div>
 				</div>
 			</div>
 			<div class="upload-drop relative" id="dropZone">
+				<!-- 文件选择器仅展示主要类型；其余扩展名（rst/wps/et/dps/ini/conf/cfg/bat/ps1 等）
+				     仍支持拖拽上传，由 JS 侧 ALLOWED_EXTS 统一校验 -->
 				<input type="file" id="fileInput" multiple class="upload-input"
-					accept=".pdf,.doc,.docx,.md,.markdown,.txt,.rst,.csv,.xlsx,.xls,.ppt,.pptx,.wps,.et,.dps,.py,.js,.ts,.jsx,.tsx,.java,.go,.rs,.c,.cpp,.h,.yml,.yaml,.json,.xml,.conf,.cfg,.ini,.toml,.sh,.bat,.ps1,.css">
+					accept=".pdf,.doc,.docx,.md,.markdown,.txt,.csv,.xlsx,.xls,.ppt,.pptx,.py,.js,.ts,.jsx,.tsx,.java,.go,.rs,.c,.cpp,.h,.yml,.yaml,.json,.xml,.toml,.sh,.css">
 				<div class="upload-drop-icon">📤</div>
 				<div class="upload-drop-title">拖拽文件到此处，或<span class="text-primary">点击选择上传</span></div>
-				<div class="upload-drop-desc">支持批量上传，单个文件最大 100 MB，建议单批次不超过 20 个文件</div>
+				<div class="upload-drop-desc">支持批量上传，单个文件最大 100 MB，单批次最多 100 个文件</div>
 				<div class="upload-types">
 					<span class="tag tag-info">📕 PDF</span>
 					<span class="tag tag-info">📄 Word</span>
@@ -48,7 +51,6 @@
 					<span class="tag tag-info">📊 Excel/CSV</span>
 					<span class="tag tag-info">📽️ PPT</span>
 					<span class="tag tag-info">💻 源代码</span>
-					<span class="tag tag-info">🎨 CSS</span>
 					<span class="tag tag-info">⚙️ YML</span>
 					<span class="tag tag-info">📊 JSON</span>
 				</div>
@@ -152,17 +154,21 @@
 							<select class="select" id="filterDept" style="width:120px" onchange="loadUploadHistory(1)">
 								<option value="">全部部门</option>
 							</select>
-							<select class="select" id="filterVisible" style="width:100px" onchange="loadUploadHistory(1)">
+							<select class="select" id="filterVisible" style="width:130px" onchange="loadUploadHistory(1)">
 								<option value="">全部可见范围</option>
 								<option value="team">仅团队</option>
 								<option value="dept">部门</option>
 								<option value="public">全公司</option>
 							</select>
-							<select class="select" id="filterStatus" style="width:90px" onchange="loadUploadHistory(1)">
+							<select class="select" id="filterStatus" style="width:150px" onchange="loadUploadHistory(1)">
 								<option value="">全部状态</option>
-								<option value="done">已完成</option>
+								<option value="pending">等待解析</option>
 								<option value="parsing">解析中</option>
-								<option value="failed">失败</option>
+								<option value="chunking">切片中</option>
+								<option value="embedding">向量构建中</option>
+								<option value="embedding_failed">向量构建失败</option>
+								<option value="done">已完成</option>
+								<option value="failed">解析失败</option>
 							</select>
 							<label class="checkbox"><input type="checkbox" id="showDeleted" onchange="toggleShowDeleted(this)">显示已删除</label>
 						</div>
@@ -303,6 +309,46 @@
 						style="flex:1;padding:10px;border:1px solid #2196f3;border-radius:8px;background:white;color:#2196f3;cursor:pointer;font-size:14px;transition:all 0.2s">新建记录</button>
 					<button class="con-btn-restore"
 						style="flex:1;padding:10px;border:none;border-radius:8px;background:#2196f3;color:white;cursor:pointer;font-size:14px;transition:all 0.2s">恢复</button>
+				</div>
+			</div>
+		</div>
+	</template>
+
+	<template id="tmpl-duplicate-dialog">
+		<div class="conflict-overlay"
+			style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:10000;display:flex;align-items:center;justify-content:center">
+			<div class="conflict-dialog"
+				style="background:white;border-radius:12px;padding:24px;width:420px;max-width:90vw;box-shadow:0 10px 40px rgba(0,0,0,0.2);font-family:system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+				<div class="flex items-center gap-12" style="margin-bottom:16px">
+					<div
+						style="width:40px;height:40px;border-radius:50%;background:#2196f315;display:flex;align-items:center;justify-content:center;font-size:20px">
+						📄</div>
+					<div>
+						<div style="font-size:16px;font-weight:600;color:#333">相同内容的文件已存在</div>
+						<div style="font-size:13px;color:#999">检测到同节点已有内容完全一致的文件</div>
+					</div>
+				</div>
+				<div style="background:#f8f9fa;border-radius:8px;padding:16px;margin-bottom:20px">
+					<div class="flex justify-between" style="margin-bottom:8px">
+						<span style="color:#666">文件名</span>
+						<span class="con-filename" style="font-weight:500"></span>
+					</div>
+					<div class="flex justify-between" style="margin-bottom:8px">
+						<span style="color:#666">原上传者</span>
+						<span class="con-owner"></span>
+					</div>
+					<div class="flex justify-between">
+						<span style="color:#666">原上传时间</span>
+						<span class="con-time"></span>
+					</div>
+				</div>
+				<div class="flex gap-12">
+					<button class="dup-btn-cancel"
+						style="flex:1;padding:10px;border:1px solid #ddd;border-radius:8px;background:white;color:#666;cursor:pointer;font-size:14px;transition:all 0.2s">取消</button>
+					<button class="dup-btn-view"
+						style="flex:1;padding:10px;border:1px solid #2196f3;border-radius:8px;background:white;color:#2196f3;cursor:pointer;font-size:14px;transition:all 0.2s">查看现有文件</button>
+					<button class="dup-btn-force"
+						style="flex:1;padding:10px;border:none;border-radius:8px;background:#2196f3;color:white;cursor:pointer;font-size:14px;transition:all 0.2s">强制新建版本</button>
 				</div>
 			</div>
 		</div>

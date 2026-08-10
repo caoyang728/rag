@@ -221,9 +221,61 @@
 	white-space: nowrap;
 }
 
-/* --- 队列深度 SVG 画布最小高度 --- */
+/* --- 队列深度历史卡片：flex 列布局 + 边界裁剪，图表内容绝不超出卡片 ---
+ * 原实现 svg 设 min-height:240px，卡片（flex:1/min-height:0）高度不足时
+ * 图表会被挤出卡片边界；现改为卡片内部 flex 列布局，图表区撑满剩余高度，
+ * svg 高度由 flex 决定（覆盖 common.css 的 height:100%），绘制内容按
+ * preserveAspectRatio 缩放，任何数据量都不会溢出
+ */
+#queueHistoryCard {
+	overflow: hidden;
+	display: flex;
+	flex-direction: column;
+	min-height: 290px; /* 卡片高度固定不动，图表 viewBox 由 flex 自适应缩放 */
+}
+
+#queueHistoryCard .card-title {
+	flex-shrink: 0;
+}
+
+#queueDepthHistory {
+	flex: 1;
+	min-height: 0;
+	display: flex;
+	flex-direction: row; /* 图例在左、图表在右，纵排图例不再挤占图表上方空间 */
+	align-items: stretch;
+	gap: 12px;
+}
+
 #queueDepthHistory .chart-svg {
-	min-height: 240px;
+	flex: 1;
+	min-width: 0;
+	min-height: 0;
+	width: 100%;
+	height: auto; /* 覆盖 common.css .chart-svg 的 height:100%，尺寸由 flex 布局决定 */
+	display: block;
+}
+
+/* 图例改为左侧纵排：覆盖全局 .chart-legend 的水平布局与上边距 */
+#queueDepthHistory .chart-legend {
+	flex-shrink: 0;
+	flex-direction: column;
+	justify-content: center;
+	align-items: flex-start;
+	gap: 12px;
+	margin-top: 0;
+	margin-left: 24px; /* 图例整体右移，与卡片左边缘留出间距 */
+	font-size: 14px;
+}
+
+#queueDepthHistory .legend-dot {
+	width: 14px;
+	height: 14px;
+}
+
+/* 空数据占位（无历史/样本不足）时水平居中于图表区 */
+#queueDepthHistory > .empty {
+	flex: 1;
 }
 
 /* --- QA 记录行 hover 高亮更明显 --- */
@@ -412,7 +464,11 @@
 }
 
 .chart-row { display: flex; gap: 4px; align-items: center; }
-.chart-container-flex { flex: 1; min-width: 0; }
+.chart-container-flex { flex: 1; min-width: 0; height: auto; }
+
+/* 概述趋势图：容器高度由 SVG viewBox 宽高比自动计算（标准响应式 SVG 方案），
+   覆盖 common.css 的 height:100%，避免容器 height:auto 时 SVG 高度塌陷为 0 */
+.chart-container-flex .chart-svg { height: auto; }
 
 /* --- 圆点颜色修饰类 ---
  * 配合 .metric-dot（圆点基础类，background 用 currentColor）

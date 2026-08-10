@@ -20,6 +20,7 @@ urlpatterns = [
     path("documents/<int:pk>/audit-approve/", views.DocAuditApproveView.as_view()),
     path("documents/<int:pk>/audit-reject/", views.DocAuditRejectView.as_view()),
     path("celery/status/", views.CeleryStatusView.as_view()),
+    path("queues/depth/", views.QueueDepthView.as_view()),
     # 注意：router.urls 必须放在最后，避免覆盖自定义路由
     path("", include(router.urls)),
 ]

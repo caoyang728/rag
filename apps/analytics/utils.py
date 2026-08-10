@@ -509,7 +509,10 @@ def get_queue_depth_history(hours: int = 24) -> list:
     for log in logs:
         # 兼容老数据：如果有 minute_bucket 优先使用，否则从 created_at 构造
         if hasattr(log, 'minute_bucket') and log.minute_bucket:
-            bucket = str(log.minute_bucket)
+            # minute_bucket 是 DateTimeField（UTC 存储），必须转本地时间并格式化为
+            # YYYYMMDDHHmm；若 str() 直出 ISO 字符串（如 2026-08-10 15:23:00+00:00），
+            # 前端 slice(8,10):slice(10,12) 会误切出"日+空格"导致 X 轴刻度错乱
+            bucket = timezone.localtime(log.minute_bucket).strftime('%Y%m%d%H%M')
         else:
             local_time = timezone.localtime(log.created_at)
             bucket = local_time.strftime('%Y%m%d%H%M')

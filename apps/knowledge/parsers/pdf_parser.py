@@ -11,12 +11,33 @@ PDF 解析器
 """
 from loguru import logger
 import re
+import sys
 import base64
 import statistics
 from collections import Counter, defaultdict
 from typing import List, Dict, Any, Tuple
 
 from .base import BaseParser
+
+
+def _get_fitz():
+    """获取 PyMuPDF 模块（延迟导入），未安装时返回 None。
+
+    读取顺序：模块属性 fitz → sys.modules → 实际 import。采用延迟导入而非模块级
+    固定引用，既保证真实环境取到 fitz，也便于测试用 patch.object(模块, 'fitz') 或
+    patch.dict('sys.modules', {'fitz': mock}) 两种方式打桩替换。
+    """
+    mod = globals().get('fitz')
+    if mod is not None:
+        return mod
+    mod = sys.modules.get('fitz')
+    if mod is not None:
+        return mod
+    try:
+        import fitz  # PyMuPDF
+    except ImportError:
+        return None
+    return fitz
 
 
 class PDFParser(BaseParser):
@@ -43,9 +64,8 @@ class PDFParser(BaseParser):
         4. 跨页处理：合并断裂句子、合并跨页表格
         5. 返回结构化blocks列表
         """
-        try:
-            import fitz  # PyMuPDF
-        except ImportError:
+        fitz = _get_fitz()
+        if fitz is None:
             logger.error('[PDFParser] PyMuPDF未安装，无法解析PDF')
             return []
 
@@ -428,7 +448,7 @@ class PDFParser(BaseParser):
                     # 提取合并单元格信息
                     merge_info = self._extract_merge_info(tab)
 
-                    logger.debug(f'[PDFParser]   Table {i}: {tab.rows}行 x {tab.cols}列, '
+                    logger.debug(f'[PDFParser]   Table {i}: {tab.row_count}行 x {tab.col_count}列, '
                                 f'has_header={has_header}, merges={len(merge_info)}')
 
                     tables.append({
@@ -438,10 +458,12 @@ class PDFParser(BaseParser):
                         'page_number': pnum,
                         'extra': {
                             'table_index': i,
-                            'rows': tab.rows,
-                            'cols': tab.cols,
+                            'rows': tab.row_count,
+                            'cols': tab.col_count,
                             'has_header': has_header,
-                            'is_cross_page': tab.is_spanning,
+                            # PyMuPDF 1.28 的 Table 已移除 is_spanning 属性，
+                            # 跨页表格表现为 bbox 超出当前页面上下边界，这里本地计算
+                            'is_cross_page': tab.bbox[1] < page.rect.y0 or tab.bbox[3] > page.rect.y1,
                             'merge_info': merge_info,
                         },
                     })
@@ -457,16 +479,12 @@ class PDFParser(BaseParser):
         """
         merge_info = []
         try:
-            # 获取表格单元格信息
-            for row_idx in range(table.rows):
-                for col_idx in range(table.cols):
-                    cell = table[row_idx][col_idx]
-                    if cell is not None:
-                        # 检查是否为合并单元格
-                        # 通过比较相邻单元格内容是否相同来检测
-                        # 注意：PyMuPDF的find_tables可能已经处理了合并单元格
-                        # 这里记录原始结构信息供后续处理
-                        pass
+            # PyMuPDF 1.28 的 Table 不再支持 table[row][col] 直接取值，
+            # 改为基于 extract() 的二维内容网格判断：被合并的单元格在网格中为 None
+            for row_idx, row in enumerate(table.extract()):
+                for col_idx, cell in enumerate(row):
+                    if cell is None:
+                        merge_info.append({'row': row_idx, 'col': col_idx, 'span': 'merged'})
         except Exception:
             pass
 
@@ -546,6 +564,9 @@ class PDFParser(BaseParser):
         3. 异常处理，确保单个图片失败不影响其他图片
         """
         images = []
+        fitz = _get_fitz()
+        if fitz is None:
+            return images
         image_list = page.get_images(full=True)
         logger.debug(f'[PDFParser] Page {pnum}: 发现 {len(image_list)} 张图片')
 

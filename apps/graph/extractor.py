@@ -42,6 +42,157 @@ def extract_entities_and_relations(content: str, llm=None) -> dict:
     return parse_llm_response(result_text)
 
 
+class _JSONTruncated(Exception):
+    """JSON 文本被截断的信号（容忍解析器内部使用）"""
+
+
+# 数字/布尔/null 的完整 token 匹配，用于截断时判断值 token 是否完整
+_NUMBER_RE = re.compile(r'-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null')
+
+
+def _repair_truncated_json(text: str) -> dict:
+    """修复 LLM 输出被截断导致的 JSON 解析失败。
+
+    典型场景：max_tokens 截断使 JSON 在末尾不完整，截断点可能落在键名、
+    字符串值、冒号之后、逗号/括号等任意位置，json.loads 无法直接解析
+    （报错形如 "Expecting ',' delimiter" / "Expecting value" 等）。
+
+    这里用容忍截断的递归下降解析器做尽力恢复：
+    - 未闭合字符串：按可见内容吸收（值仍可用，如 "description": "服务器CO）；
+    - 键名被截断 / 冒号后无值 / 值 token 不完整：丢弃该键值对；
+    - 数组元素结构不完整：丢弃该元素（其内部已完整解析的键值对不受影响）；
+    - 其余截断点：提前闭合当前数组/对象，返回已解析内容。
+
+    完全无法解析时返回 {}，不中断抽取流程。
+    """
+    start = text.find('{')
+    if start == -1:
+        return {}
+    s = text[start:]
+    n = len(s)
+    pos = 0
+
+    def skip_ws():
+        nonlocal pos
+        while pos < n and s[pos] in ' \t\n\r':
+            pos += 1
+
+    def parse_string():
+        """解析字符串；文本结束仍未闭合时按可见内容吸收"""
+        nonlocal pos
+        assert s[pos] == '"'
+        pos += 1
+        out = []
+        while pos < n:
+            ch = s[pos]
+            if ch == '\\':
+                if pos + 1 < n:
+                    out.append(s[pos:pos + 2])
+                    pos += 2
+                else:
+                    pos += 1  # 结尾孤立的反斜杠，丢弃
+                continue
+            if ch == '"':
+                pos += 1
+                return ''.join(out)
+            out.append(ch)
+            pos += 1
+        return ''.join(out)
+
+    def parse_value():
+        """解析一个值；结构不完整时抛 _JSONTruncated"""
+        nonlocal pos
+        skip_ws()
+        if pos >= n:
+            raise _JSONTruncated
+        ch = s[pos]
+        if ch == '{':
+            return parse_object()
+        if ch == '[':
+            return parse_array()
+        if ch == '"':
+            return parse_string()
+        m = _NUMBER_RE.match(s, pos)
+        if m:
+            tok = s[pos:m.end()]
+            pos = m.end()
+            if tok == 'true':
+                return True
+            if tok == 'false':
+                return False
+            if tok == 'null':
+                return None
+            return json.loads(tok)
+        raise _JSONTruncated
+
+    def parse_array():
+        """解析数组；截断时丢弃最后一个结构不完整的元素"""
+        nonlocal pos
+        pos += 1  # 跳过 [
+        arr = []
+        while True:
+            skip_ws()
+            if pos >= n:
+                break  # 数组被截断，丢弃最后一个元素
+            if s[pos] == ']':
+                pos += 1
+                break
+            try:
+                val = parse_value()
+            except _JSONTruncated:
+                break  # 元素结构不完整 → 丢弃该元素
+            arr.append(val)
+            skip_ws()
+            if pos < n and s[pos] == ',':
+                pos += 1
+                continue
+            if pos < n and s[pos] == ']':
+                pos += 1
+                break
+            break  # 元素后缺少 , 或 ] → 截断，丢弃最后一个元素
+        return arr
+
+    def parse_object():
+        """解析对象；截断时丢弃最后一个结构不完整的键值对"""
+        nonlocal pos
+        pos += 1  # 跳过 {
+        obj = {}
+        while True:
+            skip_ws()
+            if pos >= n:
+                break  # 对象被截断
+            if s[pos] == '}':
+                pos += 1
+                break
+            if s[pos] != '"':
+                break  # 键不完整/非法 → 丢弃该键值对
+            key = parse_string()
+            skip_ws()
+            if pos >= n or s[pos] != ':':
+                break  # 键被截断或缺少冒号 → 丢弃该键值对
+            pos += 1  # 跳过 :
+            try:
+                val = parse_value()
+            except _JSONTruncated:
+                break  # 值缺失/不完整 → 丢弃该键值对
+            obj[key] = val
+            skip_ws()
+            if pos < n and s[pos] == ',':
+                pos += 1
+                continue
+            if pos < n and s[pos] == '}':
+                pos += 1
+                break
+            break  # 键值对后缺少 , 或 } → 截断，丢弃最后一个键值对
+        return obj
+
+    try:
+        val = parse_value()
+    except _JSONTruncated:
+        val = {}
+    return val if isinstance(val, dict) else {}
+
+
 def parse_llm_response(response_text: str) -> dict:
     """解析 LLM 返回的文本，提取 JSON 部分。
 
@@ -64,17 +215,20 @@ def parse_llm_response(response_text: str) -> dict:
     if code_match:
         text = code_match.group(1).strip()
 
-    # 2. 截取第一个 { 到最后一个 }，去掉 JSON 前后的解释文字
+    # 2. 截取第一个 { 之后的 JSON 部分，去掉 JSON 前的解释文字。
+    #    不按最后一个 } 截尾：字符串值里可能含 '}'（如描述含花括号），
+    #    按 '}' 截尾会把字符串截断；尾部多余文字/截断统一交给修复逻辑兜底。
     start = text.find('{')
-    end = text.rfind('}')
-    if start != -1 and end > start:
-        text = text[start:end + 1]
+    if start == -1:
+        return {'entities': [], 'relations': []}
 
     try:
-        data = json.loads(text)
+        data = json.loads(text[start:])
     except json.JSONDecodeError as e:
-        logger.warning(f'[Graph Extract] LLM JSON 解析失败: {e}, raw={response_text[:200]}')
-        data = {}
+        # 常规解析失败后尝试截断修复（应对 max_tokens 截断或尾部多余文字）
+        data = _repair_truncated_json(text[start:])
+        if not data:
+            logger.warning(f'[Graph Extract] LLM JSON 解析失败: {e}, raw={response_text[:200]}')
 
     if not isinstance(data, dict):
         return {'entities': [], 'relations': []}

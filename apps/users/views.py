@@ -2292,6 +2292,25 @@ class AccessApplicationWithdrawView(APIView):
         return Response({"detail": "已撤回", "status": "cancelled"})
 
 
+def _notify_workflow_resolved(ticket):
+    """Agent 人工确认工单进入终态后，恢复对应工作流执行
+
+    审批通过（APPROVED/EXECUTED）→ 工作流继续执行剩余节点；
+    驳回（REJECTED）→ 工作流标记该节点被拒并降级继续。
+    复用统一工单状态机，工单本身不删除只改状态。
+
+    HITL 恢复失败不影响审批结果（工作流可通过详情页手动重试），故异常仅记录。
+    """
+    if not ticket or getattr(ticket, 'biz_type', None) != TicketBizType.AGENT:
+        return
+    try:
+        from apps.agent.workflow.hitl import resume_workflow_from_ticket
+        resume_workflow_from_ticket(ticket)
+    except Exception:
+        logger.exception(
+            f'[Workflow] resume after agent ticket resolved failed: ticket={ticket.id}')
+
+
 class TicketApproveView(APIView):
     """POST /api/v1/auth/permissions/tickets/<id>/approve/
     审批通过工单（共享审批池模式：任一匹配 approver_role 的用户均可审批）
@@ -2336,6 +2355,8 @@ class TicketApproveView(APIView):
             return Response({"detail": str(e)}, status=400)
 
         logger.info(f"Ticket approved: id={pk}, ticket_no={ticket.ticket_no}, approver={request.user.username}")
+        # Agent 人工确认工单通过后，恢复对应工作流继续执行
+        _notify_workflow_resolved(ticket)
         return Response({
             "ok": True,
             "ticket_no": ticket.ticket_no,
@@ -2391,6 +2412,8 @@ class TicketRejectView(APIView):
             return Response({"detail": str(e)}, status=400)
 
         logger.info(f"Ticket rejected: id={pk}, ticket_no={ticket.ticket_no}, rejector={request.user.username}")
+        # Agent 人工确认工单被驳回后，工作流对应节点标记被拒并降级
+        _notify_workflow_resolved(ticket)
         return Response({
             "ok": True,
             "ticket_no": ticket.ticket_no,
@@ -2493,6 +2516,9 @@ def _user_approvable_roles(user):
         roles.add('TEAM_LEADER')
     if Department.objects.filter(leader_id=user.id, is_deleted=False).exists():
         roles.add('DEPT_LEADER')
+    # Agent 工作流人工确认（HITL）：发起人可审批自己发起的确认工单。
+    # 粗过滤命中所有 agent 工单，精确的"仅发起人"判定由 _can_user_approve_ticket 兜底。
+    roles.add('WORKFLOW_OWNER')
     return roles
 
 
@@ -2650,6 +2676,12 @@ def _serialize_center_ticket(t, config_map=None, model_map=None, dept_map=None, 
                 'target_model_name': target_model_name,
                 'changed_fields': list((t.changed_fields or {}).keys()),
             })
+        # --- agent：Agent 工作流人工确认（TicketAgentApprovalDetail） ---
+        # reason 已带 [agent:{wf_id}:approval] 前缀，工单中心可直接展示确认理由
+        elif t.biz_type == TicketBizType.AGENT:
+            ad = getattr(t, 'agent_approval_detail', None)
+            row['reason'] = ad.reason if ad else ''
+            row['operation'] = t.operation or 'agent_approval'
     return row
 
 

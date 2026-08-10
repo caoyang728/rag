@@ -57,6 +57,7 @@ TICKET_TYPE_PREFIX = {
     TicketBizType.CONFIG: 'PZ',
     TicketBizType.SCHEDULE: 'DS',
     TicketBizType.MODEL: 'MX',
+    TicketBizType.AGENT: 'AG',
 }
 
 # 新格式工单号正则：两字母前缀 + 8 位日期 + 4 位当日序列（用于取当日全局序列）
@@ -81,6 +82,7 @@ class ApproverRole:
     USER_ADMIN = 'USER_ADMIN'      # 用户管理员(部门经理/文档管理员/合规管理员审批链第一节点)
     KB_ADMIN = 'KB_ADMIN'          # 文档管理员(部门级跨部门 viewer/contributor 授权审核)
     SUPER_ADMIN = 'SUPER_ADMIN'    # 超级管理员(全局高权角色审批链第二节点 / super_admin 双人复核)
+    WORKFLOW_OWNER = 'WORKFLOW_OWNER'  # Agent 工作流人工确认发起人(HITL 自助确认,超管兜底)
 
 
 class ApproveStepStatus:
@@ -180,6 +182,19 @@ def _can_approve_for_role(user, approver_role: str, ticket=None) -> bool:
     if not user or not getattr(user, 'is_authenticated', False):
         return False
 
+    # 特殊节点 0：Agent 工作流人工确认（HITL）—— 发起人自助确认 + 超管兜底
+    # 该节点独立于权限域，发起人本人就是被授权的确认人，因此必须放在"回避原则"
+    # 闸门之前判定（否则发起人被"不能审自己工单"拦截）。
+    if approver_role == ApproverRole.WORKFLOW_OWNER:
+        if not ticket:
+            return False
+        if user.id == ticket.applicant_id:
+            return True
+        return UserRoleRel.objects.filter(
+            user=user, role__role_key='super_admin',
+            status=GrantStatus.ACTIVE,
+        ).exists()
+
     # 闸 1:回避原则 —— 申请人/目标用户不能审自己工单
     if ticket:
         if user.id == ticket.applicant_id:
@@ -274,6 +289,12 @@ def _find_approver_ids_for_role(approver_role: str, ticket=None) -> list:
     if approver_role == ApproverRole.SUPER_ADMIN:
         ids = _get_super_admin_ids(exclude_user_id=ticket.applicant_id if ticket else None)
         return [i for i in ids if i not in exclude_ids]
+
+    if approver_role == ApproverRole.WORKFLOW_OWNER:
+        # Agent 工作流人工确认：候选审批人 = 发起人本人（共享审批池中仅此人可批）
+        if not ticket or not ticket.applicant_id:
+            return []
+        return [ticket.applicant_id]
 
     if approver_role == ApproverRole.USER_ADMIN:
         # 查所有持有 user_admin 角色的活跃用户

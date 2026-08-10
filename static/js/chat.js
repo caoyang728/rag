@@ -38,6 +38,13 @@ let userAborted = false;  // 标记是否用户主动终止（区分超时中断
 // 问答模式：auto（LLM 自主决定是否调用工具）/ rag（传统 RAG）/ agent（强制 Agent）
 let currentMode = 'auto';
 
+// ===== 多 Agent 工作流前端状态（sendChat 生命周期内使用，审批后刷新/历史回显共用）=====
+let wfId = null;       // 当前工作流 id（workflow_start 设置）
+let wfAreaEl = null;   // .workflow-area 轨迹区容器
+let wfBodyEl = null;   // .workflow-body 节点卡片容器
+let wfStatusEl = null; // .workflow-status 状态文本节点
+let wfNodeEls = {};    // node_id -> 节点卡片 DOM
+
 document.addEventListener('DOMContentLoaded', () => {
 	initChatPage();
 	initScopePicker();
@@ -638,6 +645,105 @@ function buildThinkingAreaHtml(toolTraces) {
 	});
 }
 
+// ===== 多 Agent 工作流前端辅助 =====
+
+/**
+ * 节点类型图标：research=子Agent / tool=工具 / approval=人工确认 / finalize=汇总
+ */
+function wfStepIcon(stepType) {
+	return { research: '🔬', tool: '🔧', approval: '👤', finalize: '📝' }[stepType] || '•';
+}
+
+/**
+ * 工作流整体状态中文文案（workflow-status 徽标）
+ */
+function workflowStatusText(status) {
+	return {
+		running: '执行中', succeeded: '✅ 已完成', degraded: '⚠️ 降级完成',
+		failed: '❌ 执行失败', waiting_approval: '⏸ 等待人工确认'
+	}[status] || status;
+}
+
+/**
+ * 节点卡片状态文案（workflow_node_start / workflow_node_done / 审批刷新共用）
+ */
+function wfNodeStatusText(status) {
+	return {
+		running: '执行中', succeeded: '成功', failed: '失败',
+		blocked: '等待确认', pending: '待执行',
+		approved: '已批准', rejected: '已拒绝', skipped: '已跳过'
+	}[status] || status;
+}
+
+/**
+ * 更新单节点卡片状态（状态文案 + 耗时 + 展开详情）
+ * @param {string} nodeId - 节点 id
+ * @param {string} status - 节点状态（running/succeeded/failed/blocked/approved/rejected/skipped）
+ * @param {number|null} latencyMs - 耗时 ms
+ */
+function setWorkflowNodeStatus(nodeId, status, latencyMs) {
+	const nodeEl = wfNodeEls[nodeId];
+	if (!nodeEl) return;
+	const stEl = nodeEl.querySelector('.wf-node-status');
+	stEl.textContent = wfNodeStatusText(status);
+	stEl.className = 'wf-node-status ' + status;
+	if (latencyMs != null) {
+		nodeEl.querySelector('.wf-node-latency').textContent = (latencyMs / 1000).toFixed(2) + 's';
+	}
+	// 终态节点展开详情区（输入输出快照）
+	if (['succeeded', 'failed', 'rejected', 'approved', 'skipped'].includes(status)) {
+		nodeEl.classList.add('done');
+	}
+	scrollChatBottom();
+}
+
+/**
+ * 审批通过/驳回后刷新工作流结果（"我已审批，刷新结果"按钮触发）
+ * 轮询工作流详情 API：更新节点轨迹、渲染最终答案、回填反馈按钮
+ */
+async function refreshWorkflowResult(wfId, mid, answerContentEl, answerTextEl) {
+	try {
+		const data = await api.get('/api/v1/agent/workflows/' + wfId + '/');
+		if (!data || data.status === 'waiting_approval') {
+			toast('该步骤仍在等待审批确认');
+			return;
+		}
+		if (wfStatusEl) {
+			wfStatusEl.textContent = workflowStatusText(data.status);
+			wfStatusEl.className = 'workflow-status ' + data.status;
+		}
+		// 重绘节点轨迹（含审批结果与后续节点）
+		(data.nodes || []).forEach((n) => {
+			setWorkflowNodeStatus(n.node_id, n.status, n.latency_ms);
+		});
+		// 移除审批确认卡片
+		const appr = wfBodyEl && wfBodyEl.querySelector('.wf-approval');
+		if (appr) appr.remove();
+
+		const result = data.result || {};
+		// 渲染最终答案（waiting_approval 期间 answerText 为空，直接填充）
+		if (answerTextEl) {
+			answerTextEl.innerHTML = formatAnswer(result.answer || '', result.citations || []);
+		}
+		// 回填真实 message_id 到反馈按钮
+		if (answerContentEl && result.qa_id) {
+			answerContentEl.querySelector('.feedback-good').setAttribute('onclick', "submitFeedback('" + mid + "', " + result.qa_id + ", 1)");
+			answerContentEl.querySelector('.feedback-bad').setAttribute('onclick', "submitFeedback('" + mid + "', " + result.qa_id + ", -1)");
+			answerContentEl.querySelector('.feedback-detail-btn').setAttribute('onclick', "toggleFeedbackDetail(this,'" + mid + "'," + result.qa_id + ")");
+			const latEl = answerContentEl.querySelector('.feedback-latency');
+			if (latEl) latEl.textContent = '已完成';
+		}
+		// 渲染溯源区
+		const srcArea = answerContentEl && answerContentEl.querySelector('.ai-source-area');
+		if (srcArea && result.citations && result.citations.length) {
+			srcArea.innerHTML = buildSourceHtml(result.citations, undefined, undefined, undefined, result.qa_id);
+		}
+		scrollChatBottom();
+	} catch (e) {
+		toast('刷新工作流结果失败：' + (e.message || e));
+	}
+}
+
 /* 切换发送按钮状态：idle=发送，sending=转圈等待后端响应，stopping=可终止 */
 function setSendButtonState(state) {
 	const btn = $('#chatSendBtn');
@@ -717,6 +823,12 @@ async function sendChat() {
 	let toolCallEls = {};         // call_id -> tool-call DOM 元素映射，供 tool_result 回填
 	let toolCallCount = 0;        // 工具调用总次数（用于摘要展示）
 	let typingAnimTimer = null;   // 打字机逐字符补帧的 rAF / interval 引用
+	// 多 Agent 工作流状态重置（每次发送前清空，避免复用上一次的节点卡片）
+	wfId = null;
+	wfAreaEl = null;
+	wfBodyEl = null;
+	wfStatusEl = null;
+	wfNodeEls = {};
 
 	/* ---- 打字机逐字符补帧渲染 ----
 	 * 解决两个痛点：
@@ -774,7 +886,11 @@ async function sendChat() {
 		node_ids: [...selectedScopeIds].map(Number),
 		use_cache: true,
 		do_task_split: false,
-		mode: currentMode  // 问答模式：auto / rag / agent
+		mode: currentMode,  // 问答模式：auto / rag / agent
+		// 多 Agent 工作流开关：rag 传统检索模式下不启用；
+		// auto/agent 模式由后端编排器判断——复杂问题走工作流（含 HITL 审批），
+		// 简单问题仍回退现有 ReAct 单轮链路
+		do_workflow: currentMode !== 'rag'
 	};
 	if (currentSessionId) {
 		body.session_id = currentSessionId;
@@ -895,6 +1011,69 @@ async function sendChat() {
 					scrollChatBottom();
 					break;
 				}
+				case 'workflow_planning': {
+					// 编排器判断阶段（do_workflow 模式）：更新思考占位提示
+					const ph = aMsg.querySelector('.msg-ai-content .text-sub');
+					if (ph) ph.innerHTML = '<div class="spinner"></div>正在规划多 Agent 工作流...';
+					break;
+				}
+				case 'workflow_start': {
+					// 工作流已创建：渲染节点 DAG 轨迹区（插入回答骨架顶部）
+					wfId = chunk.workflow_id;
+					const nodes = chunk.nodes || [];
+					wfAreaEl = elemFromTpl('tmpl-workflow-area', (frag) => {
+						frag.querySelector('.workflow-area').dataset.workflowId = wfId;
+						wfStatusEl = frag.querySelector('.workflow-status');
+						wfStatusEl.textContent = '执行中';
+						wfStatusEl.className = 'workflow-status running';
+						wfBodyEl = frag.querySelector('.workflow-body');
+						nodes.forEach((n) => {
+							const nodeEl = elemFromTpl('tmpl-workflow-node', (frag2) => {
+								const card = frag2.querySelector('.wf-node');
+								card.dataset.nodeId = n.id;
+								card.dataset.stepType = n.type;
+								frag2.querySelector('.wf-node-icon').textContent = wfStepIcon(n.type);
+								frag2.querySelector('.wf-node-name').textContent = n.name || n.id;
+							});
+							wfBodyEl.appendChild(nodeEl);
+							wfNodeEls[n.id] = nodeEl;
+						});
+					});
+					if (answerContentEl) {
+						answerContentEl.insertBefore(wfAreaEl, answerContentEl.firstChild);
+					} else {
+						aMsg.querySelector('.msg-ai-content').appendChild(wfAreaEl);
+					}
+					scrollChatBottom();
+					break;
+				}
+				case 'workflow_node_start': {
+					setWorkflowNodeStatus(chunk.node_id, 'running');
+					break;
+				}
+				case 'workflow_node_done': {
+					setWorkflowNodeStatus(chunk.node_id, chunk.status, chunk.latency_ms);
+					break;
+				}
+				case 'workflow_approval_required': {
+					// 审批节点阻塞：工作流暂停等待人工确认（HITL）
+					setWorkflowNodeStatus(chunk.node_id, 'blocked');
+					if (wfStatusEl) {
+						wfStatusEl.textContent = '等待人工确认';
+						wfStatusEl.className = 'workflow-status waiting_approval';
+					}
+					const apprEl = elemFromTpl('tmpl-workflow-approval', (frag) => {
+						frag.querySelector('.wf-approval-reason').textContent = chunk.reason || '';
+						const link = frag.querySelector('.wf-approval-link');
+						link.href = '/static/ticket.html';  // 工单中心（待我审批视图）
+						frag.querySelector('.wf-approval-refresh').addEventListener('click', () => {
+							refreshWorkflowResult(wfId, mid, answerContentEl, answerTextEl);
+						});
+					});
+					if (wfBodyEl) wfBodyEl.appendChild(apprEl);
+					scrollChatBottom();
+					break;
+				}
 				case 'first_token': {
 					ttfbMs = chunk.ttfb_ms || 0;
 					// first_token 到达时：清空占位文本，重置 answerText/displayText 为空
@@ -919,6 +1098,25 @@ async function sendChat() {
 					break;
 				}
 				case 'done': {
+					// 多 Agent 工作流分支：
+					// 1) 审批阻塞（message_id 为空，工作流停留 waiting_approval）：
+					//    不落历史记录，仅提示用户去工单中心确认，等审批后手动刷新结果
+					// 2) 工作流完成（succeeded/degraded/failed）：更新状态后走通用收尾
+					if (chunk.is_workflow && chunk.status === 'waiting_approval') {
+						if (wfStatusEl) {
+							wfStatusEl.textContent = '等待人工确认';
+							wfStatusEl.className = 'workflow-status waiting_approval';
+						}
+						if (answerContentEl) {
+							const latEl = answerContentEl.querySelector('.feedback-latency');
+							if (latEl) latEl.textContent = '已暂停，等待人工确认';
+						}
+						break;
+					}
+					if (chunk.is_workflow && wfStatusEl) {
+						wfStatusEl.textContent = workflowStatusText(chunk.status);
+						wfStatusEl.className = 'workflow-status ' + chunk.status;
+					}
 					messageId = chunk.message_id;
 					totalMs = chunk.stats?.total_ms || 0;
 					ttfbMs = chunk.stats?.ttfb_ms || ttfbMs;

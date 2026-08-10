@@ -156,6 +156,7 @@ def ask_stream(user, question: str, session: Session,
                node_ids: list = None,
                use_cache: bool = True,
                do_task_split: bool = False,
+               do_workflow: bool = False,
                do_rerank: bool = True,
                mode: str = 'auto'):
     """流式问答主流程，yield SSE 事件 dict
@@ -285,7 +286,13 @@ def ask_stream(user, question: str, session: Session,
     # Agent 模式分流（auto / agent 走 ReAct 流式循环）
     # 转发 agent_ask_stream 的 tool_call/tool_result/delta 事件，
     # 在 done 事件时统一落 QaRecord + 缓存 + 记忆
+    # do_workflow=True 时先由编排器判断：复杂问题走多 Agent 工作流（含 HITL），
+    # 简单问题仍回退到现有 ReAct 单轮链路（兼容性要求）
     if mode in ('auto', 'agent'):
+        if do_workflow:
+            yield from _ask_stream_via_workflow(user, question, session, root_types,
+                                                node_ids, root_type, turn_index, t0)
+            return
         yield from _ask_stream_via_agent(user, question, session, root_types,
                                          node_ids, root_type, turn_index, t0)
         return
@@ -1363,3 +1370,52 @@ def _ask_stream_via_agent(user, question, session, root_types, node_ids,
             'is_agent': True,
         },
     }
+
+
+def _ask_stream_via_workflow(user, question, session, root_types, node_ids,
+                             root_type, turn_index, t0):
+    """多 Agent 工作流流式问答入口（do_workflow=True 时走这里）
+
+    流程：
+    1. 先由编排器（planner）判断问题是否需要工作流（LLM 调用，非流式）
+    2. 不需要 → 直接回退现有 ReAct 单轮链路（_ask_stream_via_agent，兼容性要求）
+    3. 需要 → 发 start 事件后转发 run_workflow_stream 的完整事件序列：
+       workflow_start → workflow_node_start/done* → (workflow_approval_required |
+       first_token/delta) → done
+
+    审批阻塞时 done 无 message_id（工作流停留 waiting_approval），
+    用户审批后由 engine.resume_workflow 同步完成剩余执行，
+    前端通过工作流详情 API 轮询最终结果。
+    """
+    from apps.agent.workflow.planner import maybe_plan
+
+    # 编排判断阶段提示事件（前端可忽略，SSE 客户端对未知事件默认跳过）
+    yield {'type': 'workflow_planning', 'session_id': session.id}
+
+    try:
+        plan = maybe_plan(question)
+    except Exception:
+        # 编排器异常：降级走现有 ReAct 链路（可用性优先）
+        logger.exception('[ask_stream_via_workflow] planner error, fallback to ReAct')
+        plan = {'need_workflow': False, 'reason': 'planner error'}
+
+    if not plan.get('need_workflow'):
+        # 简单问题：不拆分，仍走现有 ReAct 单轮链路
+        yield from _ask_stream_via_agent(user, question, session, root_types,
+                                         node_ids, root_type, turn_index, t0)
+        return
+
+    # 复杂问题：走多 Agent 工作流（_ask_stream_via_agent 不再发 start，这里补发）
+    yield {
+        'type': 'start',
+        'session_id': session.id,
+        'citations': [],
+        'is_hit_cache': False,
+        'is_workflow': True,
+    }
+
+    from apps.agent.workflow.engine import run_workflow_stream
+    yield from run_workflow_stream(
+        user, session, question, plan,
+        root_types=root_types, node_ids=node_ids,
+    )

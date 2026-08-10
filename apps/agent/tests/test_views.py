@@ -205,3 +205,120 @@ class TestAgentTaskRunAPI:
         data = resp.json()
         assert data['answer'] == '合并答案'
         assert data['stats']['is_task_split'] is True
+
+
+# ---------------------------------------------------------------------------
+# AgentWorkflowDetailView / AgentWorkflowListView
+# ---------------------------------------------------------------------------
+
+class TestAgentWorkflowAPI:
+    """GET /api/v1/agent/workflows/  工作流详情与列表（含节点执行轨迹）"""
+
+    def _make_workflow(self, user, status='succeeded', question='测试问题'):
+        """创建带一个节点轨迹的工作流记录（Detail 序列化需要节点数据）"""
+        from apps.agent.models import AgentWorkflow, WorkflowNodeRun
+        wf = AgentWorkflow.objects.create(
+            user=user, question=question, status=status,
+            definition=[{'id': 'research_1', 'step_type': 'research', 'name': '检索'}],
+            result={'answer': '最终答案', 'citations': [{'doc_title': '文档'}],
+                    'degraded_reasons': [], 'qa_id': 1, 'filtered': False},
+            max_nodes=10, max_duration_sec=300,
+            started_at='2026-01-01T00:00:00Z', finished_at='2026-01-01T00:01:00Z',
+        )
+        WorkflowNodeRun.objects.create(
+            workflow=wf, node_id='research_1', node_name='检索', step_type='research',
+            status='succeeded', attempt=1,
+            input={'query': '测试问题'},
+            output={'output': '检索结果片段', 'ok': True},
+            latency_ms=120,
+            started_at='2026-01-01T00:00:00Z', finished_at='2026-01-01T00:00:01Z',
+        )
+        return wf
+
+    def test_detail_when_owner_then_returns_full_result(self, authed_client, test_user):
+        """发起人本人可见完整轨迹（节点状态/输出/耗时）"""
+        wf = self._make_workflow(test_user)
+        resp = authed_client.get(f'/api/v1/agent/workflows/{wf.id}/')
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data['id'] == wf.id
+        assert data['question'] == '测试问题'
+        assert data['status'] == 'succeeded'
+        assert data['status_display'] == '成功'
+        assert data['result']['answer'] == '最终答案'
+        assert data['result']['citations'] == [{'doc_title': '文档'}]
+        assert len(data['nodes']) == 1
+        node = data['nodes'][0]
+        assert node['node_id'] == 'research_1'
+        assert node['status'] == 'succeeded'
+        assert node['output'] == '检索结果片段'
+        assert node['ok'] is True
+        assert node['latency_ms'] == 120
+        assert node['ticket_id'] is None
+        assert node['started_at'] is not None
+        assert node['finished_at'] is not None
+        assert data['started_at'] is not None
+        assert data['finished_at'] is not None
+
+    def test_detail_when_not_exists_then_returns_404(self, authed_client):
+        resp = authed_client.get('/api/v1/agent/workflows/999999/')
+        assert resp.status_code == 404
+        assert '工作流不存在' in resp.json()['detail']
+
+    def test_detail_when_other_user_then_returns_403(self, authed_client, test_user):
+        """非发起人且非超管 → 403（轨迹含工具输入输出，属敏感信息）"""
+        from apps.users.models import User
+        other = User.objects.create_user(
+            username='other', email='other@example.com', password='x')
+        wf = self._make_workflow(other)
+        resp = authed_client.get(f'/api/v1/agent/workflows/{wf.id}/')
+        assert resp.status_code == 403
+        assert '无权查看' in resp.json()['detail']
+
+    def test_detail_when_super_admin_then_returns_200(self, authed_client, test_user):
+        """超管可查看任何用户的工作流详情"""
+        from unittest.mock import PropertyMock
+        from apps.users.models import User
+        other = User.objects.create_user(
+            username='other2', email='other2@example.com', password='x')
+        wf = self._make_workflow(other)
+        # is_super_admin 为只读 property（基于角色关联判定），测试环境无角色种子，
+        # 直接 mock property 模拟超管身份
+        with patch.object(User, 'is_super_admin', new_callable=PropertyMock, return_value=True):
+            resp = authed_client.get(f'/api/v1/agent/workflows/{wf.id}/')
+        assert resp.status_code == 200
+        assert resp.json()['id'] == wf.id
+
+    def test_list_when_no_status_then_returns_all(self, authed_client, test_user):
+        """不传 status → 返回当前用户全部工作流（按创建倒序）"""
+        self._make_workflow(test_user, status='succeeded', question='问题A')
+        self._make_workflow(test_user, status='waiting_approval', question='问题B')
+        resp = authed_client.get('/api/v1/agent/workflows/')
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 2
+        assert {w['question'] for w in data} == {'问题A', '问题B'}
+
+    def test_list_when_status_filter_then_only_matches(self, authed_client, test_user):
+        """status 过滤只返回对应状态的工作流"""
+        self._make_workflow(test_user, status='succeeded', question='问题A')
+        self._make_workflow(test_user, status='waiting_approval', question='问题B')
+        resp = authed_client.get('/api/v1/agent/workflows/?status=waiting_approval')
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 1
+        assert data[0]['question'] == '问题B'
+        assert data[0]['status_display'] == '等待人工确认'
+
+    def test_list_only_shows_own_workflows(self, authed_client, test_user):
+        """列表只含当前用户自己的工作流，不越权看到他人记录"""
+        from apps.users.models import User
+        other = User.objects.create_user(
+            username='other3', email='other3@example.com', password='x')
+        self._make_workflow(other, status='succeeded', question='别人的')
+        self._make_workflow(test_user, status='succeeded', question='我的')
+        resp = authed_client.get('/api/v1/agent/workflows/')
+        data = resp.json()
+        assert len(data) == 1
+        assert data[0]['question'] == '我的'
+        assert data[0]['status_display'] == '成功'

@@ -344,6 +344,7 @@ const PAGE_MAP = {
 	'admin-org': '/admin-org/',
 	'admin-system-config': '/admin-system-config/',
 	'admin-scheduler': '/admin-scheduler/',
+	'admin-tasks': '/admin-tasks/',
 	'wiki': '/wiki/',
 	'graph': '/graph/',
 	'profile': '/profile/',

@@ -165,6 +165,7 @@ function getSidebarGroups() {
 		adminItems.push(
 			{ icon: '🔧', name: '系统配置', page: 'admin-system-config', key: 'admin-system-config', desc: '系统运行参数与模型管理' },
 			{ icon: '⏰', name: '定时任务', page: 'admin-scheduler', key: 'admin-scheduler', desc: 'Beat 调度时间与启停配置（需审批）' },
+			{ icon: '📋', name: '任务看板', page: 'admin-tasks', key: 'admin-tasks', desc: 'Celery 任务执行状态与失败重试' },
 		);
 	}
 

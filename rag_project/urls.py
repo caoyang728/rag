@@ -98,6 +98,7 @@ urlpatterns = [
     path("admin-org/", _serve_frontend("admin-org"), name="admin-org"),
     path("admin-system-config/", _serve_frontend("admin-system-config"), name="admin-system-config"),
     path("admin-scheduler/", _serve_frontend("admin-scheduler"), name="admin-scheduler"),
+    path("admin-tasks/", _serve_frontend("admin-tasks"), name="admin-tasks"),
     path("wiki/", _serve_frontend("wiki"), name="wiki"),
     path("graph/", _serve_frontend("graph"), name="graph"),
     path("admin/", admin.site.urls),

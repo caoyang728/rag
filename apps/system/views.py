@@ -7,10 +7,15 @@ system views
 - CRUD /api/v1/system/llm-models/  LLM/Embedding/Rerank 模型配置管理
 - /api/v1/system/config-tickets/  配置变更工单（创建/审批/驳回/撤回）
 - GET  /api/v1/system/tickets/  统一工单列表（合并 config/schedule/model 工单）
+- GET  /api/v1/system/tasks/    后台任务看板：任务执行日志列表（过滤/分页）
+- GET  /api/v1/system/tasks/stats/  后台任务看板：状态统计 + 队列深度
+- POST /api/v1/system/tasks/<task_id>/retry/  后台任务看板：失败任务重试
 """
 import json
 import time
+import uuid
 
+from celery import current_app
 from loguru import logger
 
 from django.db import connection, transaction
@@ -22,7 +27,7 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.system.models import SystemConfig, LLMModel
+from apps.system.models import SystemConfig, LLMModel, CeleryTaskLog
 from apps.system.scheduler_registry import (
     compute_schedule_change_summary,
     is_schedule_key,
@@ -1965,3 +1970,180 @@ class StatsView(APIView):
             "my_qa_records": QaRecord.objects.filter(user=request.user).count(),
         }
         return Response(stats)
+
+
+# ============================================================================
+# 后台任务看板 —— Celery 任务执行日志（数据来源：task_signals.py 统一写入）
+# ============================================================================
+
+
+class TaskLogView(APIView):
+    """GET /api/v1/system/tasks/  后台任务看板：任务执行日志列表
+
+    供管理端"任务看板"页面展示 Celery 任务执行记录：
+    - 支持 status / task_name 过滤（task_name 为模糊匹配）
+    - 分页参数 page / page_size（默认 50，最大 200），按 created_at 倒序
+    - 权限：system.config.read（维护管理员 / 超管）
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not request.user.has_perm('system.config.read'):
+            return Response({"detail": "无权限查看任务看板"}, status=status.HTTP_403_FORBIDDEN)
+
+        qs = CeleryTaskLog.objects.all()
+
+        # 状态过滤：status 参数与模型 choices 对齐（pending/started/success/failure/retry/revoked）
+        status_filter = (request.query_params.get('status') or '').strip()
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+
+        # task_id 精确过滤：详情弹窗复用列表接口按 task_id 取单条记录
+        task_id_filter = (request.query_params.get('task_id') or '').strip()
+        if task_id_filter:
+            qs = qs.filter(task_id=task_id_filter)
+
+        # 任务名模糊过滤：便于定位特定任务的执行历史
+        task_name = (request.query_params.get('task_name') or '').strip()
+        if task_name:
+            qs = qs.filter(task_name__icontains=task_name)
+
+        qs = qs.order_by('-created_at')
+
+        # 分页：默认 50 条，最大 200，避免一次拉取过多日志拖慢看板
+        try:
+            page = max(int(request.query_params.get('page', 1)), 1)
+            page_size = min(int(request.query_params.get('page_size', 50)), 200)
+        except (TypeError, ValueError):
+            page, page_size = 1, 50
+
+        total = qs.count()
+        start = (page - 1) * page_size
+        rows = list(qs[start:start + page_size])
+
+        return Response({
+            'total': total,
+            'page': page,
+            'page_size': page_size,
+            'items': [self._serialize(r) for r in rows],
+        })
+
+    def _serialize(self, row):
+        """单条任务日志序列化：时间字段做空值保护，避免前端渲染 NaN"""
+        return {
+            'id': row.id,
+            'task_id': row.task_id,
+            'task_name': row.task_name,
+            'queue': row.queue,
+            'status': row.status,
+            'args': row.args,
+            'kwargs': row.kwargs,
+            'result': row.result,
+            'error_message': row.error_message,
+            'retry_count': row.retry_count,
+            'started_at': row.started_at.isoformat() if row.started_at else None,
+            'finished_at': row.finished_at.isoformat() if row.finished_at else None,
+            'duration_ms': row.duration_ms,
+            'created_at': row.created_at.isoformat() if row.created_at else None,
+        }
+
+
+class TaskStatsView(APIView):
+    """GET /api/v1/system/tasks/stats/  后台任务看板：状态统计 + 队列深度
+
+    返回：
+    - counts：各状态任务数（success/failure/started/pending/retry/revoked）
+    - avg_duration_ms / max_duration_ms：已结束任务耗时统计（毫秒）
+    - queues：各 Celery 队列实时深度（复用 analytics.realtime 快照，
+      Redis 不可用时降级为空 dict，前端展示"队列监控不可用"）
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not request.user.has_perm('system.config.read'):
+            return Response({"detail": "无权限查看任务看板"}, status=status.HTTP_403_FORBIDDEN)
+
+        from django.db.models import Avg, Count, Max
+
+        # 状态分布：一次 GROUP BY 统计全部状态，避免逐状态查询
+        status_counts = dict(
+            CeleryTaskLog.objects.values_list('status').annotate(cnt=Count('status'))
+        )
+        counts = {choice: status_counts.get(choice, 0) for choice, _ in CeleryTaskLog.STATUS_CHOICES}
+
+        # 耗时统计：仅统计已结束任务（duration_ms > 0），运行中任务不计入均值
+        agg = CeleryTaskLog.objects.filter(duration_ms__gt=0).aggregate(
+            avg_duration=Avg('duration_ms'),
+            max_duration=Max('duration_ms'),
+        )
+
+        # 队列深度：复用实时监控快照；Redis 不可用时降级为空 dict，不影响整体接口
+        try:
+            from apps.analytics.realtime import get_queue_depth_snapshot
+            queues = get_queue_depth_snapshot()
+        except Exception as e:
+            logger.warning(f'[TaskBoard] 队列深度获取失败: {e}')
+            queues = {}
+
+        return Response({
+            'counts': counts,
+            'avg_duration_ms': round(agg['avg_duration'] or 0),
+            'max_duration_ms': agg['max_duration'] or 0,
+            'queues': queues,
+        })
+
+
+class TaskRetryView(APIView):
+    """POST /api/v1/system/tasks/<task_id>/retry/  失败任务重试
+
+    仅支持对 failure 状态的任务重试：
+    - 用原 task_name + args/kwargs 重新派发（queue 优先原队列，缺失时按默认路由）
+    - send_task 按 task_name 全局寻址，Worker 可解析短名/模块路径两种注册方式
+    - Celery 重新生成 task_id，重试不会覆盖原记录，历史日志完整可追溯
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, task_id):
+        if not request.user.has_perm('system.config.read'):
+            return Response({"detail": "无权限重试任务"}, status=status.HTTP_403_FORBIDDEN)
+
+        # 校验 task_id 为合法 UUID：Celery 生成的 task_id 均为 UUID，
+        # 非法值直接 400，避免任意字符串进入查询与派发
+        try:
+            uuid.UUID(task_id)
+        except (ValueError, AttributeError, TypeError):
+            return Response({"detail": "task_id 格式不合法"}, status=status.HTTP_400_BAD_REQUEST)
+
+        row = CeleryTaskLog.objects.filter(task_id=task_id).first()
+        if not row:
+            return Response({"detail": "任务记录不存在"}, status=status.HTTP_404_NOT_FOUND)
+        if row.status != 'failure':
+            return Response({"detail": f"仅失败任务可重试，当前状态 {row.status}"},
+                            status=status.HTTP_409_CONFLICT)
+
+        # 重新派发：任务参数必须可 JSON 序列化（写入时已做 safety 处理），
+        # 派发异常由 send_task 抛错，这里兜底返回 500 并记录日志
+        try:
+            new_result = current_app.send_task(
+                row.task_name,
+                args=row.args or [],
+                kwargs=row.kwargs or {},
+                queue=row.queue or None,
+            )
+        except Exception as e:
+            logger.warning(f'[TaskBoard] 重试派发失败 task={row.task_name}: {e}')
+            return Response({"detail": f"任务派发失败: {e}"},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        logger.info(
+            f'[TaskBoard] 重试任务 {row.task_name} 已派发: '
+            f'old_task_id={task_id} new_task_id={new_result.id}'
+        )
+        return Response({
+            'detail': '已重新派发',
+            'old_task_id': task_id,
+            'new_task_id': new_result.id,
+        }, status=status.HTTP_202_ACCEPTED)

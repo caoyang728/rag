@@ -1,0 +1,249 @@
+/* ==========================================================
+   后台任务看板页面样式 (admin-tasks.css)
+   布局：状态统计卡片 / 队列深度水位条 / 任务日志表格 / 详情弹窗
+   ========================================================== */
+
+/* ===== 页面整体 ===== */
+.page-header {
+	margin-bottom: 16px;
+}
+
+.page-header-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+}
+
+.page-header-actions {
+	flex-shrink: 0;
+	display: flex;
+	gap: 8px;
+}
+
+/* ===== 状态统计卡片 ===== */
+.stats-grid {
+	display: grid;
+	grid-template-columns: repeat(6, 1fr);
+	gap: 12px;
+	margin-bottom: 16px;
+}
+
+@media (max-width: 1100px) {
+	.stats-grid { grid-template-columns: repeat(3, 1fr); }
+}
+
+.stat-card {
+	padding: 14px 16px;
+}
+
+.stat-num {
+	font-size: 26px;
+	font-weight: 700;
+	color: var(--text-main, #1a1a2e);
+	line-height: 1.2;
+}
+
+.stat-success { color: #16a34a; }
+.stat-failure { color: #e5484d; }
+.stat-running { color: #2563eb; }
+
+.stat-label {
+	margin-top: 4px;
+	font-size: 12px;
+	color: var(--text-sub, #8a8fa3);
+}
+
+/* ===== 队列深度 ===== */
+.queue-depth {
+	display: grid;
+	grid-template-columns: repeat(5, 1fr);
+	gap: 14px;
+}
+
+@media (max-width: 900px) {
+	.queue-depth { grid-template-columns: repeat(2, 1fr); }
+}
+
+.queue-item {
+	min-width: 0;
+}
+
+.queue-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	margin-bottom: 6px;
+}
+
+.queue-name {
+	font-size: 13px;
+	font-weight: 600;
+	color: var(--text-main, #1a1a2e);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.queue-size {
+	font-size: 14px;
+	font-weight: 700;
+	color: var(--text-main, #1a1a2e);
+	flex-shrink: 0;
+	margin-left: 8px;
+}
+
+.queue-bar {
+	height: 8px;
+	border-radius: 4px;
+	background: var(--bg-hover, #f0f1f5);
+	overflow: hidden;
+}
+
+.queue-bar-fill {
+	height: 100%;
+	border-radius: 4px;
+	transition: width 0.3s;
+}
+
+/* 深度分档：<10 正常绿色 / <50 偏高黄色 / >=50 堆积红色 */
+.bar-ok { background: #16a34a; }
+.bar-mid { background: #f59e0b; }
+.bar-warn { background: #e5484d; }
+
+/* ===== 任务日志表格 ===== */
+.task-table-wrap {
+	flex: 1;
+	min-height: 0;
+	overflow: auto;
+	border: 1px solid var(--border-light, #f0f0f0);
+	border-radius: 8px;
+}
+
+.task-table {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: 13px;
+}
+
+.task-table thead th {
+	position: sticky;
+	top: 0;
+	background: var(--bg-hover, #fafbfc);
+	color: var(--text-sub, #8a8fa3);
+	font-weight: 600;
+	text-align: left;
+	padding: 10px 12px;
+	border-bottom: 1px solid var(--border-light, #f0f0f0);
+	white-space: nowrap;
+	z-index: 1;
+}
+
+.task-table tbody td {
+	padding: 9px 12px;
+	border-bottom: 1px solid var(--border-light, #f5f5f5);
+	color: var(--text-main, #1a1a2e);
+	vertical-align: middle;
+}
+
+.task-table tbody tr:last-child td {
+	border-bottom: none;
+}
+
+.task-table tbody tr:hover {
+	background: var(--bg-hover, #fafbfc);
+}
+
+/* 任务名较长：单行截断 + 悬停 title 全名 */
+.task-name-cell {
+	max-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+	font-size: 12px;
+}
+
+.task-actions-cell {
+	white-space: nowrap;
+	text-align: right;
+}
+
+.task-actions-cell .btn {
+	margin-left: 6px;
+}
+
+/* ===== 状态徽标 ===== */
+.status-badge {
+	display: inline-block;
+	padding: 2px 8px;
+	border-radius: 10px;
+	font-size: 12px;
+	line-height: 1.6;
+	white-space: nowrap;
+}
+
+.badge-success { background: #e8f7ee; color: #16a34a; }
+.badge-failure { background: #fdecec; color: #e5484d; }
+.badge-started { background: #e8f0fe; color: #2563eb; }
+.badge-pending { background: #f1f2f6; color: #8a8fa3; }
+.badge-retry { background: #fdf3e3; color: #b45309; }
+.badge-revoked { background: #f1f2f6; color: #8a8fa3; }
+
+/* ===== 详情弹窗 ===== */
+.detail-grid {
+	display: grid;
+	grid-template-columns: repeat(2, 1fr);
+	gap: 10px 20px;
+	margin-bottom: 8px;
+}
+
+.detail-block {
+	margin-top: 12px;
+}
+
+.detail-label {
+	font-size: 12px;
+	color: var(--text-sub, #8a8fa3);
+	margin-bottom: 4px;
+}
+
+.detail-value {
+	font-size: 13px;
+	color: var(--text-main, #1a1a2e);
+	word-break: break-all;
+}
+
+.detail-value.mono {
+	font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+	font-size: 12px;
+}
+
+.detail-pre {
+	background: var(--bg-hover, #f5f6f8);
+	border: 1px solid var(--border-light, #f0f0f0);
+	border-radius: 6px;
+	padding: 10px 12px;
+	font-size: 12px;
+	line-height: 1.5;
+	white-space: pre-wrap;
+	word-break: break-all;
+	max-height: 220px;
+	overflow: auto;
+	margin: 0;
+	color: var(--text-main, #1a1a2e);
+}
+
+.detail-error {
+	background: #fdecec;
+	border-color: #f5c6c8;
+	color: #c0392b;
+}
+
+.confirm-detail {
+	margin-top: 8px;
+	font-size: 12px;
+	color: var(--text-sub, #8a8fa3);
+	word-break: break-all;
+	font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}

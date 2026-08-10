@@ -19,4 +19,8 @@ urlpatterns = [
     path("tickets/<int:pk>/reject/", views.RejectTicketView.as_view(), name='ticket-reject'),
     path("tickets/<int:pk>/withdraw/", views.WithdrawTicketView.as_view(), name='ticket-withdraw'),
     path("stats/", views.StatsView.as_view()),
+    # 后台任务看板：任务日志列表 / 状态统计 + 队列深度 / 失败重试
+    path("tasks/", views.TaskLogView.as_view()),
+    path("tasks/stats/", views.TaskStatsView.as_view()),
+    path("tasks/<str:task_id>/retry/", views.TaskRetryView.as_view()),
 ]

@@ -218,6 +218,14 @@ SCHEDULED_TASKS: List[dict] = [
         'label': '过期 Wiki 刷新',
         'description': '刷新过期的 Wiki 页面（文档变更后被标记 expired，重新生成）',
     },
+    {
+        'name': 'cleanup-task-logs',
+        'task': 'apps.system.tasks.cleanup_task_logs',
+        'cron': '40 3 * * *',
+        'enabled': True,
+        'label': '任务日志清理',
+        'description': '清理超过保留期的后台任务日志（数据量控制，默认 30 天）',
+    },
 ]
 
 # ---------------------------------------------------------------------------

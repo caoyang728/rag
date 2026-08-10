@@ -23,6 +23,10 @@ QUEUE_NAMES = ['default', 'parse', 'memory', 'email', 'analytics']
 # 历史数据保留天数
 REALTIME_RETENTION_DAYS = 3
 
+# Worker 状态在 Redis 的保留时长：大于 update_queue_depth 的执行间隔（5 分钟），
+# 保证任务两次运行之间 API 始终能读到上一轮聚合结果
+_WORKER_STATS_TTL = 10 * 60
+
 # Redis 连接健康检查间隔（秒）
 _HEALTH_CHECK_INTERVAL = 60
 _last_health_check = 0
@@ -141,18 +145,38 @@ def update_queue_depth():
     pipeline.execute()
 
     # --- 获取 Worker 数量（可选，失败时降级）---
+    # 同时聚合完整 worker 状态（active/queued/idle）写入 Redis，
+    # 供快照 API 秒级读取：inspect 是广播等待，实测每命令等待 2s+ 超时，
+    # 若放 API 热路径会导致接口 4s+ 响应，故只在后台任务里执行一次。
     worker_count = 0
+    worker_stats = {'active': None, 'queued': None, 'idle': None}
     try:
         # 复用 rag_project.celery.app 而非创建新实例，
         # 新实例无法连接到正在运行的 Worker，inspect 会返回空
         from rag_project.celery import app as celery_app
         insp = celery_app.control.inspect(timeout=3)
         if insp:
-            active_workers = insp.active()
-            if active_workers:
-                worker_count = len(active_workers)
+            active = insp.active() or {}
+            reserved = insp.reserved() or {}
+            # 活跃 Worker 总数（无响应时为空 dict，降级为 0）
+            worker_count = max(1, len(active)) if active else 0
+            # 正在执行的任务数（active）+ 已预取等待执行的任务数（reserved）
+            total_active = sum(len(tasks) for tasks in active.values())
+            total_reserved = sum(len(tasks) for tasks in reserved.values())
+            # 空闲 Worker：总 Worker 数 - 有 active 任务的 Worker 数
+            busy_workers = sum(1 for tasks in active.values() if len(tasks) > 0)
+            worker_stats['active'] = total_active
+            worker_stats['queued'] = total_reserved
+            worker_stats['idle'] = max(0, worker_count - busy_workers)
     except Exception as e:
         logger.warning(f"[QueueDepth] Failed to inspect workers: {e}")
+
+    # 写入 Redis worker 状态键（TTL 10 分钟，下次任务刷新覆盖）。
+    # inspect 失败时各值保持 None，删除对应键，让前端显示 "-"
+    try:
+        _set_worker_stats(r, worker_stats)
+    except Exception as e:
+        logger.warning(f"[QueueDepth] Failed to write worker stats: {e}")
 
     for log in logs:
         log.worker_count = worker_count
@@ -172,42 +196,54 @@ def update_queue_depth():
     )
 
 
+def _set_worker_stats(r, worker_stats):
+    """把 worker 状态聚合结果写入 Redis 键（供快照 API 秒级读取）
+
+    - 值非 None 时 SET 并带 TTL，None 时 DEL（表示该状态不可用）
+    - pipeline 批量执行，一次网络往返
+    """
+    pipe = r.pipeline()
+    for key, value in worker_stats.items():
+        rk = f'analytics:queue:worker:{key}'
+        if value is None:
+            pipe.delete(rk)
+        else:
+            pipe.set(rk, value, ex=_WORKER_STATS_TTL)
+    pipe.execute()
+
+
 def get_queue_depth_snapshot():
     """获取所有队列当前深度快照（供 API 调用）
 
     返回结构与前端 JS 解析对齐：
       {queue_name: {size, length, queued, active, idle, failed}}
     - size/length：等待任务数（读取 Redis current 键，LLEN 兜底）
-    - queued/active/idle/failed：Worker 状态（从 Celery inspect 获取，缺失为 None）
+    - queued/active/idle/failed：Worker 状态（由 update_queue_depth 每 5 分钟
+      聚合写入 Redis，此处只读；缺失为 None）
 
     优先读取 Redis current 键，避免每次都 LLEN 全队列。
     若 Redis current 键不存在（如服务刚重启），降级为直接 LLEN。
+
+    注意：不在本函数内执行 Celery inspect——inspect 是广播等待，每命令
+    会等满 timeout（实测 2s+），放 API 热路径会让接口响应 4s+；
+    worker 状态属于分钟级延迟可接受的数据，统一由后台任务聚合。
     """
     r = _get_redis_safe()
     result = {}
 
-    # 1) 获取 Worker 状态（Celery inspect，一次调用获取所有队列）
+    # 1) 获取 Worker 状态：只读 Redis（键由 update_queue_depth 任务写入），
+    #    缺失/异常时为 None（前端显示 "-"），不影响队列长度返回
     worker_stats = {'queued': None, 'active': None, 'idle': None, 'failed': None}
     try:
-        from rag_project.celery import app as celery_app
-        insp = celery_app.control.inspect(timeout=2)
-        if insp:
-            active = insp.active() or {}
-            reserved = insp.reserved() or {}
-            # 活跃 Worker 总数
-            worker_count = max(1, len(active))
-            # 正在执行的任务数（active）+ 已预取等待执行的任务数（reserved）
-            total_active = sum(len(tasks) for tasks in active.values())
-            total_reserved = sum(len(tasks) for tasks in reserved.values())
-            worker_stats['active'] = total_active
-            worker_stats['queued'] = total_reserved
-            # 空闲 Worker：总 Worker 数 - 有 active 任务的 Worker 数
-            busy_workers = sum(1 for tasks in active.values() if len(tasks) > 0)
-            worker_stats['idle'] = max(0, worker_count - busy_workers)
-            # Celery 无全局失败计数（有结果后端才可查），置为 None 让前端显示 -
-            worker_stats['failed'] = None
+        pipe = r.pipeline()
+        for key in ('active', 'queued', 'idle'):
+            pipe.get(f'analytics:queue:worker:{key}')
+        vals = pipe.execute()
+        for key, val in zip(('active', 'queued', 'idle'), vals):
+            if val is not None:
+                worker_stats[key] = int(val)
     except Exception as e:
-        logger.debug(f'[QueueSnapshot] inspect workers unavailable: {e}')
+        logger.debug(f'[QueueSnapshot] read worker stats failed: {e}')
 
     # 2) 获取队列等待长度（Redis current -> LLEN 降级）
     for queue_name in QUEUE_NAMES:

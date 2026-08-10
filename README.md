@@ -8,56 +8,66 @@
 > 1. **LLM Wiki 快速命中**（置信度 ≥ 0.68）：直接返回基于知识节点文档或图谱社区自动生成的 Wiki 页面，延迟最低；
 > 2. **GraphRAG**（置信度 ≥ 0.45）：实体/关系局部检索（graphrag_local）+ Louvain 社区摘要全局检索（graphrag_global），回答结构化关系型问题；
 > 3. **RAG 兜底**：pgvector 向量 + BM25 + RRF 混合检索 + Rerank 重排，格式化 Top 5 片段作为上下文。
-> 每层路由的置信度与耗时记录到 `route_trace`，随问答记录落库，由 RouteAnalysis 持续评估各层命中率与回答质量对比。
+> 每层路由的置信度与耗时记录到 `route_trace`，随问答记录落库，由 RouteAnalysis 持续评估各层命中率与回答质量。
+>
+> 除三层路由外，系统还内置 **Agentic RAG 模式**（`mode=auto/agent`，LLM 自主决策调用工具）与**多 Agent 工作流**（`do_workflow=true`）。完整问答链路见下方「问答流程总览」。
 
 ---
 
-## 检索流程总览
+## 问答流程总览
 
-> 从用户 Query 到最终结果的完整链路，包含**热点缓存**（上游拦截）与**权限过滤**（两路召回内部完成）。查询改写/分解（`QUERY_TRANSFORM_ENABLED`，默认关闭）是透明增强层——仅改变 query，召回/融合/精排完全复用同一核心；LLM 改写或分解**任何失败都降级为原始 Query**，永不阻断主流程。改写/分解的输入输出随 `route_trace` 落库，评估看板据此统计"改写命中率"。
+> 从用户 Query 到最终结果的完整链路：**输入审查 → 热点缓存 → 检索核心 → LLM 流式生成 → SSE 输出 → 落库与评估**：
+> - `wiki / graphrag / rag`：三层路由，预检索注入 context；
+> - `auto / agent`（默认）：Agentic RAG，LLM 自主决策调用工具，`do_workflow=true` 可升级为多 Agent 工作流。
 
 ```mermaid
 flowchart TD
-    Q["用户 Query"] --> CACHE{"① 热点缓存命中？<br/>HotQaCache 组织分组（public/org_…）"}
-    CACHE -->|"命中：直接返回缓存答案<br/>（仍过内容审查 + 引用权限校验）"| DONE["返回答案"]
-    CACHE -->|"未命中"| H{"② hybrid_search 入口<br/>QUERY_TRANSFORM_ENABLED"}
+    Q["用户 Query<br/>POST /api/v1/chat/ask_stream/"] --> IN{"输入侧敏感词审查<br/>block 命中直接拒答"}
+    IN -->|"拦截"| F["content_filtered 拒答"]
+    IN -->|"通过"| CACHE{"热点缓存命中？<br/>HotQaCache 组织分组 + 文档兜底"}
+    CACHE -->|"命中：直接返回<br/>（仍过内容审查 + 引用权限校验）"| DONE["返回答案"]
+    CACHE -->|"未命中"| MODE{"mode 分流"}
 
-    H -->|"关闭（默认）"| CORE["_search_core 混合检索核心"]
-    H -->|"开启"| RW["③ LLM 改写 + 同义词扩展"]
-    RW -->|"失败降级为原 Query"| S1["④ 改写后混合检索"]
-    S1 --> CF{"⑤ 置信度 ≥ 阈值<br/>默认 0.35"}
-    CF -->|"是：直接返回"| OUT["返回检索结果"]
-    CF -->|"否：触发分解"| DC["⑥ LLM 查询分解<br/>N 个子查询"]
-    DC -->|"逐路召回（不 Rerank 省成本）"| SUB["⑦ 各子查询独立混合检索"]
-    SUB --> MG["⑧ RRF 合并去重<br/>以原 query 精排"]
-    MG --> OUT
+    MODE -->|"wiki / graphrag / rag"| ROUTE["三层路由编排<br/>Wiki 命中 → GraphRAG → RAG 兜底"]
+    MODE -->|"auto / agent（默认）"| REACT["Agentic RAG · ReAct 循环<br/>（≤5 轮，LLM 自主决策是否调用工具）"]
+    REACT -->|"do_workflow=true 且<br/>planner 判定复杂"| WF["多 Agent 工作流<br/>research/tool/approval 节点 DAG<br/>+ HITL 人工确认"]
+    REACT --> TOOLS["工具注册表（6 个）<br/>knowledge_search / web_search / calculator<br/>text2sql / wiki_search / graph_search"]
+    WF --> TOOLS
 
-    CORE --> VEC["向量检索 pgvector<br/>top_k<br/>（权限过滤）"]
-    CORE --> BM["BM25 关键词检索<br/>top_k<br/>（权限过滤）"]
-    S1 --> CORE
-    SUB --> CORE
-    VEC --> FUSE["RRF 融合 k=60<br/>top 30"]
-    BM --> FUSE
-    FUSE --> RK["BGE-Reranker 重排<br/>top N"]
-    RK --> EN["补全元信息<br/>doc_title / section_path / 图片"]
-    EN --> OUT
-    OUT --> DONE
-    DONE --> CTX["chunks 作为上下文拼入 Prompt<br/>transform → QaRecord.route_trace"]
+    ROUTE -.->|"RAG 兜底层"| CORE["检索核心 _search_core（hybrid_search）<br/>向量 + BM25 + RRF 融合<br/>+ Rerank 重排 + 二次权限过滤"]
+    TOOLS -.->|"knowledge_search 工具复用"| CORE
+    CORE --> GEN["LLM 流式生成<br/>逐段敏感词审查（block/mask）"]
+    ROUTE --> GEN
+    TOOLS --> GEN
+    GEN --> SSE["SSE 事件输出<br/>tool_call / tool_result / first_token<br/>/ delta / done"]
+    SSE --> PERSIST["落库<br/>QaRecord + AgentTrace<br/>+ 热点缓存 + 记忆 + 12 维评估"]
+    PERSIST --> DONE
+    F --> DONE
 ```
 
-检索核心（`_search_core`，[apps/retrieval/hybrid.py](apps/retrieval/hybrid.py)）五步：**query 向量化 → 向量 + BM25 并行召回 → RRF 融合 → BGE-Reranker 重排 → 元信息补全**，最终返回 `{chunks, stats, raw}`；改写/分解链路见 [apps/retrieval/query_transform.py](apps/retrieval/query_transform.py)。
+**链路说明**：
 
-**缓存（组织分组 + 文档兜底）**：`HotQaCache` 按 `question_hash + root_type + visibility_scope` 三键定位，`visibility_scope` 按答案引用文档的**组织归属**分组（`public` 无引用或全 PUBLIC 文档，任意用户共享 / `org_d3_t7` 部门/团队 ID 升序拼接，同组用户共享），不同权限组各自独立一条、互不覆盖。命中校验两层：① **权限组粗筛**——`org_...` 组需用户可见组织（部门祖先链 + 管辖/所属团队）AND 全覆盖；② **文档级兜底**——`filter_accessible_doc_ids` 对 `cited_doc_ids` 引用文档全通过，兜住黑名单/个人共享/申请审批等组织维度看不见的个人级权限（Deny Override 铁律：任一引用无权则跳过缓存、回落完整检索重新生成，答案文本无法按文档切割部分返回）。旧数据无权限组标记（`cited_doc_ids` 空但有引用）非超管保守跳过。命中结果仍会**过内容审查**（词库更新后拦截历史违规答案）。
+| 环节 | 说明 |
+|---|---|
+| 输入侧敏感词审查 | block 命中直接拒答（content_filtered），不浪费 LLM 算力 |
+| 热点缓存 | HotQaCache 组织分组（public/org_…）+ 文档级兜底校验（Deny Override）；命中仍过内容审查 + 引用权限校验 |
+| 检索核心 `_search_core` | 向量 pgvector + BM25 + RRF 融合 + Rerank 重排 + 检索级权限过滤；查询改写/分解（`QUERY_TRANSFORM_ENABLED`，默认关闭）是透明增强层，失败恒降级为原 Query |
+| LLM 流式生成 | 逐段敏感词审查（block 中断 / mask 脱敏） |
+| SSE 输出 | `start → (tool_call/tool_result)* → first_token → delta* → done`（或 `content_filtered` / `error`） |
+| 落库 | QaRecord（answer_type：rag / agent / general / refused）+ AgentTrace（工具调用链）+ 热点缓存 + 记忆 + 12 维评估 |
 
-**权限过滤**：两路召回（`vector_search` / `bm25_search`）内部均完成检索级权限过滤（黑名单 Deny Override → 可见范围 → 主动共享，见 [apps/retrieval/permission.py](apps/retrieval/permission.py)），RRF 融合与 Rerank 层无需重复判权；Agent 工具在混合检索后还会做二次权限校验。
+**三层路由（wiki/graphrag/rag）**：按置信度逐层降级——LLM Wiki 命中（≥ 0.68）→ GraphRAG（≥ 0.45）→ RAG 兜底；每层置信度与耗时记入 `route_trace`，由 RouteAnalysis 持续评估各层命中率与回答质量。
+
+**Agentic RAG（auto/agent）**：不预检索注入 context，LLM 在 ReAct 循环中自主决策是否调用工具（≤ 5 轮，末轮强制成文，达上限强制总结）。6 个工具：`knowledge_search`（复用混合检索全链路 + 二次权限过滤）/ `web_search`（Tavily，未配置降级 DuckDuckGo）/ `calculator` / `text2sql`（业务库，白名单限定）/ `wiki_search` / `graph_search`，统一返回 `{result, ok, meta, latency_ms}` 回填 messages，工具调用链落库 AgentTrace。`do_workflow=true` 时由 planner 判定，复杂问题产出节点 DAG（research / tool / approval）走多 Agent 工作流：拓扑序执行、无依赖节点并行（≤ 4）、失败自动重试（≤ 2），`web_search` / `text2sql` 敏感工具隐式人工确认（HITL），审批通过 `resume_workflow` 继续 / 驳回降级回答；节点轨迹落 WorkflowNodeRun。
 
 ---
 
 ## 一、项目特性
 
-- **三层混合架构（LLM Wiki + GraphRAG + RAG）**：问答按置信度逐层路由——Wiki 页面直接命中 → 图谱实体/关系与社区摘要 → 混合检索兜底，各层命中率与回答质量持续评估对比
+- **三层混合架构（LLM Wiki + GraphRAG + RAG）**：问答按置信度逐层路由——Wiki 页面直接命中 → 图谱实体/关系与社区摘要 → 混合检索兜底，各层命中率与回答质量持续评估
 - **混合检索 + Rerank**：pgvector 向量检索 + BM25 关键词检索 + RRF 融合 + BGE-Reranker 重排序，二次权限过滤保证安全
-- **流式问答**：SSE 流式响应，TTFB/总延迟展示，AbortController 终止，断线自动保存部分回答
+- **Agentic RAG（ReAct Agent）**：不预检索注入 context，LLM 自主决策调用 6 种工具（知识检索/联网/计算器/Text2SQL/Wiki/图谱），多轮 ReAct 循环 + 工具调用链落库；复杂问题可叠加多 Agent 工作流（节点 DAG + 并行执行 + 人工确认 HITL）
+- **流式问答**：SSE 流式响应，TTFB/总延迟展示，AbortController 终止，断线自动保存部分回答；Agent 模式实时下发 `tool_call/tool_result`「思考过程」事件
 - **四层记忆**：short/session/user/global 记忆分层管理，每晚提炼稳定用户偏好
 - **文档全生命周期**：多格式解析（PDF/DOCX/Markdown/代码/表格/PPT）→ 语义感知切分 → 数据脱敏 → 向量化 → 版本管理 + 软删除；PDF 深度解析支持 PyMuPDF `find_tables()` 表格提取、跨页合并与图片提取（base64 + OSS 双存储）
 - **知识图谱（Graph RAG）**：LLM 实体/关系抽取 + Louvain 社区检测与摘要，图谱增量同步 + 向量检索召回
@@ -135,11 +145,13 @@ rag/
 │   │   └── rerank.py           # BGE-Reranker 重排序
 │   ├── llm/                    # DeepSeek Provider + 抽象工厂 + Prompt 模板
 │   ├── memory/                 # 四层记忆（short/session/user/global），每晚提炼用户偏好
-│   ├── agent/                  # 问答编排 + 任务拆分 + 流式回答 + 引用合并
-│   │   ├── executor.py         # 问答执行器（mode: auto/rag/agent/wiki/graphrag）
+│   ├── agent/                  # 问答编排 + ReAct Agent + 任务拆分 + 流式回答 + 引用合并
+│   │   ├── executor.py         # 问答执行器（mode: auto/rag/agent/wiki/graphrag，含多 Agent 工作流分流）
+│   │   ├── react.py            # ReAct Agent 循环（Agentic RAG 核心：同步/流式 + 工具调用链）
 │   │   ├── task_splitter.py    # 复杂任务拆分
 │   │   ├── streamer.py         # SSE 流式输出
-│   │   └── tools/              # Agent 工具（知识检索/图谱/Wiki/联网/Text2SQL/计算器）
+│   │   ├── tools/              # Agent 工具（知识检索/图谱/Wiki/联网/Text2SQL/计算器）
+│   │   └── workflow/           # 多 Agent 工作流（planner 编排 DAG + engine 并行执行 + HITL 人工确认）
 │   ├── chat/                   # 会话 / QA 记录（含 TTFB/Token 速率/错误类型） / 反馈 / 热点缓存
 │   ├── audit/                  # 审计日志（sha256 哈希链防篡改）
 │   ├── security/               # 验证码 / IP 黑白名单 / 登录失败锁定 / 敏感词
@@ -316,13 +328,15 @@ rag/
 
 | Method | Path | 说明 |
 |--------|------|------|
-| POST | `/api/v1/chat/ask_stream/` | **核心问答接口**（SSE 流式 + TTFB + 终止控制） |
+| POST | `/api/v1/chat/ask_stream/` | **核心问答接口**（SSE 流式 + TTFB + 终止控制；`mode=auto/agent` 走 Agentic RAG，`do_workflow=true` 走多 Agent 工作流） |
 | POST | `/api/v1/chat/feedback/` | 提交问答反馈 |
 | CRUD | `/api/v1/chat/sessions/` | 会话管理 |
 | GET | `/api/v1/chat/sessions/{id}/qa/` | 问答历史（按 turn_index 升序） |
 | GET | `/api/v1/chat/records/` | 问答记录列表 |
 | POST | `/api/v1/agent/task/plan/` | 复杂任务拆分预览 |
 | POST | `/api/v1/agent/task/run/` | 拆分并执行 |
+| GET | `/api/v1/agent/workflows/` | 工作流列表（`?status=running` 过滤） |
+| GET | `/api/v1/agent/workflows/{id}/` | 工作流详情（含节点执行轨迹，发起人或超管可见） |
 | POST | `/api/v1/retrieval/search/` | 检索调试接口 |
 
 ### 记忆（memory）
@@ -586,7 +600,9 @@ rag/
 
 | 模型 | 表名 | 说明 |
 |------|------|------|
-| AgentTrace | `agent_trace` | Agent 执行轨迹（任务拆分 + 工具调用 + 引用合并） |
+| AgentTrace | `agent_trace` | Agent 工具调用链记录（每轮工具名/参数/结果/耗时，供「思考过程」展示与端到端 Tracing） |
+| AgentWorkflow | `agent_workflow` | 多 Agent 工作流执行实例（节点 DAG + 状态机 planning→running→succeeded/failed/degraded/waiting_approval） |
+| WorkflowNodeRun | `agent_workflow_node` | 工作流节点执行轨迹（research/tool/approval/finalize 的输入/输出/耗时/错误，审批节点关联工单 ID） |
 
 ---
 

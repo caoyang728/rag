@@ -16,7 +16,7 @@ task_prerun / task_postrun / task_failure / task_revoked 四个信号，
 """
 import json
 
-from celery.signals import task_failure, task_postrun, task_prerun, task_revoked
+from celery.signals import task_failure, task_postrun, task_prerun, task_revoked, worker_process_init
 from django.utils import timezone
 from loguru import logger
 
@@ -39,9 +39,18 @@ _SKIP_TASKS = frozenset({
 _MAX_TEXT_LEN = 2000
 
 
-def _is_recordable(task_name):
+def _task_name(task):
+    """取任务注册名：celery 的 task_prerun 等信号传入的 task 是任务对象（Task 实例），
+    不能直接作为字符串比较/入库，需取其注册名（如 knowledge.parse_document）"""
+    if isinstance(task, str):
+        return task
+    return getattr(task, 'name', None) or str(task)
+
+
+def _is_recordable(task):
     """是否记录该任务：跳过高频维护类任务与调试任务，其余任务均记录"""
-    return bool(task_name) and task_name not in _SKIP_TASKS
+    name = _task_name(task)
+    return bool(name) and name not in _SKIP_TASKS
 
 
 def _queue_of(sender):
@@ -127,7 +136,7 @@ def on_task_prerun(sender, task_id, task, args, kwargs, **extra):
             retries = sender.request.retries or 0
         except Exception:
             retries = 0
-        _record_started(task_id, task, _queue_of(sender),
+        _record_started(task_id, _task_name(task), _queue_of(sender),
                         _safe_args(args), _safe_kwargs(kwargs), retries)
     except Exception as e:
         logger.warning(f'[TaskLog] prerun 写入失败 task={task} id={task_id}: {e}')
@@ -172,8 +181,27 @@ def on_task_revoked(sender, request, terminated, signum, expired, **extra):
         logger.warning(f'[TaskLog] revoked 写入失败 task={task} id={task_id}: {e}')
 
 
+def on_worker_process_init(sender, **kwargs):
+    """worker 子进程 fork 后重建数据库连接池
+
+    psycopg_pool 官方明确：ConnectionPool 不支持 fork 后复用，
+    Celery prefork 模式下子进程会继承主进程已初始化的连接池，
+    导致池内连接状态与实际物理连接不一致（表现为 20 个连接
+    "全部被占用"、getconn 等待 30 秒 PoolTimeout）。
+    故在 worker_process_init（每个子进程 fork 后触发）重建连接池，
+    保证子进程使用自己进程内干净的池。
+    """
+    try:
+        from rag_project.db.pooled_postgresql import DatabaseWrapper
+        DatabaseWrapper.reset_pool()
+        logger.info('[TaskLog] Celery worker 子进程连接池已重建（fork 后重置）')
+    except Exception as e:
+        logger.warning(f'[TaskLog] worker 子进程连接池重建失败: {e}')
+
+
 # 模块导入时注册信号（apps.system.apps.SystemConfig.ready 中 import 本模块）
 task_prerun.connect(on_task_prerun)
 task_postrun.connect(on_task_postrun)
 task_failure.connect(on_task_failure)
 task_revoked.connect(on_task_revoked)
+worker_process_init.connect(on_worker_process_init)

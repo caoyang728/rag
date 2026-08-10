@@ -120,6 +120,98 @@ def test_parse_null_values():
 
 
 # ============================================================================
+# parse_llm_response：max_tokens 截断场景（容忍解析器修复）
+# ============================================================================
+@pytest.mark.unit
+def test_parse_truncated_mid_string_value():
+    """字符串值内部被截断（用户场景："description": "服务器CO）应吸收可见内容并保留实体"""
+    from apps.graph.extractor import parse_llm_response
+    text = ('{ \n'
+            '   "entities": [ \n'
+            '     {"name": "server.cors.allowed_methods", "type": "TERM", '
+            '"description": "服务器CORS配置中允许的HTTP方法列表"}, \n'
+            '     {"name": "server.cors.allowed_headers", "type": "TERM", '
+            '"description": "服务器CO')
+    result = parse_llm_response(text)
+    assert len(result['entities']) == 2
+    assert result['entities'][1]['name'] == 'server.cors.allowed_headers'
+    # 截断的字符串值按可见内容吸收
+    assert result['entities'][1]['description'] == '服务器CO'
+
+
+@pytest.mark.unit
+def test_parse_truncated_mid_key():
+    """键名内部被截断（如 "desc）应丢弃该键值对，保留已完整解析的成员"""
+    from apps.graph.extractor import parse_llm_response
+    text = '{"entities": [{"name": "a", "type": "TERM", "desc'
+    result = parse_llm_response(text)
+    assert len(result['entities']) == 1
+    assert result['entities'][0]['name'] == 'a'
+    assert result['entities'][0]['type'] == 'TERM'
+    assert 'description' not in result['entities'][0]
+
+
+@pytest.mark.unit
+def test_parse_truncated_after_colon():
+    """冒号后值未开始（"description": 后截断）应丢弃该键值对，保留其余成员"""
+    from apps.graph.extractor import parse_llm_response
+    text = '{"entities": [{"name": "a", "type": "TERM", "description": '
+    result = parse_llm_response(text)
+    assert len(result['entities']) == 1
+    assert result['entities'][0]['name'] == 'a'
+    assert 'description' not in result['entities'][0]
+
+
+@pytest.mark.unit
+def test_parse_truncated_mid_array_element():
+    """数组末尾元素结构不完整时，已完整解析的前置元素应全部保留"""
+    from apps.graph.extractor import parse_llm_response
+    text = ('{"entities": ['
+            '{"name": "a", "type": "TERM"}, '
+            '{"name": "b", "type": "TERM"}, '
+            '{"name": "c", "type": "TER')
+    result = parse_llm_response(text)
+    names = [e.get('name') for e in result['entities']]
+    assert names == ['a', 'b', 'c']
+
+
+@pytest.mark.unit
+def test_parse_truncated_in_relations():
+    """relations 数组被截断时，已解析的 entities 应完整保留"""
+    from apps.graph.extractor import parse_llm_response
+    text = ('{"entities": [{"name": "a", "type": "TERM"}], '
+            '"relations": [{"source": "a", "target": "b", "type": "依赖", '
+            '"description": "a依赖')
+    result = parse_llm_response(text)
+    assert len(result['entities']) == 1
+    assert len(result['relations']) == 1
+    assert result['relations'][0]['description'] == 'a依赖'
+
+
+@pytest.mark.unit
+def test_parse_json_with_brace_in_string():
+    """描述字符串内含 } 不应导致 JSON 被按最后一个 } 错误截尾"""
+    from apps.graph.extractor import parse_llm_response
+    text = ('{"entities": [{"name": "http_method", "type": "TERM", '
+            '"description": "支持{GET, POST}等方法"}], "relations": []}')
+    result = parse_llm_response(text)
+    assert len(result['entities']) == 1
+    assert result['entities'][0]['description'] == '支持{GET, POST}等方法'
+
+
+@pytest.mark.unit
+def test_parse_truncated_escaped_quote_in_string():
+    """字符串含转义引号 \\" 时截断，应正确吸收且不破坏结构"""
+    from apps.graph.extractor import parse_llm_response
+    text = ('{"entities": [{"name": "a", "type": "TERM", '
+            '"description": "他说:\\"你好\\"，然后')
+    result = parse_llm_response(text)
+    assert len(result['entities']) == 1
+    assert result['entities'][0]['name'] == 'a'
+    assert '他说' in result['entities'][0]['description']
+
+
+# ============================================================================
 # extract_entities_and_relations：mock LLM
 # ============================================================================
 @pytest.mark.unit

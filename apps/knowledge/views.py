@@ -426,6 +426,32 @@ def _detect_file_type(filename: str) -> str:
 
 
 # ============================================================================
+# 上传 MIME 校验白名单（配合 _validate_upload_mime 使用）
+# ============================================================================
+# 文本类扩展名：libmagic 对纯文本按内容猜测语言（.md 内容含 Python 代码会识别为
+# text/x-script.python、.go 内容像 C 会识别为 text/x-c 等），因此不做精确匹配，
+# 只要检测结果是任意 text/* 或常见文本 MIME 即视为匹配。
+_TEXT_EXTENSIONS = {
+    '.md', '.markdown', '.txt', '.rst', '.csv',
+    '.py', '.java', '.go', '.js', '.ts', '.jsx', '.tsx',
+    '.c', '.cpp', '.h', '.rs',
+    '.yaml', '.yml', '.json', '.xml', '.toml', '.ini', '.conf', '.cfg',
+    '.sh', '.bat', '.ps1', '.css',
+}
+# libmagic 对部分文本格式返回非 text/* 的 MIME（json/xml/js/csv/yaml 等），
+# 检测结果落在这些值时同样视为合法文本，避免误拒
+_TEXT_MIMES = {
+    'application/json', 'application/xml', 'text/xml',
+    'application/javascript', 'text/javascript',
+    'application/csv', 'application/x-yaml', 'text/x-yaml',
+    'application/x-httpd-php',
+}
+# OOXML/zip 容器扩展名：部分 libmagic 版本对 zip 容器识别为 application/octet-stream，
+# 校验 zip 魔数（PK\x03\x04）确认真实容器后放行，保留对其他伪装的拦截
+_OCTET_STREAM_TOLERANT_EXTS = {'.docx', '.xlsx', '.pptx', '.wps', '.et', '.dps'}
+
+
+# ============================================================================
 # 文档活跃版本判定（同组文件：「新版本」 vs 「恰好同名的独立文档」）
 # ============================================================================
 # 文本类文件可直接读取内容做相似度判定；二进制（pdf/docx/xlsx 等）上传时无法
@@ -2408,12 +2434,8 @@ class DocumentUploadView(APIView):
             }
             expected_mime = ext_mime_map.get(ext)
             if expected_mime:
-                if isinstance(expected_mime, list):
-                    if detected_mime not in expected_mime:
-                        return Response({"detail": f"文件类型不匹配：扩展名显示为 {ext}，但实际文件类型为 {detected_mime}"}, status=400)
-                else:
-                    if detected_mime != expected_mime:
-                        return Response({"detail": f"文件类型不匹配：扩展名显示为 {ext}，但实际文件类型为 {detected_mime}"}, status=400)
+                if not self._validate_upload_mime(ext, detected_mime, file_content, expected_mime):
+                    return Response({"detail": f"文件类型不匹配：扩展名显示为 {ext}，但实际文件类型为 {detected_mime}"}, status=400)
         except Exception as e:
             logger.error(f"文件类型检测失败: {e}")
             return Response({"detail": "文件类型检测失败，请上传合法文件"}, status=400)
@@ -2663,6 +2685,39 @@ class DocumentUploadView(APIView):
                     return True
 
         return False
+
+    @staticmethod
+    def _validate_upload_mime(ext, detected_mime, file_content, expected_mime):
+        """校验上传文件 MIME 是否与扩展名匹配（防文件伪装）
+
+        libmagic 对纯文本按内容猜测语言：.md 内容含 Python 代码会被识别为
+        text/x-script.python、.go 内容像 C 会被识别为 text/x-c 等，扩展名才是
+        真实意图，因此文本类文件不做精确匹配，只要命中任意 text/* 或常见文本
+        MIME 即放行；OOXML/zip 容器（docx/xlsx/pptx 等）在部分 libmagic 版本下
+        误报 application/octet-stream，通过 zip 魔数（PK\\x03\\x04）确认真实容器后
+        放行。其余类型保持精确匹配，仍能拦截伪装文件。
+
+        Args:
+            ext: 文件扩展名（含点，小写）
+            detected_mime: libmagic 检测结果
+            file_content: 文件开头字节（用于 zip 魔数校验）
+            expected_mime: ext_mime_map 中该扩展名的预期 MIME（字符串或列表）
+        """
+        # 文本类：任意 text/* 或常见文本 MIME 均视为匹配
+        if ext in _TEXT_EXTENSIONS:
+            if detected_mime.startswith('text/') or detected_mime in _TEXT_MIMES:
+                return True
+            return False
+        # zip 容器类：octet-stream 时校验 zip 魔数后放行
+        if ext in _OCTET_STREAM_TOLERANT_EXTS:
+            if detected_mime == 'application/octet-stream':
+                return file_content[:4] == b'PK\x03\x04'
+            return detected_mime == expected_mime if isinstance(expected_mime, str) \
+                else detected_mime in expected_mime
+        # 其余类型：精确匹配（兼容字符串或列表配置）
+        if isinstance(expected_mime, list):
+            return detected_mime in expected_mime
+        return detected_mime == expected_mime
 
     def _save_file(self, f, node):
         from apps.knowledge.storage import get_document_storage, generate_node_storage_path

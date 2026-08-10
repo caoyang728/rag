@@ -13,10 +13,8 @@ apps.knowledge.parsers.pdf_parser 单元测试 —— PDF 解析器
 即可完全模拟各种 PDF 形态，无需真实 PDF 文件，也不涉及 ORM。
 
 已知实现缺陷（仅测试如实记录，不修改源码）：
-1. fitz 只在 parse() 内 `import fitz`（局部变量），_extract_images 中引用模块级
-   fitz 会抛 NameError，被逐图 except 捕获后降级为「空 base64 的错误图片块」，
-   即真实环境中图片永远无法成功提取（见 test_parse_image_extraction_bug 注释）。
-   成功路径（base64 编码 / 透明通道转换）通过直接打桩模块级 fitz 属性覆盖。
+1. 图片提取的 NameError（fitz 局部 import）缺陷已修复：fitz 改为 _get_fitz()
+   延迟获取，端到端图片提取可成功（见 test_parse_image_extraction）。
 2. 多栏重排与跨页句子合并的结果只影响章节识别，不影响最终文本块内容
    （_extract_text_blocks 内部会基于原始 text 重新切行），见对应测试注释。
 3. parse 不提供 page-range / chunk_size 选项（切片在 chunker 中处理），
@@ -43,6 +41,8 @@ def _word(text, x0, y0, size=10.0, font='Body', bold=False):
 def _make_page(text='', words=None, tables=None, images=None, is_inside=None):
     """构造一个模拟的 fitz 页面对象"""
     page = MagicMock()
+    # is_cross_page 计算需要 page.rect 的数值边界（y0/y1）
+    page.rect = MagicMock(y0=0, y1=842)
     word_tuples = list(words) if words is not None else []
 
     def _get_text(mode):
@@ -78,13 +78,14 @@ def _run_parse(parser, pages, open_error=None):
 
 def _make_table(content='| h1 | h2 |\n| a | b |', has_header=True, rows=2, cols=2,
                 is_spanning=False):
-    """构造一个模拟的 PyMuPDF 表格对象"""
+    """构造一个模拟的 PyMuPDF 1.28 表格对象（row_count/col_count/bbox API）"""
     tab = MagicMock()
     tab.to_markdown.return_value = content
     tab.header = None if not has_header else MagicMock()
-    tab.rows = rows
-    tab.cols = cols
-    tab.is_spanning = is_spanning
+    tab.row_count = rows
+    tab.col_count = cols
+    # is_cross_page 由 bbox 是否超出页面上下边界计算得出（页面高 842）
+    tab.bbox = (50, 100, 500, 900) if is_spanning else (50, 100, 500, 220)
     return tab
 
 
@@ -270,15 +271,17 @@ def test_parse_cross_page_table_merge(mock_logger):
 
 
 @patch('apps.knowledge.parsers.pdf_parser.logger')
-def test_parse_image_extraction_bug(mock_logger):
-    """图片提取（真实行为）：fitz 仅作为局部变量 import 在 parse() 内，
-    _extract_images 引用模块级 fitz 时抛 NameError，被逐图 except 捕获后
-    降级为 base64 为空的错误图片块——图片无法成功提取是现有实现缺陷。
-    此测试如实记录当前行为；成功路径见 test_extract_images_*"""
+def test_parse_image_extraction(mock_logger):
+    """图片提取（端到端）：fitz 通过 _get_fitz() 延迟获取，图片应成功提取为
+    base64 数据（修复前因模块级 fitz 缺失会抛 NameError 而降级为空 base64）"""
     parser = PDFParser()
-    # 即使 Pixmap mock 本身可用，也会先撞上模块级 fitz 缺失导致的 NameError
+    pix = MagicMock()
+    pix.n = 4
+    pix.width = 100
+    pix.height = 50
+    pix.tobytes.return_value = b'PNGDATA'
     fitz_mock = MagicMock()
-    fitz_mock.Pixmap.return_value = MagicMock()
+    fitz_mock.Pixmap.return_value = pix
     with patch.dict('sys.modules', {'fitz': fitz_mock}):
         doc = _make_doc([_make_page(text='', images=[(1, 0, 0, 0, 0, 0, 0)])])
         fitz_mock.open.return_value = doc
@@ -287,9 +290,10 @@ def test_parse_image_extraction_bug(mock_logger):
     assert len(blocks) == 1
     img = blocks[0]
     assert img['type'] == 'image'
-    assert img['content'] == '[图片 P1#1 xref=1]'
-    assert img['extra']['base64_data'] == ''
-    assert 'fitz' in img['extra']['error']
+    assert img['content'] == '[图片 P1#1]'
+    assert img['extra']['base64_data'] == base64.b64encode(b'PNGDATA').decode('utf-8')
+    assert img['extra']['width'] == 100
+    assert img['extra']['height'] == 50
 
 
 # ============================================================================
@@ -554,6 +558,7 @@ def test_extract_tables_normal(mock_logger):
     parser = PDFParser()
     tab = _make_table(content='| a | b |\n| 1 | 2 |', has_header=True, rows=2, cols=2, is_spanning=True)
     page = MagicMock()
+    page.rect = MagicMock(y0=0, y1=842)  # is_cross_page 计算需要数值边界
     page.find_tables.return_value = MagicMock(tables=[tab])
     tables = parser._extract_tables(page, 3, '章节')
 
@@ -581,20 +586,26 @@ def test_extract_tables_error(mock_logger):
 
 
 def test_extract_merge_info_returns_empty():
-    """合并单元格信息提取：当前实现仅遍历不做处理，恒返回空列表"""
+    """合并单元格信息提取：extract 网格中没有 None 单元格（无合并）时返回空列表"""
     parser = PDFParser()
     tab = MagicMock()
-    tab.rows = 2
-    tab.cols = 2
+    tab.extract.return_value = [['a', 'b'], ['c', 'd']]
     assert parser._extract_merge_info(tab) == []
 
 
-def test_extract_merge_info_exception():
-    """遍历表格单元格抛异常（rows 非 int 导致 range 失败）时静默降级，返回空列表"""
+def test_extract_merge_info_merged_cell():
+    """存在合并单元格（extract 网格中出现 None）时记录其位置"""
     parser = PDFParser()
     tab = MagicMock()
-    tab.rows = 'x'  # 非 int → range('x') 抛 TypeError，被 except 吞掉
-    tab.cols = 2
+    tab.extract.return_value = [['a', None], ['c', 'd']]
+    assert parser._extract_merge_info(tab) == [{'row': 0, 'col': 1, 'span': 'merged'}]
+
+
+def test_extract_merge_info_exception():
+    """遍历表格单元格抛异常时静默降级，返回空列表"""
+    parser = PDFParser()
+    tab = MagicMock()
+    tab.extract.side_effect = Exception('boom')
     assert parser._extract_merge_info(tab) == []
 
 
@@ -669,10 +680,9 @@ def test_extract_text_blocks_find_tables_error(mock_logger):
 # 图片提取（直接打桩模块级 fitz，覆盖成功路径与异常路径）
 # ============================================================================
 def _run_extract_images(parser, pixmap_behavior):
-    """直接调用 _extract_images 并打桩模块级 fitz（create=True）：
-    源码中 fitz 仅在 parse() 局部 import（模块级不存在该名字），这里显式创建
-    模块属性以测试方法逻辑本身（成功路径）；parse 层的真实缺陷行为见
-    test_parse_image_extraction_bug"""
+    """直接调用 _extract_images 并打桩模块属性 fitz（create=True）：
+    _extract_images 通过 _get_fitz() 读取模块级 fitz，这里打桩以测试方法逻辑
+    本身（成功路径）；端到端 parse 层路径见 test_parse_image_extraction"""
     fitz_mock = MagicMock()
     fitz_mock.csRGB = 'csRGB'
     fitz_mock.Pixmap.side_effect = pixmap_behavior

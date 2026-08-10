@@ -875,6 +875,68 @@ class TestDocumentUploadBranch(KnowledgeViewsExtraBase):
         assert '文件类型不匹配' in resp.json()['detail']
 
     @pytest.mark.integration
+    @patch('apps.knowledge.tasks.parse_document')
+    @patch('apps.knowledge.views.magic')
+    def test_upload_md_detected_as_python_script_201(self, mock_magic, mock_parse):
+        """.md 内容被 libmagic 误判为 text/x-script.python → 放行（扩展名才是真实意图）"""
+        mock_magic.from_buffer.return_value = 'text/x-script.python'
+        upload = SimpleUploadedFile('说明.md', '# 标题\nprint("code")'.encode('utf-8'),
+                                    content_type='text/markdown')
+        resp = self.client.post(
+            '/api/v1/knowledge/documents/upload/',
+            data={'file': upload, 'node_id': self.category_node.id,
+                  'visibility_level': 'TEAM_ONLY'},
+            **_auth_headers(self.super_admin))
+        assert resp.status_code == 201
+
+    @pytest.mark.integration
+    @patch('apps.knowledge.tasks.parse_document')
+    @patch('apps.knowledge.views.magic')
+    def test_upload_go_detected_as_c_source_201(self, mock_magic, mock_parse):
+        """.go 内容被 libmagic 误判为 text/x-c → 放行（扩展名才是真实意图）"""
+        mock_magic.from_buffer.return_value = 'text/x-c'
+        upload = SimpleUploadedFile('main.go', b'package main\nfunc main() {}',
+                                    content_type='text/plain')
+        resp = self.client.post(
+            '/api/v1/knowledge/documents/upload/',
+            data={'file': upload, 'node_id': self.category_node.id,
+                  'visibility_level': 'TEAM_ONLY'},
+            **_auth_headers(self.super_admin))
+        assert resp.status_code == 201
+
+    @pytest.mark.integration
+    @patch('apps.knowledge.tasks.parse_document')
+    @patch('apps.knowledge.views.magic')
+    def test_upload_pptx_octet_stream_with_zip_magic_201(self, mock_magic, mock_parse):
+        """.pptx 被误判为 application/octet-stream，但含 zip 魔数 → 放行（真实 OOXML 容器）"""
+        mock_magic.from_buffer.return_value = 'application/octet-stream'
+        # PK\x03\x04 是 zip 本地文件头魔数（docx/xlsx/pptx 均为 zip 容器）
+        fake_pptx = b'PK\x03\x04' + b'\x00' * 64
+        upload = SimpleUploadedFile('演示.pptx', fake_pptx,
+                                    content_type='application/octet-stream')
+        resp = self.client.post(
+            '/api/v1/knowledge/documents/upload/',
+            data={'file': upload, 'node_id': self.category_node.id,
+                  'visibility_level': 'TEAM_ONLY'},
+            **_auth_headers(self.super_admin))
+        assert resp.status_code == 201
+
+    @pytest.mark.integration
+    @patch('apps.knowledge.views.magic')
+    def test_upload_pptx_octet_stream_without_zip_magic_400(self, mock_magic):
+        """.pptx 被误判为 application/octet-stream 且不含 zip 魔数 → 仍拦截（防伪装）"""
+        mock_magic.from_buffer.return_value = 'application/octet-stream'
+        upload = SimpleUploadedFile('伪装.pptx', b'\x00' * 64,
+                                    content_type='application/octet-stream')
+        resp = self.client.post(
+            '/api/v1/knowledge/documents/upload/',
+            data={'file': upload, 'node_id': self.category_node.id,
+                  'visibility_level': 'TEAM_ONLY'},
+            **_auth_headers(self.super_admin))
+        assert resp.status_code == 400
+        assert '文件类型不匹配' in resp.json()['detail']
+
+    @pytest.mark.integration
     @patch('apps.knowledge.views.magic')
     def test_upload_magic_error_400(self, mock_magic):
         """magic 检测异常 → 400 文件类型检测失败"""

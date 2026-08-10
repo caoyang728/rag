@@ -214,17 +214,16 @@ class TestGetQueueDepthSnapshot:
 
     @pytest.mark.unit
     def test_worker_stats_aggregated(self):
-        """active/reserved 聚合成 queued/active/idle 状态"""
+        """worker 状态从 Redis 读取（update_queue_depth 任务聚合写入）"""
         fake_r = MagicMock(name='redis_conn')
         fake_r.get.return_value = None
         fake_r.llen.return_value = 0
-        celery_app = MagicMock()
-        insp = MagicMock()
-        insp.active.return_value = {'worker1': ['t1', 't2']}   # 2 个 active，1 个忙
-        insp.reserved.return_value = {'worker1': ['t3']}       # 1 个 reserved
-        celery_app.control.inspect.return_value = insp
-        with patch('apps.analytics.realtime._get_redis_safe', return_value=fake_r), \
-             patch('rag_project.celery.app', celery_app):
+        pipe = MagicMock(name='pipeline')
+        # pipeline.get 按 active/queued/idle 顺序返回，execute 返回同值列表
+        pipe.get.side_effect = ['2', '1', '0']
+        pipe.execute.return_value = ['2', '1', '0']
+        fake_r.pipeline.return_value = pipe
+        with patch('apps.analytics.realtime._get_redis_safe', return_value=fake_r):
             result = realtime.get_queue_depth_snapshot()
         entry = result['default']
         assert entry['active'] == 2
@@ -233,14 +232,15 @@ class TestGetQueueDepthSnapshot:
         assert entry['failed'] is None
 
     @pytest.mark.unit
-    def test_inspect_unavailable_stats_none(self):
-        """inspect 不可用 → worker 状态全部为 None，队列长度仍正常返回"""
+    def test_worker_stats_missing_none(self):
+        """Redis 无 worker 状态键（任务未跑/不可用）→ worker 状态全部为 None，队列长度仍正常返回"""
         fake_r = MagicMock(name='redis_conn')
         fake_r.get.return_value = '1'
-        celery_app = MagicMock()
-        celery_app.control.inspect.side_effect = Exception('no workers')
-        with patch('apps.analytics.realtime._get_redis_safe', return_value=fake_r), \
-             patch('rag_project.celery.app', celery_app):
+        pipe = MagicMock(name='pipeline')
+        pipe.get.return_value = None
+        pipe.execute.return_value = [None, None, None]
+        fake_r.pipeline.return_value = pipe
+        with patch('apps.analytics.realtime._get_redis_safe', return_value=fake_r):
             result = realtime.get_queue_depth_snapshot()
         entry = result['default']
         assert entry['queued'] is None and entry['active'] is None

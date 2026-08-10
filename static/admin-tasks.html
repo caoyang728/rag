@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>任务看板 · 知库 Agent</title>
+	<link rel="stylesheet" href="/static/css/common.css">
+	<link rel="stylesheet" href="/static/css/layout.css">
+	<link rel="stylesheet" href="/static/css/admin-tasks.css">
+</head>
+
+<body>
+	<div id="topnav-container"></div>
+	<div class="layout">
+		<div id="sidebar-container"></div>
+		<div class="main main-flex">
+			<div class="page-header page-header-row">
+				<div class="flex items-baseline gap-10">
+					<div class="page-title">任务看板</div>
+					<div class="page-subtitle">Celery 任务执行状态与失败重试（每 30 秒自动刷新）</div>
+				</div>
+				<div class="page-header-actions">
+					<button class="btn btn-sm btn-outline" onclick="refreshAll()">🔄 刷新</button>
+				</div>
+			</div>
+
+			<!-- ===== 状态统计卡片 ===== -->
+			<div class="stats-grid" id="statsGrid">
+				<div class="card stat-card">
+					<div class="stat-num stat-success" id="statSuccess">-</div>
+					<div class="stat-label">成功</div>
+				</div>
+				<div class="card stat-card">
+					<div class="stat-num stat-failure" id="statFailure">-</div>
+					<div class="stat-label">失败</div>
+				</div>
+				<div class="card stat-card">
+					<div class="stat-num stat-running" id="statRunning">-</div>
+					<div class="stat-label">运行中</div>
+				</div>
+				<div class="card stat-card">
+					<div class="stat-num" id="statTotal">-</div>
+					<div class="stat-label">任务总数</div>
+				</div>
+				<div class="card stat-card">
+					<div class="stat-num" id="statAvg">-</div>
+					<div class="stat-label">平均耗时 (ms)</div>
+				</div>
+				<div class="card stat-card">
+					<div class="stat-num" id="statMax">-</div>
+					<div class="stat-label">最慢耗时 (ms)</div>
+				</div>
+			</div>
+
+			<!-- ===== 队列深度 ===== -->
+			<div class="card" style="margin-bottom:16px">
+				<div class="card-title" style="margin-bottom:12px">队列深度 <span class="text-sub text-sm" style="font-weight:400">（Redis 实时等待任务数，每分钟由队列监控任务更新）</span></div>
+				<div id="queueDepth" class="queue-depth">
+					<div class="empty"><div class="empty-text">加载中...</div></div>
+				</div>
+			</div>
+
+			<!-- ===== 任务日志列表 ===== -->
+			<div class="card flex flex-col overflow-hidden" style="flex:1;min-height:0">
+				<div class="flex items-center justify-between mb-16 shrink-0" style="gap:12px;flex-wrap:wrap">
+					<div class="card-title mb-0">任务执行日志 <span id="taskCount" class="text-sub text-sm" style="font-weight:400;margin-left:8px"></span></div>
+					<div class="flex items-center" style="gap:8px;flex-wrap:wrap">
+						<select id="filterStatus" class="input" style="width:auto" onchange="resetPageLoad()">
+							<option value="">全部状态</option>
+							<option value="pending">pending 待执行</option>
+							<option value="started">started 运行中</option>
+							<option value="success">success 成功</option>
+							<option value="failure">failure 失败</option>
+							<option value="retry">retry 重试中</option>
+							<option value="revoked">revoked 已撤销</option>
+						</select>
+						<input id="filterTaskName" class="input" style="width:200px" placeholder="任务名模糊搜索" onkeydown="if(event.key==='Enter')resetPageLoad()">
+						<button class="btn btn-sm btn-outline" onclick="resetPageLoad()">筛选</button>
+					</div>
+				</div>
+				<div id="taskTableWrap" class="task-table-wrap">
+					<table class="task-table">
+						<thead>
+							<tr>
+								<th style="width:26%">任务</th>
+								<th style="width:90px">状态</th>
+								<th style="width:70px">队列</th>
+								<th style="width:90px">耗时</th>
+								<th style="width:150px">开始时间</th>
+								<th style="width:60px">重试</th>
+								<th style="width:60px">操作</th>
+							</tr>
+						</thead>
+						<tbody id="taskList">
+							<tr><td colspan="7"><div class="empty"><div class="empty-text">加载中...</div></div></td></tr>
+						</tbody>
+					</table>
+				</div>
+				<div class="flex items-center justify-between" style="padding:10px 4px 0;gap:8px">
+					<div class="text-sub text-sm">第 <span id="pageInfo">1</span> 页</div>
+					<div class="flex items-center" style="gap:8px">
+						<button class="btn btn-sm btn-outline" id="prevPageBtn" onclick="changePage(-1)">上一页</button>
+						<button class="btn btn-sm btn-outline" id="nextPageBtn" onclick="changePage(1)">下一页</button>
+					</div>
+				</div>
+			</div>
+		</div>
+	</div>
+
+	<div id="mask" class="mask"></div>
+	<div id="toast-wrap" class="toast-wrap"></div>
+
+	<!-- ===== 任务详情弹窗（common.js 弹窗框架：.modal + showModal/closeModal） ===== -->
+	<div class="modal" id="taskDetailModal" style="width:640px;max-width:95vw">
+		<div class="modal-header">
+			<div class="modal-title">任务详情</div>
+			<button class="modal-close" onclick="closeModal('taskDetailModal')">&times;</button>
+		</div>
+		<div class="modal-body" style="padding:12px 20px;max-height:60vh;overflow:auto">
+			<div id="taskDetailBody"></div>
+		</div>
+		<div class="modal-footer">
+			<button class="btn-cancel" onclick="closeModal('taskDetailModal')">关闭</button>
+			<button class="btn-save hidden" id="detailRetryBtn" onclick="retryFromDetail()">重试此任务</button>
+		</div>
+	</div>
+
+	<!-- ===== 无权限模板 ===== -->
+	<template id="tmpl-no-permission">
+		<div class="flex items-center justify-center flex-col" style="height:100vh;color:var(--text-sub)">
+			<div style="font-size:48px;margin-bottom:16px">&#128274;</div>
+			<div style="font-size:16px">仅超级管理员或维护管理员可访问此页面</div>
+			<a href="/chat/" style="margin-top:16px;color:var(--primary)">返回首页</a>
+		</div>
+	</template>
+
+	<script src="/static/js/common.js"></script>
+	<script src="/static/js/api.js"></script>
+	<script src="/static/js/layout.js"></script>
+	<script src="/static/js/admin-tasks.js"></script>
+</body>
+
+</html>

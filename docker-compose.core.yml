@@ -25,8 +25,8 @@ services:
       TZ: Asia/Shanghai
     volumes:
       - .:/app
+      - ./media:/app/media
       - static_data:/app/staticfiles
-      - media_data:/app/media
     ports:
       # 开发直连 django（无 nginx），对外暴露 8000
       - "8000:8000"
@@ -46,7 +46,7 @@ services:
       TZ: Asia/Shanghai
     volumes:
       - .:/app
-      - media_data:/app/media
+      - ./media:/app/media
     command: ["celery", "-A", "rag_project", "worker", "-l", "info", "-Q", "default,parse,memory,email,analytics", "--concurrency=1"]
     networks:
       - data_network
@@ -70,8 +70,6 @@ services:
 volumes:
   static_data:
     name: rag_static_data
-  media_data:
-    name: rag_media_data
 
 networks:
   # 复用共享外部网络 data_network：postgres / redis 由其他项目部署并在该网络注册，

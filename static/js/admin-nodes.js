@@ -635,8 +635,8 @@ function renderDocList(docs) {
 
 /* ---- 渲染操作按钮（按权限） ---- */
 function isPreviewable(fileType) {
-	// 文本类文件可预览，二进制/PDF/Word 不可
-	return ['markdown', 'txt', 'code', 'config'].indexOf(fileType) !== -1;
+	// 可预览类型：文本/代码走行模式，PDF/Office 走页图模式（未知二进制类型 'other' 除外）
+	return ['markdown', 'txt', 'code', 'config', 'pdf', 'docx', 'spreadsheet', 'presentation'].indexOf(fileType) !== -1;
 }
 
 function renderDocActions(d) {

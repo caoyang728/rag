@@ -9,13 +9,16 @@ import difflib
 import magic
 import os
 import re
+import shutil
+import subprocess
 from loguru import logger
 import uuid as uuid_lib
 
 from django.conf import settings
+from django.core.cache import cache
 from django.db import transaction, models
 from django.db.models import Count
-from django.http import FileResponse, Http404
+from django.http import FileResponse, Http404, HttpResponse
 from django.utils import text as django_text
 from django.utils import timezone
 from rest_framework import viewsets, status
@@ -639,6 +642,236 @@ def _extract_presentation_preview(content: bytes, ext: str) -> str:
         return "[.ppt 旧版格式不支持预览，请下载查看或转换为 .pptx 格式]"
 
     return "不支持的演示文稿格式"
+
+
+# ============================================================================
+# 文档在线预览（按文件类型区分渲染形态）
+# ============================================================================
+# - pdf / Office(转PDF成功)：pymupdf 逐页渲染为 PNG 页图，天然按页分页
+# - Office(转PDF失败)：降级为行模式文本预览并返回降级提示
+# - code/config / txt/markdown/other：行模式——
+#   小文件（≤ _PREVIEW_WHOLE_MAX_LINES 行且 ≤ _PREVIEW_WHOLE_MAX_BYTES）整文件直出，
+#   大文件按行分块返回，前端触底追加（连续滚动）；行边界切片保证拼接无缝。
+# 权限统一走 resolve_doc_access：预览内容需 can_read（与 raw_content 一致）；
+# 原文件字节仅由 download（can_download）下发，预览接口不直接暴露原文件。
+MAX_PREVIEW_TEXT_BYTES = 50 * 1024 * 1024       # 文本提取上限（与 raw_content 一致）
+_PREVIEW_TEXT_PAGE_SIZE = 5000                  # 文本模式每页字符数（raw_content 旧分页兼容）
+_PREVIEW_WHOLE_MAX_LINES = 1000                 # 行模式整文件直出阈值：行数（渲染成本感知）
+_PREVIEW_WHOLE_MAX_BYTES = 512 * 1024           # 行模式整文件直出阈值：字节（兜底超长单行）
+_PREVIEW_CHUNK_LINES = 500                      # 行模式滚动分块行数（同时作为跳页换算粒度）
+_PREVIEW_IMAGE_MAX_WIDTH = 1400                 # 页图渲染目标宽度(px)，控制图片体积
+_PREVIEW_IMAGE_CACHE_TTL = 600                  # 页图缓存秒数
+_PREVIEW_PDF_CACHE_TTL = 3600                   # LibreOffice 转 PDF 产物缓存秒数
+_PREVIEW_OFFICE_TYPES = ('docx', 'spreadsheet', 'presentation')
+# 代码高亮语言推断：前端按 language 选取关键字表，后端只负责扩展名映射
+_CODE_LANGUAGE_BY_EXT = {
+    '.py': 'python', '.java': 'java', '.js': 'javascript', '.ts': 'typescript',
+    '.go': 'go', '.c': 'c', '.cpp': 'cpp', '.rs': 'rust', '.cs': 'csharp',
+    '.sh': 'shell', '.sql': 'sql', '.html': 'html', '.css': 'css',
+    '.php': 'php', '.rb': 'ruby',
+    '.json': 'json', '.yml': 'yaml', '.yaml': 'yaml', '.toml': 'toml',
+    '.ini': 'ini', '.conf': 'ini',
+}
+
+
+def _get_preview_tmp_dir():
+    """预览转换产物目录（统一放 scripts/tmp，禁止散落到项目其他位置）"""
+    d = os.path.join(settings.BASE_DIR, 'scripts', 'tmp', 'preview')
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _libreoffice_bin():
+    """LibreOffice 可执行文件路径（soffice/libreoffice 任一），未安装返回 None"""
+    return shutil.which('libreoffice') or shutil.which('soffice')
+
+
+def _libreoffice_available():
+    """检测容器是否安装 LibreOffice，决定 Office 文件能否转 PDF 页图预览"""
+    return _libreoffice_bin() is not None
+
+
+def _read_doc_bytes(doc, max_size=None):
+    """读取文档原始字节（本地路径或 OSS 签名 URL 拉取），供解析/预览复用"""
+    if doc.file_path.startswith('oss://'):
+        storage = get_document_storage()
+        url = storage.get_url(doc.file_path)
+        import requests
+        resp = requests.get(url, timeout=30, stream=True)
+        content = b''
+        for chunk in resp.iter_content(chunk_size=1024 * 1024):
+            content += chunk
+            if max_size and len(content) >= max_size:
+                return content[:max_size]
+        return content
+    if not os.path.exists(doc.file_path):
+        raise Http404("文件不存在")
+    with open(doc.file_path, 'rb') as f:
+        return f.read(max_size) if max_size else f.read()
+
+
+def _ensure_local_file(doc):
+    """本地文件直接返回路径；OSS 文件下载到 scripts/tmp 缓存后返回本地路径
+
+    页图渲染 / 页数统计会多次读取同一份文件，OSS 模式下载一次本地缓存，
+    避免每次预览请求都从 OSS 拉取（以 doc.id+file_size 为键，TTL 内复用）。
+    """
+    if not doc.file_path.startswith('oss://'):
+        if not os.path.exists(doc.file_path):
+            raise Http404("文件不存在")
+        return doc.file_path
+    cache_key = f'doc_preview:local:{doc.id}:{doc.file_size}'
+    cached = cache.get(cache_key)
+    if cached and os.path.exists(cached):
+        return cached
+    tmp_dir = _get_preview_tmp_dir()
+    local_path = os.path.join(tmp_dir, f'doc_{doc.id}_{doc.file_size}.bin')
+    with open(local_path, 'wb') as f:
+        f.write(_read_doc_bytes(doc))
+    cache.set(cache_key, local_path, _PREVIEW_IMAGE_CACHE_TTL)
+    return local_path
+
+
+def _office_to_pdf_path(doc):
+    """LibreOffice 将 Office 文档转 PDF，返回 PDF 路径；未安装/失败返回 None
+
+    产物以 doc.id + file_size 为键缓存路径，避免每次预览都重新起 LibreOffice
+    （首转较慢，转换结果 TTL 内复用）。
+    """
+    if not _libreoffice_available() or not doc.file_path:
+        return None
+    try:
+        cache_key = f'doc_preview:office2pdf:{doc.id}:{doc.file_size}'
+        cached = cache.get(cache_key)
+        if cached and os.path.exists(cached):
+            return cached
+        tmp_dir = _get_preview_tmp_dir()
+        src_name = f'doc_{doc.id}_{hashlib.md5(doc.file_path.encode("utf-8")).hexdigest()[:8]}' \
+                   f'{os.path.splitext(doc.file_name)[1].lower() or ".bin"}'
+        src_path = os.path.join(tmp_dir, src_name)
+        with open(src_path, 'wb') as f:
+            f.write(_read_doc_bytes(doc))
+        out_dir = os.path.join(tmp_dir, 'out')
+        os.makedirs(out_dir, exist_ok=True)
+        # 每个文档独立 UserInstallation 配置目录，避免并发转换时 LibreOffice 配置锁冲突
+        lo_profile = f'file://{os.path.join(tmp_dir, "lo_profile_" + str(doc.id))}'
+        subprocess.run(
+            [_libreoffice_bin(), '--headless', f'-env:UserInstallation={lo_profile}',
+             '--convert-to', 'pdf', '--outdir', out_dir, src_path],
+            timeout=120, check=True, capture_output=True,
+        )
+        pdf_path = os.path.join(out_dir, os.path.splitext(src_name)[0] + '.pdf')
+        if not os.path.exists(pdf_path):
+            return None
+        cache.set(cache_key, pdf_path, _PREVIEW_PDF_CACHE_TTL)
+        return pdf_path
+    except Exception as e:
+        logger.exception(f"Office to PDF convert failed doc={doc.id}: {e}")
+        return None
+
+
+def _get_preview_pdf_path(doc):
+    """返回可直接渲染的 PDF 路径（PDF 原文 / Office 转换产物）；不可用返回 None"""
+    if doc.file_type == 'pdf':
+        return _ensure_local_file(doc)
+    if doc.file_type in _PREVIEW_OFFICE_TYPES:
+        return _office_to_pdf_path(doc)
+    return None
+
+
+def _open_pdf_document(doc):
+    """打开可预览的 PDF（pymupdf），返回 fitz.Document；不可预览时返回 None"""
+    pdf_path = _get_preview_pdf_path(doc)
+    if not pdf_path:
+        return None
+    import fitz  # PyMuPDF
+    return fitz.open(pdf_path)
+
+
+def _pdf_page_count(doc):
+    """PDF 总页数（带缓存，避免每次预览请求都重新 open 计数）"""
+    cache_key = f'doc_preview:pages:{doc.id}:{doc.file_size}'
+    cached = cache.get(cache_key)
+    if cached:
+        return cached
+    pdf = _open_pdf_document(doc)
+    if pdf is None:
+        return 0
+    try:
+        n = pdf.page_count
+        cache.set(cache_key, n, _PREVIEW_PDF_CACHE_TTL)
+        return n
+    finally:
+        pdf.close()
+
+
+def _render_pdf_page_png(doc, page, width):
+    """渲染 PDF 第 page 页为 PNG 字节（带缓存，避免重复渲染占用 CPU）
+
+    width 为目标渲染宽度(px)：zoom 限制在 2x 以内防止超大页图；
+    页数越界或不可预览时返回 None，由调用方降级处理。
+    """
+    cache_key = f'doc_preview:img:{doc.id}:{page}:{width}:{doc.file_size}'
+    cached = cache.get(cache_key)
+    if cached:
+        return cached
+    pdf = _open_pdf_document(doc)
+    if pdf is None:
+        return None
+    try:
+        if page < 1 or page > pdf.page_count:
+            return None
+        p = pdf[page - 1]
+        import fitz  # PyMuPDF
+        zoom = min(2.0, width / max(p.rect.width, 1))
+        pix = p.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+        data = pix.tobytes('png')
+        cache.set(cache_key, data, _PREVIEW_IMAGE_CACHE_TTL)
+        return data
+    finally:
+        pdf.close()
+
+
+def _paginate_text(content, page, page_size):
+    """按字符数分页文本（尽量在换行符处断开，行为与 raw_content 一致）
+
+    返回 (页内容, 当前页, 总页数, 总字符数)；跨页处首/尾补省略号提示截断。
+    """
+    total_chars = len(content)
+    total_pages = max(1, (total_chars + page_size - 1) // page_size)
+    page = min(page, total_pages)
+    start = (page - 1) * page_size
+    end = start + page_size
+    # 尽量在换行符处断开，避免页首/页尾截断单词或半行
+    if end < total_chars:
+        newline_pos = content.find('\n', end - 100, end + 200)
+        if newline_pos != -1:
+            end = newline_pos + 1
+    current = content[start:end]
+    if start > 0:
+        current = '...' + current
+    if end < total_chars:
+        current = current + '...'
+    return current, page, total_pages, total_chars
+
+
+def _slice_content_lines(content, offset, limit):
+    """按行边界切片文本，返回 (行列表, 起始行号, 是否还有更多)
+
+    行边界切片而非按字符截断，保证前端连续滚动拼接时无断词、无省略号装饰。
+    """
+    lines = content.splitlines()
+    start = max(0, offset - 1)
+    end = min(start + limit, len(lines))
+    has_more = end < len(lines)
+    return lines[start:end], start + 1, has_more
+
+
+def _count_content_lines(content):
+    """统计文本行数（与 splitlines 口径一致，避免大文件物化整个行列表）"""
+    if not content:
+        return 0
+    return content.count("\n") + (0 if content.endswith("\n") else 1)
 
 
 def _build_tree(qs):
@@ -1353,7 +1586,154 @@ class DocumentViewSet(viewsets.ModelViewSet):
         return FileResponse(fp, as_attachment=True, filename=doc.file_name)
 
     # ------------------------------------------------------------------
-    # 原始内容预览：返回文档原始文本内容（支持分页，用于前端预览，不可复制）
+    # 文档在线预览：按文件类型区分渲染形态
+    # - image：PDF/Office 页图（天然按页，前端分页加载）
+    # - code / text：行模式（小文件整文件直出；大文件按行分块，前端连续滚动追加）
+    # 权限统一走 resolve_doc_access：预览内容需 can_read（与 raw_content 一致）；
+    # 原文件字节仅由 download（can_download）下发，预览接口不直接暴露原文件
+    # ------------------------------------------------------------------
+    @action(detail=True, methods=["get"])
+    def preview(self, request, pk=None):
+        doc = self.get_object()
+        if not self._access(doc)["can_read"]:
+            raise PermissionDenied("无权限预览此文档")
+        if not doc.file_path:
+            raise Http404("文件不存在")
+
+        file_type = doc.file_type or "other"
+        ext = os.path.splitext(doc.file_name)[1].lower()
+
+        # PDF：页图模式（pymupdf 渲染，前端按 PDF 页分页，页图不可复制）
+        if file_type == "pdf":
+            return Response({
+                "mode": "image",
+                "file_name": doc.file_name,
+                "file_type": file_type,
+                "format_label": "PDF",
+                "total_pages": _pdf_page_count(doc),
+                "page_url": f"/api/v1/knowledge/documents/{doc.id}/preview_page/?w=1200&page=",
+                "can_copy": False,
+            })
+
+        # Office（docx/spreadsheet/presentation）：LibreOffice 可用 → 页图模式；
+        # 未安装或转换失败 → 降级为行模式文本预览并返回降级提示
+        if file_type in _PREVIEW_OFFICE_TYPES:
+            if _office_to_pdf_path(doc):
+                return Response({
+                    "mode": "image",
+                    "file_name": doc.file_name,
+                    "file_type": file_type,
+                    "format_label": "Office 文档",
+                    "total_pages": _pdf_page_count(doc),
+                    "page_url": f"/api/v1/knowledge/documents/{doc.id}/preview_page/?w=1200&page=",
+                    "can_copy": False,
+                })
+            return self._line_mode_response(
+                doc, request, "text",
+                fallback_notice="未安装格式转换组件（LibreOffice），当前以文本模式预览，无法保留原始排版")
+
+        # 代码/配置：行模式 + 语法高亮语言
+        if file_type in ("code", "config"):
+            return self._line_mode_response(
+                doc, request, "code",
+                language=_CODE_LANGUAGE_BY_EXT.get(ext, "plaintext"))
+
+        # 文本及其他类型：行模式
+        return self._line_mode_response(doc, request, "text")
+
+    def _line_mode_response(self, doc, request, mode, language=None, fallback_notice=None):
+        """行模式预览响应（代码/文本）：小文件整文件直出，大文件按行分块
+
+        - whole=true：content 为全文，前端一次渲染（行号连续、无页缝）
+        - whole=false：content 为 offset 起的行块，前端触底追加拼接（连续滚动）
+        响应统一返回 total_lines / start_line / page_size_lines，供前端跳页换算行号。
+        """
+        text_content = self._get_document_text(doc, MAX_PREVIEW_TEXT_BYTES)
+        if text_content is None:
+            return Response({"error": "无法获取文件内容"}, status=500)
+        total_lines = _count_content_lines(text_content)
+        text_bytes = len(text_content.encode("utf-8"))
+        resp = {
+            "mode": mode,
+            "file_type": doc.file_type,
+            "file_name": doc.file_name,
+            "size": doc.file_size or text_bytes,
+            "total_lines": total_lines,
+            "page_size_lines": _PREVIEW_CHUNK_LINES,
+            "can_copy": False,
+        }
+        if language:
+            resp["language"] = language
+        if fallback_notice:
+            resp["fallback_notice"] = fallback_notice
+        # 小文件直出：行数与字节均未超阈值时一次返回全文，避免分块打断阅读
+        if total_lines <= _PREVIEW_WHOLE_MAX_LINES and text_bytes <= _PREVIEW_WHOLE_MAX_BYTES:
+            resp.update({
+                "whole": True,
+                "content": text_content,
+                "start_line": 1,
+                "total_pages": 1,
+            })
+            return Response(resp)
+        # 大文件分块：按 offset/limit 行切片，前端滚动触底追加
+        limit = min(max(100, int(request.query_params.get("limit", _PREVIEW_CHUNK_LINES))), 2000)
+        # offset 越界（如聊天引用页码超出文件长度）时收敛到最后一屏，避免返回空块
+        offset = max(1, int(request.query_params.get("offset", 1)))
+        if total_lines and offset > total_lines:
+            offset = max(1, total_lines - limit + 1)
+        lines, start_line, has_more = _slice_content_lines(text_content, offset, limit)
+        resp.update({
+            "whole": False,
+            "content": "\n".join(lines),
+            "start_line": start_line,
+            "has_more": has_more,
+            "offset": offset,
+        })
+        return Response(resp)
+
+    @action(detail=True, methods=["get"])
+    def preview_page(self, request, pk=None):
+        """返回 PDF/Office 预览页图（PNG），前端按页加载渲染
+
+        页数越界或不可渲染时返回 422，前端据此降级为文本模式。
+        """
+        doc = self.get_object()
+        if not self._access(doc)["can_read"]:
+            raise PermissionDenied("无权限预览此文档")
+        if not doc.file_path:
+            raise Http404("文件不存在")
+        page = max(1, int(request.query_params.get("page", 1)))
+        width = min(2000, max(400, int(request.query_params.get("w", _PREVIEW_IMAGE_MAX_WIDTH))))
+        png = _render_pdf_page_png(doc, page, width)
+        if png is None:
+            return Response({"detail": "该文件当前无法以页图模式预览"}, status=422)
+        return HttpResponse(png, content_type="image/png")
+
+    def _preview_text_response(self, doc, page, request, fallback_notice=None):
+        """文本模式预览响应（raw_content 旧分页兼容，按字符分页）"""
+        page_size = min(max(1000, int(request.query_params.get("page_size", _PREVIEW_TEXT_PAGE_SIZE))), 20000)
+        text_content = self._get_document_text(doc, MAX_PREVIEW_TEXT_BYTES)
+        if text_content is None:
+            return Response({"error": "无法获取文件内容"}, status=500)
+        current, cur_page, total_pages, total_chars = _paginate_text(text_content, page, page_size)
+        resp = {
+            "mode": "text",
+            "content": current,
+            "file_type": doc.file_type,
+            "file_name": doc.file_name,
+            "size": doc.file_size or total_chars,
+            "total_chars": total_chars,
+            "total_pages": total_pages,
+            "current_page": cur_page,
+            "page_size": page_size,
+            "can_copy": False,
+        }
+        if fallback_notice:
+            resp["fallback_notice"] = fallback_notice
+        return Response(resp)
+
+    # ------------------------------------------------------------------
+    # 原始内容预览（兼容旧版：返回纯文本内容，支持分页；preview 的文本模式复用同一逻辑）
     # ------------------------------------------------------------------
     @action(detail=True, methods=["get"])
     def raw_content(self, request, pk=None):
@@ -1362,77 +1742,19 @@ class DocumentViewSet(viewsets.ModelViewSet):
             raise PermissionDenied("无权限预览此文档")
         if not doc.file_path:
             raise Http404("文件不存在")
-
-        # 分页参数（每页字符数）
-        page = max(1, int(request.query_params.get("page", 1)))
-        page_size = min(max(1000, int(request.query_params.get("page_size", 5000))), 20000)  # 1k-20k 字符
-
-        # 获取完整文本内容（最大 50MB，超出则截断）
-        MAX_PREVIEW_SIZE = 50 * 1024 * 1024
-        text_content = self._get_document_text(doc, MAX_PREVIEW_SIZE)
-        
-        if text_content is None:
-            return Response({"error": "无法获取文件内容"}, status=500)
-        
-        total_chars = len(text_content)
-        total_pages = max(1, (total_chars + page_size - 1) // page_size)
-        page = min(page, total_pages)
-        
-        # 计算当前页内容（按字符数分页，尽量在段落边界处断开）
-        start = (page - 1) * page_size
-        end = start + page_size
-        
-        # 尽量在换行符处断开
-        if end < total_chars:
-            # 向后找最近的换行符
-            newline_pos = text_content.find('\n', end - 100, end + 200)
-            if newline_pos != -1:
-                end = newline_pos + 1  # 包含换行符
-        
-        current_content = text_content[start:end]
-        
-        # 添加上下文提示
-        if start > 0:
-            current_content = '...' + current_content
-        if end < total_chars:
-            current_content = current_content + '...'
-
-        return Response({
-            "content": current_content,
-            "file_type": doc.file_type,
-            "file_name": doc.file_name,
-            "size": doc.file_size or total_chars,
-            "total_chars": total_chars,
-            "total_pages": total_pages,
-            "current_page": page,
-            "page_size": page_size,
-            "can_copy": False,
-        })
+        return self._preview_text_response(
+            doc, max(1, int(request.query_params.get("page", 1))), request)
 
     def _get_document_text(self, doc, max_size):
-        """提取文档文本内容（内部方法）"""
-        content = None
-        if doc.file_path.startswith("oss://"):
-            storage = get_document_storage()
-            url = storage.get_url(doc.file_path)
-            try:
-                import requests
-                resp = requests.get(url, timeout=30, stream=True)
-                content = b""
-                for chunk in resp.iter_content(chunk_size=1024 * 1024):
-                    content += chunk
-                    if len(content) > max_size:
-                        content = content[:max_size]
-                        break
-            except Exception as e:
-                logger.error(f"OSS raw content fetch failed: {e}")
-                return None
-        else:
-            if not os.path.exists(doc.file_path):
-                raise Http404("文件不存在")
-            with open(doc.file_path, "rb") as f:
-                content = f.read(max_size)
-        
+        """提取文档文本内容（内部方法，复用 _read_doc_bytes 读取本地/OSS 字节）"""
+        try:
+            content = _read_doc_bytes(doc, max_size)
+        except Http404:
+            # 文件缺失必须向上抛 404，不能降级为 500（与旧 raw_content 行为一致）
+            raise
+        except Exception as e:
+            logger.error(f"raw content fetch failed: {e}")
+            return None
         return _extract_text_content(content, doc.file_type, doc.file_name)
 
     # ------------------------------------------------------------------

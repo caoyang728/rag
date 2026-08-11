@@ -170,6 +170,60 @@ class AgentWorkflowDetailView(APIView):
         })
 
 
+class WorkflowApprovalView(APIView):
+    """POST /api/v1/agent/workflows/<workflow_id>/approve/
+
+    工作流内嵌确认/拒绝（敏感工具节点的轻量级 HITL）。
+
+    与工单审批的区别：
+    - 工单审批（explicit approval 节点）：创建 TicketList，走正式审批流程，审批后由工单钩子恢复
+    - 内嵌确认（敏感工具节点）：不创建工单，前端直接调用此接口确认/拒绝，同步恢复工作流
+
+    Body: {"node_id": "xxx", "approved": true/false}
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, workflow_id):
+        from apps.agent.models import AgentWorkflow
+        from apps.agent.workflow.engine import resume_workflow
+
+        try:
+            workflow = AgentWorkflow.objects.get(id=workflow_id)
+        except AgentWorkflow.DoesNotExist:
+            return Response({"detail": "工作流不存在"}, status=404)
+        # 权限：仅发起人本人或超管可操作
+        if workflow.user_id != request.user.id and not request.user.is_super_admin:
+            return Response({"detail": "无权操作该工作流"}, status=403)
+        if workflow.status != 'waiting_approval':
+            return Response({"detail": f"工作流状态为 {workflow.status}，无需审批"}, status=400)
+
+        node_id = request.data.get('node_id')
+        approved = bool(request.data.get('approved', True))
+        if not node_id:
+            return Response({"detail": "node_id 必填"}, status=400)
+
+        # 校验节点存在且处于 blocked 状态
+        node_run = workflow.node_runs.filter(node_id=node_id).first()
+        if not node_run:
+            return Response({"detail": "节点不存在"}, status=404)
+        if node_run.status != 'blocked':
+            return Response({"detail": f"节点状态为 {node_run.status}，无需审批"}, status=400)
+
+        # 同步恢复工作流
+        try:
+            resume_workflow(workflow, node_id=node_id, approved=approved)
+        except Exception as e:
+            logger.exception(f'[WorkflowApproval] resume failed: workflow={workflow.id}')
+            return Response({"detail": f"恢复工作流失败: {e}"}, status=500)
+
+        return Response({
+            "workflow_id": workflow.id,
+            "node_id": node_id,
+            "approved": approved,
+            "status": workflow.status,
+        })
+
+
 class AgentWorkflowListView(APIView):
     """GET /api/v1/agent/workflows/?status=running
 

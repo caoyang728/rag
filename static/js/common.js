@@ -600,6 +600,180 @@ const OrgFilter = (function () {
 	return { init, load, getDeptId, getTeamId, describeScope };
 })();
 
+/* ============ 通用分页组件 Pagination ============ */
+/**
+ * 通用分页组件，支持对齐方式（居中/右侧）、每页条数切换，内置工具条视觉。
+ *
+ * 用法：
+ *   // 首次渲染（创建 DOM + 绑定事件）
+ *   Pagination.render({
+ *       container: '#ticketPagination',
+ *       page: 1,
+ *       totalPages: 10,
+ *       total: 200,
+ *       pageSize: 20,
+ *       align: 'center',              // 'center' | 'right'，默认 'right'
+ *       pageSizeOptions: [10,20,50],  // 不传则不显示条数下拉（位于右侧、统计信息旁）, 默认不使用
+ *       onPageChange: p => loadList(p),
+ *       onPageSizeChange: size => loadList(1, size),
+ *   });
+ *
+ *   // 后续刷新（仅更新状态 + 重绘，不重建 DOM）
+ *   Pagination.update({ page: 2, totalPages: 10, total: 200 });
+ *
+ *   // 销毁（清空容器内容）
+ *   Pagination.destroy();
+ *
+ * 间距与样式（见 common.css 分页组件段落）：
+ *   - 组件默认无外间距，需要留白时对 .pgn-wrap 设置 margin 即可
+ *   - 工具条背景：默认浅灰 + 顶部分隔线，覆盖 --pgn-bg（如 transparent 关闭）
+ *
+ * @type {{ render: Function, update: Function, destroy: Function }}
+ */
+const Pagination = (function () {
+	/** 当前实例内部状态 */
+	let _state = null;
+	/** 容器 DOM 引用 */
+	let _container = null;
+	/** 最近一次传入的配置（保留回调引用） */
+	let _opts = null;
+
+	/**
+	 * 生成窗口化页码数组。
+	 * 始终显示首页与末页，当前页前后各 1 页，跳过的用 '...' 占位。
+	 */
+	function _pageWindow(current, total) {
+		const show = [];
+		show.push(1);
+		if (current - 1 > 2) show.push('...');
+		for (let i = Math.max(2, current - 1); i <= Math.min(total - 1, current + 1); i++) show.push(i);
+		if (current + 1 < total - 1) show.push('...');
+		if (total > 1) show.push(total);
+		return show;
+	}
+
+	/** 内部渲染：根据 _state + _opts 重绘容器内容并重新绑定事件 */
+	function _render() {
+		if (!_container || !_state || !_opts) return;
+
+		const { page, totalPages, total, pageSize } = _state;
+		const align = _opts.align || 'right';
+		const showPageSize = Array.isArray(_opts.pageSizeOptions) && _opts.pageSizeOptions.length > 0;
+
+		// 对齐类名：center / right（默认）
+		const alignCls = align === 'center' ? ' pgn-center' : ' pgn-right';
+
+		// 每页条数下拉（右侧，与统计信息相邻）
+		let pageSizeHtml = '';
+		if (showPageSize) {
+			pageSizeHtml = '<select class="pgn-size-sel" aria-label="每页条数">' +
+				_opts.pageSizeOptions.map(n =>
+					`<option value="${n}"${n === pageSize ? ' selected' : ''}>${n} 条/页</option>`
+				).join('') +
+				'</select>';
+		}
+
+		// 页码按钮（当前页标记 aria-current 供读屏识别）
+		const pages = _pageWindow(page, totalPages);
+		const btnsHtml = pages.map(p => {
+			if (p === '...') return '<button class="pgn-btn pgn-ellipsis" disabled>…</button>';
+			const cls = p === page ? ' pgn-active' : '';
+			const cur = p === page ? ' aria-current="page"' : '';
+			return `<button class="pgn-btn${cls}" data-pg="${p}"${cur}>${p}</button>`;
+		}).join('');
+
+		// 组装：pgn-wrap 为组件根元素，pgn-bar 为工具条（背景+分隔线）。
+		// 布局：页码按钮组 + 统计信息 + 条数下拉（右侧分组，居中对齐时左右更平衡）
+		_container.innerHTML =
+			`<div class="pgn-wrap"><div class="pgn-bar${alignCls}">` +
+				`<button class="pgn-btn" data-pg="${page - 1}" aria-label="上一页" ${page <= 1 ? 'disabled' : ''}>上一页</button>` +
+				btnsHtml +
+				`<button class="pgn-btn" data-pg="${page + 1}" aria-label="下一页" ${page >= totalPages ? 'disabled' : ''}>下一页</button>` +
+				`<span class="pgn-info">第 ${page} / ${totalPages} 页，共 ${total} 条</span>` +
+				(pageSizeHtml ? `<div>${pageSizeHtml}</div>` : '') +
+			'</div></div>';
+
+		// 页码按钮事件绑定
+		_container.querySelectorAll('.pgn-btn[data-pg]').forEach(btn => {
+			btn.addEventListener('click', () => {
+				if (btn.disabled) return;
+				const p = parseInt(btn.dataset.pg, 10);
+				if (!isNaN(p) && p >= 1 && p <= totalPages && p !== page) {
+					if (_opts.onPageChange) _opts.onPageChange(p);
+				}
+			});
+		});
+
+		// 每页条数下拉事件绑定
+		if (showPageSize) {
+			const sel = _container.querySelector('.pgn-size-sel');
+			if (sel) {
+				sel.addEventListener('change', () => {
+					const newSize = parseInt(sel.value, 10);
+					if (!isNaN(newSize) && newSize > 0 && newSize !== pageSize) {
+						if (_opts.onPageSizeChange) _opts.onPageSizeChange(newSize);
+					}
+				});
+			}
+		}
+	}
+
+	/**
+	 * 首次渲染：解析容器 + 创建内部状态 + 绘制
+	 * @param {Object} opts
+	 * @param {string|HTMLElement} opts.container  CSS 选择器或 DOM 元素
+	 * @param {number} opts.page                   当前页码（从 1 开始）
+	 * @param {number} opts.totalPages             总页数
+	 * @param {number} opts.total                  总记录数
+	 * @param {number} [opts.pageSize=20]          每页条数
+	 * @param {'center'|'right'} [opts.align='right']  对齐方式
+	 * @param {number[]} [opts.pageSizeOptions]    可选的每页条数选项（不传则不显示下拉）
+	 * @param {Function} [opts.onPageChange]       翻页回调 (page) => void
+	 * @param {Function} [opts.onPageSizeChange]   每页条数变更回调 (pageSize) => void
+	 */
+	function render(opts) {
+		_container = typeof opts.container === 'string'
+			? document.querySelector(opts.container)
+			: opts.container;
+		if (!_container) return;
+		_opts = opts;
+		_state = {
+			page: opts.page || 1,
+			totalPages: Math.max(1, opts.totalPages || 1),
+			total: opts.total || 0,
+			pageSize: opts.pageSize || 20,
+		};
+		// 总页数不足 1 页时清空容器，不渲染分页条
+		if (_state.totalPages <= 1) { _container.innerHTML = ''; return; }
+		_render();
+	}
+
+	/**
+	 * 更新状态并重绘（不重建容器引用和回调，适合翻页后刷新）
+	 * 只需传入变化的字段，未传入的保持上次值。
+	 * @param {Object} state  { page?, totalPages?, total?, pageSize? }
+	 */
+	function update(state) {
+		if (!_state) return;
+		if (state.page != null) _state.page = state.page;
+		if (state.totalPages != null) _state.totalPages = Math.max(1, state.totalPages);
+		if (state.total != null) _state.total = state.total;
+		if (state.pageSize != null) _state.pageSize = state.pageSize;
+		if (_state.totalPages <= 1) { if (_container) _container.innerHTML = ''; return; }
+		_render();
+	}
+
+	/** 销毁：清空容器内容并释放引用 */
+	function destroy() {
+		if (_container) _container.innerHTML = '';
+		_container = null;
+		_state = null;
+		_opts = null;
+	}
+
+	return { render, update, destroy };
+})();
+
 /* ============ Auth 守卫 ============ */
 function authGuard() {
 	const token = localStorage.getItem('rag_access');

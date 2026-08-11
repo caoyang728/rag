@@ -17,8 +17,6 @@ let expandedSet = new Set();      // 已展开过邻居的节点 id（避免重�
 let graphCenterId = null;         // 当前中心实体 id
 
 let communityPage = 1;
-let communityTotalPages = 1;
-let communityCount = 0;
 const communityDetailCache = {};  // 社区详情缓存（卡片展开只请求一次）
 
 /* ============ 初始化 ============ */
@@ -322,10 +320,22 @@ async function loadCommunities(page) {
 	list.innerHTML = '<div class="community-loading">🗂️ 加载中...</div>';
 	try {
 		const data = await api.getJson(`${GRAPH_API}/communities/?${params.toString()}`);
-		communityTotalPages = Math.max(1, Math.ceil((data.count || 0) / 20));
-		communityCount = data.count || 0;
+		const count = data.count || 0;
+		const totalPages = Math.max(1, Math.ceil(count / 20));
 		renderCommunities(data.results || []);
-		renderCommunityPagination();
+
+		// 使用公共 Pagination 组件渲染分页
+		const pgnState = { page: communityPage, totalPages, total: count, pageSize: 20 };
+		if (communityPage > 1) {
+			Pagination.update(pgnState);
+		} else {
+			Pagination.render({
+				container: '#communityPagination',
+				...pgnState,
+				align: 'center',
+				onPageChange: (p) => loadCommunities(p)
+			});
+		}
 	} catch (e) {
 		list.innerHTML = `<div class="empty" style="padding:60px 0"><div class="empty-icon" style="font-size:48px">😥</div><div>加载失败：${escapeHtml(e.message)}</div></div>`;
 	}
@@ -385,36 +395,6 @@ function openEntityFromCommunity(id) {
 	// 跳到图谱 Tab 并渲染该实体的关系子图
 	switchTab('graph');
 	loadSubgraph(id, 2);
-}
-
-function renderCommunityPagination() {
-	const container = $('#communityPagination');
-	if (!container) return;
-	if (communityTotalPages <= 1) { container.innerHTML = ''; return; }
-
-	const show = [];
-	const add = v => show.push(v);
-	add(1);
-	if (communityPage - 1 > 2) add('...');
-	for (let i = Math.max(2, communityPage - 1); i <= Math.min(communityTotalPages - 1, communityPage + 1); i++) add(i);
-	if (communityPage + 1 < communityTotalPages - 1) add('...');
-	add(communityTotalPages);
-
-	container.innerHTML = `
-    <button class="page-btn" data-page="${communityPage - 1}" ${communityPage <= 1 ? 'disabled' : ''}>上一页</button>
-    ${show.map(p => p === '...'
-		? `<span class="page-btn page-btn-ellipsis" disabled>…</span>`
-		: `<button class="page-btn ${p === communityPage ? 'active' : ''}" data-page="${p}">${p}</button>`).join('')}
-    <button class="page-btn" data-page="${communityPage + 1}" ${communityPage >= communityTotalPages ? 'disabled' : ''}>下一页</button>
-    <span class="ml-8">第 ${communityPage} / ${communityTotalPages} 页，共 ${communityCount} 条</span>`;
-
-	container.querySelectorAll('button[data-page]').forEach(btn => {
-		btn.addEventListener('click', () => {
-			if (btn.disabled) return;
-			const p = parseInt(btn.getAttribute('data-page'), 10);
-			if (!isNaN(p) && p >= 1 && p <= communityTotalPages) loadCommunities(p);
-		});
-	});
 }
 
 /* ============ 手动触发社区检测 ============ */

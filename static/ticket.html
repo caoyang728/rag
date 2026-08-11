@@ -23,9 +23,10 @@
 				</div>
 			</div>
 
-			<div class="card flex flex-col overflow-hidden flex-1 min-h-0">
+			<!-- 剔除 .card 的 padding/margin，改为各区域自行控制间距，保证分页组件上下间隔一致 -->
+			<div class="card flex flex-col overflow-hidden flex-1 min-h-0" style="padding:0;margin:0">
 				<!-- 视角切换 + 筛选工具栏 -->
-				<div class="flex items-center gap-8 mb-8 shrink-0 border-b" style="padding-bottom:12px;flex-wrap:wrap;">
+				<div class="flex items-center gap-8 mb-8 shrink-0 border-b" style="padding:14px 14px 12px;flex-wrap:wrap;">
 					<button id="tab-pending" class="tab-btn tab-active" onclick="switchView('pending')">
 						待我审批
 						<span id="badge-pending" class="badge badge-danger hidden">0</span>
@@ -68,7 +69,7 @@
 
 				<!-- 工单列表（四视角共用） -->
 				<div class="flex flex-col flex-1 min-h-0">
-					<div class="card-scroll">
+					<div class="card-scroll" style="padding:0 14px">
 						<table class="table">
 							<thead>
 								<tr>
@@ -90,8 +91,8 @@
 							</tbody>
 						</table>
 					</div>
-					<!-- 分页条：每次返回 20 条，页码/总条数由 _renderPagination 渲染 -->
-					<div id="ticketPagination" class="pagination"></div>
+					<!-- 分页条：通用 Pagination 组件，居中对齐，支持每页条数切换；间距由组件默认 6px 控制 -->
+					<div id="ticketPagination"></div>
 				</div>
 			</div>
 		</div>

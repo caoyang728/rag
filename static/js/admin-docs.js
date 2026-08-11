@@ -6,15 +6,30 @@
  * - 普通用户直接跳回首页并提示无权限
  *
  * 功能模块：
- * 1. 待审文档列表：拉取待审核 / 待复核 文档
- * 2. 详情弹窗：展示文档元信息 + 摘要预览（本期仅元信息）
- * 3. 审核动作：通过（备注选填）/ 驳回（理由必填，支持 Ctrl+Enter 提交）
+ * 1. Tab 列表：待审核（pending_team/pending_compliance）/ 已驳回（rejected）/ 审核记录（doc_audit 操作日志）
+ * 2. 列表分页：复用公共 Pagination 组件（common.js），翻页/切条数走请求序号守卫
+ * 3. 详情弹窗：展示文档元信息 + 驳回理由（已驳回时）+ 摘要预览入口
+ * 4. 摘要预览：点击「文档摘要」区域打开二级预览弹窗（公共模块 preview-doc.js）
+ * 5. 审核动作：通过（备注选填）/ 驳回（理由必填，支持 Ctrl+Enter 提交）
  * ============================================================================ */
 
 // 当前正在审核的文档对象
 let _currentDoc = null;
 // 提交防重锁（防止审核通过/驳回重复提交）
 let _submitting = false;
+
+/* ============ Tab 列表状态 ============ */
+// 当前 tab：pending=待审核 / rejected=已驳回 / records=审核记录
+let _auditTab = 'pending';
+// 分页状态
+let _auditPage = 1;
+let _auditPageSize = 20;
+let _auditTotal = 0;
+let _paginationInited = false;
+// 当前列表数据（供弹窗与预览元信息查找）
+let _currentDocs = [];
+// 请求序号守卫：异步响应返回时丢弃过期数据，防止旧响应覆盖新状态
+let _requestSeq = 0;
 
 /* ============ 页面启动 ============ */
 document.addEventListener('DOMContentLoaded', () => {
@@ -27,8 +42,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
 	// 顶栏 / 侧栏 / 全局搜索 已由 common.js 的 DOMContentLoaded 注入，无需重复
 
-	// 加载待审文档列表
-	loadDocList();
+	// 加载待审核文档列表
+	loadAuditList();
 });
 
 /* ---------- 页面级权限判断 ---------- */
@@ -38,44 +53,153 @@ function _canAccessPage() {
 }
 
 /* ============================================================================
- * 待审文档 —— 列表加载
+ * Tab 列表 —— 切换 / 加载 / 渲染
  * ============================================================================ */
-function loadDocList() {
+
+/* ---------- 切换 tab（重置页码并加载） ---------- */
+function switchAuditTab(tab) {
+	if (!['pending', 'rejected', 'records'].includes(tab)) return;
+	_auditTab = tab;
+	_auditPage = 1;
+	// 切换 tab 后需重建分页（容器可能已被 Pagination.destroy 清空）
+	_paginationInited = false;
+	document.querySelectorAll('.tab-item').forEach(el => {
+		el.classList.toggle('active', el.getAttribute('data-tab') === tab);
+	});
+	loadAuditList();
+}
+
+/* ---------- 当前 tab 的接口地址 ---------- */
+function _auditApiUrl() {
+	return {
+		pending: '/api/v1/knowledge/documents/pending-audits/',
+		rejected: '/api/v1/knowledge/documents/audit-rejected/',
+		records: '/api/v1/knowledge/documents/audit-records/',
+	}[_auditTab];
+}
+
+/* ---------- 列表加载（带分页参数与请求序号守卫） ---------- */
+function loadAuditList(page) {
+	const seq = ++_requestSeq;
+	// 页码越界（如删除后回退）时由调用方传入修正后的页码
+	if (page) _auditPage = page;
+
 	const tbody = $('#docTable');
-	tbody.innerHTML = `<tr><td colspan="8" class="text-sub text-sm text-center" style="padding:30px">加载中...</td></tr>`;
-	api.getJson('/api/v1/knowledge/documents/pending-audits/')
+	const head = $('#docTableHead');
+	_renderTableHead(head);
+	tbody.innerHTML = `<tr><td colspan="${_auditTab === 'records' ? 5 : 8}" class="text-sub text-sm text-center" style="padding:30px">加载中...</td></tr>`;
+
+	api.getJson(`${_auditApiUrl()}?page=${_auditPage}&page_size=${_auditPageSize}`)
 		.then(res => {
+			// 过期响应丢弃
+			if (seq !== _requestSeq) return;
 			const rows = res?.rows || [];
-			if (!rows.length) {
-				tbody.innerHTML = `<tr><td colspan="8" class="text-sub text-sm text-center" style="padding:30px">暂无待审核文档</td></tr>`;
+			_currentDocs = rows;
+			_auditTotal = res?.count || 0;
+
+			// 数据量减少导致当前页越界时，回退到最后一页重新加载
+			const totalPages = Math.max(1, Math.ceil(_auditTotal / _auditPageSize));
+			if (_auditPage > totalPages) {
+				loadAuditList(totalPages);
 				return;
 			}
-			tbody.innerHTML = rows.map(_renderDocRow).join('');
-			// 绑定行点击事件：打开审核详情弹窗
-			tbody.querySelectorAll('[data-doc-id]').forEach(tr => {
-				tr.addEventListener('click', () => {
-					const id = +tr.getAttribute('data-doc-id');
-					const data = rows.find(r => r.id === id);
-					if (data) openDocModal(data);
+
+			if (!rows.length) {
+				tbody.innerHTML = `<tr><td colspan="${_auditTab === 'records' ? 5 : 8}" class="text-sub text-sm text-center" style="padding:30px">${_emptyTip()}</td></tr>`;
+				renderDocPagination();
+				return;
+			}
+			tbody.innerHTML = (_auditTab === 'records' ? rows.map(_renderRecordRow) : rows.map(_renderDocRow)).join('');
+			// 绑定行点击事件：打开审核详情弹窗（审核记录行不弹窗）
+			if (_auditTab !== 'records') {
+				tbody.querySelectorAll('[data-doc-id]').forEach(tr => {
+					tr.addEventListener('click', () => {
+						const id = +tr.getAttribute('data-doc-id');
+						const data = rows.find(r => r.id === id);
+						if (data) openDocModal(data);
+					});
 				});
-			});
+			}
+			renderDocPagination();
 		})
 		.catch(err => {
-			toast('加载待审核文档失败', 'error');
+			if (seq !== _requestSeq) return;
+			toast('加载文档列表失败', 'error');
 			console.error(err);
-			tbody.innerHTML = `<tr><td colspan="8" class="text-sub text-sm text-center" style="padding:30px;color:var(--danger)">加载失败，请稍后重试</td></tr>`;
+			tbody.innerHTML = `<tr><td colspan="${_auditTab === 'records' ? 5 : 8}" class="text-sub text-sm text-center" style="padding:30px;color:var(--danger)">加载失败，请稍后重试</td></tr>`;
 		});
 }
 
+/* ---------- 空列表提示 ---------- */
+function _emptyTip() {
+	return {
+		pending: '暂无待审核文档',
+		rejected: '暂无已驳回文档',
+		records: '暂无审核记录',
+	}[_auditTab];
+}
+
+/* ---------- 表头渲染（审核记录与其他 tab 列不同） ---------- */
+function _renderTableHead(head) {
+	if (!head) return;
+	head.innerHTML = _auditTab === 'records'
+		? `<tr>
+			<th>文档标题</th>
+			<th style="width:120px">操作</th>
+			<th style="width:120px">操作人</th>
+			<th>审批意见</th>
+			<th style="width:160px">时间</th>
+		</tr>`
+		: `<tr>
+			<th>文档标题</th>
+			<th style="width:90px">类型</th>
+			<th style="width:90px">密级</th>
+			<th>上传人</th>
+			<th style="width:120px">归属</th>
+			<th style="width:120px">阶段</th>
+			<th style="width:160px">上传时间</th>
+			<th style="width:100px">操作</th>
+		</tr>`;
+}
+
+/* ---------- 审核记录行 ---------- */
+function _renderRecordRow(r) {
+	const actionBadge = {
+		'审核通过': 'badge-info',
+		'复核通过': 'badge-success',
+		'驳回': 'badge-danger',
+	}[r.action_label] || 'badge-default';
+	return `
+	<tr class="table-row-hover">
+		<td>
+			<div class="flex items-center gap-8">
+				<div>
+					<div class="text-strong">${escapeHtml(r.document_title || '—')}</div>
+				</div>
+			</div>
+		</td>
+		<td><span class="badge ${actionBadge}">${escapeHtml(r.action_label)}</span></td>
+		<td class="text-sm">${escapeHtml(r.operator_name || '—')}</td>
+		<td class="text-sm text-sub">${escapeHtml(r.comment || '—')}</td>
+		<td class="text-sm text-sub">${formatDate(r.created_at)}</td>
+	</tr>`;
+}
+
+/* ============================================================================
+ * 待审核 / 已驳回 —— 行渲染
+ * ============================================================================ */
 function _renderDocRow(d) {
-	// 密级映射：1=公开, 2=内部, 3=秘密, 4=绝密
-	const secLvMap = { 1: '公开', 2: '内部', 3: '秘密', 4: '绝密' };
+	// 密级映射：1=普通, 2=内部, 3=机密, 4=绝密
+	const secLvMap = { 1: '普通', 2: '内部', 3: '机密', 4: '绝密' };
 	const secBadge = { 1: '', 2: 'badge-info', 3: 'badge-warn', 4: 'badge-danger' }[d.secret_level] || '';
-	// 审核阶段徽章：待审核 / 待复核
-	const auditBadge = d.audit_status === 'pending_team'
-		? '<span class="badge badge-warn">待审核</span>'
-		: '<span class="badge badge-info">待复核</span>';
 	const belong = [d.dept_name, d.team_name].filter(Boolean).join(' / ');
+	// 阶段：仅展示状态徽章（统一使用 badge-warn 样式，不再显示审核步骤说明）
+	const stageText = d.audit_status === 'rejected' ? '已驳回'
+		: d.audit_status === 'pending_compliance' ? '待复核' : '待审核';
+	const stageHtml = `<span class="badge badge-warn">${stageText}</span>`;
+	// 文件名与标题相同时不重复展示（避免标题下方文件名重复出现）
+	const fileSub = d.file_name && d.file_name !== d.title
+		? `<div class="text-sub text-xs">${escapeHtml(d.file_name)}</div>` : '';
 	return `
 	<tr class="table-row-hover" data-doc-id="${d.id}" style="cursor:pointer">
 		<td>
@@ -83,21 +207,16 @@ function _renderDocRow(d) {
 				<span style="font-size:16px">${_iconForFileType(d.file_type)}</span>
 				<div>
 					<div class="text-strong">${escapeHtml(d.title)}</div>
-					<div class="text-sub text-xs">${escapeHtml(d.file_name || '')}</div>
+					${fileSub}
+					${d.reject_comment ? `<div class="text-xs" style="color:var(--danger)">驳回：${escapeHtml(d.reject_comment)}</div>` : ''}
 				</div>
 			</div>
 		</td>
 		<td class="text-sm">${escapeHtml(d.file_type || '—')}</td>
 		<td>${secLvMap[d.secret_level] ? `<span class="badge ${secBadge}">${secLvMap[d.secret_level]}</span>` : '—'}</td>
-		<td>
-			<div>${escapeHtml(d.owner_name)}</div>
-			<div class="text-sub text-xs">${escapeHtml(d.owner_email || '')}</div>
-		</td>
+		<td class="text-sm">${escapeHtml(d.owner_username || d.owner_name || '—')}</td>
 		<td class="text-sm">${escapeHtml(belong || '—')}</td>
-		<td>
-			${auditBadge}
-			<div class="text-sub text-xs mt-4">${escapeHtml(d.audit_step || '')}</div>
-		</td>
+		<td>${stageHtml}</td>
 		<td class="text-sm text-sub">${formatDate(d.created_at)}</td>
 		<td>
 			<button class="btn btn-sm btn-primary">处理</button>
@@ -106,17 +225,52 @@ function _renderDocRow(d) {
 }
 
 /* ============================================================================
- * 待审文档 —— 详情弹窗
+ * 分页：复用公共 Pagination 组件（common.js）。
+ * 首次 render 绑定回调，后续 update 仅刷新页码状态；切换每页条数后重置回第 1 页
+ * ============================================================================ */
+function renderDocPagination() {
+	const totalPages = Math.max(1, Math.ceil(_auditTotal / _auditPageSize));
+	if (!_paginationInited) {
+		Pagination.render({
+			container: '#docPagination',
+			page: _auditPage,
+			totalPages: totalPages,
+			total: _auditTotal,
+			pageSize: _auditPageSize,
+			align: 'right',
+			// pageSizeOptions: [10, 20, 50],
+			onPageChange(p) { loadAuditList(p); },
+			onPageSizeChange(size) { _auditPageSize = size; loadAuditList(1); },
+		});
+		_paginationInited = true;
+	} else {
+		Pagination.update({
+			page: _auditPage,
+			totalPages: totalPages,
+			total: _auditTotal,
+			pageSize: _auditPageSize,
+		});
+	}
+}
+
+/* ============================================================================
+ * 文档详情弹窗
  * ============================================================================ */
 function openDocModal(d) {
 	_currentDoc = d;
-	$('#docModalTitle').textContent = '文档审核 · ' + (d.audit_status === 'pending_team' ? '团队组长审核' : '合规复核');
-	// 可见性 / 密级 文案映射
-	const visMap = { 1: '全局公开', 2: '部门内可见', 3: '团队内可见', 4: '私有' };
-	const secLvMap = { 1: '公开', 2: '内部', 3: '秘密', 4: '绝密' };
+	// 弹窗标题：按状态区分（已驳回/待审核/待复核）
+	$('#docModalTitle').textContent = _docModalTitle(d);
+	// 可见性 / 密级 文案映射（可见性为字符串枚举 TEAM_ONLY/DEPT_ONLY/PUBLIC）
+	const visMap = { 'PUBLIC': '全局公开', 'DEPT_ONLY': '部门内可见', 'TEAM_ONLY': '团队内可见' };
+	const secLvMap = { 1: '普通', 2: '内部', 3: '机密', 4: '绝密' };
 	const belong = [d.dept_name, d.team_name].filter(Boolean).join(' / ');
 	const fileSizeTxt = d.file_size ? formatFileSize(d.file_size) : '—';
-	const isPendingTeam = d.audit_status === 'pending_team';
+	// 版本：version_tag 已含 v 前缀（如 v1），无标签时兜底 v{version}
+	const versionTxt = d.version_tag || ('v' + (d.version || 1));
+	const isRejected = d.audit_status === 'rejected';
+	// 文件名与标题相同时不重复展示（避免标题下方文件名重复出现）
+	const fileSub = d.file_name && d.file_name !== d.title
+		? `<div class="detail-cell-sub">${escapeHtml(d.file_name)}</div>` : '';
 	// 取上传人姓名首字作为头像占位
 	const avatarChar = (d.owner_name || '?').charAt(0).toUpperCase();
 
@@ -125,7 +279,7 @@ function openDocModal(d) {
 			<div class="applicant-avatar">${escapeHtml(avatarChar)}</div>
 			<div class="applicant-info">
 				<div class="applicant-name">${escapeHtml(d.owner_name)}</div>
-				<div class="applicant-meta">${escapeHtml(d.owner_email || '')}</div>
+				<div class="applicant-meta">账号：${escapeHtml(d.owner_username || '—')}</div>
 			</div>
 			<div class="applicant-time">
 				<div class="applicant-time-label">上传时间</div>
@@ -137,20 +291,27 @@ function openDocModal(d) {
 		<div class="detail-grid">
 			<div class="detail-cell" style="grid-column:1/-1">
 				<div class="detail-cell-label">文档标题</div>
-				<div class="detail-cell-value">${escapeHtml(d.title)}</div>
-				<div class="detail-cell-sub">${escapeHtml(d.file_name || '')}</div>
+				<div class="doc-title-row">
+					<div class="doc-title-main">
+						<div class="detail-cell-value">${escapeHtml(d.title)}</div>
+						${fileSub}
+					</div>
+					<button class="btn btn-sm btn-outline doc-preview-btn" onclick="previewDoc(${d.id})">👁 预览</button>
+				</div>
 			</div>
 			<div class="detail-cell">
 				<div class="detail-cell-label">当前阶段</div>
 				<div class="detail-cell-value">
-					${isPendingTeam
-						? '<span class="badge badge-warn">待审核（团队组长）</span>'
-						: '<span class="badge badge-info">待复核（合规/部门经理）</span>'}
+					${isRejected
+						? '<span class="badge badge-danger">已驳回</span>'
+						: d.audit_status === 'pending_compliance'
+							? '<span class="badge badge-info">待复核</span>'
+							: '<span class="badge badge-warn">待审核</span>'}
 				</div>
 			</div>
 			<div class="detail-cell">
 				<div class="detail-cell-label">版本</div>
-				<div class="detail-cell-value">v${d.version || 1}${d.version_tag ? ' · ' + escapeHtml(d.version_tag) : ''}</div>
+				<div class="detail-cell-value">${escapeHtml(versionTxt)}</div>
 			</div>
 			<div class="detail-cell">
 				<div class="detail-cell-label">文件类型</div>
@@ -164,32 +325,46 @@ function openDocModal(d) {
 				<div class="detail-cell-label">密级</div>
 				<div class="detail-cell-value">${secLvMap[d.secret_level] || '—'}</div>
 			</div>
-			<div class="detail-cell" style="grid-column:1/-1">
+			<div class="detail-cell">
 				<div class="detail-cell-label">归属路径</div>
 				<div class="detail-cell-value">
 					${belong ? escapeHtml(belong) : '—'}
-					${d.node_name ? ` <span class="detail-cell-sub">（节点：${escapeHtml(d.node_name)}）</span>` : ''}
+					${d.node_name ? `<span class="detail-cell-sub">（节点：${escapeHtml(d.node_name)}）</span>` : ''}
 				</div>
 			</div>
+			${isRejected ? `
+			<div class="detail-cell" style="grid-column:1/-1">
+				<div class="detail-cell-label">驳回理由</div>
+				<div class="detail-cell-value" style="color:var(--danger)">${escapeHtml(d.reject_comment || '—')}</div>
+				<div class="detail-cell-sub">驳回时间：${d.rejected_at ? formatDate(d.rejected_at) : '—'}</div>
+			</div>` : ''}
 		</div>
 
-		<div class="flex mt-20">
-			<a class="btn btn-sm btn-outline" href="/admin-nodes/?doc_id=${encodeURIComponent(d.uuid)}" target="_blank" rel="noopener">
-				🔗 在知识库中查看
-			</a>
-		</div>
-
-		<div class="detail-section-title">文档摘要</div>
-		<div class="doc-summary-box">
-			<div class="doc-summary-meta">
-				<span>${_iconForFileType(d.file_type)}</span>
-				<span class="text-strong">${escapeHtml(d.file_name || d.title)}</span>
-				<span class="text-sub text-sm">${escapeHtml(d.file_type || '—')} · ${fileSizeTxt}</span>
-			</div>
-			<div class="doc-summary-tip">📄 完整内容预览功能开发中</div>
+		<div class="detail-section-title">敏感词检测</div>
+		<div class="doc-scan-todo">
+			<span class="doc-scan-todo-icon">⚠</span>
+			<span>敏感词自动检测待接入（TODO），后续在此展示检测结果</span>
 		</div>
 	`;
+	// 已驳回文档不可再审核：隐藏通过/拒绝按钮
+	$('#btnDocApprove').style.display = isRejected ? 'none' : '';
+	$('#btnDocReject').style.display = isRejected ? 'none' : '';
 	showModal('docModal');
+}
+
+/* ---------- 弹窗标题：按审核状态生成 ---------- */
+function _docModalTitle(d) {
+	const title = escapeHtml(d.title);
+	if (d.audit_status === 'rejected') return '文档详情 · ' + title;
+	return '文档审核 · ' + title;
+}
+
+/* ============================================================================
+ * 文档预览（二级弹窗由公共模块 preview-doc.js 实现）
+ * ============================================================================ */
+// 预览元信息来源：当前列表数据中按 id 查找，找不到返回 null
+function getDocForPreview(id) {
+	return Promise.resolve((_currentDocs || []).find(x => x.id === id) || null);
 }
 
 /* ============================================================================
@@ -272,7 +447,7 @@ function _submitDocApprove(id, comment) {
 				toast(nextLabel, 'success');
 				closeModal('docModal');
 				_currentDoc = null;
-				loadDocList();
+				loadAuditList();
 			} else {
 				toast(res?.detail || '审核失败', 'error');
 			}
@@ -292,7 +467,7 @@ function _submitDocReject(id, comment) {
 				toast('文档已驳回', 'success');
 				closeModal('docModal');
 				_currentDoc = null;
-				loadDocList();
+				loadAuditList();
 			} else {
 				toast(res?.detail || '驳回失败', 'error');
 			}

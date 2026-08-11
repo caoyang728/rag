@@ -26,7 +26,6 @@
 	overflow: hidden;
 	display: flex;
 	flex-direction: column;
-	padding: 4px 2px 10px;
 }
 
 /* 本次上传面板：最多占满剩余空间，文件列表内部滚动；
@@ -81,6 +80,11 @@
 	overflow: hidden;
 }
 
+/* 分页容器：flex 列布局下固定高度，避免被表格区压缩 */
+#uploadHistorySection #uploadPagination {
+	flex-shrink: 0;
+}
+
 /* 表格滚动层：表头 sticky 固定，行内容内部滚动 */
 #uploadHistorySection .table-scroll {
 	flex: 1;
@@ -94,15 +98,6 @@
 	top: 0;
 	background: #f9fafb;
 	z-index: 1;
-}
-
-/* 分页与表格卡片一体：卡片内固定底部居中，淡灰线分割表格与分页 */
-#uploadHistorySection .pagination {
-	flex-shrink: 0;
-	justify-content: center;
-	background: var(--white);
-	border-top: 1px solid var(--border);
-	padding: 8px 16px;
 }
 
 .upload-drop {

@@ -503,6 +503,12 @@ var docListTotal = 0;
 var docListNodeFilter = null;   // 当前节点筛选（null=全部）
 var docListCurrentDocs = [];    // 当前页文档数据（用于权限判定）
 var docListSearchTimeout = null;  // 搜索防抖定时器
+/** 文档列表每页条数（可经公共分页组件切换，后端按 page_size 切片，上限 100） */
+var docListPageSize = 20;
+/** 分页组件是否已初始化（首次 render 绑定回调，后续仅 update 状态） */
+var docPaginationInited = false;
+/** 请求序号：防止快速连续操作（翻页/切条数/改筛选）时旧请求后返回覆盖新状态 */
+var docRequestSeq = 0;
 
 /* ---- 搜索输入防抖 ---- */
 function onDocSearchInput() {
@@ -559,8 +565,9 @@ function setDocNodeFilter(nodeId) {
 
 /* ---- 加载文档列表 ---- */
 function loadDocList(page) {
+	var seq = ++docRequestSeq;
 	docListPage = page || 1;
-	var params = ['discover=1', 'page=' + docListPage, 'page_size=20'];
+	var params = ['discover=1', 'page=' + docListPage, 'page_size=' + docListPageSize];
 
 	var search = (document.getElementById('docSearch').value || '').trim();
 	if (search) params.push('search=' + encodeURIComponent(search));
@@ -584,15 +591,24 @@ function loadDocList(page) {
 	tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text-sub);padding:24px">加载中...</td></tr>';
 
 	api.getJson(DOC_API + '/?' + params.join('&')).then(function (data) {
+		if (seq !== docRequestSeq) return; // 已有更新的请求发出，丢弃本次旧响应
 		var docs = data.results || data || [];
 		docListCurrentDocs = docs;
 		docListTotal = data.count || docs.length || 0;
+		// 数据量减少（文档被删除/恢复）导致当前页越界时，回退到最后一页重新加载
+		var totalPages = Math.max(1, Math.ceil(docListTotal / docListPageSize));
+		if (docListPage > totalPages) {
+			docListPage = totalPages;
+			loadDocList(docListPage);
+			return;
+		}
 		renderDocList(docs);
 		renderDocPagination();
 		// 更新计数
 		var countEl = document.getElementById('docListCount');
 		if (countEl) countEl.textContent = '（共 ' + docListTotal + ' 条）';
 	}).catch(function (e) {
+		if (seq !== docRequestSeq) return;
 		tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--danger);padding:24px">加载失败：' + escapeHtml(e.message || '') + '</td></tr>';
 	});
 }
@@ -660,50 +676,31 @@ function renderDocActions(d) {
 	return '<div class="table-actions">' + actions.join('') + '</div>';
 }
 
-/* ---- 分页（使用 tmpl-doc-pagination 模板） ---- */
+/* ---- 分页：复用公共 Pagination 组件（common.js）。
+  首次 render 绑定回调，后续 update 仅刷新页码状态；每页条数切换由后端按 page_size 重新切片 ---- */
 function renderDocPagination() {
-	var container = document.getElementById('docPagination');
-	if (!container) return;
-	var pageSize = 20;
-	var totalPages = Math.max(1, Math.ceil(docListTotal / pageSize));
-	var page = docListPage;
-
-	if (docListTotal === 0) { container.innerHTML = ''; return; }
-
-	var tmpl = document.getElementById('tmpl-doc-pagination');
-	var clone = tmpl.content.cloneNode(true);
-
-	clone.querySelector('.pg-total').textContent = docListTotal;
-
-	var prev = clone.querySelector('.pg-prev');
-	if (page > 1) {
-		prev.onclick = function () { loadDocList(page - 1); };
+	var totalPages = Math.max(1, Math.ceil(docListTotal / docListPageSize));
+	if (!docPaginationInited) {
+		Pagination.render({
+			container: '#docPagination',
+			page: docListPage,
+			totalPages: totalPages,
+			total: docListTotal,
+			pageSize: docListPageSize,
+			align: 'right',
+			pageSizeOptions: [10, 20, 50],
+			onPageChange: function (p) { loadDocList(p); },
+			onPageSizeChange: function (size) { docListPageSize = size; loadDocList(1); },
+		});
+		docPaginationInited = true;
 	} else {
-		prev.disabled = true;
+		Pagination.update({
+			page: docListPage,
+			totalPages: totalPages,
+			total: docListTotal,
+			pageSize: docListPageSize,
+		});
 	}
-
-	var numbersEl = clone.querySelector('.pg-numbers');
-	var numsHtml = '';
-	for (var i = 1; i <= totalPages; i++) {
-		if (totalPages <= 7 || i === 1 || i === totalPages || (i >= page - 2 && i <= page + 2)) {
-			numsHtml += i === page
-				? '<button class="page-btn active">' + i + '</button>'
-				: '<button class="page-btn" onclick="loadDocList(' + i + ')">' + i + '</button>';
-		} else if (i === page - 3 || i === page + 3) {
-			numsHtml += '<span>...</span>';
-		}
-	}
-	numbersEl.innerHTML = numsHtml;
-
-	var next = clone.querySelector('.pg-next');
-	if (page < totalPages) {
-		next.onclick = function () { loadDocList(page + 1); };
-	} else {
-		next.disabled = true;
-	}
-
-	container.innerHTML = '';
-	container.appendChild(clone);
 }
 
 /* ================================================================

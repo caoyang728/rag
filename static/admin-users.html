@@ -23,9 +23,9 @@
 				</div>
 			</div>
 
-			<div class="card flex flex-col overflow-hidden flex-1 min-h-0">
+			<div class="card flex flex-col overflow-hidden flex-1 min-h-0" style="padding:0">
 				<!-- 工具栏 -->
-				<div class="flex items-center justify-between mb-8 shrink-0 flex-wrap gap-8">
+				<div class="user-toolbar flex items-center justify-between shrink-0 flex-wrap gap-8">
 					<div class="flex gap-8 items-center flex-wrap">
 						<form class="hidden">
 							<input type="text" autocomplete="username" readonly>
@@ -82,16 +82,8 @@
 					</table>
 				</div>
 
-				<!-- 分页 -->
-				<div class="flex items-center justify-center mt-16 shrink-0 gap-10">
-					<span class="text-sub text-sm" id="paginationInfo"></span>
-					<select id="pageSizeSelect" class="select page-size-select" onchange="onPageSizeChange()">
-						<option value="20">20 条</option>
-						<option value="50">50 条</option>
-						<option value="100">100 条</option>
-					</select>
-					<div class="flex items-center gap-4" id="paginationBtns"></div>
-				</div>
+				<!-- 分页：复用公共 Pagination 组件（common.js） -->
+				<div class="mt-16 shrink-0" id="userPagination"></div>
 			</div>
 		</div>
 	</div>

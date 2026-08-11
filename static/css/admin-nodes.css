@@ -175,50 +175,6 @@
 	margin: 0
 }
 
-.doc-list-card .pagination {
-	padding: 12px 20px;
-	border-top: 1px solid var(--border)
-}
-
-/* 分页 */
-.page-btn {
-	min-width: 30px;
-	height: 30px;
-	padding: 0 8px;
-	border: 1px solid var(--border);
-	background: var(--white);
-	border-radius: var(--radius-sm);
-	cursor: pointer;
-	font-size: 13px;
-	color: var(--text);
-	transition: all .15s;
-}
-
-.page-btn:hover:not(:disabled) {
-	border-color: var(--primary);
-	color: var(--primary)
-}
-
-.page-btn.active {
-	background: var(--primary);
-	border-color: var(--primary);
-	color: #fff
-}
-
-.page-btn:disabled {
-	opacity: .5;
-	cursor: not-allowed
-}
-
-.pagination {
-	display: flex;
-	align-items: center;
-	gap: 6px;
-	font-size: 13px;
-	color: var(--text-sub)
-}
-
-/* 表格操作按钮组 */
 .table-actions {
 	display: flex;
 	gap: 6px;
@@ -322,18 +278,88 @@
 }
 
 /* ============ 文档列表弹窗 ============ */
+/* 弹窗高度固定（modal-content height:80vh），body 不整体滚动：
+   表格区内部滚动，分页条固定底部，切换节点/筛选时弹窗尺寸不变。 */
 .doc-list-modal-body {
-	max-height: calc(85vh - 100px);
-	overflow-y: auto;
 	display: flex;
 	flex-direction: column;
-	gap: 12px;
+	min-height: 0;
+	overflow: hidden;
+	margin: 0;
+	padding: 0;
+}
+
+/* 弹窗内筛选栏：左右贴齐弹窗、背景与表格区区分；垂直 padding 6px 使整体高度
+   （控件 32px + 12px）与表格数据行高一致，形成紧凑统一的行节奏；
+   控件间距用相邻兄弟 margin（不用 gap，换行时每行首个控件无多余间距） */
+.doc-list-modal-body .doc-filter-bar {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	padding: 6px 20px;
+	border-bottom: 1px solid var(--border);
+	background: var(--bg);
+}
+
+.doc-list-modal-body .doc-filter-bar > * + * {
+	margin-left: 8px;
+}
+
+/* 含旧版本勾选项：整体与相邻控件等高居中，checkbox 与文字在内部垂直居中 */
+.doc-list-modal-body .filter-check {
+	display: inline-flex;
+	align-items: center;
+	height: 32px;
+	cursor: pointer;
+	user-select: none;
+	white-space: nowrap;
+}
+
+.doc-list-modal-body .filter-check input {
+	margin: 0;
+	flex-shrink: 0;
+}
+
+.doc-list-modal-body .filter-check span {
+	margin-left: 4px;
 }
 
 .doc-list-modal-body .table-container {
 	flex: 1;
 	min-height: 0;
 	overflow-y: auto;
+}
+
+/* 分页条固定在弹窗底部，不被表格区压缩 */
+.doc-list-modal-body #docPagination {
+	flex-shrink: 0;
+}
+
+/* 文档列表表格：fixed 布局使列宽严格按 th 的 width 分配（auto 布局下 max-width 会被内容撑破）；
+   单元格单行省略，长文件名等悬停可看 title。
+   border-collapse:separate：collapse 模式下 sticky 表头背景有兼容问题，需分离布局 */
+.doc-list-table {
+	table-layout: fixed;
+	width: 100%;
+	border-collapse: separate;
+	border-spacing: 0;
+}
+
+/* 表头固定：sticky 吸顶于滚动容器（table-container），滚动数据行时表头保持可见；
+   需要自身不透明背景遮挡滚过的数据行 + 下边框补回原表格分隔线 */
+.doc-list-table thead th {
+	position: sticky;
+	top: 0;
+	z-index: 1;
+	background: #f9fafb;
+	border-bottom: 1px solid var(--border);
+	padding: 10px 16px;
+}
+
+.doc-list-table td {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
 }
 
 /* 编辑文档设置弹窗 — 多选下拉面板突破弹窗裁剪 */

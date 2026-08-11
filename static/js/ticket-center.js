@@ -141,6 +141,7 @@
 
 	/* ============ 关闭工单中心 ============ */
 	function close() {
+		Pagination.destroy(); // 销毁分页实例，避免状态残留
 		closeModal('ticketCenterModal');
 	}
 
@@ -265,10 +266,10 @@
 				? `<div class="tc-empty">未搜索到相关的工单</div>`
 				: '<div class="tc-empty">暂无工单</div>';
 			body.innerHTML = emptyMsg;
-			const pag = $('#tcPagination');
-			if (pag) pag.innerHTML = '';
+			Pagination.destroy();
 			return;
 		}
+		// 分页：使用公共 Pagination 组件
 		const totalPages = Math.ceil(total / _PAGE_SIZE);
 		if (_page > totalPages) _page = 1;
 		const start = (_page - 1) * _PAGE_SIZE;
@@ -277,19 +278,28 @@
 			const type = TICKET_TYPES[t._type];
 			return type.renderCard(t);
 		}).join('');
-		// 分页 + 总数
-		const pagination = $('#tcPagination');
-		if (!pagination) return;
-		pagination.innerHTML = `
-			${totalPages > 1 ? `<button class="btn btn-sm btn-outline" ${_page <= 1 ? 'disabled' : ''} onclick="TicketCenter.goPage(${_page - 1})">上一页</button>` : ''}
-			<span class="pagination-info">第 ${_page} / ${totalPages} 页（共 ${total} 条）</span>
-			${totalPages > 1 ? `<button class="btn btn-sm btn-outline" ${_page >= totalPages ? 'disabled' : ''} onclick="TicketCenter.goPage(${_page + 1})">下一页</button>` : ''}`;
+		const pgnState = { page: _page, totalPages, total, pageSize: _PAGE_SIZE };
+		if (_page > 1) {
+			Pagination.update(pgnState);
+		} else {
+			Pagination.render({
+				container: '#tcPagination',
+				...pgnState,
+				align: 'center',
+				onPageChange: (p) => {
+					_page = p;
+					renderList();
+					const scrollBody = $('#tcList');
+					if (scrollBody) scrollBody.scrollTop = 0;
+				}
+			});
+		}
 	}
 
 	/* ============ 分页跳转 ============ */
-	async function goPage(page) {
+	function goPage(page) {
 		_page = page;
-		await loadTickets();
+		renderList();
 		const body = $('#tcList');
 		if (body) body.scrollTop = 0;
 	}

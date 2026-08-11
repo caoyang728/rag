@@ -192,8 +192,8 @@
 								<tbody id="uploadHistoryBody"></tbody>
 							</table>
 						</div>
-						<!-- 分页与表格卡片一体（淡灰线分割），固定在卡片底部居中 -->
-						<div class="pagination" id="uploadPagination"></div>
+						<!-- 分页：通用 Pagination 组件，居中；每页条数切换由后端按 page_size 重新切片 -->
+						<div id="uploadPagination"></div>
 					</div>
 				</div>
 			</div>
@@ -234,13 +234,6 @@
 			color: #999;
 		}
 	</style>
-
-	<template id="tmpl-upload-pagination">
-		<span class="up-pag-total">共 <span class="up-pag-total-num"></span> 条</span>
-		<button class="page-btn up-pag-prev">‹</button>
-		<div class="up-pag-pages"></div>
-		<button class="page-btn up-pag-next">›</button>
-	</template>
 
 	<template id="tmpl-file-item">
 		<div class="file-item">

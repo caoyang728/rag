@@ -12,6 +12,16 @@ let _auditDetailCache = [];
 let _whitelistCache = [];
 let _sensitiveCache = [];      // 敏感词列表缓存，供编辑按钮按 idx 取记录
 let _sensitiveEditId = null;   // 当前编辑的敏感词 id（null 表示新增模式）
+let _auditPgnData = null;      // 审计日志分页数据（供 Pagination 组件使用）
+const _TAB_PAGE_SIZE = 20;     // 各 tab 统一每页条数
+let _whitePgnData = null;      // IP 白名单分页数据
+let _blackPgnData = null;      // IP 黑名单分页数据
+let _sensitivePgnData = null;  // 敏感词分页数据
+let _loginPgnData = null;      // 登录记录分页数据
+let _whitePage = 1;            // 白名单当前页码
+let _blackPage = 1;            // 黑名单当前页码
+let _sensitivePage = 1;        // 敏感词当前页码
+let _loginPage = 1;            // 登录记录当前页码
 
 document.addEventListener('DOMContentLoaded', () => {
 	initAuditPage();
@@ -29,39 +39,44 @@ async function setAuditTab(tab) {
 	const body = $('#auditBody');
 	if (body) {
 		body.innerHTML = '<div style="text-align:center;padding:40px"><div class="spinner"></div> 加载中...</div>';
+		Pagination.destroy(); // 切换 tab 时销毁旧分页实例
 		try {
 			const fragment = await renderAuditTab(tab);
 			body.innerHTML = '';
 			body.appendChild(fragment);
+
+			// 通用分页渲染：各 tab 在 renderAuditTab 中存储分页数据，此处统一调用 Pagination.render
+			const pgnMap = {
+				audit: _auditPgnData,
+				white: _whitePgnData,
+				black: _blackPgnData,
+				sensitive: _sensitivePgnData,
+				login: _loginPgnData,
+			};
+			const tabPgnData = pgnMap[tab];
+			if (tabPgnData && tabPgnData.total > 0) {
+				const containerSelector = '#' + tab + 'PaginationContainer';
+				Pagination.render({
+					container: containerSelector,
+					page: tabPgnData.page,
+					totalPages: tabPgnData.totalPages,
+					total: tabPgnData.total,
+					pageSize: tabPgnData.pageSize,
+					align: 'center',
+					onPageChange: (p) => {
+						if (tab === 'audit') { auditFilter.page = p; setAuditTab('audit'); }
+						else if (tab === 'white') { _whitePage = p; setAuditTab('white'); }
+						else if (tab === 'black') { _blackPage = p; setAuditTab('black'); }
+						else if (tab === 'sensitive') { _sensitivePage = p; setAuditTab('sensitive'); }
+						else if (tab === 'login') { _loginPage = p; setAuditTab('login'); }
+					}
+				});
+			}
 		} catch (e) {
 			console.error('render audit tab failed:', e);
 			body.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-sub)">加载失败，请刷新重试</div>';
 		}
 	}
-}
-
-function buildPagination(data, loadFn) {
-	const totalPages = data.total_pages || 1;
-	const page = data.page || 1;
-	if (totalPages <= 1 && (data.total || 0) <= (data.page_size || 20)) {
-		return `<span>共 ${data.total || 0} 条</span>`;
-	}
-	let html = `<span>共 ${data.total || 0} 条</span>`;
-	html += `<button class="page-btn" ${page <= 1 ? 'disabled' : ''} onclick="${loadFn}(${page - 1})">‹</button>`;
-	const maxBtns = 5;
-	let start = Math.max(1, page - Math.floor(maxBtns / 2));
-	let end = Math.min(totalPages, start + maxBtns - 1);
-	if (end - start < maxBtns - 1) start = Math.max(1, end - maxBtns + 1);
-	for (let p = start; p <= end; p++) {
-		html += `<button class="page-btn ${p === page ? 'active' : ''}" onclick="${loadFn}(${p})">${p}</button>`;
-	}
-	html += `<button class="page-btn" ${page >= totalPages ? 'disabled' : ''} onclick="${loadFn}(${page + 1})">›</button>`;
-	return html;
-}
-
-async function loadAuditPage(p) {
-	auditFilter.page = p || 1;
-	await setAuditTab('audit');
 }
 
 async function renderAuditTab(tab) {
@@ -85,7 +100,7 @@ async function renderAuditTab(tab) {
 			const tmpl = document.getElementById('tmpl-audit-tab');
 			const frag = tmpl.content.cloneNode(true);
 
-			// Set filter values
+			// 设置筛选条件值
 			frag.querySelector('.audit-filter-username').value = auditFilter.username || '';
 			frag.querySelector('.audit-filter-username').onchange = function () { auditFilter.username = this.value; };
 			frag.querySelector('.audit-filter-action').value = auditFilter.action || '';
@@ -99,7 +114,7 @@ async function renderAuditTab(tab) {
 			frag.querySelector('.audit-btn-query').onclick = loadAuditLogs;
 			frag.querySelector('.audit-btn-reset').onclick = resetAuditFilter;
 
-			// Generate table rows
+			// 渲染表格行
 			const tbody = frag.querySelector('.audit-tbody');
 			if (logs.length === 0) {
 				tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:30px;color:var(--text-sub)">暂无审计日志</td></tr>';
@@ -117,8 +132,16 @@ async function renderAuditTab(tab) {
 				`).join('');
 			}
 
-			// Set pagination
-			frag.querySelector('.audit-pagination').innerHTML = buildPagination(data, 'loadAuditPage');
+			// 存储分页数据，供 setAuditTab 中 Pagination.render 使用（fragment 挂载后渲染）
+			_auditPgnData = {
+				page: data.page || 1,
+				totalPages: data.total_pages || 1,
+				total: data.total || 0,
+				pageSize: data.page_size || 20
+			};
+
+			// 清空分页占位（实际分页由 setAuditTab 在 fragment 挂载后调用 Pagination.render 渲染）
+			frag.querySelector('.audit-pagination').innerHTML = '<div id="auditPaginationContainer"></div>';
 
 			return frag;
 		} catch (e) {
@@ -142,21 +165,33 @@ async function renderAuditTab(tab) {
 			// Set info count
 			frag.querySelector('.whitelist-info').textContent = '白名单外 IP 将直接返回 403，共 ' + items.length + ' 条规则';
 
-			// Generate table rows
+			// 前端分页：全量数据按 _TAB_PAGE_SIZE 切片展示当前页
+			const totalPages = Math.max(1, Math.ceil(items.length / _TAB_PAGE_SIZE));
+			if (_whitePage > totalPages) _whitePage = 1;
+			const start = (_whitePage - 1) * _TAB_PAGE_SIZE;
+			const pageItems = items.slice(start, start + _TAB_PAGE_SIZE);
+
+			// Generate table rows（索引使用全局 items 下标，供 editWhitelist/deleteWhitelist 按 idx 取 id）
 			const tbody = frag.querySelector('.whitelist-tbody');
-			if (items.length === 0) {
+			if (pageItems.length === 0) {
 				tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:20px;color:var(--text-sub)">暂无白名单</td></tr>';
 			} else {
-				tbody.innerHTML = items.map((x, i) => `
+				tbody.innerHTML = pageItems.map((x, i) => {
+					const globalIdx = start + i;
+					return `
 					<tr>
 						<td><code style="background:var(--hover);padding:2px 6px;border-radius:3px">${escapeHtml(x.ip_or_cidr)}</code></td>
 						<td>${escapeHtml(x.description || '-')}</td>
 						<td>${escapeHtml(x.creator || '-')}</td>
 						<td class="text-sub">${formatDate(x.created_at)}</td>
-						<td><div class="table-actions"><button class="btn-link btn-sm" onclick="editWhitelist(${i})">编辑</button><button class="btn-link btn-sm" style="color:var(--danger)" onclick="deleteWhitelist(${x.id})">删除</button></div></td>
-					</tr>
-				`).join('');
+						<td><div class="table-actions"><button class="btn-link btn-sm" onclick="editWhitelist(${globalIdx})">编辑</button><button class="btn-link btn-sm" style="color:var(--danger)" onclick="deleteWhitelist(${x.id})">删除</button></div></td>
+					</tr>`;
+				}).join('');
 			}
+
+			// 存储分页数据，供 setAuditTab 中 Pagination.render 使用
+			_whitePgnData = { page: _whitePage, totalPages, total: items.length, pageSize: _TAB_PAGE_SIZE };
+			frag.querySelector('.whitelist-pagination').innerHTML = '<div id="whitePaginationContainer"></div>';
 
 			return frag;
 		} catch (e) {
@@ -176,12 +211,18 @@ async function renderAuditTab(tab) {
 			const tmpl = document.getElementById('tmpl-blacklist-tab');
 			const frag = tmpl.content.cloneNode(true);
 
+			// 前端分页：全量数据按 _TAB_PAGE_SIZE 切片展示当前页
+			const totalPages = Math.max(1, Math.ceil(items.length / _TAB_PAGE_SIZE));
+			if (_blackPage > totalPages) _blackPage = 1;
+			const start = (_blackPage - 1) * _TAB_PAGE_SIZE;
+			const pageItems = items.slice(start, start + _TAB_PAGE_SIZE);
+
 			// Generate table rows
 			const tbody = frag.querySelector('.blacklist-tbody');
-			if (items.length === 0) {
+			if (pageItems.length === 0) {
 				tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:20px;color:var(--text-sub)">暂无黑名单</td></tr>';
 			} else {
-				tbody.innerHTML = items.map(x => `
+				tbody.innerHTML = pageItems.map(x => `
 					<tr>
 						<td><code style="background:var(--hover);padding:2px 6px;border-radius:3px">${escapeHtml(x.ip)}</code></td>
 						<td>${escapeHtml(x.reason === 'login_fail' ? '登录连续失败' : (x.reason === 'manual' ? '人工封禁' : escapeHtml(x.reason || '-')))}</td>
@@ -192,6 +233,10 @@ async function renderAuditTab(tab) {
 					</tr>
 				`).join('');
 			}
+
+			// 存储分页数据，供 setAuditTab 中 Pagination.render 使用
+			_blackPgnData = { page: _blackPage, totalPages, total: items.length, pageSize: _TAB_PAGE_SIZE };
+			frag.querySelector('.blacklist-pagination').innerHTML = '<div id="blackPaginationContainer"></div>';
 
 			return frag;
 		} catch (e) {
@@ -205,7 +250,6 @@ async function renderAuditTab(tab) {
 
 	if (tab === 'sensitive') {
 		// 敏感词列表 tab：渲染表格 + 启用/正则状态徽章
-		// 不做分页（词库通常百级以内），全量加载
 		try {
 			const data = await api.getJson('/api/v1/security/sensitive-words/');
 			const items = data.rows || [];
@@ -214,11 +258,19 @@ async function renderAuditTab(tab) {
 			const tmpl = document.getElementById('tmpl-sensitive-tab');
 			const frag = tmpl.content.cloneNode(true);
 
+			// 前端分页：全量数据按 _TAB_PAGE_SIZE 切片展示当前页
+			const totalPages = Math.max(1, Math.ceil(items.length / _TAB_PAGE_SIZE));
+			if (_sensitivePage > totalPages) _sensitivePage = 1;
+			const start = (_sensitivePage - 1) * _TAB_PAGE_SIZE;
+			const pageItems = items.slice(start, start + _TAB_PAGE_SIZE);
+
 			const tbody = frag.querySelector('.sensitive-tbody');
-			if (items.length === 0) {
+			if (pageItems.length === 0) {
 				tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:20px;color:var(--text-sub)">暂无敏感词，点击右上角新增</td></tr>';
 			} else {
-				tbody.innerHTML = items.map((x, i) => `
+				tbody.innerHTML = pageItems.map((x, i) => {
+					const globalIdx = start + i;
+					return `
 					<tr>
 						<td><code style="background:var(--hover);padding:2px 6px;border-radius:3px">${escapeHtml(x.word)}</code></td>
 						<td>${categoryTag(x.category)}</td>
@@ -226,10 +278,14 @@ async function renderAuditTab(tab) {
 						<td>${x.is_regex ? '<span class="tag tag-primary">是</span>' : '<span class="tag tag-default">否</span>'}</td>
 						<td>${x.is_enabled ? '<span class="tag tag-success">启用</span>' : '<span class="tag tag-default">禁用</span>'}</td>
 						<td class="text-sub">${formatDate(x.created_at)}</td>
-						<td><div class="table-actions"><button class="btn-link btn-sm" onclick="editSensitive(${i})">编辑</button><button class="btn-link btn-sm" style="color:var(--danger)" onclick="deleteSensitive(${x.id})">删除</button></div></td>
-					</tr>
-				`).join('');
+						<td><div class="table-actions"><button class="btn-link btn-sm" onclick="editSensitive(${globalIdx})">编辑</button><button class="btn-link btn-sm" style="color:var(--danger)" onclick="deleteSensitive(${x.id})">删除</button></div></td>
+					</tr>`;
+				}).join('');
 			}
+
+			// 存储分页数据，供 setAuditTab 中 Pagination.render 使用
+			_sensitivePgnData = { page: _sensitivePage, totalPages, total: items.length, pageSize: _TAB_PAGE_SIZE };
+			frag.querySelector('.sensitive-pagination').innerHTML = '<div id="sensitivePaginationContainer"></div>';
 
 			return frag;
 		} catch (e) {
@@ -243,10 +299,10 @@ async function renderAuditTab(tab) {
 
 	if (tab === 'login') {
 		try {
-			let url = '/api/v1/security/login-attempts/';
+			const params = new URLSearchParams({ page: _loginPage, page_size: _TAB_PAGE_SIZE });
 			const resultFilter = window._loginResultFilter || '';
-			if (resultFilter) url += '?result=' + encodeURIComponent(resultFilter);
-			const data = await api.getJson(url);
+			if (resultFilter) params.set('result', resultFilter);
+			const data = await api.getJson('/api/v1/security/login-attempts/?' + params.toString());
 			const items = data.rows || [];
 
 			const tmpl = document.getElementById('tmpl-login-tab');
@@ -272,6 +328,13 @@ async function renderAuditTab(tab) {
 					</tr>
 				`).join('');
 			}
+
+			// 存储分页数据，供 setAuditTab 中 Pagination.render 使用
+			const total = data.total || 0;
+			const totalPages = Math.max(1, Math.ceil(total / _TAB_PAGE_SIZE));
+			if (_loginPage > totalPages) _loginPage = 1;
+			_loginPgnData = { page: _loginPage, totalPages, total, pageSize: _TAB_PAGE_SIZE };
+			frag.querySelector('.login-pagination').innerHTML = '<div id="loginPaginationContainer"></div>';
 
 			return frag;
 		} catch (e) {
@@ -557,6 +620,7 @@ function resetAuditFilter() {
 
 function filterLoginAttempts(result) {
 	window._loginResultFilter = result;
+	_loginPage = 1; // 筛选条件变化时重置页码
 	setAuditTab('login');
 }
 

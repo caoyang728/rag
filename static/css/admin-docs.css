@@ -3,11 +3,23 @@
  *
  * 仅用于 /admin-docs/ 页面：
  * - 审核弹窗专属样式（#docModal）
- * - 文档摘要预览区
+ * - 弹窗标题行/归属路径行/敏感词检测占位样式
  *
  * 通用组件（.badge / .table / .btn / .modal / .applicant-card / .detail-cell 等）
  * 由 common.css 维护，此处不重复定义。
  * ============================================================================ */
+
+/* ==================== 页面布局 ==================== */
+
+/* 卡片铺满主区域：去除 .card 默认 14px 内边距，表格区域与卡片边缘齐平 */
+.main .card {
+	padding: 0;
+}
+
+/* 列表顶部工具条（tab 切换 + 刷新）：左右各 10px 留白 */
+.doc-toolbar {
+	padding: 0 10px;
+}
 
 /* ==================== 审核弹窗美化 ==================== */
 
@@ -19,31 +31,34 @@
 	border-radius: 12px
 }
 
-/* 文档摘要预览区（本期仅展示元信息 + 占位提示） */
-.doc-summary-box {
-	background: var(--bg);
-	border: 1px dashed var(--border-strong);
-	border-radius: var(--radius-lg);
-	padding: 16px;
+/* 弹窗：文档标题行（左侧标题 + 右侧悬浮预览按钮，按钮唤起二级预览弹窗） */
+.doc-title-row {
 	display: flex;
-	flex-direction: column;
-	gap: 10px
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 12px
 }
-.doc-summary-meta {
+.doc-title-main {
+	min-width: 0
+}
+.doc-preview-btn {
+	flex-shrink: 0
+}
+
+/* 弹窗：敏感词检测 TODO 占位（后期接入自动检测后替换为检测结果） */
+.doc-scan-todo {
 	display: flex;
 	align-items: center;
 	gap: 8px;
-	font-size: 14px;
-	color: var(--text);
-	flex-wrap: wrap
+	background: var(--bg);
+	border: 1px dashed var(--border-strong);
+	border-radius: var(--radius-lg);
+	padding: 14px 16px;
+	font-size: 13px;
+	color: var(--text-sub)
 }
-.doc-summary-tip {
-	font-size: 12px;
-	color: var(--text-placeholder);
-	background: var(--white);
-	border-radius: var(--radius);
-	padding: 8px 12px;
-	text-align: center
+.doc-scan-todo-icon {
+	font-size: 14px
 }
 
 /* 弹窗底部按钮优化 */

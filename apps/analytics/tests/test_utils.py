@@ -216,6 +216,12 @@ class TestAggregateSystemMetrics(UtilsDBTestBase):
         assert result['p50_latency_total'] == 250
         assert result['p95_latency_total'] == 385
         assert result['p99_latency_total'] == 397
+        # LLM [50,100,150,200] / 检索 [50,50,50,50] / TTFB [100,100,100,100] 的 P99
+        assert result['p99_latency_llm'] == 198
+        assert result['p99_latency_retrieval'] == 50
+        assert result['p99_ttfb'] == 100
+        # 本用例无缓存命中记录，P99 为 0
+        assert result['cache_hit_p99_latency'] == 0
         # 成功率 3/4，超时率 1/4（均只统计非缓存请求）
         assert result['llm_success_rate'] == 0.75
         assert result['llm_timeout_rate'] == 0.25
@@ -248,6 +254,9 @@ class TestAggregateSystemMetrics(UtilsDBTestBase):
         # 正常请求 P50 = (100+200)/2 = 150；缓存命中 P50 = (10+20)/2 = 15
         assert result['p50_latency_total'] == 150
         assert result['cache_hit_p50_latency'] == 15
+        # 两条缓存命中 [10,20]：P95=P99=19（线性插值 int 截断）
+        assert result['cache_hit_p95_latency'] == 19
+        assert result['cache_hit_p99_latency'] == 19
         # avg_tokens_per_second 仅统计非缓存请求：(10+20)/2 = 15
         assert result['avg_tokens_per_second'] == 15.0
 

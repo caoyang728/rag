@@ -10,7 +10,6 @@ urlpatterns = [
     # --- 日报 & 趋势---
     path("daily/", views.DailyReportView.as_view()),
     path("trend/", views.TrendReportView.as_view()),
-    path("overview/", views.OverviewStatsView.as_view()),
     path("qa-records/", views.QaRecordView.as_view()),
 
     # --- 差评反馈---

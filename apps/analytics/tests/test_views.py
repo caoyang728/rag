@@ -537,27 +537,6 @@ class TestBadFeedbackAPI(AnalyticsAPITestBase):
         assert resp.status_code == 404
 
 
-class TestOverviewAPI(AnalyticsAPITestBase):
-    """概览统计 API 测试"""
-
-    def test_overview_anonymous_401(self):
-        resp = self.client.get('/api/v1/analytics/overview/', **self.anon_headers)
-        assert resp.status_code in [401, 403]
-
-    def test_overview_authenticated_200(self):
-        # overview 视图要求 analytics.system.read 权限，需用 reader 用户
-        resp = self.client.get('/api/v1/analytics/overview/', **self.reader_headers)
-        assert resp.status_code == 200
-        data = resp.json()
-        for key in ['total_qa', 'accuracy', 'avg_latency_ms', 'active_users']:
-            assert key in data
-
-    def test_overview_with_filter(self):
-        resp = self.client.get('/api/v1/analytics/overview/?root_type=test_root',
-                              **self.reader_headers)
-        assert resp.status_code == 200
-
-
 class TestTrendAPI(AnalyticsAPITestBase):
     """趋势图 API 测试"""
 
@@ -707,6 +686,71 @@ class TestQaRecordAPI(AnalyticsAPITestBase):
                                **self.reader_headers)
         assert resp.status_code == 200
         assert resp.json()['total'] == 1
+
+    def test_list_filter_by_question_search(self):
+        # 问题关键词模糊搜索：只返回包含关键词的记录
+        self._make_qa(question='合同审批流程怎么走')
+        self._make_qa(question='报销标准是多少')
+        resp = self.client.get('/api/v1/analytics/qa-records/?q=合同',
+                               **self.reader_headers)
+        assert resp.status_code == 200
+        assert resp.json()['total'] == 1
+        assert resp.json()['rows'][0]['question'] == '合同审批流程怎么走'
+
+    def test_list_filter_by_answer_type(self):
+        self._make_qa(answer_type='refused')
+        self._make_qa(answer_type='agent')
+        resp = self.client.get('/api/v1/analytics/qa-records/?answer_type=refused',
+                               **self.reader_headers)
+        assert resp.status_code == 200
+        assert resp.json()['total'] == 1
+        assert resp.json()['rows'][0]['answer_type'] == 'refused'
+
+    def test_list_filter_by_cache_hit(self):
+        # 预置 15 条中 is_hit_cache=True 的有 5 条（i%3==0）
+        resp = self.client.get('/api/v1/analytics/qa-records/?cache=1',
+                               **self.reader_headers)
+        assert resp.status_code == 200
+        assert resp.json()['total'] == 5
+
+    def test_list_filter_by_rating_good(self):
+        # 预置 15 条中好评（rating=1）10 条，新增 1 条好评后应返回 11 条
+        qa1 = self._make_qa()
+        self._make_feedback(qa1, rating=1)
+        resp = self.client.get('/api/v1/analytics/qa-records/?rating=1',
+                               **self.reader_headers)
+        assert resp.status_code == 200
+        assert resp.json()['total'] == 11
+        assert any(r['id'] == qa1.id for r in resp.json()['rows'])
+
+    def test_list_filter_by_rating_bad(self):
+        # 预置 15 条中差评（rating=-1）5 条
+        resp = self.client.get('/api/v1/analytics/qa-records/?rating=-1',
+                               **self.reader_headers)
+        assert resp.status_code == 200
+        assert resp.json()['total'] == 5
+
+    def test_list_filter_by_rating_zero_includes_no_feedback(self):
+        # 评分 0：无反馈与中性反馈都归入"未评分/中性"
+        self._make_qa()  # 无反馈
+        qa_neutral = self._make_qa()
+        self._make_feedback(qa_neutral, rating=0)
+        resp = self.client.get('/api/v1/analytics/qa-records/?rating=0',
+                               **self.reader_headers)
+        assert resp.status_code == 200
+        assert resp.json()['total'] == 2
+
+    def test_list_filter_by_latency_range(self):
+        # 预置 15 条 latency_total_ms=500+i*50（500~1200），其中 >=1000 的 5 条
+        resp = self.client.get('/api/v1/analytics/qa-records/?latency_min=1000',
+                               **self.reader_headers)
+        assert resp.status_code == 200
+        assert resp.json()['total'] == 5
+
+    def test_latency_filter_invalid_400(self):
+        resp = self.client.get('/api/v1/analytics/qa-records/?latency_min=abc',
+                               **self.reader_headers)
+        assert resp.status_code == 400
 
     def test_anonymous_401(self):
         resp = self.client.get('/api/v1/analytics/qa-records/', **self.anon_headers)
@@ -1200,20 +1244,20 @@ class TestEdgeCases(AnalyticsAPITestBase):
         """测试关键词权重边界值"""
         kw = KeywordWeight.objects.first()
 
-        # 上边界
+        # 上边界：初始 1.5 + delta 5.0 = 6.5，被钳制到上限 5.0（与创建接口 0.1~5.0 一致）
         resp = self.client.put(f'/api/v1/analytics/keywords/{kw.id}/',
                                data=json.dumps({'delta': 5.0}),
                                content_type='application/json',
                                **self.writer_headers)
         assert resp.status_code == 200
         kw.refresh_from_db()
-        assert kw.weight_score <= 2.0
+        assert kw.weight_score == 5.0
 
-        # 下边界
+        # 下边界：5.0 + delta -5.0 = 0，被钳制到下限 0.1
         resp = self.client.put(f'/api/v1/analytics/keywords/{kw.id}/',
                                data=json.dumps({'delta': -5.0}),
                                content_type='application/json',
                                **self.writer_headers)
         assert resp.status_code == 200
         kw.refresh_from_db()
-        assert kw.weight_score >= 0.1
+        assert kw.weight_score == 0.1

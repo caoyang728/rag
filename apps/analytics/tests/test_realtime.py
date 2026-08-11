@@ -9,19 +9,24 @@ apps.analytics.realtime 单元测试 —— Redis 实时指标 & 队列深度操
 - get_queue_depth_snapshot：current 键优先 / LLEN 降级 / worker 状态聚合
 - increment_realtime_metrics：缓存命中 / 正常请求 / 失败计数三种分支
 - get_realtime_snapshot：字段默认值与浮点四舍五入
+- get_yesterday_same_period_stats：昨日同时段聚合（今日实时同比对比数据源）
 - flush_realtime_metrics：last_flush_at 时间戳写入
 
 说明：全部 Redis 交互均 mock 在源模块层（apps.analytics.realtime._get_redis_safe），
 不依赖真实 Redis；QueueDepthLog 落库用真实 Django 测试库。
 """
 import time
+from datetime import timedelta
 from types import SimpleNamespace
 
 import pytest
 from unittest.mock import patch, MagicMock
 
+from django.utils import timezone
+
 from apps.analytics import realtime
 from apps.analytics.models import QueueDepthLog
+from apps.chat.models import QaRecord, Session
 from rag_project.config import AnalyticsConfig
 
 QUEUE_NAMES = ['default', 'parse', 'memory', 'email', 'analytics']
@@ -393,3 +398,65 @@ class TestRealtimeSnapshot:
         assert args[1] == 'last_flush_at'
         # 时间戳为整数秒
         assert isinstance(args[2], int)
+
+
+# ============================================================================
+# get_yesterday_same_period_stats —— 昨日同时段聚合（今日实时同比对比）
+# ============================================================================
+@pytest.mark.django_db
+class TestYesterdaySamePeriod:
+    """昨日同时段聚合测试：窗口与字段口径均与 increment_realtime_metrics 对齐"""
+
+    def _make_qa(self, session, user, created_at, is_hit_cache=False, is_success=True,
+                 tokens_prompt=0, tokens_completion=0, cost_estimate=0):
+        """创建 QA 记录；created_at 通过 queryset.update 回填（auto_now_add 不可直接赋值）"""
+        qa = QaRecord.objects.create(
+            session=session, user=user, turn_index=0, question='q', answer='a',
+            is_hit_cache=is_hit_cache, is_success=is_success,
+            tokens_prompt=tokens_prompt, tokens_completion=tokens_completion,
+            cost_estimate=cost_estimate)
+        QaRecord.objects.filter(id=qa.id).update(created_at=created_at)
+        return qa
+
+    def test_aggregates_only_yesterday_same_period(self, test_user):
+        """只统计[昨日0点, 昨日0点+今日已流逝时长)内的记录，缓存/失败/Token/费用口径对齐"""
+        session = Session.objects.create(user=test_user, title='t')
+        now = timezone.localtime()
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        elapsed = now - today_start
+        y_start = today_start - timedelta(days=1)
+        y_end = y_start + elapsed
+        # 段内三点按 elapsed 比例取值，避免凌晨 elapsed 很小导致超窗
+        y_a = y_start + elapsed * 0.3   # 非缓存成功
+        y_b = y_start + elapsed * 0.5   # 缓存命中
+        y_c = y_start + elapsed * 0.8   # 非缓存失败
+        self._make_qa(session, test_user, y_a, tokens_prompt=100, tokens_completion=50, cost_estimate=0.01)
+        self._make_qa(session, test_user, y_b, is_hit_cache=True)
+        self._make_qa(session, test_user, y_c, is_success=False, tokens_prompt=20, tokens_completion=10, cost_estimate=0.002)
+        # 窗口外：昨日更晚（可能已跨入今日）与今日记录均不计入
+        self._make_qa(session, test_user, y_end + timedelta(hours=2))
+        self._make_qa(session, test_user, today_start + elapsed * 0.5)
+
+        agg = realtime.get_yesterday_same_period_stats()
+        assert agg['total_qa'] == 3
+        assert agg['cache_hits'] == 1
+        assert agg['normal_qa'] == 2
+        assert agg['llm_errors'] == 1
+        assert agg['tokens_prompt'] == 120
+        assert agg['tokens_completion'] == 60
+        assert abs(agg['cost_estimate'] - 0.012) < 1e-6
+
+    def test_empty_period_returns_zero(self, test_user):
+        """昨日同时段无记录 → 返回全 0 聚合（非 None），前端按持平展示"""
+        session = Session.objects.create(user=test_user, title='t')
+        now = timezone.localtime()
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        self._make_qa(session, test_user, today_start + timedelta(minutes=5))
+
+        agg = realtime.get_yesterday_same_period_stats()
+        assert agg is not None
+        assert agg['total_qa'] == 0
+        assert agg['cache_hits'] == 0
+        assert agg['normal_qa'] == 0
+        assert agg['llm_errors'] == 0
+        assert agg['cost_estimate'] == 0.0

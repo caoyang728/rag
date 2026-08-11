@@ -394,7 +394,6 @@ rag/
 
 | Method | Path | 说明 |
 |--------|------|------|
-| GET | `/api/v1/analytics/overview/` | 概览统计 |
 | GET | `/api/v1/analytics/daily/` | 准确率日报 |
 | GET | `/api/v1/analytics/trend/?days=` | 趋势报表 |
 | GET | `/api/v1/analytics/qa-records/` | 问答记录（需 `analytics:system:read` 权限） |

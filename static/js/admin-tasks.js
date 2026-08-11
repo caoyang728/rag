@@ -103,10 +103,24 @@ async function loadTasks() {
 		const data = await api.getJson('/api/v1/system/tasks/?' + params.toString());
 		_state.total = data.total || 0;
 		$('#taskCount').textContent = `（共 ${_state.total} 条）`;
-		$('#pageInfo').textContent = _state.page;
-		$('#prevPageBtn').disabled = _state.page <= 1;
-		$('#nextPageBtn').disabled = _state.page * _state.pageSize >= _state.total;
 		renderTasks(data.items || []);
+
+		// 使用公共 Pagination 组件渲染分页
+		const totalPages = Math.max(1, Math.ceil(_state.total / _state.pageSize));
+		const pgnState = { page: _state.page, totalPages, total: _state.total, pageSize: _state.pageSize };
+		if (_state.page > 1) {
+			Pagination.update(pgnState);
+		} else {
+			Pagination.render({
+				container: '#taskPagination',
+				...pgnState,
+				align: 'center',
+				onPageChange: (p) => {
+					_state.page = p;
+					loadTasks();
+				}
+			});
+		}
 	} catch (e) {
 		listEl.innerHTML = `<tr><td colspan="7"><div class="empty"><div class="empty-icon">❌</div><div class="empty-text">加载失败：${escapeHtml(e.message)}</div></div></td></tr>`;
 	}
@@ -205,14 +219,6 @@ function retryTask(taskId) {
 			} }
 		]
 	});
-}
-
-/* ============ 分页 ============ */
-function changePage(delta) {
-	const next = _state.page + delta;
-	if (next < 1 || (next - 1) * _state.pageSize >= _state.total) return;
-	_state.page = next;
-	loadTasks();
 }
 
 /* ============ 过滤条件变化时重置到第一页再加载 ============ */

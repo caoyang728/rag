@@ -208,10 +208,15 @@ class WorkflowRunner:
         """处理需要人工确认的节点
 
         返回：
-        - BLOCKED：已创建/已存在待审批工单，整个工作流暂停
+        - BLOCKED：整个工作流暂停，等待人工确认
         - 'approved'：确认已通过（approval 节点），视为完成
         - 'run_tool'：敏感工具已批准，可继续执行工具
         - 'rejected'：被拒绝，节点跳过并降级
+
+        审批分流：
+        - 显式 approval 节点：创建工单（TicketList），走正式审批流程（审计可追溯）
+        - 敏感工具节点（web_search/text2sql）：不创建工单，前端展示内嵌确认/拒绝按钮，
+          用户确认后直接调用 API 恢复工作流（轻量级 HITL，避免频繁创建工单干扰用户）
         """
         run = self.node_runs[nid]
         if run.status == 'approved':
@@ -230,28 +235,40 @@ class WorkflowRunner:
             self.degraded_reasons.append(f'节点 {node.get("name") or nid} 被人工拒绝')
             return 'rejected'
         if run.status == 'blocked':
-            # 已有待审批工单（异常态：resume 未及时处理）→ 维持等待
+            # 已有待审批状态 → 维持等待，重新发送审批事件
             self.blocked = True
-            self._emit({
-                'type': 'workflow_approval_required',
-                'node_id': nid, 'node_name': node.get('name', nid),
-                'ticket_id': run.ticket_id, 'ticket_no': '',
-                'reason': node.get('reason', ''),
-            })
+            self._emit_approval_event(nid, node, run)
             return BLOCKED
-        # pending：首次遇到 → 创建 HITL 工单，工作流进入等待审批
-        from apps.agent.workflow.hitl import create_approval_ticket
-        ticket = create_approval_ticket(self.workflow, node, self.user)
-        self._mark_node(nid, 'blocked', output={'output': '', 'meta': {}},
-                        ticket_id=ticket.id, emit=True)
-        self._emit({
-            'type': 'workflow_approval_required',
-            'node_id': nid, 'node_name': node.get('name', nid),
-            'ticket_id': ticket.id, 'ticket_no': ticket.ticket_no,
-            'reason': node.get('reason', ''),
-        })
+
+        # pending：首次遇到 → 分流处理
+        needs_ticket = node.get('type') == 'approval'
+        if needs_ticket:
+            # 显式 approval 节点：创建正式工单
+            from apps.agent.workflow.hitl import create_approval_ticket
+            ticket = create_approval_ticket(self.workflow, node, self.user)
+            self._mark_node(nid, 'blocked', output={'output': '', 'meta': {}},
+                            ticket_id=ticket.id, emit=True)
+        else:
+            # 敏感工具节点：不创建工单，直接标记 blocked 等待内嵌确认
+            self._mark_node(nid, 'blocked', output={'output': '', 'meta': {}}, emit=True)
+        self._emit_approval_event(nid, node, self.node_runs[nid])
         self.blocked = True
         return BLOCKED
+
+    def _emit_approval_event(self, nid: str, node: dict, run):
+        """发送审批事件：区分工单审批（ticket）和内嵌确认（inline）
+
+        前端据此渲染不同 UI：ticket 显示工单链接，inline 显示确认/拒绝按钮。
+        """
+        is_ticket = node.get('type') == 'approval'
+        self._emit({
+            'type': 'workflow_approval_required',
+            'node_id': nid,
+            'node_name': node.get('name', nid),
+            'ticket_id': run.ticket_id if is_ticket else None,
+            'reason': node.get('reason', ''),
+            'approval_type': 'ticket' if is_ticket else 'inline',
+        })
 
     # ------------------------------------------------------------------
     # 拓扑序主循环

@@ -1,5 +1,9 @@
 """
 SSE 流式响应工具
+
+SSE 消息体很小（几十到几百字节），无需压缩。静态大文件（如 echarts.min.js）
+的 gzip 压缩已由 WhiteNoise 的 CompressedManifestStaticFilesStorage 在构建时完成，
+运行时直接返回预压缩文件，不经过此模块。
 """
 import json
 from loguru import logger

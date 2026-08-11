@@ -703,7 +703,9 @@ function setWorkflowNodeStatus(nodeId, status, latencyMs) {
  */
 async function refreshWorkflowResult(wfId, mid, answerContentEl, answerTextEl) {
 	try {
-		const data = await api.get('/api/v1/agent/workflows/' + wfId + '/');
+		// api.getJson 返回解析后的 JSON 对象（含 status/nodes/result 等字段）；
+		// 不能用 api.get()，否则 data 是 Response 对象，data.status 为 HTTP 状态码而非工作流状态
+		const data = await api.getJson('/api/v1/agent/workflows/' + wfId + '/');
 		if (!data || data.status === 'waiting_approval') {
 			toast('该步骤仍在等待审批确认');
 			return;
@@ -712,8 +714,21 @@ async function refreshWorkflowResult(wfId, mid, answerContentEl, answerTextEl) {
 			wfStatusEl.textContent = workflowStatusText(data.status);
 			wfStatusEl.className = 'workflow-status ' + data.status;
 		}
-		// 重绘节点轨迹（含审批结果与后续节点）
+		// 重绘节点轨迹（含审批结果与后续新增节点）
+		const existingNodeIds = new Set(Object.keys(wfNodeEls));
 		(data.nodes || []).forEach((n) => {
+			if (!existingNodeIds.has(n.node_id)) {
+				// 审批后新产生的节点：动态创建卡片并追加到轨迹区
+				const nodeEl = elemFromTpl('tmpl-workflow-node', (frag2) => {
+					const card = frag2.querySelector('.wf-node');
+					card.dataset.nodeId = n.node_id;
+					card.dataset.stepType = n.step_type;
+					frag2.querySelector('.wf-node-icon').textContent = wfStepIcon(n.step_type);
+					frag2.querySelector('.wf-node-name').textContent = n.node_name || n.node_id;
+				});
+				if (wfBodyEl) wfBodyEl.appendChild(nodeEl);
+				wfNodeEls[n.node_id] = nodeEl;
+			}
 			setWorkflowNodeStatus(n.node_id, n.status, n.latency_ms);
 		});
 		// 移除审批确认卡片
@@ -744,16 +759,47 @@ async function refreshWorkflowResult(wfId, mid, answerContentEl, answerTextEl) {
 	}
 }
 
-/* 切换发送按钮状态：idle=发送，sending=转圈等待后端响应，stopping=可终止 */
+/* 内嵌确认/拒绝：敏感工具节点的轻量级 HITL，直接调用 API 恢复工作流（不创建工单）
+
+   与 refreshWorkflowResult 的区别：refresh 用于工单审批后的手动刷新（轮询状态）；
+   submitInlineApproval 直接提交确认/拒绝决策，后端同步恢复工作流，前端自动刷新结果。
+*/
+async function submitInlineApproval(wfId, nodeId, approved, apprEl, mid, answerContentEl, answerTextEl) {
+	// 禁用按钮防止重复提交
+	const btns = apprEl.querySelectorAll('button');
+	btns.forEach((b) => { b.disabled = true; });
+	// 显示处理中状态
+	const statusBtn = approved
+		? apprEl.querySelector('.btn-primary')
+		: apprEl.querySelector('.btn-danger');
+	if (statusBtn) statusBtn.textContent = '处理中…';
+
+	try {
+		await api.postJson(
+			'/api/v1/agent/workflows/' + wfId + '/approve/',
+			{ node_id: nodeId, approved: approved },
+		);
+		// 审批完成：移除确认卡片，刷新结果
+		apprEl.remove();
+		refreshWorkflowResult(wfId, mid, answerContentEl, answerTextEl);
+	} catch (e) {
+		toast('操作失败：' + (e.message || e));
+		// 恢复按钮状态
+		btns.forEach((b) => { b.disabled = false; });
+		if (statusBtn) statusBtn.textContent = approved ? '✓ 确认执行' : '✗ 拒绝';
+	}
+}
+
+/* 切换发送按钮状态：idle=发送，sending/stopping=可终止流式生成 */
 function setSendButtonState(state) {
 	const btn = $('#chatSendBtn');
 	if (!btn) return;
 	if (state === 'sending') {
-		btn.innerHTML = '<span class="btn-spinner"></span>';
-		btn.classList.add('sending');
-		btn.classList.remove('stopping');
-		btn.setAttribute('onclick', '');
-		btn.disabled = true;
+		btn.textContent = '⏹ 终止';
+		btn.classList.add('stopping');
+		btn.classList.remove('sending');
+		btn.disabled = false;
+		btn.setAttribute('onclick', 'stopChat()');
 	} else if (state === 'stopping') {
 		btn.textContent = '⏹ 终止';
 		btn.classList.add('stopping');
@@ -899,7 +945,7 @@ async function sendChat() {
 	// 声明在 try 外部，确保 catch/finally 可访问（否则块级作用域导致 ReferenceError）
 	const abortController = new AbortController();
 	currentAbortController = abortController;
-	// 发送中按钮先显示转圈，等后端响应后再切换为"终止"
+	// 发送后按钮立即显示"终止"，用户可随时中断流式生成
 	setSendButtonState('sending');
 	// 流式可能持续较久，放宽到 120s（超时自动中断）
 	const timeoutId = setTimeout(() => abortController.abort(), 120000);
@@ -1062,13 +1108,42 @@ async function sendChat() {
 						wfStatusEl.textContent = '等待人工确认';
 						wfStatusEl.className = 'workflow-status waiting_approval';
 					}
+					const approvalType = chunk.approval_type || 'ticket';
 					const apprEl = elemFromTpl('tmpl-workflow-approval', (frag) => {
 						frag.querySelector('.wf-approval-reason').textContent = chunk.reason || '';
-						const link = frag.querySelector('.wf-approval-link');
-						link.href = '/static/ticket.html';  // 工单中心（待我审批视图）
-						frag.querySelector('.wf-approval-refresh').addEventListener('click', () => {
-							refreshWorkflowResult(wfId, mid, answerContentEl, answerTextEl);
-						});
+						const actionsEl = frag.querySelector('.wf-approval-actions');
+						if (approvalType === 'inline') {
+							// 内嵌确认（敏感工具）：直接在聊天界面确认/拒绝，不创建工单
+							const confirmBtn = document.createElement('button');
+							confirmBtn.className = 'btn btn-sm btn-primary';
+							confirmBtn.textContent = '✓ 确认执行';
+							confirmBtn.addEventListener('click', () => {
+								submitInlineApproval(wfId, chunk.node_id, true, apprEl, mid, answerContentEl, answerTextEl);
+							});
+							const rejectBtn = document.createElement('button');
+							rejectBtn.className = 'btn btn-sm btn-danger';
+							rejectBtn.textContent = '✗ 拒绝';
+							rejectBtn.addEventListener('click', () => {
+								submitInlineApproval(wfId, chunk.node_id, false, apprEl, mid, answerContentEl, answerTextEl);
+							});
+							actionsEl.appendChild(confirmBtn);
+							actionsEl.appendChild(rejectBtn);
+						} else {
+							// 工单审批（显式 approval 节点）：跳转工单中心，审批后手动刷新
+							const link = document.createElement('a');
+							link.className = 'btn btn-sm wf-approval-link';
+							link.target = '_blank';
+							link.href = '/static/ticket.html';
+							link.textContent = '前往审批';
+							const refreshBtn = document.createElement('button');
+							refreshBtn.className = 'btn btn-sm wf-approval-refresh';
+							refreshBtn.textContent = '我已审批，刷新结果';
+							refreshBtn.addEventListener('click', () => {
+								refreshWorkflowResult(wfId, mid, answerContentEl, answerTextEl);
+							});
+							actionsEl.appendChild(link);
+							actionsEl.appendChild(refreshBtn);
+						}
 					});
 					if (wfBodyEl) wfBodyEl.appendChild(apprEl);
 					scrollChatBottom();
@@ -1162,12 +1237,15 @@ async function sendChat() {
 					}
 					// 同一问答再次渲染时恢复历史反馈状态（刷新/切换会话重载后）
 					if (answerContentEl) restoreAllFeedbackBars(answerContentEl);
-					// 思考区摘要收尾：补全总耗时；若全流程无工具调用，则移除空思考区
+					// 思考区摘要收尾：补全总耗时；若全流程无工具调用，则移除空思考区；
+					// 有工具调用时自动折叠思考区（默认展开方便观察过程，结束后折叠避免干扰阅读答案）
 					if (thinkingAreaEl) {
 						if (toolCallCount === 0) {
 							thinkingAreaEl.innerHTML = '';
 						} else {
 							updateThinkingSummary(thinkingSummaryEl, toolCallCount, totalMs);
+							const thinkingArea = thinkingAreaEl.querySelector('.thinking-area');
+							if (thinkingArea) thinkingArea.classList.add('collapsed');
 						}
 					}
 					scrollChatBottom();

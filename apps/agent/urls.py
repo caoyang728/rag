@@ -7,4 +7,5 @@ urlpatterns = [
     path("task/run/", views.AgentTaskRunView.as_view()),
     path("workflows/", views.AgentWorkflowListView.as_view()),
     path("workflows/<int:workflow_id>/", views.AgentWorkflowDetailView.as_view()),
+    path("workflows/<int:workflow_id>/approve/", views.WorkflowApprovalView.as_view()),
 ]

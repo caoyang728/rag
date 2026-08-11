@@ -70,9 +70,6 @@ INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
-    # 响应 gzip：vendor 静态大文件（如 echarts.min.js ~1MB）压缩后约 1/4，
-    # 开发环境（未走 collectstatic）也能受益；WhiteNoise 已压缩的响应不会重复压缩
-    'django.middleware.gzip.GZipMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',

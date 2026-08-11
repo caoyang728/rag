@@ -4,6 +4,12 @@
 let pendingFiles = [];
 let uploadHistoryCurrentPage = 1;
 let uploadHistoryTotal = 0;
+/** 上传历史每页条数（可经公共分页组件切换，后端按 page_size 切片，上限 100） */
+let uploadHistoryPageSize = 20;
+/** 分页组件是否已初始化（首次 render 绑定回调，后续仅 update 状态） */
+let uploadPaginationInited = false;
+/** 请求序号：防止快速连续操作（翻页/切条数/改筛选）时旧请求后返回覆盖新状态 */
+let uploadRequestSeq = 0;
 /** 归属节点下拉中可选的文件夹节点 ID 集合（仅 FOLDER 可选，用于 startUpload 二次拦截组织节点） */
 let folderNodeIds = new Set();
 
@@ -68,11 +74,12 @@ function toggleShowDeleted(checkbox) {
 }
 
 async function loadUploadHistory(page = 1) {
+	const seq = ++uploadRequestSeq;
 	const tbody = $('#uploadHistoryBody');
 	if (!tbody) return;
 
 	try {
-		let url = `/api/v1/knowledge/documents/?page=${page}&page_size=20`;
+		let url = `/api/v1/knowledge/documents/?page=${page}&page_size=${uploadHistoryPageSize}`;
 		if (uploadHistorySearch) {
 			url += `&search=${encodeURIComponent(uploadHistorySearch)}`;
 		}
@@ -103,9 +110,17 @@ async function loadUploadHistory(page = 1) {
 		}
 
 		const data = await api.getJson(url);
+		if (seq !== uploadRequestSeq) return; // 已有更新的请求发出，丢弃本次旧响应
 		const docs = data.results || data;
 		currentDocs = docs;
-		uploadHistoryTotal = data.count || (docs.length || 0);
+		const count = data.count || (docs.length || 0);
+		// 数据量减少（文档被删除/恢复）导致当前页越界时，回退到最后一页重新加载
+		if (page > Math.max(1, Math.ceil(count / uploadHistoryPageSize))) {
+			uploadHistoryCurrentPage = Math.max(1, Math.ceil(count / uploadHistoryPageSize));
+			loadUploadHistory(uploadHistoryCurrentPage);
+			return;
+		}
+		uploadHistoryTotal = count;
 		uploadHistoryCurrentPage = page;
 
 		if (!docs || docs.length === 0) {
@@ -183,63 +198,37 @@ async function loadUploadHistory(page = 1) {
 		renderUploadPagination();
 	startUploadPolling();
 	} catch (e) {
+		if (seq !== uploadRequestSeq) return;
 		console.error('load upload history failed:', e);
 		tbody.innerHTML = '<tr><td colspan="8" class="text-center text-sub">加载失败，请刷新重试</td></tr>';
 	}
 }
 
+// 上传历史分页：复用公共 Pagination 组件（common.js）。
+// 首次 render 绑定回调，后续 update 仅刷新页码状态；每页条数切换由后端按 page_size 重新切片
 function renderUploadPagination() {
-	const container = $('#uploadPagination');
-	if (!container) return;
-
-	const total = uploadHistoryTotal;
-	const page = uploadHistoryCurrentPage;
-	const pageSize = 20;
-	const totalPages = Math.max(1, Math.ceil(total / pageSize));
-
-	if (total === 0) {
-		container.innerHTML = '';
-		return;
-	}
-
-	const tpl = document.getElementById('tmpl-upload-pagination').content;
-	const frag = document.importNode(tpl, true);
-
-	frag.querySelector('.up-pag-total-num').textContent = total;
-
-	const prevBtn = frag.querySelector('.up-pag-prev');
-	if (page <= 1) {
-		prevBtn.disabled = true;
+	const totalPages = Math.max(1, Math.ceil(uploadHistoryTotal / uploadHistoryPageSize));
+	if (!uploadPaginationInited) {
+		Pagination.render({
+			container: '#uploadPagination',
+			page: uploadHistoryCurrentPage,
+			totalPages: totalPages,
+			total: uploadHistoryTotal,
+			pageSize: uploadHistoryPageSize,
+			align: 'center',
+			// pageSizeOptions: [10, 20, 50],
+			onPageChange(p) { loadUploadHistory(p); },
+			onPageSizeChange(size) { uploadHistoryPageSize = size; loadUploadHistory(1); },
+		});
+		uploadPaginationInited = true;
 	} else {
-		prevBtn.onclick = function () { loadUploadHistory(page - 1); };
+		Pagination.update({
+			page: uploadHistoryCurrentPage,
+			totalPages: totalPages,
+			total: uploadHistoryTotal,
+			pageSize: uploadHistoryPageSize,
+		});
 	}
-
-	const pagesDiv = frag.querySelector('.up-pag-pages');
-	for (var i = 1; i <= totalPages; i++) {
-		if (totalPages <= 7 || i === 1 || i === totalPages || (i >= page - 2 && i <= page + 2)) {
-			var btn = document.createElement('button');
-			btn.className = 'page-btn' + (i === page ? ' active' : '');
-			btn.textContent = i;
-			if (i !== page) {
-				btn.onclick = (function (p) { return function () { loadUploadHistory(p); }; })(i);
-			}
-			pagesDiv.appendChild(btn);
-		} else if (i === page - 3 || i === page + 3) {
-			var span = document.createElement('span');
-			span.textContent = '...';
-			pagesDiv.appendChild(span);
-		}
-	}
-
-	const nextBtn = frag.querySelector('.up-pag-next');
-	if (page >= totalPages) {
-		nextBtn.disabled = true;
-	} else {
-		nextBtn.onclick = function () { loadUploadHistory(page + 1); };
-	}
-
-	container.innerHTML = '';
-	container.appendChild(frag);
 }
 
 function viewDocument(docId) {

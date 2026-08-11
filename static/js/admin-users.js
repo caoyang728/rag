@@ -85,13 +85,6 @@ function searchUsers() {
 	loadUsers();
 }
 
-/** 切换每页条数 */
-function onPageSizeChange() {
-	pageSize = parseInt($id('pageSizeSelect').value) || 20;
-	currentPage = 1;
-	loadUsers();
-}
-
 let _searchTimer = null;
 function onSearchInput() {
 	clearTimeout(_searchTimer);
@@ -137,7 +130,7 @@ async function loadUsers() {
 		totalPages = Math.ceil(totalCount / pageSize) || 1;
 		if (currentPage > totalPages) currentPage = 1;
 		renderTable(data.results || []);
-		renderPagination();
+		renderUserPagination();
 		renderSortIndicators();
 	} catch (e) {
 		if (seq !== _loadSeq) return;
@@ -200,38 +193,35 @@ function renderTable(users) {
 	}).join('');
 }
 
-function renderPagination() {
-	$id('paginationInfo').textContent = `共 ${totalCount} 条，第 ${currentPage}/${totalPages} 页`;
-	const btns = [];
-	// 首页：第 1 页时禁用
-	btns.push(`<button class="btn btn-sm page-btn" onclick="goPage(1)" ${currentPage <= 1 ? 'disabled' : ''}>«</button>`);
-	// 上一页：第 1 页时禁用
-	btns.push(`<button class="btn btn-sm page-btn" onclick="goPage(${currentPage - 1})" ${currentPage <= 1 ? 'disabled' : ''}>‹</button>`);
-	// 页码：最多显示 5 个，当前页尽量居中
-	if (totalPages <= 5) {
-		for (let i = 1; i <= totalPages; i++) btns.push(renderPageBtn(i));
+/* ============================================================================
+ * 分页：复用公共 Pagination 组件（common.js）。
+ * 首次 render 绑定回调，后续 update 仅刷新页码状态；切换每页条数后重置回第 1 页
+ * ============================================================================ */
+let _paginationInited = false; // 分页组件是否已初始化
+
+function renderUserPagination() {
+	const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
+	if (!_paginationInited) {
+		Pagination.render({
+			container: '#userPagination',
+			page: currentPage,
+			totalPages: totalPages,
+			total: totalCount,
+			pageSize: pageSize,
+			align: 'right',
+			// pageSizeOptions: [20, 50, 100],
+			onPageChange(p) { currentPage = p; loadUsers(); },
+			onPageSizeChange(size) { pageSize = size; currentPage = 1; loadUsers(); },
+		});
+		_paginationInited = true;
 	} else {
-		let start = Math.max(1, currentPage - 2);
-		const end = Math.min(totalPages, start + 4);
-		if (end - start < 4) start = Math.max(1, end - 4);
-		for (let i = start; i <= end; i++) btns.push(renderPageBtn(i));
+		Pagination.update({
+			page: currentPage,
+			totalPages: totalPages,
+			total: totalCount,
+			pageSize: pageSize,
+		});
 	}
-	// 下一页：末页时禁用
-	btns.push(`<button class="btn btn-sm page-btn" onclick="goPage(${currentPage + 1})" ${currentPage >= totalPages ? 'disabled' : ''}>›</button>`);
-	// 末页：末页时禁用
-	btns.push(`<button class="btn btn-sm page-btn" onclick="goPage(${totalPages})" ${currentPage >= totalPages ? 'disabled' : ''}>»</button>`);
-	$id('paginationBtns').innerHTML = btns.join('');
-}
-
-/** 渲染单个页码按钮 */
-function renderPageBtn(page) {
-	const active = page === currentPage ? 'btn-primary' : '';
-	return `<button class="btn btn-sm ${active} page-btn" onclick="goPage(${page})">${page}</button>`;
-}
-
-function goPage(p) {
-	if (!Number.isInteger(p) || p < 1 || p > totalPages) return;
-	currentPage = p; loadUsers();
 }
 
 function toggleCheckAll() {

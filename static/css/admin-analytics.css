@@ -62,23 +62,69 @@
 }
 
 /* panel-body 内最后一个主要元素撑满剩余高度，避免底部空白 */
-.panel-body > .chart-wrap:last-child,
 .panel-body > .card:last-child,
 .panel-body > .grid-2:last-child {
 	flex: 1;
 	min-height: 0;
 }
 
-/* chart-wrap 内部用 flex 列布局，让 chart-container 自适应高度而非固定 280px */
-.panel-body .chart-wrap {
-	display: flex;
-	flex-direction: column;
-}
-
 .panel-body .chart-container {
 	flex: 1;
 	min-height: 0;
 	height: auto;  /* 覆盖 common.css 的 height:280px，防止溢出 */
+}
+
+/* 概览面板：KPI 区与趋势图合并为一张卡片，内部用分隔线间隔，
+   避免多个白块拼接显得零散；卡片纵向 flex，趋势图区占满剩余高度 */
+.overview-card {
+	padding: 0;
+	overflow: hidden;
+	display: flex;
+	flex-direction: column;
+}
+
+/* 概览面板工具栏（时间范围 + 导出）：并入卡片顶部，与下方区块用分隔线区分 */
+.overview-card .overview-toolbar {
+	flex-shrink: 0;
+	padding: 12px 16px;
+	border-bottom: 1px solid var(--border);
+}
+
+/* 趋势图区：占满卡片剩余高度，内部纵向排列让图表容器撑满；
+   标题已并入上方工具栏同排，此处仅承载图表本体，顶部留较小间距 */
+.overview-card .trend-section {
+	flex: 1;
+	min-height: 0;
+	display: flex;
+	flex-direction: column;
+	padding: 12px 16px 16px;
+}
+
+/* 外层容器 #trendChart：撑满趋势图区剩余高度，并作为 flex 列让组件根容器填满 */
+.overview-card .trend-section > .chart-container {
+	flex: 1;
+	min-height: 0;
+	display: flex;
+	flex-direction: column;
+}
+
+/* 组件根容器 .chart-row：纵向填满外层，并让图表容器纵向拉伸（align-items 覆盖为 stretch），
+   配合 chart-echarts 的 height:100% 实现图表占满整个趋势图区 */
+.overview-card .trend-section .chart-row {
+	flex: 1;
+	min-height: 0;
+	align-items: stretch;
+}
+
+/* 内层图表容器（.chart-container-flex）：在 chart-row 内横向撑满剩余宽度 */
+.overview-card .trend-section .chart-row .chart-container {
+	flex: 1;
+	min-width: 0;
+}
+
+/* 图表画布占满 chart-container：内联 height 由组件传 '100%'，ResizeObserver 自适应 */
+.overview-card .chart-echarts {
+	height: 100%;
 }
 
 /* QA 记录等表格表头固定：滚动时 thead 粘在 panel-body 顶部 */
@@ -92,10 +138,10 @@
 
 /* 减小 card-title 下方间距（common.css 默认 margin-bottom:16px → 10px） */
 .card-title {
-	margin-bottom: 10px !important;
+	margin-bottom: 0 !important;
 }
 
-/* 日报 chart-wrap 头部：标题左 / 天数选择器右 */
+/* 日报趋势区头部：标题左 / 天数选择器右 */
 .daily-chart-header {
 	display: flex;
 	justify-content: space-between;
@@ -149,16 +195,6 @@
 	padding: 16px 28px;
 }
 
-/* 图例放图表下方 */
-.chart-wrap > .chart-legend {
-	margin-top: 8px;
-	justify-content: center;
-}
-
-.panel-footer {
-	flex-shrink: 0;
-}
-
 @keyframes tabFadeIn {
 	from { opacity: 0; transform: translateY(4px); }
 	to { opacity: 1; transform: translateY(0); }
@@ -187,8 +223,6 @@
 }
 
 /* --- 筛选行内元素垂直居中 --- */
-.page-actions .select,
-.page-actions .input,
 .card .select,
 .card .input {
 	vertical-align: middle;
@@ -221,56 +255,233 @@
 	white-space: nowrap;
 }
 
-/* --- 队列深度历史卡片：flex 列布局 + 边界裁剪，图表内容绝不超出卡片 ---
- * 原实现 svg 设 min-height:240px，卡片（flex:1/min-height:0）高度不足时
- * 图表会被挤出卡片边界；现改为卡片内部 flex 列布局，图表区撑满剩余高度，
- * svg 高度由 flex 决定（覆盖 common.css 的 height:100%），绘制内容按
- * preserveAspectRatio 缩放，任何数据量都不会溢出
+/* --- 合并卡片公共基础（队列深度 / 日报详情）：两张独立卡片合并为一张，
+ * 内部区段自带 padding 并用分隔线间隔，避免各自圆角/边框拼出断裂感（同 overview-card 方案）；
+ * 注意：不能设 overflow:hidden —— 卡片内容有固定最小高度（队列 290px / 日报摘要表），
+ * overflow:hidden 会使 min-height:auto 退化为 0，面板较矮时内容会被卡片裁切；
+ * min-height:auto 覆盖通用规则 .panel-body > .card:last-child 的 min-height:0：
+ * 面板较矮时卡片按内容高度展开（由 panel-body 滚动），保证内容完整可见
  */
-#queueHistoryCard {
-	overflow: hidden;
+.panel-body > .card.queue-card,
+.panel-body > .card.daily-card,
+.panel-body > .card.system-card {
+	flex: 1;
+	min-height: auto;
 	display: flex;
 	flex-direction: column;
-	min-height: 290px; /* 卡片高度固定不动，图表 viewBox 由 flex 自适应缩放 */
+	padding: 0;
 }
 
-#queueHistoryCard .card-title {
+/* 实时快照区：顶部固定 + 与历史趋势区用分隔线间隔 */
+.queue-card .queue-snapshot-section {
 	flex-shrink: 0;
+	padding: 12px 16px;
+	border-bottom: 1px solid var(--border);
+}
+
+/* 历史趋势区：占满卡片剩余高度，保留最小高度避免图表过矮 */
+.queue-card .queue-history-section {
+	flex: 1;
+	min-height: 290px;
+	display: flex;
+	flex-direction: column;
+	padding: 12px 16px;
+}
+
+.queue-history-section .card-title {
+	flex-shrink: 0;
+}
+
+/* --- 历史指标单卡（system-card）：与 queue-card 同款"单卡+内部分隔线"方案 ---
+ * 内容由 loadSystemMetrics 动态渲染为多个区块，区块间用分隔线间隔，
+ * 取代原先多张独立小卡片堆叠的碎片感 */
+.system-card #systemMetricsBody {
+	display: flex;
+	flex-direction: column;
+}
+
+/* 历史指标卡片头部：标题 + 日期选择，与下方内容用分隔线区分 */
+.system-card .system-card-header {
+	flex-shrink: 0;
+	padding: 10px 16px;
+	border-bottom: 1px solid var(--border);
+}
+
+.system-card .system-kpi-section,
+.system-card .system-section {
+	flex-shrink: 0;
+	padding: 12px 16px 14px;
+	border-bottom: 1px solid var(--border);
+}
+
+.system-card .system-section:last-child {
+	border-bottom: none;
+}
+
+/* 区块标题：小号加粗，与卡片 card-title 区分层级 */
+.system-card .section-title {
+	font-size: 14px;
+	font-weight: 600;
+	margin-bottom: 10px;
+}
+
+/* 关键指标：8 张 KPI 卡窄化一排展示，宽度不足时横向滑动（与概览实时条同款交互） */
+.system-card .system-kpi-section .kpi-grid {
+	display: flex;
+	gap: 10px;
+	overflow-x: auto;
+	overflow-y: hidden;
+}
+
+.system-card .system-kpi-section .kpi-grid .kpi-card {
+	flex: 0 0 auto;
+	min-width: 130px;
+	padding: 10px 12px;
+}
+
+.system-card .system-kpi-section .kpi-grid .kpi-value {
+	font-size: 20px;
+}
+
+/* 响应耗时与 Token 区块：耗时卡占 2/3，Token 成本占 1/3（耗时维度列多，需更宽空间） */
+.perf-grid {
+	display: grid;
+	grid-template-columns: 2fr 1fr;
+	gap: 12px;
+}
+
+/* 两个卡片嵌套在 system-card 单卡内：弱化内层卡片底色与标题，避免"卡中卡"视觉过重 */
+.system-card .perf-grid .card {
+	background: #f8fafc;
+	padding: 12px 14px;
+	min-width: 0;
+}
+
+.system-card .perf-grid .card-title {
+	font-size: 14px;
+	margin-bottom: 12px;
+}
+
+/* 分区内左右两列的子面板：浅底+细边框，避免在单卡内再嵌套 .card 造成双层圆角 */
+.system-card .sub-panel {
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	background: #f8fafc;
+	padding: 12px 14px;
+	min-width: 0;
+}
+
+/* 分位数延迟：每维度一列（总延迟/LLM/检索/TTFB/缓存命中），列内上下展示 P50/P95/P99；
+ * 值不带 ms 后缀（子面板标题已注明单位），避免窄列下溢出 */
+.latency-grid {
+	display: grid;
+	grid-template-columns: repeat(5, 1fr);
+	gap: 4px 12px;
+}
+
+.latency-col-title {
+	font-size: 12px;
+	font-weight: 600;
+	color: var(--text-sub);
+	margin-bottom: 6px;
+	white-space: nowrap;
+}
+
+/* 响应延迟列：label 与值左对齐紧贴（label 固定宽度保证同列纵向对齐），
+ * 列间 gap 自然分隔，避免 space-between 把"上一列的值"推近"下一列的 key"造成误读 */
+.latency-row {
+	display: flex;
+	justify-content: flex-start;
+	align-items: center;
+	gap: 6px;
+	padding: 7px 0;
+	font-size: 13px;
+}
+
+.latency-row span {
+	color: var(--text-sub);
+	min-width: 26px;
+}
+
+.latency-row b { font-weight: 600; white-space: nowrap; }
+
+/* 响应延迟与 Token 两面板行样式统一（同字号/留白/分隔线），
+ * 避免左右子项高度与间隔不一致；分隔线用相邻选择器，首行不加线 */
+.latency-row + .latency-row,
+.token-row + .token-row {
+	border-top: 1px dashed var(--border);
+}
+
+/* Token 与成本：纵向三行（Prompt / Completion / 费用），费用红色强调 */
+.token-rows {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.token-row {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	gap: 8px;
+	padding: 7px 0;
+	font-size: 13px;
+}
+
+.token-row span { color: var(--text-sub); }
+.token-row b { font-weight: 600; white-space: nowrap; }
+.token-row b.cost { color: #dc2626; }
+
+/* 日报趋势区：占满卡片剩余空间（趋势图随面板高度伸缩，仅保留最小下限避免被压没），
+ * 这样下方摘要表始终以自然高度完整展示，不会被固定尺寸图表挤掉 */
+.daily-card .daily-trend-section {
+	flex: 1;
+	min-height: 200px;
+	display: flex;
+	flex-direction: column;
+	padding: 16px 16px 0;
+	border-bottom: 1px solid var(--border);
+}
+
+/* 趋势图容器链：占满趋势区剩余高度（TrendChart 组件要求容器高度确定） */
+.daily-card .daily-trend-section #dailyTrendChart {
+	flex: 1;
+	min-height: 0;
+	display: flex;
+	flex-direction: column;
+}
+
+.daily-card .daily-trend-section #dailyTrendChart .chart-row {
+	flex: 1;
+	min-height: 0;
+	align-items: stretch;
+}
+
+.daily-card .daily-trend-section #dailyTrendChart .chart-echarts {
+	height: 100%; /* 图表画布占满 chart-container，配合组件 chartHeight:'100%' 使用 */
+}
+
+/* 每日摘要对比区：保持自然高度、不可压缩，保证表格完整可见 */
+.daily-card .daily-summary-section {
+	flex-shrink: 0;
+	padding: 6px 16px;
 }
 
 #queueDepthHistory {
 	flex: 1;
 	min-height: 0;
 	display: flex;
-	flex-direction: row; /* 图例在左、图表在右，纵排图例不再挤占图表上方空间 */
-	align-items: stretch;
-	gap: 12px;
+	flex-direction: column; /* ECharts 组件渲染的 .chart-row（勾选侧栏 + 图表）填满容器 */
 }
 
-#queueDepthHistory .chart-svg {
+#queueDepthHistory .chart-row {
 	flex: 1;
-	min-width: 0;
 	min-height: 0;
-	width: 100%;
-	height: auto; /* 覆盖 common.css .chart-svg 的 height:100%，尺寸由 flex 布局决定 */
-	display: block;
+	align-items: stretch; /* 覆盖 .chart-row 默认 align-items:center，让图表容器纵向拉伸 */
 }
 
-/* 图例改为左侧纵排：覆盖全局 .chart-legend 的水平布局与上边距 */
-#queueDepthHistory .chart-legend {
-	flex-shrink: 0;
-	flex-direction: column;
-	justify-content: center;
-	align-items: flex-start;
-	gap: 12px;
-	margin-top: 0;
-	margin-left: 24px; /* 图例整体右移，与卡片左边缘留出间距 */
-	font-size: 14px;
-}
-
-#queueDepthHistory .legend-dot {
-	width: 14px;
-	height: 14px;
+#queueDepthHistory .chart-echarts {
+	height: 100%; /* 图表画布占满 chart-container，配合组件 chartHeight:'100%' 使用 */
 }
 
 /* 空数据占位（无历史/样本不足）时水平居中于图表区 */
@@ -278,15 +489,57 @@
 	flex: 1;
 }
 
-/* --- QA 记录行 hover 高亮更明显 --- */
-#qaRecordsBody .table tbody tr:hover {
+/* --- QA 记录行 hover 高亮更明显（qaRecordsBody 现为 tbody 本身） --- */
+#qaRecordsBody tr:hover {
 	background: #eff6ff !important;
 }
 
-/* --- 实时监控数据新鲜度标签 --- */
-#realtimeBody .tag {
-	margin-left: 8px;
+/* --- QA 记录卡片工具栏：卡片 padding 置 0 后自行补回留白 --- */
+.qa-toolbar {
+	padding: 16px;
 }
+
+/* --- 概览"今日实时"区块（合并自原"实时监控"Tab）：
+ * 标题行 + 计数条放在卡片最顶部，与下方时间范围工具栏用分隔线间隔 --- */
+.overview-card .overview-realtime {
+	flex-shrink: 0;
+	padding: 14px 16px 0;
+	border-bottom: 1px solid var(--border);
+}
+
+/* 实时计数条：横向 flex 一排展示，卡片窄化固定最小宽度，
+ * 容器宽度不足时横向滑动（不换行），隐藏纵向滚动条 */
+.overview-card .overview-realtime .realtime-strip {
+	display: flex;
+	align-items: stretch;
+	gap: 10px;
+	overflow-x: auto;
+	overflow-y: hidden;
+	padding: 12px 0 14px;
+	scrollbar-width: thin;
+}
+
+.overview-card .overview-realtime .realtime-strip .kpi-card {
+	flex: 0 0 auto;
+	min-width: 132px;
+	padding: 12px 14px;
+}
+
+.overview-card .overview-realtime .realtime-strip .kpi-value {
+	font-size: 20px;
+}
+
+/* 实时卡片同比对比行：今日 vs 昨日同时段，绿=符合预期方向，红=反预期 */
+.overview-card .overview-realtime .realtime-strip .kpi-card .kpi-compare {
+	margin-top: 4px;
+	font-size: 11px;
+	line-height: 1.4;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.kpi-compare.up { color: #059669; }
+.kpi-compare.down { color: #dc2626; }
 
 /* --- 延迟直方图百分比条 hover 效果 --- */
 #systemMetricsBody [class*="__anim"]:hover {
@@ -297,11 +550,6 @@
 #dailyBody .table th:last-child,
 #dailyBody .table td:last-child {
 	min-width: 200px;
-}
-
-/* --- 辅助：tools tab 与 overview tab 中的差评卡片避免重复样式冲突 --- */
-.feedback-item + .feedback-item {
-	margin-top: 0;
 }
 
 /* --- 宽度工具类：用于 select / input 配合 ---
@@ -322,19 +570,15 @@
 }
 
 /* --- 卡片 / Grid 工具类 ---
- * .card-shrink 用于在 flex 容器中固定不被压缩的卡片
  * .grid-cols-* 提供常用列比，避免在 HTML/JS 里写 grid-template-columns
  */
-.card-shrink { flex-shrink: 0; }
 .grid-cols-5-4 { grid-template-columns: 5fr 4fr; }
 .grid-cols-1-1 { grid-template-columns: 1fr 1fr; }
-.grid-cols-3 { grid-template-columns: repeat(3, 1fr); }
 
 /* --- 表格相关 ---
  * .table-bordered 给 table 加边框圆角（默认 table 无外框）
  * .th-action 操作列固定宽度
  * .td-question 单行省略，限制最大宽度，配合 title 属性显示完整内容
- * .td-reason 评估说明列：限制宽度 + 小字灰色
  * .tr-clickable 整行可点击：鼠标变手型
  */
 .table-bordered { border: 1px solid var(--border); border-radius: var(--radius); }
@@ -345,7 +589,6 @@
 	text-overflow: ellipsis;
 	white-space: nowrap;
 }
-.td-reason { max-width: 280px; font-size: 12px; color: var(--text-sub); }
 .tr-clickable { cursor: pointer; }
 
 /* --- 反馈列表 / 卡片 ---
@@ -396,24 +639,12 @@
 .empty-emoji { font-size: 48px; margin-bottom: 16px; }
 .text-loading { padding: 20px; }
 
-/* --- 大数字 / KPI 动态色值显示 ---
- * .metric-value-lg Token 统计大数字（24px 粗体）
- * .metric-value-cost 费用数字（红色强调）
+/* --- KPI 动态色值显示 ---
  * .kpi-value-dynamic 用于 KPI 卡片：字号 22px，颜色由 --kpi-color 控制（默认深灰）
  *   用法：<div class="kpi-value kpi-value-dynamic" style="--kpi-color:#059669">
  *   注意：用 .kpi-value.kpi-value-dynamic 提升优先级，覆盖 .tab-panel .kpi-value 的 24px
  */
-/* 公共：大数字样式；.metric-value-cost 额外红色强调费用 */
-.metric-value-lg,
-.metric-value-cost { font-size: 24px; font-weight: 600; }
-.metric-value-cost { color: #dc2626; }
 .kpi-value.kpi-value-dynamic { font-size: 22px; color: var(--kpi-color, #1f2937); }
-
-/* --- 卡片小内边距（用于紧凑型横向 card，如实时监控顶部的数据日期行） --- */
-.card-pad-sm { padding: 12px 20px; }
-
-/* --- 文本行高工具类（用于说明性文字，让多行更易读） --- */
-.text-lh-18 { line-height: 1.8; }
 
 /* --- 直方图行布局 ---
  * 延迟分布 / 错误分布的每行结构：[标签 | 进度条 | 数值]
@@ -443,44 +674,42 @@
 
 /* --- 图表侧栏 / 行布局 ---
  * 趋势图左侧的勾选框列：垂直排列 + 居中 + 不被压缩
- * .chart-sidebar 概览趋势图侧栏（min-width 110px）
- * .daily-sidebar 仅覆盖 min-width（需配合 .chart-sidebar 一起使用）
+ * .chart-sidebar 图例侧栏：宽度由 JS 内联 style 控制（TrendChart 的 legendWidth 参数），
+ *   如需要可传参调整，无需再在 CSS 中写死 min-width
  * .chart-row 图表主行容器（侧栏 + 图表横向排列）
  * .chart-container-flex chart-container 的 flex 变体：占满剩余宽度（高度由 JS 动态设置）
  */
 .chart-sidebar {
 	display: flex;
 	flex-direction: column;
-	gap: 10px;
+	gap: 12px;
 	flex-shrink: 0;
-	padding: 10px 4px 10px 6px;
-	min-width: 110px;
+	padding: 10px 8px;
 	justify-content: center;
 }
 
-/* 日报侧栏：仅覆盖 min-width，HTML 需写 class="chart-sidebar daily-sidebar" */
-.daily-sidebar {
-	min-width: 120px;
+/* 图例勾选项：整行可点 + 圆点与文字垂直对齐，hover 轻微高亮提升可辨识度 */
+.chart-sidebar .checkbox {
+	white-space: nowrap;   /* 防止窄侧栏内中文标签换行 */
+	border-radius: var(--radius-sm);
+	padding: 4px 6px;
+	transition: background .15s;
+}
+
+.chart-sidebar .checkbox:hover {
+	background: var(--hover);
+}
+
+.chart-sidebar .checkbox input {
+	margin: 0;
+}
+
+.chart-sidebar .metric-dot {
+	flex-shrink: 0;
 }
 
 .chart-row { display: flex; gap: 4px; align-items: center; }
 .chart-container-flex { flex: 1; min-width: 0; height: auto; }
-
-/* 概述趋势图：容器高度由 SVG viewBox 宽高比自动计算（标准响应式 SVG 方案），
-   覆盖 common.css 的 height:100%，避免容器 height:auto 时 SVG 高度塌陷为 0 */
-.chart-container-flex .chart-svg { height: auto; }
-
-/* --- 圆点颜色修饰类 ---
- * 配合 .metric-dot（圆点基础类，background 用 currentColor）
- * font-size 统一 1.28em（比父级大 28%），color 控制圆点颜色
- * 用于趋势图勾选框前的色块标识
- */
-.dot-blue, .dot-yellow, .dot-red, .dot-green, .dot-purple { font-size: 1.28em; }
-.dot-blue { color: #2563eb; }
-.dot-yellow { color: #a16207; }
-.dot-red { color: #ef4444; }
-.dot-green { color: #059669; }
-.dot-purple { color: #7c3aed; }
 
 /* --- QA 详情弹窗内的问答展示块 ---
  * 公共样式：圆角 + 内边距 + 行高；仅 background 不同区分问题和回答
@@ -494,9 +723,6 @@
 .qa-detail-question { background: #f9fafb; }
 .qa-detail-answer { background: #eff6ff; }
 
-/* --- 分页省略号按钮：去掉边框与背景，看起来像纯文本 --- */
-.page-btn-ellipsis { border: none; background: transparent; }
-
 /* --- 动态色值单元格 ---
  * 队列大小、忠实度分数、环比差值等会根据数值动态切换颜色
  * 这里提供语义化 class，JS 根据阈值选择对应 class
@@ -506,67 +732,21 @@
 .cell-success { font-weight: 600; }
 .cell-danger { color: #dc2626; }
 .cell-success { color: #059669; }
-.score-good { color: #059669; }
-.score-mid { color: #f59e0b; }
-.score-bad { color: #dc2626; }
 .diff-up { color: #059669; }
 .diff-down { color: #dc2626; }
 
-/* --- SVG 画布自适应（队列深度历史图）：保持宽度 100% + 高度自适应 --- */
-.chart-svg-fluid { min-width: 100%; height: auto; }
-
-/* --- kpi-grid 上使用 .grid-cols-3 时需提升优先级，覆盖 .tab-panel .kpi-grid 的 auto-fit --- */
-.kpi-grid.grid-cols-3 { grid-template-columns: repeat(3, 1fr); }
-
-/* --- 小屏响应式：把所有降列的选择器放到一个合并后的 @media，
-   位置放在 .kpi-grid.grid-cols-3 之后，确保按 CSS 级联覆盖成功 --- */
+/* --- 小屏响应式：把所有降列的选择器放到一个合并后的 @media --- */
 @media (max-width: 900px) {
 	.grid-2,
-	.grid-3,
 	.grid-cols-5-4,
-	.grid-cols-1-1,
-	.kpi-grid.grid-cols-3 {
+	.grid-cols-1-1 {
 		grid-template-columns: 1fr;
 	}
 }
 
 /* ============ 折线图 ============ */
-.chart-wrap {
-	background: var(--white);
-	border: 1px solid var(--border);
-	border-radius: var(--radius-lg);
-	padding: 20px
-}
-
 .chart-container {
 	width: 100%;
 	height: 280px;
 	position: relative
-}
-
-.chart-svg {
-	width: 100%;
-	height: 100%
-}
-
-.chart-legend {
-	display: flex;
-	gap: 16px;
-	margin-top: 12px;
-	font-size: 12px;
-	color: var(--text-sub);
-	justify-content: center
-}
-
-.legend-item {
-	display: flex;
-	align-items: center;
-	gap: 4px
-}
-
-.legend-dot {
-	width: 10px;
-	height: 10px;
-	border-radius: 50%;
-	background: var(--primary)
 }

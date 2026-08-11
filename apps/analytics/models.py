@@ -90,27 +90,25 @@ class SystemMetricsReport(models.Model):
     p99_latency_total = models.IntegerField(default=0, help_text='端到端 P99（不含缓存命中）')
     p50_latency_llm = models.IntegerField(default=0, help_text='LLM 调用 P50')
     p95_latency_llm = models.IntegerField(default=0, help_text='LLM 调用 P95')
+    p99_latency_llm = models.IntegerField(default=0, help_text='LLM 调用 P99')
     p50_latency_retrieval = models.IntegerField(default=0, help_text='检索 P50')
     p95_latency_retrieval = models.IntegerField(default=0, help_text='检索 P95')
+    p99_latency_retrieval = models.IntegerField(default=0, help_text='检索 P99')
     p50_ttfb = models.IntegerField(default=0, help_text='首字返回 P50')
     p95_ttfb = models.IntegerField(default=0, help_text='首字返回 P95')
+    p99_ttfb = models.IntegerField(default=0, help_text='首字返回 P99')
 
     # --- 缓存命中延迟（单独统计，通常 <50ms）---
-    cache_hit_p50_latency = models.IntegerField(default=0,
-                                                  help_text='缓存命中请求 P50 延迟')
-    cache_hit_p95_latency = models.IntegerField(default=0,
-                                                  help_text='缓存命中请求 P95 延迟')
+    cache_hit_p50_latency = models.IntegerField(default=0, help_text='缓存命中请求 P50 延迟')
+    cache_hit_p95_latency = models.IntegerField(default=0, help_text='缓存命中请求 P95 延迟')
+    cache_hit_p99_latency = models.IntegerField(default=0, help_text='缓存命中请求 P99 延迟')
 
     # --- 比率指标 ---
     cache_hit_rate = models.FloatField(default=0.0, help_text='缓存命中率')
-    llm_success_rate = models.FloatField(default=0.0,
-                                          help_text='LLM 成功率（仅统计非缓存请求）')
-    llm_timeout_rate = models.FloatField(default=0.0,
-                                          help_text='LLM 超时率')
-    embedding_error_rate = models.FloatField(default=0.0,
-                                              help_text='Embedding 错误率')
-    avg_tokens_per_second = models.FloatField(default=0.0,
-                                               help_text='Token 生成速率（仅非缓存请求）')
+    llm_success_rate = models.FloatField(default=0.0, help_text='LLM 成功率（仅统计非缓存请求）')
+    llm_timeout_rate = models.FloatField(default=0.0, help_text='LLM 超时率')
+    embedding_error_rate = models.FloatField(default=0.0, help_text='Embedding 错误率')
+    avg_tokens_per_second = models.FloatField(default=0.0, help_text='Token 生成速率（仅非缓存请求）')
 
     # --- Token & 成本（仅非缓存请求）---
     total_tokens_prompt = models.BigIntegerField(default=0)
@@ -118,12 +116,10 @@ class SystemMetricsReport(models.Model):
     total_cost = models.DecimalField(max_digits=12, decimal_places=6, default=0)
 
     # --- 延迟直方图（JSON，按 100ms 分桶，仅非缓存请求）---
-    latency_histogram = models.JSONField(default=dict, blank=True,
-                                          help_text='{区间: 计数} 示例: {"0-100": 123, "100-200": 456}')
+    latency_histogram = models.JSONField(default=dict, blank=True, help_text='{区间: 计数} 示例: {"0-100": 123, "100-200": 456}')
 
     # --- 错误分布 ---
-    error_distribution = models.JSONField(default=dict, blank=True,
-                                           help_text='{错误类型: 计数} 示例: {"timeout": 5, "network": 2}')
+    error_distribution = models.JSONField(default=dict, blank=True, help_text='{错误类型: 计数} 示例: {"timeout": 5, "network": 2}')
 
     created_at = models.DateTimeField(auto_now_add=True)
 

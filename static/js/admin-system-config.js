@@ -912,6 +912,7 @@ async function openHistoryModal() {
 	const searchInput = $('#historySearchInput');
 	if (searchInput) searchInput.value = '';
 	_historyPage = 1; // 重置页码
+	Pagination.destroy(); // 销毁旧分页实例，避免残留状态
 	await loadHistoryRecords();
 }
 
@@ -962,44 +963,35 @@ function renderHistoryList() {
 		body.innerHTML = keyword
 			? `<div class="ticket-empty">未找到匹配"${escapeHtml(keyword)}"的记录</div>`
 			: '<div class="ticket-empty">暂无已生效的配置变更</div>';
-		$('#historyPagination').innerHTML = '';
+		Pagination.destroy();
 		return;
 	}
 
-	// 分页逻辑：参考工单列表实现
+	// 前端分页：全量数据按 _HISTORY_PAGE_SIZE 切片展示当前页
 	const totalPages = Math.ceil(records.length / _HISTORY_PAGE_SIZE);
 	if (_historyPage > totalPages) _historyPage = 1;
 	const start = (_historyPage - 1) * _HISTORY_PAGE_SIZE;
 	const pageItems = records.slice(start, start + _HISTORY_PAGE_SIZE);
 
 	body.innerHTML = pageItems.map(renderHistoryCard).join('');
-	renderHistoryPagination(records.length, totalPages);
-}
 
-/* ============ 渲染变更记录分页控件 ============ */
-function renderHistoryPagination(totalItems, totalPages) {
-	const el = $('#historyPagination');
-	if (!el) return;
-	if (totalPages <= 1) {
-		el.innerHTML = `<span class="pagination-info">共 ${totalItems} 条</span>`;
-		return;
+	// 使用公共 Pagination 组件渲染分页控件；首次 render 建 DOM，后续 update 仅刷新状态
+	const pgnState = { page: _historyPage, totalPages, total: records.length, pageSize: _HISTORY_PAGE_SIZE };
+	if (_historyPage > 1) {
+		Pagination.update(pgnState);
+	} else {
+		Pagination.render({
+			container: '#historyPagination',
+			...pgnState,
+			align: 'center',
+			onPageChange: (p) => {
+				_historyPage = p;
+				renderHistoryList();
+				const scrollBody = $('#historyListBody');
+				if (scrollBody) scrollBody.scrollTop = 0;
+			}
+		});
 	}
-	const prevDisabled = _historyPage <= 1 ? 'disabled' : '';
-	const nextDisabled = _historyPage >= totalPages ? 'disabled' : '';
-	el.innerHTML = `
-		<button class="btn btn-sm btn-outline" ${prevDisabled} onclick="goHistoryPage(${_historyPage - 1})">上一页</button>
-		<span class="pagination-info">第 ${_historyPage} / ${totalPages} 页（共 ${totalItems} 条）</span>
-		<button class="btn btn-sm btn-outline" ${nextDisabled} onclick="goHistoryPage(${_historyPage + 1})">下一页</button>
-	`;
-}
-
-/* ============ 跳转到变更记录指定页 ============ */
-function goHistoryPage(page) {
-	_historyPage = page;
-	renderHistoryList();
-	// 滚动到列表顶部
-	const body = $('#historyListBody');
-	if (body) body.scrollTop = 0;
 }
 
 /* ============ 搜索过滤变更记录（oninput 触发）============ */

@@ -17,11 +17,11 @@
 	color: var(--primary);
 }
 
-/* 分页大小选择框：与 btn-sm 等高 */
-.page-size-select {
-	width: 68px;
-	padding: 4px 8px;
-	font-size: 12px;
-	height: 28px;
-	line-height: 1;
+/* 卡片 padding 置 0 后，工具条与表格区域需自行补回留白 */
+.user-toolbar {
+	padding: 16px;
+}
+
+.card-scroll {
+	padding: 0 16px;
 }

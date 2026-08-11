@@ -2,7 +2,6 @@
 analytics views - 关键词权重 & 日报 & 统计 & 系统指标 & 组织报表 & 队列监控
 """
 import io
-import csv
 
 from loguru import logger
 from datetime import timedelta, datetime
@@ -140,7 +139,7 @@ class KeywordWeightListView(APIView):
 class KeywordWeightDetailView(APIView):
     """PUT /api/v1/analytics/keywords/{id}/ 调整权重
 
-    - 修改关键词权重直接影响检索排序（weight_score 范围 0.1~2.0）
+    - 修改关键词权重直接影响检索排序（weight_score 范围 0.1~5.0，与创建接口一致）
     - 仅限管理员操作，需记录审计日志
     """
     permission_classes = [IsAuthenticated, CanViewAnalytics]
@@ -158,7 +157,8 @@ class KeywordWeightDetailView(APIView):
         try:
             kw = KeywordWeight.objects.get(id=kw_id)
             old_score = kw.weight_score
-            kw.weight_score = max(0.1, min(2.0, kw.weight_score + delta))
+            # 上限与创建接口（0.1~5.0）保持一致，避免高权重关键词 +0.1 被静默压回 2.0
+            kw.weight_score = max(0.1, min(5.0, kw.weight_score + delta))
             kw.save(update_fields=["weight_score"])
             # 手动调整同样落 KeywordFeedbackAgg，与自动调整统一审计展示；
             # 同 (日期, 关键词) 自动任务将跳过应用，保证手动覆盖优先
@@ -207,6 +207,10 @@ class ChunkClickLogView(APIView):
         except (TypeError, ValueError):
             document_id = None
         root_type = (request.data.get("root_type") or "all").strip() or "all"
+        # root_type 长度与模型 CharField(max_length=32) 对齐，超长直接 400，
+        # 否则会触发 DB DataError 导致 500（与 KeywordWeightListView.post 同一口径）
+        if len(root_type) > 32:
+            return Response({"detail": "root_type 长度不能超过 32 字符"}, status=400)
 
         # 记录点击日志；qa_record/user 以请求携带为准，写入失败不阻塞前端
         ChunkClickLog.objects.create(
@@ -232,10 +236,12 @@ class KeywordFeedbackAggListView(APIView):
         qs = KeywordFeedbackAgg.objects.all()
         date = (request.query_params.get("date") or "").strip()
         if date:
+            # 先解析校验日期格式，避免非法字符串直接透传到 ORM 过滤导致 500
             try:
-                qs = qs.filter(report_date=date)
+                report_date = datetime.fromisoformat(date).date()
             except ValueError:
                 return Response({"detail": "date 格式应为 YYYY-MM-DD"}, status=400)
+            qs = qs.filter(report_date=report_date)
         keyword = (request.query_params.get("keyword") or "").strip()
         if keyword:
             qs = qs.filter(keyword__icontains=keyword)
@@ -410,13 +416,15 @@ class TrendReportView(APIView):
         if root_type:
             qa_base_qs = qa_base_qs.filter(root_type=root_type)
 
-        # 聚合 1：qa count（全量，包含缓存命中）
+        # 聚合 1：qa count + 缓存命中数（全量；缓存命中单独计数，
+        # 供概览趋势图勾选展示"缓存命中"指标）
         qa_counts = (qa_base_qs
                       .annotate(day=TruncDate("created_at"))
                       .values("day")
-                      .annotate(qa_count=models.Count("id"))
+                      .annotate(qa_count=models.Count("id"),
+                                cache_hits=models.Count("id", filter=models.Q(is_hit_cache=True)))
                       .order_by("day"))
-        qa_map = {r["day"].isoformat(): {"qa_count": r["qa_count"]} for r in qa_counts}
+        qa_map = {r["day"].isoformat(): {"qa_count": r["qa_count"], "cache_hit_count": r["cache_hits"]} for r in qa_counts}
 
         # 聚合 2：仅非缓存命中的平均耗时，分别计算首字(TTFT)和整体(total)耗时
         # —— 缓存命中请求走旁路，没有真实 LLM 生成过程，latency 代表纯读库速度，会拉低真实生成耗时
@@ -428,6 +436,14 @@ class TrendReportView(APIView):
                                       avg_ttfb=models.Avg("latency_ttfb_ms"))
                            .order_by("day"))
         lat_map = {r["day"].isoformat(): r for r in latency_by_day}
+
+        # 聚合 2b：每日活跃用户数（按 user 去重），供概览趋势图勾选"活跃用户"指标
+        active_by_day = (qa_base_qs
+                         .annotate(day=TruncDate("created_at"))
+                         .values("day")
+                         .annotate(active_users=models.Count("user", distinct=True))
+                         .order_by("day"))
+        active_map = {r["day"].isoformat(): r["active_users"] for r in active_by_day}
 
         # 单次 GROUP BY 查询：good / bad feedback count
         # —— 注意：所有 filter（尤其是 JOIN 条件如 qa_record__root_type）必须放在 .values().annotate() 之前 ——
@@ -461,6 +477,8 @@ class TrendReportView(APIView):
             trend.append({
                 "date": day_str,
                 "qa_count": qa_count,
+                "cache_hit_count": qa_row.get("cache_hit_count", 0),
+                "active_users": active_map.get(day_str, 0),
                 "good": good,
                 "bad": bad,
                 "accuracy": round(good / max(good + bad, 1), 4),
@@ -507,98 +525,21 @@ class BadFeedbackListView(APIView):
                 "tags": fb.tags,
                 "comment": fb.comment,
                 "status": fb.status,
-                "user": fb.user.real_name or fb.user.username if fb.user else "",
+                # user 为不可空 FK（CASCADE），此处保留判空仅为防御性编程
+                "user": (fb.user.real_name or fb.user.username) if fb.user else "",
                 "created_at": fb.created_at.isoformat() if fb.created_at else "",
             })
         return Response({"rows": rows, "count": len(rows)})
 
 
-class OverviewStatsView(APIView):
-    """GET /api/v1/analytics/overview/?root_type= 概览统计
-    - Dashboard 顶部卡片：总 QA 次数、近 7 日 QA、准确率、平均延迟、活跃用户、文档数、活跃会话
-    - 使用条件聚合一次性查出 total_qa/weekly_qa/good/bad，减少查询
-    - 系统级统计，需具备 analytics:system:read 权限
-    """
-    permission_classes = [IsAuthenticated, CanViewAnalytics]
-    required_perm = 'analytics.system.read'
-
-    def get(self, request):
-        from apps.knowledge.models import Document
-        from apps.memory.models import Session
-
-        today = timezone.now().date()
-        week_ago = today - timedelta(days=7)
-        root_type = request.query_params.get("root_type")
-
-        qa_qs = QaRecord.objects.all()
-        if root_type:
-            qa_qs = qa_qs.filter(root_type=root_type)
-
-        # 一次性聚合：总 QA + 近 7 日 QA
-        qa_agg = qa_qs.aggregate(
-            total_qa=models.Count('id'),
-            weekly_qa=models.Count('id', filter=models.Q(created_at__date__gte=week_ago)),
-        )
-        total_qa = qa_agg['total_qa'] or 0
-        weekly_qa = qa_agg['weekly_qa'] or 0
-
-        # 反馈聚合：一次性查出好评+差评
-        fb_qs = QaFeedback.objects.all()
-        if root_type:
-            fb_qs = fb_qs.filter(qa_record__root_type=root_type)
-        fb_agg = fb_qs.aggregate(
-            good_fb=models.Count('id', filter=models.Q(rating__gt=0)),
-            bad_fb=models.Count('id', filter=models.Q(rating__lt=0)),
-        )
-        good_fb = fb_agg['good_fb'] or 0
-        bad_fb = fb_agg['bad_fb'] or 0
-        accuracy = round(good_fb / max(good_fb + bad_fb, 1), 4)
-
-        # 平均延迟：排除缓存命中（缓存命中延迟仅代表纯读库速度，不是真实 LLM 生成耗时）
-        norm_qs = qa_qs.exclude(is_hit_cache=True)
-        latency_agg = norm_qs.aggregate(
-            avg_total=models.Avg("latency_total_ms"),
-            avg_ttfb=models.Avg("latency_ttfb_ms"),
-        )
-        avg_total_ms = int(latency_agg["avg_total"] or 0)
-        avg_ttft_ms = int(latency_agg["avg_ttfb"] or 0)
-
-        active_users = qa_qs.filter(created_at__date__gte=week_ago).values("user").distinct().count()
-
-        # 文档统计：一次性查出 total + completed
-        doc_qs = Document.objects.filter(is_deleted=False)
-        if root_type:
-            doc_qs = doc_qs.filter(root_type=root_type)
-        doc_agg = doc_qs.aggregate(
-            total_docs=models.Count('id'),
-            completed_docs=models.Count('id', filter=models.Q(status='done')),
-        )
-        total_docs = doc_agg['total_docs'] or 0
-        completed_docs = doc_agg['completed_docs'] or 0
-
-        active_sessions = Session.objects.filter(is_deleted=False, last_active_at__date__gte=week_ago).count()
-
-        return Response({
-            "total_qa": total_qa,
-            "weekly_qa": weekly_qa,
-            "accuracy": accuracy,
-            "avg_latency_ms": avg_total_ms,   # 兼容旧字段，等于 avg_total_ms
-            "avg_ttft_ms": avg_ttft_ms,      # 首字耗时（排除缓存命中）
-            "avg_total_ms": avg_total_ms,     # 整体总耗时（排除缓存命中）
-            "active_users": active_users,
-            "total_docs": total_docs,
-            "completed_docs": completed_docs,
-            "active_sessions": active_sessions,
-        })
-
-
 class QaRecordView(APIView):
     """GET /api/v1/analytics/qa-records/?start_date=&end_date=&root_type=&qa_id=
+            &q=&answer_type=&cache=&rating=&latency_min=&latency_max=
 
     - 返回 QA 记录列表，供 Dashboard 查看对话历史
     - 可选 qa_id 参数：返回单条 QA 详情（用于 QA 详情弹窗，避免列表前 100 条限制）
     - 仅管理员或具备 analytics:system:read 权限的用户可访问
-    - 支持日期范围、领域过滤和分页
+    - 支持日期范围、问题搜索、回答类型、缓存命中、评分、延迟区间过滤和分页
     - feedback 是 OneToOne，需用 hasattr 判断存在性（select_related 做 LEFT JOIN，无反馈时为 None）
     """
     permission_classes = [IsAuthenticated, CanViewAnalytics]
@@ -664,6 +605,40 @@ class QaRecordView(APIView):
 
         if root_type:
             qs = qs.filter(root_type=root_type)
+
+        # —— 列表筛选：问题搜索 / 回答类型 / 是否缓存 / 评分 / 延迟区间 ——
+        q = request.query_params.get("q", "").strip()
+        if q:
+            # 问题关键词模糊搜索
+            qs = qs.filter(question__icontains=q)
+
+        answer_type = request.query_params.get("answer_type")
+        if answer_type:
+            qs = qs.filter(answer_type=answer_type)
+
+        cache = request.query_params.get("cache")
+        if cache in ("true", "1"):
+            qs = qs.filter(is_hit_cache=True)
+        elif cache in ("false", "0"):
+            qs = qs.filter(is_hit_cache=False)
+
+        rating = request.query_params.get("rating")
+        if rating in ("-1", "0", "1"):
+            if rating == "0":
+                # 评分 0：无反馈记录（feedback 为 NULL）与中性反馈都视为"未评分/中性"
+                qs = qs.filter(models.Q(feedback__isnull=True) | models.Q(feedback__rating=0))
+            else:
+                qs = qs.filter(feedback__rating=int(rating))
+
+        latency_min = request.query_params.get("latency_min")
+        latency_max = request.query_params.get("latency_max")
+        try:
+            if latency_min:
+                qs = qs.filter(latency_total_ms__gte=int(latency_min))
+            if latency_max:
+                qs = qs.filter(latency_total_ms__lte=int(latency_max))
+        except ValueError:
+            return Response({'detail': 'latency_min/latency_max 必须为整数'}, status=400)
 
         try:
             page = int(request.query_params.get("page") or 1)
@@ -776,13 +751,17 @@ class SystemMetricsReportView(APIView):
             'p99_latency_total': report.p99_latency_total,
             'p50_latency_llm': report.p50_latency_llm,
             'p95_latency_llm': report.p95_latency_llm,
+            'p99_latency_llm': report.p99_latency_llm,
             'p50_latency_retrieval': report.p50_latency_retrieval,
             'p95_latency_retrieval': report.p95_latency_retrieval,
+            'p99_latency_retrieval': report.p99_latency_retrieval,
             'p50_ttfb': report.p50_ttfb,
             'p95_ttfb': report.p95_ttfb,
+            'p99_ttfb': report.p99_ttfb,
             # 缓存命中延迟
             'cache_hit_p50_latency': report.cache_hit_p50_latency,
             'cache_hit_p95_latency': report.cache_hit_p95_latency,
+            'cache_hit_p99_latency': report.cache_hit_p99_latency,
             # 比率
             'cache_hit_rate': report.cache_hit_rate,
             'llm_success_rate': report.llm_success_rate,
@@ -815,7 +794,7 @@ class OrgUsageReportView(APIView):
         # 权限模型：user.department FK 直接获取部门，团队管辖通过 UserTeamScopeRel 判定，
         # 部门管辖通过 UserDeptScopeRel 判定
         from apps.users.models import (
-            UserDeptScopeRel, UserTeamScopeRel, GrantStatus, Team,
+            UserDeptScopeRel, UserTeamScopeRel, GrantStatus,
         )
 
         date_str = request.query_params.get('date')
@@ -984,8 +963,10 @@ class RealtimeSnapshotView(APIView):
 
     def get(self, request):
         try:
-            from apps.analytics.realtime import get_realtime_snapshot
+            from apps.analytics.realtime import get_realtime_snapshot, get_yesterday_same_period_stats
             snapshot = get_realtime_snapshot()
+            # 同比对比数据：昨日同时段累计（失败时为 None，前端按"无对比数据"降级展示）
+            snapshot['yesterday'] = get_yesterday_same_period_stats()
             return Response(snapshot)
         except Exception:
             logger.exception('[RealtimeSnapshot] Failed to get snapshot')

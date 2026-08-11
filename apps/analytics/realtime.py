@@ -9,6 +9,8 @@ Analytics realtime - Redis 实时指标 & 队列深度操作封装
 """
 import os
 import time
+from datetime import timedelta
+from decimal import Decimal
 from functools import lru_cache
 
 from loguru import logger
@@ -373,6 +375,49 @@ def get_realtime_snapshot():
         # Dashboard 可据此判断数据是否新鲜（默认 5 分钟刷新）
         'last_flush_at': int(data.get('last_flush_at', 0)),
     }
+
+
+def get_yesterday_same_period_stats():
+    """聚合昨日同时段（昨日 0 点 ~ 当前时刻）的实时指标，用于今日实时同比对比
+
+    - 今日已流逝时长 elapsed = now - 今日0点（本地时间）；
+      昨日同时段 = [昨日0点, 昨日0点 + elapsed)，随时间推移动态前移，故只能实时聚合不能预存
+    - 字段口径与 increment_realtime_metrics 完全对齐：
+      缓存命中仅累加 total_qa/cache_hits；Token/费用仅统计非缓存请求；llm_errors 按 is_success=False
+    - 返回 None 表示聚合失败，调用方按"无对比数据"处理，不影响 Redis 快照
+    """
+    from django.db.models import Count, Q, Sum
+    from django.db.models.functions import Coalesce
+    from apps.analytics.models import QaRecord
+
+    try:
+        # 用本地时间而非 UTC：Redis key 按 timezone.localdate() 分日，
+        # 若按 UTC 0 点截断，本地凌晨时段会错位到昨天
+        now = timezone.localtime()
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        elapsed = now - today_start
+        y_start = today_start - timedelta(days=1)
+        y_end = y_start + elapsed
+
+        agg = (QaRecord.objects
+               .filter(created_at__gte=y_start, created_at__lt=y_end)
+               .aggregate(
+                   total_qa=Count('id'),
+                   cache_hits=Count('id', filter=Q(is_hit_cache=True)),
+                   normal_qa=Count('id', filter=Q(is_hit_cache=False)),
+                   llm_errors=Count('id', filter=Q(is_success=False)),
+                   tokens_prompt=Coalesce(Sum('tokens_prompt', filter=Q(is_hit_cache=False)), 0),
+                   tokens_completion=Coalesce(Sum('tokens_completion', filter=Q(is_hit_cache=False)), 0),
+                   # cost_estimate 为 DecimalField，默认值须同类型，否则 Coalesce 报混合类型错误
+                   cost_estimate=Coalesce(Sum('cost_estimate', filter=Q(is_hit_cache=False)), Decimal('0.0')),
+               ))
+        agg['tokens_prompt'] = round(float(agg['tokens_prompt']), 2)
+        agg['tokens_completion'] = round(float(agg['tokens_completion']), 2)
+        agg['cost_estimate'] = round(float(agg['cost_estimate']), 4)
+        return agg
+    except Exception:
+        logger.exception('[Realtime] 昨日同时段聚合失败，按无对比数据处理')
+        return None
 
 
 def flush_realtime_metrics():

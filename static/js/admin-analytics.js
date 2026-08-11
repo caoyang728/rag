@@ -1,9 +1,6 @@
 /* ============ 反馈与准确率报表 ============ */
 
-let currentTimeRange = 'week';
-let showAccuracy = true;
-let showTtft = true;       // 首字耗时（仅非缓存命中）
-let showTotal = true;      // 整体总耗时（仅非缓存命中）
+let currentTimeRange = '7d';
 let customDateStart = null;
 let customDateEnd = null;
 
@@ -29,9 +26,21 @@ async function initAnalyticsPage() {
 	if (sDate) { sDate.value = yStr; sDate.max = yStr; }
 	const oDate = $('#orgUsageDate');
 	if (oDate) { oDate.value = yStr; oDate.max = yStr; }
-	// 默认加载概览数据
-	loadOverview();
+	// 默认加载概览数据（今日实时 + 趋势；原 KPI 卡片指标已并入下方趋势折线图）
+	loadRealtimeStrip();
+	// 首屏同步趋势图标题（默认「近 7 天」），避免 HTML 写死值与实际时间范围不一致
+	updateChartTitle(currentTimeRange);
 	loadTrend();
+	// 默认落在概览 Tab，启动今日实时轮询；页面切到后台时暂停，回前台立即刷新并恢复
+	startRealtimePolling();
+	document.addEventListener('visibilitychange', () => {
+		if (document.hidden) {
+			stopRealtimePolling();
+		} else if (currentTab === 'overview') {
+			loadRealtimeStrip(true);
+			startRealtimePolling();
+		}
+	});
 }
 
 /* ====== Tab 切换 ====== */
@@ -43,11 +52,16 @@ function switchTab(name) {
 	$$('.tab-panel').forEach(p => {
 		p.classList.toggle('active', p.getAttribute('data-panel') === name);
 	});
-	// 切到新 Tab 时懒加载一次数据
+	// 今日实时轮询仅概览 Tab 生效：切到概览启动，切走停止
+	if (name === 'overview') {
+		startRealtimePolling();
+	} else {
+		stopRealtimePolling();
+	}
+	// 切到对应 Tab 时加载该面板数据（每次切换均刷新，根节点筛选变更也走 reloadCurrentTab）
 	switch (name) {
 		case 'overview': break; // 已默认加载
 		case 'system': loadSystemMetrics(); break;
-		case 'realtime': loadRealtime(); break;
 		case 'queue': loadQueueDepth(); break;
 		case 'org': loadOrgUsage(); break;
 		case 'qa': loadQaRecords(); break;
@@ -64,11 +78,9 @@ function reloadCurrentTab() {
 	// 根节点切换时，按当前 Tab 懒加载对应数据
 	switch (currentTab) {
 		case 'overview':
-			loadOverview();
 			loadTrend();
 			break;
 		case 'system': loadSystemMetrics(); break;
-		case 'realtime': loadRealtime(); break;
 		case 'queue': loadQueueDepth(); break;
 		case 'org': loadOrgUsage(); break;
 		case 'qa': qaPage = 1; loadQaRecords(); break;
@@ -81,168 +93,376 @@ function reloadCurrentTab() {
 	}
 }
 
-/* ---- 概览统计 ---- */
-async function loadOverview() {
-	const kpiValues = $$('.tab-panel[data-panel="overview"] .kpi-value');
-	try {
-		const rootType = getSelectedRootType();
-		let url = '/api/v1/analytics/overview/';
-		if (rootType) url += '?root_type=' + encodeURIComponent(rootType);
-		const data = await api.getJson(url);
+/* ============ 双轴折线趋势图组件 TrendChart（ECharts 版） ============ */
+/**
+ * ECharts 双轴折线趋势图（含图例勾选框），仅本页面使用，故放在页面内而非 common.js。
+ * 依赖：/static/vendor/echarts.min.js（已在本页引入，defer 加载，DOMContentLoaded 前就绪）。
+ * 布局结构（.chart-row 横向排列）：
+ *   div.chart-row
+ *     div.chart-sidebar        图例区：宽度固定（可通过 legendWidth 传参调整）
+ *     div.chart-container-flex 折线图区：占满剩余宽度，高度由 chartHeight 控制
+ *
+ * 用法：
+ *   const chart = TrendChart.create({
+ *     container: '#trendChart',                // 容器选择器或 DOM 元素
+ *     series: [                                // 指标线配置
+ *       { key: 'accuracy', label: '满意率', color: '#2563eb', axis: 'left',
+ *         get: t => (t.accuracy || 0) * 100 }, // get: 从数据点取值（默认读 t[key]）
+ *       { key: 'ttft', label: '首字耗时', color: '#a16207', axis: 'right',
+ *         dashed: true, get: t => (t.avg_ttft_ms || 0) / 1000 },
+ *     ],
+ *     axes: {                                  // 可选：坐标轴配置（默认已内置）
+ *       left:  { toFixed: 0, unit: '%' },
+ *       right: { toFixed: 2, unit: 's', min: 0, max: 10, interval: 2 },  // 传 min/max 可锁死刻度，interval 定刻度间隔
+ *     },
+ *     options: { legendWidth: 130, chartHeight: 320 },  // 可选：图例宽度 / 图表高度（'100%' 占满父容器）
+ *   });
+ *   chart.render(trend);   // 传入数据渲染；再次调用仅更新数据重绘
+ *   chart.destroy();       // 卸载（释放 ECharts 实例、清空容器）
+ *
+ * 说明：图例勾选在组件内部处理（至少保留一条指标线），无需外部重发请求；
+ * 容器尺寸变化（含 Tab 切换 display:none→block）通过 ResizeObserver 自动 resize。
+ */
+const TrendChart = (function () {
+	// 各坐标轴的默认取值/兜底范围参数
+	const DEFAULT_AXES = {
+		left: {
+			toFixed: 0,        // 左轴刻度小数位
+			unit: '',          // 左轴刻度单位后缀
+			defaultMin: 70,    // 无可见左轴指标时的兜底最小值
+			defaultMax: 100,   // 无可见左轴指标时的兜底最大值
+			padMin: 3, padMax: 3,  // 数据范围上下留白
+			clampMin: 0, clampMax: 100,  // 钳制范围（null 表示不限）
+			minSpan: 5,        // 最小跨度：数据过窄时下探 min 保证跨度
+			includeZero: false,// 最小值计算是否纳入 0
+		},
+		right: {
+			toFixed: 2,
+			unit: '',
+			defaultMin: 0,
+			defaultMax: 5,
+			padMin: 0.2, padMax: 0.3,
+			clampMin: 0, clampMax: null,
+			minSpan: 0.1,
+			includeZero: true,
+		},
+	};
 
-		// textContent 统一避免 innerHTML，防止数值被恶意注入
-		if (kpiValues[0]) kpiValues[0].textContent = (data.total_qa ?? 0).toLocaleString();
-		// 满意率 + % 后缀：用 span 子节点而不是 innerHTML
-		if (kpiValues[1]) {
-			kpiValues[1].textContent = ((data.accuracy ?? 0) * 100).toFixed(1);
-			const sp = kpiValues[1].querySelector('.text-sub') || document.createElement('span');
-			sp.className = 'text-sm text-sub';
-			sp.textContent = '%';
-			kpiValues[1].appendChild(sp);
+	/**
+	 * 创建趋势图实例
+	 * @param {Object} opts
+	 * @param {string|HTMLElement} opts.container  容器
+	 * @param {Array} opts.series                 指标线配置（见顶部用法注释）
+	 * @param {Object} [opts.axes]                左右轴配置（可选，默认内置）
+	 * @param {Object} [opts.options]             绘图参数：chartHeight/legendWidth/xLabel/emptyText/singleText
+	 * @param {Function} [opts.onToggle]          图例勾选变化回调 (key, visible) => void
+	 * @returns {{ render: Function, destroy: Function } | null}
+	 */
+	function create(opts) {
+		const container = typeof opts.container === 'string'
+			? document.querySelector(opts.container)
+			: opts.container;
+		if (!container) return null;
+		// ECharts 未加载（如脚本被拦截）时输出占位文案，避免页面报错
+		if (typeof echarts === 'undefined') {
+			container.innerHTML = '<div class="empty">图表组件未加载</div>';
+			return null;
 		}
-		// 平均响应耗时 + s 后缀
-		if (kpiValues[2]) {
-			kpiValues[2].textContent = ((data.avg_latency_ms || 0) / 1000).toFixed(2);
-			const sp = kpiValues[2].querySelector('.text-sub') || document.createElement('span');
-			sp.className = 'text-sm text-sub';
-			sp.textContent = 's';
-			kpiValues[2].appendChild(sp);
+
+		const series = (opts.series || []).map(s => ({
+			key: s.key,
+			label: s.label || s.key,
+			color: s.color || '#2563eb',
+			axis: s.axis === 'right' ? 'right' : 'left',
+			dashed: !!s.dashed,
+			strokeWidth: s.strokeWidth || (s.dashed ? 2.5 : 3),
+			get: typeof s.get === 'function' ? s.get : (t => t[s.key] || 0),
+			visible: s.visible !== false,
+		}));
+		const options = Object.assign({
+			chartHeight: 320,   // 折线图区高度（px）；传 '100%' 时占满父容器剩余高度
+			xLabel: t => String(t.date || '').slice(5),  // 默认取 MM-DD
+			legendWidth: 130,   // 图例区固定宽度（px），可传参调整
+			emptyText: '暂无数据',
+			singleText: '仅 1 天数据，暂无法绘制趋势图',
+		}, opts.options || {});
+		const axes = {
+			left: Object.assign({}, DEFAULT_AXES.left, (opts.axes || {}).left),
+			right: Object.assign({}, DEFAULT_AXES.right, (opts.axes || {}).right),
+		};
+		const onToggle = typeof opts.onToggle === 'function' ? opts.onToggle : null;
+
+		let data = [];
+		let bound = false;      // 图例 change 事件是否已绑定（只绑一次）
+		let chart = null;       // ECharts 实例
+		let resizeHandler = null;
+		let resizeObserver = null;
+		let observeMode = null; // 'ro' 用 ResizeObserver / 'win' 用 window resize 兜底
+
+		/** 某轴当前是否有可见指标线（决定是否绘制该轴刻度） */
+		function hasVisibleOn(axis) {
+			return series.some(s => s.axis === axis && s.visible);
 		}
-		if (kpiValues[3]) kpiValues[3].textContent = data.active_users ?? 0;
-	} catch (e) {
-		kpiValues.forEach(el => { if (el) el.textContent = '--'; });
-		toast('加载概览数据失败', 'error');
-		console.error('load overview failed:', e);
+
+		/** 计算某轴范围：仅统计可见指标，未勾选指标不参与，避免拉伸坐标轴 */
+		function computeRange(axis) {
+			const cfg = axes[axis];
+			const vals = [];
+			series.forEach(s => {
+				if (s.axis !== axis || !s.visible) return;
+				data.forEach(t => vals.push(s.get(t)));
+			});
+			if (!vals.length) return { min: cfg.defaultMin, max: cfg.defaultMax };
+			let min = Math.min(...vals, cfg.includeZero ? 0 : Infinity);
+			let max = Math.max(...vals);
+			min -= cfg.padMin;
+			max += cfg.padMax;
+			if (cfg.clampMin != null) min = Math.max(cfg.clampMin, min);
+			if (cfg.clampMax != null) max = Math.min(cfg.clampMax, max);
+			// 数据区间过窄时保持 max，下探 min 保证最小跨度，避免折线拉平
+			if (max - min < cfg.minSpan) {
+				min = Math.max(cfg.clampMin != null ? cfg.clampMin : -Infinity, max - cfg.minSpan);
+			}
+			return { min, max };
+		}
+
+		/**
+		 * 计算某轴最终范围：配置中显式提供的 min/max 优先（锁死刻度，不随数据/勾选变化），
+		 * 未提供的部分才用动态计算结果，便于时间类指标稳定对比波动幅度
+		 */
+		function axisRange(axis) {
+			const cfg = axes[axis];
+			const base = computeRange(axis);
+			return {
+				min: cfg.min != null ? cfg.min : base.min,
+				max: cfg.max != null ? cfg.max : base.max,
+			};
+		}
+
+		/** 生成图例侧栏 + 图表容器骨架 HTML */
+		function renderHtml() {
+			const { legendWidth, chartHeight } = options;
+			const sidebarHtml = `
+				<div class="chart-sidebar" style="width:${legendWidth}px">
+					${series.map(s => `
+						<label class="checkbox"><input type="checkbox" ${s.visible ? 'checked' : ''} data-metric="${escapeHtml(s.key)}"><span class="metric-dot" style="color:${s.color};font-size:1.28em"></span>${escapeHtml(s.label)}</label>
+					`).join('')}
+				</div>`;
+			return `
+				<div class="chart-row">
+					${sidebarHtml}
+					<div class="chart-container chart-container-flex">
+						<div class="chart-echarts" style="height:${chartHeight}${typeof chartHeight === 'number' ? 'px' : ''}"></div>
+					</div>
+				</div>`;
+		}
+
+		/** 由可见指标 + 轴配置生成 ECharts option（坐标轴范围按锁定值或可见指标计算） */
+		function buildOption() {
+			const days = data.map(options.xLabel);
+			const leftRange = hasVisibleOn('left') ? axisRange('left') : null;
+			const rightRange = hasVisibleOn('right') ? axisRange('right') : null;
+			// 单轴配置：无可见指标时不渲染该轴，有可见指标时按计算范围固定 min/max；
+			// interval 为显式刻度间隔（undefined 时由 ECharts 自动分档）
+			// showSplitLine 控制是否显示该轴的网格线，通常只保留一个轴（如左轴）显示，避免双轴导致网格线杂乱
+			const mkAxis = (cfg, range, showSplitLine) => ({
+				type: 'value',
+				show: !!range,
+				min: range ? range.min : undefined,
+				max: range ? range.max : undefined,
+				interval: cfg.interval,
+				axisLabel: { formatter: v => v.toFixed(cfg.toFixed) + cfg.unit },
+				splitLine: { show: showSplitLine, lineStyle: { color: '#e5e7eb', type: 'dashed' } },
+			});
+			return {
+				tooltip: {
+					trigger: 'axis',
+					// 自定义格式化：按指标所属轴的单位/小数位展示数值
+					formatter: (params) => {
+						const date = days[params[0].dataIndex];
+						const lines = params.map(p => {
+							const s = series.find(x => x.label === p.seriesName);
+							const ax = s ? axes[s.axis] : null;
+							return p.marker + p.seriesName + ': ' + (ax ? p.value.toFixed(ax.toFixed) + ax.unit : p.value);
+						}).join('<br/>');
+						return date + '<br/>' + lines;
+					},
+				},
+				legend: { show: false },  // 图例由左侧自绘勾选框承担，不用内置图例
+				grid: { left: 52, right: 56, top: 20, bottom: 32 },
+				xAxis: {
+					type: 'category',
+					data: days,
+					boundaryGap: false,
+					axisLabel: { color: '#4b5563', interval: 'auto' },
+					axisLine: { lineStyle: { color: '#d1d5db' } },
+				},
+				yAxis: [
+					mkAxis(axes.left, leftRange, true),   // 左轴：显示网格线作为视觉基准
+					mkAxis(axes.right, rightRange, false) // 右轴：隐藏网格线，仅保留刻度标签
+				],
+				series: series.filter(s => s.visible).map(s => ({
+					name: s.label,
+					type: 'line',
+					yAxisIndex: s.axis === 'right' ? 1 : 0,
+					boundaryGap: false,
+					symbol: 'circle',
+					symbolSize: 5,
+					lineStyle: { width: s.strokeWidth, type: s.dashed ? 'dashed' : 'solid' },
+					itemStyle: { color: s.color },
+					data: data.map(t => s.get(t)),
+				})),
+			};
+		}
+
+		/** 初始化 ECharts 实例并绑定尺寸自适应监听（容器变化或窗口缩放时 resize） */
+		function ensureChart() {
+			if (chart) return chart;
+			const el = container.querySelector('.chart-echarts');
+			if (!el) return null;
+			chart = echarts.init(el, null, { renderer: 'canvas' });
+			resizeHandler = () => { if (chart) chart.resize(); };
+			if (typeof ResizeObserver !== 'undefined') {
+				observeMode = 'ro';
+				resizeObserver = new ResizeObserver(resizeHandler);
+				resizeObserver.observe(container);
+			} else {
+				observeMode = 'win';
+				window.addEventListener('resize', resizeHandler);
+			}
+			return chart;
+		}
+
+		/** 释放 ECharts 实例与尺寸监听（销毁/空态时调用，避免内存泄漏） */
+		function teardownChart() {
+			if (resizeObserver) { resizeObserver.disconnect(); resizeObserver = null; }
+			if (observeMode === 'win' && resizeHandler) window.removeEventListener('resize', resizeHandler);
+			observeMode = null;
+			resizeHandler = null;
+			if (chart) { chart.dispose(); chart = null; }
+		}
+
+		/** 图例勾选事件：委托绑定在容器上，仅绑一次 */
+		function bindEvents() {
+			if (bound) return;
+			bound = true;
+			container.addEventListener('change', (evt) => {
+				const cb = evt.target.closest('input[data-metric]');
+				if (!cb) return;
+				const s = series.find(x => x.key === cb.getAttribute('data-metric'));
+				if (!s) return;
+				s.visible = cb.checked;
+				// 至少保留一条指标线，避免图表空白
+				if (!series.some(x => x.visible)) {
+					s.visible = true;
+					cb.checked = true;
+				}
+				if (onToggle) onToggle(s.key, s.visible);
+				render();
+			});
+		}
+
+		/**
+		 * 渲染/更新数据（空数据或仅 1 个数据点时输出占位文案）
+		 * @param {Array} [newData] 数据点数组；缺省时用上次缓存重绘（供图例切换）
+		 */
+		function render(newData) {
+			if (newData !== undefined) data = newData;
+			if (!container) return;
+			// 空态 / 单点：先释放图表实例，再输出占位文案
+			if (!data || data.length === 0) {
+				teardownChart();
+				container.innerHTML = `<div class="empty">${escapeHtml(options.emptyText)}</div>`;
+				return;
+			}
+			if (data.length === 1) {
+				teardownChart();
+				container.innerHTML = `<div class="empty">${escapeHtml(options.singleText)}</div>`;
+				return;
+			}
+			// 首次（或空态后）重建骨架：图例侧栏 + 图表容器
+			if (!container.querySelector('.chart-echarts')) {
+				container.innerHTML = renderHtml();
+				bindEvents();
+			}
+			const inst = ensureChart();
+			if (inst) inst.setOption(buildOption(), true);  // notMerge=true 全量替换
+		}
+
+		/** 卸载：释放实例、清空容器 */
+		function destroy() {
+			teardownChart();
+			container.innerHTML = '';
+			data = [];
+			bound = false;
+		}
+
+		return { render, destroy };
 	}
-}
+
+	return { create };
+})();
 
 /* ---- 趋势图 ---- */
+/* 构造趋势报表接口 URL：自定义范围走 start_date/end_date，否则按当前时间范围换算 days，
+   统一追加 root_type 过滤。loadTrend / exportReport / loadDailyReport 复用，避免三处拼 URL 逻辑漂移。
+   opts.days 显式指定天数；opts.forceDays=true 时强制按 days 查询（日报 Tab 的天数选择器
+   独立于概览时间范围，不受 custom 状态影响）；opts.rootType 缺省取全局根节点筛选。 */
+function buildTrendUrl(opts) {
+	opts = opts || {};
+	const rootType = opts.rootType !== undefined ? opts.rootType : getSelectedRootType();
+	let url;
+	if (!opts.forceDays && currentTimeRange === 'custom' && customDateStart && customDateEnd) {
+		url = `/api/v1/analytics/trend/?start_date=${customDateStart}&end_date=${customDateEnd}`;
+	} else {
+		const days = opts.days || (currentTimeRange === '7d' ? 7 : (currentTimeRange === '30d' ? 30 : 90));
+		url = `/api/v1/analytics/trend/?days=${days}`;
+	}
+	if (rootType) url += '&root_type=' + encodeURIComponent(rootType);
+	return url;
+}
+
+/* 概览趋势图组件实例：懒创建一次，图例勾选在组件内部处理 */
+let overviewTrendChart = null;
+
 async function loadTrend() {
 	try {
-		const rootType = getSelectedRootType();
-		let url;
-		if (currentTimeRange === 'custom' && customDateStart && customDateEnd) {
-			url = `/api/v1/analytics/trend/?start_date=${customDateStart}&end_date=${customDateEnd}`;
-		} else {
-			const days = currentTimeRange === 'today' ? 1 : (currentTimeRange === 'week' ? 7 : 30);
-			url = `/api/v1/analytics/trend/?days=${days}`;
-		}
-		if (rootType) url += '&root_type=' + encodeURIComponent(rootType);
-		const data = await api.getJson(url);
+		const data = await api.getJson(buildTrendUrl());
 		const trend = data.trend || [];
 
-		const chart = $('#trendChart');
-		if (chart) {
-			chart.innerHTML = renderTrendChart(trend);
-			// 趋势图 checkbox 事件委托：只绑一次，避免内联 onclick
-			if (!chart._metricListener) {
-				chart.addEventListener('change', (evt) => {
-					const cb = evt.target.closest('input[data-metric]');
-					if (!cb) return;
-					toggleOverviewTrend(cb.getAttribute('data-metric'));
-				});
-				chart._metricListener = true;
-			}
+		if (!overviewTrendChart) {
+			overviewTrendChart = TrendChart.create({
+				container: $('#trendChart'),
+				// 指标分轴：左轴=计数类（问答/缓存/好评/差评/活跃用户），右轴=百分比与秒类（满意率/耗时）。
+				// 受双轴限制，% 与 s 共用右轴时秒类线会相对压扁，故耗时类默认不勾选，需要时手动勾选
+				series: [
+					{ key: 'qa', label: '总问答数', color: '#2563eb', axis: 'left', get: t => t.qa_count || 0 },
+					{ key: 'cache', label: '缓存命中', color: '#059669', axis: 'left', get: t => t.cache_hit_count || 0 },
+					{ key: 'good', label: '好评', color: '#16a34a', axis: 'left', visible: false, get: t => t.good || 0 },
+					{ key: 'bad', label: '差评', color: '#dc2626', axis: 'left', visible: false, get: t => t.bad || 0 },
+					{ key: 'active', label: '活跃用户', color: '#0891b2', axis: 'left', visible: false, get: t => t.active_users || 0 },
+					{ key: 'accuracy', label: '满意率', color: '#7c3aed', axis: 'right', dashed: true, get: t => (t.accuracy || 0) * 100 },
+					{ key: 'ttft', label: '首字耗时', color: '#a16207', axis: 'right', visible: false, get: t => (t.avg_ttft_ms || 0) / 1000 },
+					{ key: 'total', label: '整体耗时', color: '#ef4444', axis: 'right', visible: false, get: t => (t.avg_total_ms || 0) / 1000 },
+				],
+				axes: {
+					// 左轴：计数类从 0 起算、不设上限，刻度取整数
+					left: { toFixed: 0, includeZero: true, clampMin: 0, clampMax: null, minSpan: 1, padMin: 1, padMax: 1 },
+					// 右轴：默认仅满意率可见（0-100%）；勾选耗时(s)后与百分比混轴，刻度单位以 tooltip 为准
+					right: { toFixed: 1, unit: '%', minSpan: 0.1 },
+				},
+				// 图表高度占满趋势图区剩余空间（配合 .overview-card .chart-echarts 的 flex 链），
+				// 图例侧栏宽度 130px，比默认更宽松以容纳中文标签
+				options: { chartHeight: '100%', legendWidth: 130 },
+			});
 		}
+		overviewTrendChart.render(trend);
 	} catch (e) {
 		const chart = $('#trendChart');
 		if (chart) chart.innerHTML = '<div class="error-block-lg">加载趋势数据失败</div>';
 		toast('加载趋势数据失败', 'error');
 		console.error('load trend failed:', e);
 	}
-}
-
-function renderTrendChart(trend) {
-	if (!trend || trend.length === 0) {
-		return '<div class="empty">暂无数据</div>';
-	}
-	if (trend.length === 1) {
-		return '<div class="empty">仅 1 天数据，暂无法绘制趋势图</div>';
-	}
-
-	// 画布宽度 1710、高度 520（宽度-5%），与队列历史图风格一致；
-	// 左右留白增大容纳更大刻度字号
-	const w = 1710, h = 520, pad = 60, padR = 80;
-	const days = trend.map(t => t.date.slice(5));
-	const sat = trend.map(t => (t.accuracy || 0) * 100);
-	/* 单位 ms → 转换为 s（左轴 ms，右轴 s，统一用 s 比较直观） */
-	const ttftSec = trend.map(t => (t.avg_ttft_ms || 0) / 1000);
-	const totalSec = trend.map(t => (t.avg_total_ms || 0) / 1000);
-
-	const xStep = (w - pad - padR) / (days.length - 1);
-	/* 左轴（满意率百分比）：仅当勾选时计算真实范围，否则占位 0-100 */
-	let y1Min = 70, y1Max = 100;
-	if (showAccuracy) {
-		y1Min = Math.min(...sat) - 3;
-		y1Max = Math.max(...sat) + 3;
-		y1Min = Math.max(0, y1Min);
-		y1Max = Math.min(100, y1Max);
-		if (y1Max - y1Min < 5) { y1Min = Math.max(0, y1Max - 5); }
-	}
-	/* 右轴（响应耗时秒）：仅当首字 / 整体至少勾选其一时计算真实范围 */
-	const showLat = showTtft || showTotal;
-	let y2Min = 0, y2Max = 5;
-	if (showLat) {
-		const latVals = [];
-		if (showTtft) latVals.push(...ttftSec);
-		if (showTotal) latVals.push(...totalSec);
-		y2Min = Math.min(...latVals, 0) - 0.2;
-		y2Max = Math.max(...latVals, 0.1) + 0.3;
-		y2Min = Math.max(0, y2Min);
-		if (Math.abs(y2Max - y2Min) < 0.1) { y2Min = 0; y2Max = 1; }
-	}
-
-	const yLeft = v => h - pad - ((v - y1Min) / (y1Max - y1Min)) * (h - 2 * pad);
-	const yRight = v => h - pad - ((v - y2Min) / (y2Max - y2Min)) * (h - 2 * pad);
-
-	const pSat = showAccuracy ? sat.map((v, i) => `${pad + i * xStep},${yLeft(v)}`).join(' ') : '';
-	const pTtft = showTtft ? ttftSec.map((v, i) => `${pad + i * xStep},${yRight(v)}`).join(' ') : '';
-	const pTotal = showTotal ? totalSec.map((v, i) => `${pad + i * xStep},${yRight(v)}`).join(' ') : '';
-
-	/* 网格 + 左右轴刻度 */
-	let grid = '';
-	for (let i = 0; i <= 5; i++) {
-		const y = pad + (h - 2 * pad) * i / 5;
-		grid += `<line x1="${pad}" y1="${y}" x2="${w - padR}" y2="${y}" stroke="#e5e7eb" stroke-dasharray="3 3"/>`;
-		if (showAccuracy) {
-			const leftLabel = (y1Max - (y1Max - y1Min) * i / 5).toFixed(0);
-			grid += `<text x="${pad - 10}" y="${y + 5}" text-anchor="end" font-size="16" font-weight="600" fill="#2563eb">${leftLabel}%</text>`;
-		}
-		if (showLat) {
-			const rightLabel = (y2Max - (y2Max - y2Min) * i / 5).toFixed(2);
-			grid += `<text x="${w - padR + 10}" y="${y + 5}" text-anchor="start" font-size="16" font-weight="600" fill="#a16207">${rightLabel}s</text>`;
-		}
-	}
-
-	const xLabels = days.map((d, i) => `<text x="${pad + i * xStep}" y="${h - pad + 28}" text-anchor="middle" font-size="16" font-weight="600" fill="#4b5563">${d}</text>`).join('');
-	const dotSat = showAccuracy ? sat.map((v, i) => `<circle cx="${pad + i * xStep}" cy="${yLeft(v)}" r="4" fill="#2563eb"/>`).join('') : '';
-	const dotTtft = showTtft ? ttftSec.map((v, i) => `<circle cx="${pad + i * xStep}" cy="${yRight(v)}" r="4" fill="#a16207"/>`).join('') : '';
-	const dotTotal = showTotal ? totalSec.map((v, i) => `<circle cx="${pad + i * xStep}" cy="${yRight(v)}" r="4" fill="#ef4444"/>`).join('') : '';
-
-	/* 左侧勾选框列 */
-	const sidebarHtml = `
-    <div class="chart-sidebar">
-      <label class="checkbox"><input type="checkbox" ${showAccuracy ? 'checked' : ''} data-metric="accuracy"><span class="metric-dot dot-blue"></span>满意率</label>
-      <label class="checkbox"><input type="checkbox" ${showTtft ? 'checked' : ''} data-metric="ttft"><span class="metric-dot dot-yellow"></span>首字耗时</label>
-      <label class="checkbox"><input type="checkbox" ${showTotal ? 'checked' : ''} data-metric="total"><span class="metric-dot dot-red"></span>整体耗时</label>
-    </div>`;
-
-	const svgHtml = `<svg class="chart-svg" viewBox="0 0 ${w} ${h}" preserveAspectRatio="xMidYMin meet">
-    ${grid}${xLabels}
-    ${showAccuracy ? `<polyline points="${pSat}" fill="none" stroke="#2563eb" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>` : ''}
-    ${showTtft ? `<polyline points="${pTtft}" fill="none" stroke="#a16207" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="6 3"/>` : ''}
-    ${showTotal ? `<polyline points="${pTotal}" fill="none" stroke="#ef4444" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>` : ''}
-    ${dotSat}${dotTtft}${dotTotal}
-  </svg>`;
-
-	/* 顶部 titlebar：标题左，其他右（目前留空只放标题） */
-	return `
-    <div class="chart-row">
-      ${sidebarHtml}
-      <div class="chart-container chart-container-flex">
-        ${svgHtml}
-      </div>
-    </div>`;
 }
 
 /* ---- 关键词表格 ---- */
@@ -253,7 +473,8 @@ async function loadKeywords(tbodyId) {
 		if (rootType) url += '?root_type=' + encodeURIComponent(rootType);
 		const data = await api.getJson(url);
 		const keywords = data.rows || [];
-		const actualTbodyId = tbodyId || 'keywordsTableBody';
+		// 页面实际承载表格的 tbody id 为 keywordsTableBody2（默认值同步，避免无参调用时静默落空）
+		const actualTbodyId = tbodyId || 'keywordsTableBody2';
 
 		const kwBody = document.getElementById(actualTbodyId);
 		if (kwBody) {
@@ -262,7 +483,7 @@ async function loadKeywords(tbodyId) {
 				? '<tr><td colspan="4" class="empty">暂无关键词数据</td></tr>'
 				: keywords.map(k => {
 					const row = kwTpl.content.cloneNode(true).firstElementChild;
-					row.querySelectorAll('td')[0].textContent = escapeHtml(k.keyword);
+					row.querySelectorAll('td')[0].textContent = k.keyword;
 					const tag = row.querySelector('.tag');
 					tag.textContent = '×' + (k.weight_score || 1).toFixed(1);
 					if (k.weight_score > 1) tag.classList.add('tag-success');
@@ -272,10 +493,8 @@ async function loadKeywords(tbodyId) {
 					const decrBtn = row.querySelector('.decr');
 					incrBtn.setAttribute('data-kw-id', k.id);
 					incrBtn.setAttribute('data-kw-delta', '0.1');
-					incrBtn.setAttribute('data-tbody-id', actualTbodyId);
 					decrBtn.setAttribute('data-kw-id', k.id);
 					decrBtn.setAttribute('data-kw-delta', '-0.1');
-					decrBtn.setAttribute('data-tbody-id', actualTbodyId);
 					return row.outerHTML;
 				}).join('');
 
@@ -286,21 +505,20 @@ async function loadKeywords(tbodyId) {
 					if (!btn) return;
 					const id = parseInt(btn.getAttribute('data-kw-id'), 10);
 					const delta = parseFloat(btn.getAttribute('data-kw-delta'));
-					const tid = btn.getAttribute('data-tbody-id') || 'keywordsTableBody';
-					if (!isNaN(id) && !isNaN(delta)) adjustKeywordWeight(id, delta, tid);
+					if (!isNaN(id) && !isNaN(delta)) adjustKeywordWeight(id, delta);
 				});
 				kwBody._kwListenerAttached = true;
 			}
 		}
 	} catch (e) {
-		const kwBody = document.getElementById(tbodyId || 'keywordsTableBody');
+		const kwBody = document.getElementById(tbodyId || 'keywordsTableBody2');
 		if (kwBody) kwBody.innerHTML = '<tr><td colspan="4" class="error-block">加载关键词数据失败</td></tr>';
 		toast('加载关键词数据失败', 'error');
 		console.error('load keywords failed:', e);
 	}
 }
 
-async function adjustKeywordWeight(id, delta, tbodyId) {
+async function adjustKeywordWeight(id, delta) {
 	try {
 		await api.put(`/api/v1/analytics/keywords/${id}/`, { delta: delta });
 		toast(delta > 0 ? '已加权 +0.1' : '已降权 -0.1', 'success');
@@ -326,11 +544,11 @@ async function loadFeedbackLoopAggs() {
 				const row = kwTpl.content.cloneNode(true).firstElementChild;
 				const tds = row.querySelectorAll('td');
 				tds[0].textContent = r.report_date;
-				tds[1].textContent = escapeHtml(r.keyword);
+				tds[1].textContent = r.keyword;
 				tds[2].textContent = `${r.shown_count || 0} / ${r.click_count || 0} / ${r.adopt_count || 0} / ${r.bad_count || 0}`;
 				tds[3].textContent = Math.round((r.adopt_rate || 0) * 100) + '%';
 				tds[4].textContent = (r.old_score || 1).toFixed(2) + ' → ' + (r.new_score || 1).toFixed(2);
-				tds[5].textContent = escapeHtml(r.reason || '-');
+				tds[5].textContent = r.reason || '-';
 				const tag = row.querySelector('.tag');
 				const statusMap = { pending: ['待复核', 'tag-warning'], applied: ['已应用', 'tag-success'], ignored: ['已忽略', ''] };
 				const st = statusMap[r.status] || [r.status || '', ''];
@@ -339,13 +557,26 @@ async function loadFeedbackLoopAggs() {
 				const actions = row.querySelector('.table-actions');
 				if (r.status === 'pending') {
 					actions.innerHTML =
-						`<button class="btn-link btn-sm" onclick="applyFeedbackAgg(${r.id},'apply')">应用</button>` +
-						`<button class="btn-link btn-sm" onclick="applyFeedbackAgg(${r.id},'ignore')">忽略</button>`;
+						`<button class="btn-link btn-sm" data-fbagg-id="${r.id}" data-fbagg-action="apply">应用</button>` +
+						`<button class="btn-link btn-sm" data-fbagg-id="${r.id}" data-fbagg-action="ignore">忽略</button>`;
 				} else {
 					actions.innerHTML = '<span class="text-sub text-sm">' + (r.adjust_type === 'manual' ? '手动' : '自动') + '</span>';
 				}
 				return row.outerHTML;
 			}).join('');
+		// 反馈闭环记录容器级事件委托：处理应用/忽略按钮，避免内联 onclick 的 XSS 风险
+		if (!body._fbAggListenerAttached) {
+			body.addEventListener('click', (evt) => {
+				const btn = evt.target.closest('[data-fbagg-id]');
+				if (!btn) return;
+				const id = parseInt(btn.getAttribute('data-fbagg-id'), 10);
+				const action = btn.getAttribute('data-fbagg-action');
+				if (!isNaN(id) && (action === 'apply' || action === 'ignore')) {
+					applyFeedbackAgg(id, action);
+				}
+			});
+			body._fbAggListenerAttached = true;
+		}
 	} catch (e) {
 		body.innerHTML = '<tr><td colspan="8" class="error-block">加载自动调整记录失败</td></tr>';
 		console.error('load feedback loop aggs failed:', e);
@@ -436,7 +667,10 @@ function addKeyword() {
 async function submitNewKeyword() {
 	const keyword = (document.getElementById('newKeywordText')?.value || '').trim();
 	const weight = parseFloat(document.getElementById('newKeywordWeight')?.value || '1.0');
-	const rootType = document.getElementById('newKeywordRootType')?.value || 'all';
+	// 所属根节点：下拉 option 的 value 是节点 id，实际 root_type 在 data-root-type 上，
+	// 与筛选下拉 getSelectedRootType 同口径，避免把节点 id 误当 root_type 写入
+	const rootSel = document.getElementById('newKeywordRootType');
+	const rootType = rootSel?.options[rootSel.selectedIndex]?.getAttribute('data-root-type') || 'all';
 
 	if (!keyword) { toast('请输入关键词', 'error'); return; }
 	if (isNaN(weight) || weight < 0.1 || weight > 5.0) { toast('权重范围 0.1 ~ 5.0', 'error'); return; }
@@ -459,7 +693,8 @@ async function loadBadFeedbacks(listId) {
 		if (rootType) url += '?root_type=' + encodeURIComponent(rootType);
 		const data = await api.getJson(url);
 		const feedbacks = data.rows || [];
-		const actualListId = listId || 'feedbackList';
+		// 页面实际承载列表的容器 id 为 feedbackList2（默认值同步，避免无参调用时静默落空）
+		const actualListId = listId || 'feedbackList2';
 
 		const fbList = document.getElementById(actualListId);
 		if (fbList) {
@@ -469,14 +704,15 @@ async function loadBadFeedbacks(listId) {
 					const isResolved = f.status === 'resolved';
 					return htmlFromTpl('tmpl-feedback-card', (frag) => {
 						const root = frag.firstElementChild;
-						root.querySelector('.fb-question').textContent = 'Q: ' + escapeHtml(f.question || '');
+						root.querySelector('.fb-question').textContent = 'Q: ' + (f.question || '');
 						// fb-answer 纯文本展示用 textContent，避免 innerHTML + escapeHtml 混用,性能差且易出错
 						const a = root.querySelector('.fb-answer');
 						a.textContent = 'A（摘要）: ' + ((f.answer || '').slice(0, 120) + ((f.answer || '').length > 120 ? '…' : ''));
-						// fb-comment 有"<b>反馈：</b>"前缀，后面纯文本部分用 textContent 拼接
+						// fb-comment 有"<b>反馈：</b>"前缀，后面纯文本部分用 createTextNode 追加
+						// （textContent/文本节点天然转义，无需再包 escapeHtml，否则会把 &lt; 原样展示）
 						const c = root.querySelector('.fb-comment');
 						c.innerHTML = '<b>反馈：</b>';
-						c.appendChild(document.createTextNode(escapeHtml(f.comment || '无详细反馈')));
+						c.appendChild(document.createTextNode(f.comment || '无详细反馈'));
 						// fb-meta 有条件的 span，使用文本节点 + createElement 组合避免 innerHTML
 						const meta = root.querySelector('.fb-meta');
 						meta.textContent = '';
@@ -488,7 +724,7 @@ async function loadBadFeedbacks(listId) {
 							sp.textContent = '已处理';
 							meta.appendChild(sp);
 						}
-						
+
 						const adjBtn = root.querySelector('.adjust-btn');
 						const procBtn = root.querySelector('.process-btn');
 						adjBtn.setAttribute('data-fb-id', f.id);
@@ -510,21 +746,22 @@ async function loadBadFeedbacks(listId) {
 					const fbId = parseInt(btn.getAttribute('data-fb-id'), 10);
 					const action = btn.getAttribute('data-fb-action');
 					if (isNaN(fbId)) return;
-					if (action === 'adjust') adjustKeywordWeightByFeedback(fbId);
+					if (action === 'adjust') adjustKeywordWeightByFeedback();
 					else if (action === 'process') markFeedbackProcessed(fbId);
 				});
 				fbList._fbListenerAttached = true;
 			}
 		}
 	} catch (e) {
-		const fbList = document.getElementById(listId || 'feedbackList');
+		const fbList = document.getElementById(listId || 'feedbackList2');
 		if (fbList) fbList.innerHTML = '<div class="error-block">加载反馈数据失败</div>';
 		toast('加载反馈数据失败', 'error');
 		console.error('load bad feedbacks failed:', e);
 	}
 }
 
-function adjustKeywordWeightByFeedback(fbId) {
+/* 差评卡「调整权重」：反馈与关键词无直接关联，暂不自动定位，引导运营到关键词列表手动调整 */
+function adjustKeywordWeightByFeedback() {
 	toast('请在关键词列表中手动调整相关关键词权重', '');
 	switchTab('tools');
 }
@@ -553,7 +790,7 @@ function setTimeRange(range) {
 
 function updateTimeButtons(range) {
 	const timeBtns = $$('#timeRangeButtons .btn');
-	const rangeMap = ['today', 'week', 'month', 'custom'];
+	const rangeMap = ['7d', '30d', '90d', 'custom'];
 	timeBtns.forEach((b, i) => {
 		if (rangeMap[i] === range) {
 			b.classList.remove('btn-ghost');
@@ -566,30 +803,16 @@ function updateTimeButtons(range) {
 }
 
 function updateChartTitle(range) {
-	const titleEl = $$('.tab-panel[data-panel="overview"] .chart-wrap .text-lg')[0];
+	const titleEl = $('#trendTitle');
 	if (!titleEl) return;
 	let label;
 	if (range === 'custom' && customDateStart && customDateEnd) {
 		label = `${customDateStart} ~ ${customDateEnd}`;
 	} else {
-		const labels = { 'today': '今日', 'week': '近 7 天', 'month': '近 30 天', 'custom': '自定义' };
+		const labels = { '7d': '近 7 天', '30d': '近 30 天', '90d': '近 90 天', 'custom': '自定义' };
 		label = labels[range] || '近 7 天';
 	}
-	titleEl.textContent = `📈 满意率与响应耗时趋势（${label}）`;
-}
-
-/* ---- 趋势图指标切换 ---- */
-function toggleOverviewTrend(type) {
-	if (type === 'accuracy') showAccuracy = !showAccuracy;
-	else if (type === 'ttft') showTtft = !showTtft;
-	else if (type === 'total') showTotal = !showTotal;
-	// 至少保留一项
-	if (!showAccuracy && !showTtft && !showTotal) {
-		if (type === 'accuracy') showAccuracy = true;
-		else if (type === 'ttft') showTtft = true;
-		else showTotal = true;
-	}
-	loadTrend();
+	titleEl.textContent = `📈 指标趋势（${label}）`;
 }
 
 /* ---- 自定义日期范围弹窗 ---- */
@@ -621,16 +844,7 @@ function applyCustomDateRange() {
 /* ---- 导出报表 ---- */
 async function exportReport() {
 	try {
-		const rootType = getSelectedRootType();
-		let url;
-		if (currentTimeRange === 'custom' && customDateStart && customDateEnd) {
-			url = `/api/v1/analytics/trend/?start_date=${customDateStart}&end_date=${customDateEnd}`;
-		} else {
-			const days = currentTimeRange === 'today' ? 1 : (currentTimeRange === 'week' ? 7 : 30);
-			url = `/api/v1/analytics/trend/?days=${days}`;
-		}
-		if (rootType) url += '&root_type=' + encodeURIComponent(rootType);
-		const data = await api.getJson(url);
+		const data = await api.getJson(buildTrendUrl());
 
 		// CSV 加 UTF-8 BOM（EF BB BF），解决 Excel 打开中文乱码
 		const BOM = '\uFEFF';
@@ -668,8 +882,9 @@ async function loadSystemMetrics() {
 		const data = await api.getJson(url);
 
 		if (!data.available) {
+			// 空态在 system-card 内直接占位，不再嵌套 .card（避免双层边框）
 			box.innerHTML = `
-        <div class="card card-empty">
+        <div class="card-empty">
           <div class="empty-emoji">📅</div>
           <div class="text-lg fw-500 mb-8">${escapeHtml(data.message || '暂无数据')}</div>
           <div class="text-sub">报表日期：${escapeHtml(date || data.date || '-')}</div>
@@ -693,93 +908,95 @@ async function loadSystemMetrics() {
         <div class="kpi-value kpi-value-dynamic" style="--kpi-color:${c.color}">${c.value}</div>
       </div>`).join('');
 
-	// 2. 延迟对比表：正常 + 缓存命中
-	const latencyRows = (fields, title) => `
-      <div class="card">
-        <div class="card-title">${title}</div>
-        <table class="table table-bordered">
-          <thead><tr>
-            ${fields.map(f => `<th>${f.label}</th>`).join('')}
-          </tr></thead>
-          <tbody><tr>
-            ${fields.map(f => `<td>${f.fmt(f.value)}</td>`).join('')}
-          </tr></tbody>
-        </table>
+		// 2. 响应及缓存耗时 / Token 成本：两个独立卡片并排（perf-grid 2fr/1fr），标题在卡片内
+		//    左卡：5 个维度列（总延迟/LLM/检索/TTFB/缓存命中），每列上下展示 P50/P95/P99
+		//    无数据（null/0）显示 "/"，避免 0 被误读为真实延迟
+		const msNum = v => (!v) ? '/' : v.toLocaleString();
+		const latencyCol = (name, p50, p95, p99) => `
+      <div class="latency-col">
+        <div class="latency-col-title">${name}</div>
+        <div class="latency-row"><span>P50</span><b>${msNum(p50)}</b></div>
+        <div class="latency-row"><span>P95</span><b>${msNum(p95)}</b></div>
+        <div class="latency-row"><span>P99</span><b>${msNum(p99)}</b></div>
       </div>`;
-		const msFmt = v => v == null ? '-' : `${v.toLocaleString()} ms`;
 
-		const normalLat = latencyRows([
-			{ label: '总延迟 P50', value: data.p50_latency_total, fmt: msFmt },
-			{ label: '总延迟 P95', value: data.p95_latency_total, fmt: msFmt },
-			{ label: '总延迟 P99', value: data.p99_latency_total, fmt: msFmt },
-			{ label: 'LLM P50', value: data.p50_latency_llm, fmt: msFmt },
-			{ label: 'LLM P95', value: data.p95_latency_llm, fmt: msFmt },
-			{ label: '检索 P50', value: data.p50_latency_retrieval, fmt: msFmt },
-			{ label: '检索 P95', value: data.p95_latency_retrieval, fmt: msFmt },
-			{ label: 'TTFB P50', value: data.p50_ttfb, fmt: msFmt },
-			{ label: 'TTFB P95', value: data.p95_ttfb, fmt: msFmt },
-		], '⚡ 正常请求：分位数延迟（ms）');
-
-		const cacheLat = latencyRows([
-			{ label: '缓存命中 P50', value: data.cache_hit_p50_latency, fmt: msFmt },
-			{ label: '缓存命中 P95', value: data.cache_hit_p95_latency, fmt: msFmt },
-		], '💨 缓存命中：分位数延迟（ms）');
-
-		// 3. Token & 成本
-	const tokenStr = `
+		const latencyPanel = `
       <div class="card">
-        <div class="card-title">🪙 Token 与 成本</div>
-        <div class="grid-3">
-          <div><div class="text-sub text-sm mb-4">Prompt Token</div><div class="metric-value-lg">${(data.total_tokens_prompt || 0).toLocaleString()}</div></div>
-          <div><div class="text-sub text-sm mb-4">Completion Token</div><div class="metric-value-lg">${(data.total_tokens_completion || 0).toLocaleString()}</div></div>
-          <div><div class="text-sub text-sm mb-4">预估费用（¥）</div><div class="metric-value-cost">¥ ${(data.total_cost || 0).toFixed(4)}</div></div>
+        <div class="card-title">⚡ 响应及缓存耗时（ms）</div>
+        <div class="latency-grid">
+          ${latencyCol('总延迟', data.p50_latency_total, data.p95_latency_total, data.p99_latency_total)}
+          ${latencyCol('LLM', data.p50_latency_llm, data.p95_latency_llm, data.p99_latency_llm)}
+          ${latencyCol('检索', data.p50_latency_retrieval, data.p95_latency_retrieval, data.p99_latency_retrieval)}
+          ${latencyCol('TTFB', data.p50_ttfb, data.p95_ttfb, data.p99_ttfb)}
+          ${latencyCol('缓存命中', data.cache_hit_p50_latency, data.cache_hit_p95_latency, data.cache_hit_p99_latency)}
         </div>
       </div>`;
 
-	// 4. 延迟直方图
-	const hist = data.latency_histogram || {};
-	const histKeys = Object.keys(hist).sort();
-	// 直方图总量只算一次，避免每条记录 O(n) reduce 造成的 O(n²)
-	const histTotal = histKeys.reduce((s, kk) => s + (hist[kk] || 0), 0);
-	/* 直方图每行结构抽到 .hist-row / .hist-label / .hist-track / .hist-bar / .hist-value，
-	   .hist-bar 的宽度由下方 setTimeout 动画设置（class __anim 用于选中元素） */
-	const histHtml = histKeys.length === 0 ? '<div class="empty">暂无分布数据</div>' : histKeys.map(k => {
-		const v = hist[k] || 0;
-		const pct = histTotal ? ((v / histTotal) * 100).toFixed(1) : 0;
-		return `<div class="hist-row">
+		// 3. Token 成本卡（纵向三行：Prompt / Completion / 费用，费用红色强调）
+		const tokenStr = `
+      <div class="card">
+        <div class="card-title">🪙 Token 成本</div>
+        <div class="token-rows">
+          <div class="token-row"><span>Prompt Token</span><b>${(data.total_tokens_prompt || 0).toLocaleString()}</b></div>
+          <div class="token-row"><span>Completion Token</span><b>${(data.total_tokens_completion || 0).toLocaleString()}</b></div>
+          <div class="token-row"><span>预估费用（¥）</span><b class="cost">¥ ${(data.total_cost || 0).toFixed(4)}</b></div>
+        </div>
+      </div>`;
+
+		// 4. 延迟直方图
+		const hist = data.latency_histogram || {};
+		const histKeys = Object.keys(hist).sort();
+		// 直方图总量只算一次，避免每条记录 O(n) reduce 造成的 O(n²)
+		const histTotal = histKeys.reduce((s, kk) => s + (hist[kk] || 0), 0);
+		/* 直方图每行结构抽到 .hist-row / .hist-label / .hist-track / .hist-bar / .hist-value，
+		   .hist-bar 的宽度由下方 setTimeout 动画设置（class __anim 用于选中元素） */
+		const histHtml = histKeys.length === 0 ? '<div class="empty">暂无分布数据</div>' : histKeys.map(k => {
+			const v = hist[k] || 0;
+			const pct = histTotal ? ((v / histTotal) * 100).toFixed(1) : 0;
+			return `<div class="hist-row">
         <span class="hist-label">${escapeHtml(k)}</span>
         <div class="hist-track">
           <div class="hist-bar __anim"></div>
         </div>
         <span class="hist-value">${v.toLocaleString()} (${pct}%)</span>
       </div>`;
-	}).join('');
+		}).join('');
 
-	// 5. 错误分布
-	const errDist = data.error_distribution || {};
-	const errKeys = Object.keys(errDist).sort((a, b) => (errDist[b] || 0) - (errDist[a] || 0));
-	const errTotal = errKeys.reduce((s, k) => s + (errDist[k] || 0), 0) || 1;
-	/* 错误分布用红色系 */
-	const errHtml = errKeys.length === 0 ? '<div class="empty">暂无错误数据 🎉</div>' : errKeys.map(k => {
-		const v = errDist[k] || 0;
-		const pct = (v / errTotal) * 100;
-		return `<div class="hist-row">
+		// 5. 错误分布
+		const errDist = data.error_distribution || {};
+		const errKeys = Object.keys(errDist).sort((a, b) => (errDist[b] || 0) - (errDist[a] || 0));
+		const errTotal = errKeys.reduce((s, k) => s + (errDist[k] || 0), 0) || 1;
+		/* 错误分布用红色系 */
+		const errHtml = errKeys.length === 0 ? '<div class="empty">暂无错误数据 🎉</div>' : errKeys.map(k => {
+			const v = errDist[k] || 0;
+			const pct = (v / errTotal) * 100;
+			return `<div class="hist-row">
         <span class="hist-label-err">${escapeHtml(k || 'unknown')}</span>
         <div class="hist-track-err">
           <div class="hist-bar-err" style="width:${pct.toFixed(1)}%"></div>
         </div>
         <span class="hist-value">${v} (${pct.toFixed(1)}%)</span>
       </div>`;
-	}).join('');
+		}).join('');
 
-	box.innerHTML = `
-      <div class="kpi-grid">${kpiCards}</div>
-      ${normalLat}
-      ${cacheLat}
-      ${tokenStr}
-      <div class="grid-2 grid-cols-1-1">
-        <div class="card"><div class="card-title">📊 延迟分布直方图（ms）</div>${histHtml}</div>
-        <div class="card"><div class="card-title">🧨 错误类型分布</div>${errHtml}</div>
+		box.innerHTML = `
+      <div class="system-kpi-section">
+        <div class="section-title">📊 关键指标</div>
+        <div class="kpi-grid">${kpiCards}</div>
+      </div>
+      <div class="system-section">
+        <!-- 响应耗时 / Token 成本两个独立卡片，标题各自在卡内，无需区块级标题 -->
+        <div class="perf-grid">
+          ${latencyPanel}
+          ${tokenStr}
+        </div>
+      </div>
+      <div class="system-section">
+        <div class="section-title">📊 分布明细</div>
+        <div class="grid-2 grid-cols-1-1">
+          <div class="sub-panel">${histHtml}</div>
+          <div class="sub-panel">${errHtml}</div>
+        </div>
       </div>`;
 
 		// 延迟直方图动画填充（逐行递增，让宽度随 0→实际宽度 动画）
@@ -795,59 +1012,97 @@ async function loadSystemMetrics() {
 			});
 		}, 30);
 	} catch (e) {
-		box.innerHTML = `<div class="card card-error">加载系统指标失败：${escapeHtml(e.message || '')}</div>`;
+		box.innerHTML = `<div class="card-error">加载系统指标失败：${escapeHtml(e.message || '')}</div>`;
 		toast('加载系统指标失败', 'error');
 		console.error('load system metrics failed:', e);
 	}
 }
 
-/* ---- Tab 3: 实时监控（Redis 快照） ---- */
-async function loadRealtime() {
-	const box = $('#realtimeBody');
+/* ---- 今日实时自动轮询 ----
+ * 仅概览 Tab 激活时运行：每 5 分钟刷新一次，与后端 flush_realtime_metrics 周期对齐；
+ * 切走/页面隐藏时暂停，回到概览/页面时立即刷新并恢复轮询。
+ * 轮询失败静默（保留已渲染数据），避免定时任务打扰用户。 */
+const REALTIME_POLL_INTERVAL = 5 * 60 * 1000; // 5 分钟
+let _rtTimer = null;
+let _rtPollSeq = 0; // 实时请求序号：手动刷新与轮询可能并发，仅采用最后一次发起的响应
+
+function startRealtimePolling() {
+	stopRealtimePolling();
+	_rtTimer = setInterval(() => loadRealtimeStrip(true), REALTIME_POLL_INTERVAL);
+}
+
+function stopRealtimePolling() {
+	if (_rtTimer) { clearInterval(_rtTimer); _rtTimer = null; }
+}
+
+/** 生成实时卡片同比对比行（今日 vs 昨日同时段）
+ *  - 无昨日数据（yesterday 缺失/为 null）时显示"暂无对比"
+ *  - 与昨日持平显示"持平"；否则按涨跌方向 + 差值 + 百分比展示，
+ *    颜色按指标业务预期着色（positive=true 表示上涨符合预期 → 涨绿跌红，反之相反） */
+function buildRealtimeCompare(c, yesterday) {
+	const yVal = (yesterday && typeof yesterday[c.key] === 'number') ? yesterday[c.key] : null;
+	if (yVal == null) return '<div class="kpi-compare text-sub">暂无对比</div>';
+	const diff = c.cur - yVal;
+	if (Math.abs(diff) < 1e-9) return '<div class="kpi-compare">持平</div>';
+	const up = diff > 0;
+	const good = up === c.positive;
+	const absDiff = Math.abs(diff);
+	// Token/费用为小数时保留 4 位，计数类整数直接千分位
+	const diffStr = Number.isInteger(absDiff) ? absDiff.toLocaleString() : absDiff.toFixed(4);
+	const pct = yVal > 0 ? ` (${((absDiff / yVal) * 100).toFixed(1)}%)` : '';
+	return `<div class="kpi-compare ${good ? 'up' : 'down'}" title="对比昨日同时段">${up ? '▲' : '▼'} ${diffStr}${pct}</div>`;
+}
+
+/* ---- 概览"今日实时"区块（Redis 快照，合并自原"实时监控"Tab） ---- */
+async function loadRealtimeStrip(silent) {
+	const box = $('#realtimeStrip');
+	if (!box) return;
+	// 请求序号守卫：轮询与手动刷新可能并发，仅采用最后一次发起的响应，防止旧数据覆盖新数据
+	const seq = ++_rtPollSeq;
 	try {
 		const data = await api.getJson('/api/v1/analytics/realtime/');
+		if (seq !== _rtPollSeq) return; // 已有更新的请求，丢弃本次过时响应
 
 		const freshness = data.last_flush_at
 			? Math.floor((Date.now() / 1000) - data.last_flush_at)
 			: null;
 		const isFresh = freshness != null && freshness < 600; // 10 分钟内视为新鲜
 
-		const freshnessBadge = freshness == null
-			? '<span class="tag tag-warning">尚未同步</span>'
-			: (isFresh
-				? `<span class="tag tag-success">数据新鲜（${freshness}s 前同步）</span>`
-				: `<span class="tag tag-danger">数据陈旧（${freshness}s 未同步）</span>`);
+		// 数据新鲜度徽标：实时指标每 5 分钟由 flush_realtime_metrics 更新时间戳
+		const freshnessEl = $('#realtimeFreshness');
+		if (freshnessEl) {
+			freshnessEl.innerHTML = freshness == null
+				? '<span class="tag tag-warning">尚未同步</span>'
+				: (isFresh
+					? `<span class="tag tag-success">数据新鲜（${freshness}s 前同步）</span>`
+					: `<span class="tag tag-danger">数据陈旧（${freshness}s 未同步）</span>`);
+		}
 
+		// 今日实时卡片：cur 为原始数值用于同比计算，positive 表示"上涨是否符合业务预期"
+		// （缓存命中/正常请求上涨为佳；Token/费用/LLM 错误上涨为劣，用于对比行着色）
 		const kpiCards = [
-		{ label: '今日 QA 总数', value: (data.total_qa || 0).toLocaleString(), color: '#1f2937' },
-		{ label: '缓存命中', value: (data.cache_hits || 0).toLocaleString(), color: '#059669' },
-		{ label: '正常请求', value: (data.normal_qa || 0).toLocaleString(), color: '#2563eb' },
-		{ label: 'LLM 错误', value: (data.llm_errors || 0).toLocaleString(), color: data.llm_errors > 0 ? '#dc2626' : '#059669' },
-		{ label: '今日 Prompt Token', value: (data.tokens_prompt || 0).toLocaleString(), color: '#7c3aed' },
-		{ label: '今日 Completion Token', value: (data.tokens_completion || 0).toLocaleString(), color: '#7c3aed' },
-		{ label: '今日预估费用', value: '¥ ' + (data.cost_estimate || 0).toFixed(4), color: '#dc2626' },
-	].map(c => `
+			{ label: '今日 QA 总数', key: 'total_qa', cur: data.total_qa || 0, color: '#1f2937', positive: true, fmt: v => v.toLocaleString() },
+			{ label: '缓存命中', key: 'cache_hits', cur: data.cache_hits || 0, color: '#059669', positive: true, fmt: v => v.toLocaleString() },
+			{ label: '正常请求', key: 'normal_qa', cur: data.normal_qa || 0, color: '#2563eb', positive: true, fmt: v => v.toLocaleString() },
+			{ label: 'LLM 错误', key: 'llm_errors', cur: data.llm_errors || 0, color: data.llm_errors > 0 ? '#dc2626' : '#059669', positive: false, fmt: v => v.toLocaleString() },
+			{ label: '今日 Prompt Token', key: 'tokens_prompt', cur: data.tokens_prompt || 0, color: '#7c3aed', positive: false, fmt: v => v.toLocaleString() },
+			{ label: '今日 Completion Token', key: 'tokens_completion', cur: data.tokens_completion || 0, color: '#7c3aed', positive: false, fmt: v => v.toLocaleString() },
+			{ label: '今日预估费用', key: 'cost_estimate', cur: data.cost_estimate || 0, color: '#dc2626', positive: false, fmt: v => '¥ ' + v.toFixed(4) },
+		].map(c => `
       <div class="kpi-card">
         <div class="kpi-label">${c.label}</div>
-        <div class="kpi-value kpi-value-dynamic" style="--kpi-color:${c.color}">${c.value}</div>
+        <div class="kpi-value kpi-value-dynamic" style="--kpi-color:${c.color}">${c.fmt(c.cur)}</div>
+        ${buildRealtimeCompare(c, data.yesterday)}
       </div>`).join('');
 
-	box.innerHTML = `
-      <div class="card mb-16 flex justify-between items-center card-pad-sm">
-        <div>📅 数据日期：${escapeHtml(data.date || '-')}　${freshnessBadge}</div>
-      </div>
-      <div class="kpi-grid">${kpiCards}</div>
-      <div class="card mt-16">
-        <div class="card-title">💡 数据来源说明</div>
-        <div class="text-sub text-sm text-lh-18">
-          实时指标直接读取 Redis 计数器（key: <code>analytics:realtime:日期</code>），通过 <code>increment_realtime_metrics()</code>
-          在每次 QA 完成时原子自增，<code>flush_realtime_metrics()</code> 每 5 分钟更新时间戳。<br>
-          精确的 T+1 聚合报表请参考「系统指标」Tab（凌晨 2 点生成，含 P50/P95/P99 分位数）。
-        </div>
-      </div>`;
+		box.innerHTML = kpiCards;
 	} catch (e) {
-		box.innerHTML = `<div class="card card-error">加载实时指标失败：${escapeHtml(e.message || '')}</div>`;
-		toast('加载实时指标失败', 'error');
+		if (seq !== _rtPollSeq) return; // 过时响应不处理
+		// 轮询失败静默：保留上一次已渲染的数据，避免卡片闪烁或清空
+		if (!silent) {
+			box.innerHTML = `<div class="card card-error">加载实时指标失败：${escapeHtml(e.message || '')}</div>`;
+			toast('加载实时指标失败', 'error');
+		}
 		console.error('load realtime failed:', e);
 	}
 }
@@ -872,10 +1127,10 @@ async function loadQueueDepth() {
 				return `<tr>
           <td>${escapeHtml(q)}</td>
           <td class="${danger ? 'cell-danger' : 'cell-success'}">${size.toLocaleString()}</td>
-          <td>${d.queued || '-'}</td>
-          <td>${d.active || '-'}</td>
-          <td>${d.idle || '-'}</td>
-          <td>${d.failed != null ? d.failed : '-'}</td>
+          <td>${d.queued != null ? escapeHtml(d.queued) : '-'}</td>
+          <td>${d.active != null ? escapeHtml(d.active) : '-'}</td>
+          <td>${d.idle != null ? escapeHtml(d.idle) : '-'}</td>
+          <td>${d.failed != null ? escapeHtml(d.failed) : '-'}</td>
         </tr>`;
 			}).join('');
 
@@ -890,84 +1145,89 @@ async function loadQueueDepth() {
 		// 2. 历史趋势 — 渲染到下方大卡片，撑满剩余空间
 		const histBox = $('#queueDepthHistory');
 		const history = data.history || [];
-		histBox.innerHTML = history.length === 0
-			? '<div class="empty">暂无历史数据（需要等待至少 1 个 5 分钟周期）</div>'
-			: renderQueueDepthChart(history);
+		if (history.length === 0) {
+			// 无历史时先销毁旧图表实例，再输出占位文案，避免残留孤立的 ECharts 实例
+			destroyQueueDepthChart();
+			histBox.innerHTML = '<div class="empty">暂无历史数据（需要等待至少 1 个 5 分钟周期）</div>';
+		} else {
+			renderQueueDepthChart(history);
+		}
 	} catch (e) {
-		$('#queueSnapshotBody').innerHTML = `<div class="error-block">加载队列深度失败：${escapeHtml(e.message || '')}</div>`;
+		const snapBox = $('#queueSnapshotBody');
+		if (snapBox) snapBox.innerHTML = `<div class="error-block">加载队列深度失败：${escapeHtml(e.message || '')}</div>`;
 		toast('加载队列深度失败', 'error');
 		console.error('load queue depth failed:', e);
 	}
 }
 
+/* 队列深度历史趋势图实例（ECharts 版，复用概览的 TrendChart 组件）：
+   懒创建，队列集合变化时销毁重建（队列名是动态的，无法像概览那样固定 series） */
+let queueDepthChart = null;
+let queueDepthQueueNames = null;  // 上次创建时的队列集合，用于判断是否需要重建实例
+
+/** 销毁队列深度趋势图实例（无数据/重建前调用，释放 ECharts 与 ResizeObserver） */
+function destroyQueueDepthChart() {
+	if (queueDepthChart) { queueDepthChart.destroy(); queueDepthChart = null; }
+	queueDepthQueueNames = null;
+}
+
 function renderQueueDepthChart(history) {
 	// history: [{queue_name, minute_bucket, queued_size, active_size, ...}]
-	// 按 minute_bucket 分组聚合成多条折线
+	// minute_bucket 为 YYYYMMDDHHmm（本地时间），X 轴标签 slice 成 HH:MM
 	const buckets = [...new Set(history.map(h => h.minute_bucket))].sort();
 	const queues = [...new Set(history.map(h => h.queue_name))].sort();
-	const palette = ['#2563eb', '#059669', '#f59e0b', '#dc2626', '#7c3aed', '#0891b2', '#db2777'];
 
 	if (buckets.length < 2) {
-		return `<div class="empty">历史数据不足（当前样本数 ${buckets.length}），至少需要 2 个时间槽</div>`;
+		destroyQueueDepthChart();
+		$('#queueDepthHistory').innerHTML = `<div class="empty">历史数据不足（当前样本数 ${buckets.length}），至少需要 2 个时间槽</div>`;
+		return;
 	}
 
-	// 先构造 (bucket, queue) → size 的 Map，避免 O(n²) 的 history.find 嵌套循环 ——
-	// 原实现在 queues × buckets 的双重循环内做 .find()，复杂度 O(Q*B*H)
-	// 优化后先做一次 O(H) 建索引，后续 O(Q*B) 直接查 Map
+	// 先构造 (bucket, queue) → 总深度（queued + active）的 Map，O(H) 建索引，
+	// 后续组装数据点 O(B*Q) 直接查 Map，避免双重循环内 .find() 的 O(Q*B*H)
 	const depthMap = new Map();
-	let globalMax = 1;
 	for (const h of history) {
-		const key = `${h.minute_bucket}||${h.queue_name}`;
-		const total = (h.queued_size || 0) + (h.active_size || 0);
-		depthMap.set(key, total);
-		if (total > globalMax) globalMax = total;
+		depthMap.set(`${h.minute_bucket}||${h.queue_name}`, (h.queued_size || 0) + (h.active_size || 0));
 	}
 
-	// 画布比例：高度 470、宽度 1800~3600（宽度-5%），与概述图一致；
-	// 24h/7d 窗口仍封顶避免过密
-	const w = Math.max(1800, Math.min(buckets.length * 24, 3600)), h = 470, pad = 80;
-	const xStep = (w - 2 * pad) / (buckets.length - 1);
-	const maxY = globalMax;
-	const yPos = v => h - pad - (v / maxY) * (h - 2 * pad);
-
-	// 网格
-	let grid = '';
-	for (let i = 0; i <= 5; i++) {
-		const y = pad + (h - 2 * pad) * i / 5;
-		const val = Math.round(maxY * (1 - i / 5));
-		grid += `<line x1="${pad}" y1="${y}" x2="${w - pad}" y2="${y}" stroke="#e5e7eb" stroke-dasharray="3 3"/>`;
-		grid += `<text x="${pad - 10}" y="${y + 6}" text-anchor="end" font-size="24" font-weight="600" fill="#4b5563">${val}</text>`;
-	}
-
-	// 折线：每个队列一条，从 Map 查询（O(1)）替代 .find()（O(H)）
-	let polylines = '';
-	queues.forEach((q, qi) => {
-		const color = palette[qi % palette.length];
-		const pts = buckets.map((b, bi) => {
-			const val = depthMap.get(`${b}||${q}`) || 0;
-			return `${pad + bi * xStep},${yPos(val)}`;
-		}).join(' ');
-		polylines += `<polyline points="${pts}" fill="none" stroke="${color}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>`;
+	// 组装 ECharts 数据点：每个时间槽一个对象，字段按队列名取值（TrendChart 默认读 t[key]）
+	const data = buckets.map(b => {
+		const point = { date: b };
+		queues.forEach(q => { point[q] = depthMap.get(`${b}||${q}`) || 0; });
+		return point;
 	});
 
-	// X 轴标签：只显示首尾 + 中间
-	const labelIdx = [0, Math.floor(buckets.length / 2), buckets.length - 1].filter((v, i, a) => a.indexOf(v) === i);
-	const xLabels = labelIdx.map(i => {
-		const b = buckets[i] || '';
-		const hm = b.slice(8, 10) + ':' + b.slice(10, 12);
-		return `<text x="${pad + i * xStep}" y="${h - pad + 42}" text-anchor="middle" font-size="24" font-weight="600" fill="#4b5563">${hm}</text>`;
-	}).join('');
+	const palette = ['#2563eb', '#059669', '#f59e0b', '#dc2626', '#7c3aed', '#0891b2', '#db2777'];
+	const series = queues.map((q, i) => ({
+		key: q,
+		label: q,
+		color: palette[i % palette.length],
+		axis: 'left',
+	}));
 
-	// 图例放在 SVG 前面，CSS flex-direction: row 让图例在左侧、图表在右侧
-	const legend = queues.map((q, qi) =>
-		`<div class="legend-item"><span class="legend-dot" style="background:${palette[qi % palette.length]}"></span>${escapeHtml(q)}</div>`
-	).join('');
+	// 队列集合未变时复用实例（保留用户图例勾选状态）仅更新数据；变化则销毁重建
+	const sameQueues = queueDepthQueueNames && queueDepthQueueNames.length === queues.length
+		&& queues.every(q => queueDepthQueueNames.includes(q));
+	if (queueDepthChart && sameQueues) {
+		queueDepthChart.render(data);
+		return;
+	}
 
-	return `
-    <div class="chart-legend">${legend}</div>
-    <svg class="chart-svg chart-svg-fluid" viewBox="0 0 ${w} ${h}" preserveAspectRatio="xMidYMid meet">
-      ${grid}${polylines}${xLabels}
-    </svg>`;
+	destroyQueueDepthChart();
+	queueDepthQueueNames = queues;
+	queueDepthChart = TrendChart.create({
+		container: $('#queueDepthHistory'),
+		series: series,
+		axes: {
+			// 计数轴：从 0 起算、不设上限（队列深度可能远超 100），刻度取整数
+			left: { toFixed: 0, includeZero: true, clampMin: 0, clampMax: null, minSpan: 1, padMin: 1, padMax: 1 },
+		},
+		options: {
+			chartHeight: '100%', legendWidth: 130,
+			xLabel: t => String(t.date).slice(8, 10) + ':' + String(t.date).slice(10, 12),
+		},
+	});
+	if (queueDepthChart) queueDepthChart.render(data);
 }
 
 /* ---- Tab 5: 部门/团队使用统计 ---- */
@@ -1036,28 +1296,68 @@ async function loadOrgUsage() {
 	}
 }
 
-/* ---- Tab 6: QA 记录列表（含分页 + 详情弹窗） ---- */
+/* ---- Tab 6: QA 记录列表（筛选 + 分页 + 详情弹窗） ---- */
+let _qaLoadSeq = 0;        // QA 记录请求序列号，防止筛选/翻页竞态
+let _qaSearchTimer = null; // 问题搜索防抖定时器
+
+/** 问题搜索输入：300ms 防抖后触发筛选 */
+function onQaSearchInput() {
+	clearTimeout(_qaSearchTimer);
+	_qaSearchTimer = setTimeout(() => onQaFilterChange(), 300);
+}
+
+/** 筛选条件变化：重置回第 1 页并重新加载 */
+function onQaFilterChange() {
+	qaPage = 1;
+	loadQaRecords();
+}
+
 async function loadQaRecords() {
 	const box = $('#qaRecordsBody');
-	const pbox = $('#qaPagination');
+	const seq = ++_qaLoadSeq;
 	try {
-		const start = $('#qaStartDate')?.value;
-		const end = $('#qaEndDate')?.value;
 		const params = [];
+		const q = $('#qaSearchInput')?.value.trim();
+		if (q) params.push('q=' + encodeURIComponent(q));
+		const start = $('#qaStartDate')?.value;
 		if (start) params.push('start_date=' + encodeURIComponent(start));
+		const end = $('#qaEndDate')?.value;
 		if (end) params.push('end_date=' + encodeURIComponent(end));
+		const answerType = $('#qaAnswerType')?.value;
+		if (answerType) params.push('answer_type=' + encodeURIComponent(answerType));
+		const cache = $('#qaCache')?.value;
+		if (cache) params.push('cache=' + encodeURIComponent(cache));
+		const rating = $('#qaRating')?.value;
+		if (rating) params.push('rating=' + encodeURIComponent(rating));
+		const latency = $('#qaLatency')?.value;
+		if (latency) {
+			// 延迟区间格式为 min-max，max 为空表示无上限
+			const [latMin, latMax] = latency.split('-');
+			if (latMin !== '') params.push('latency_min=' + encodeURIComponent(latMin));
+			if (latMax !== '') params.push('latency_max=' + encodeURIComponent(latMax));
+		}
 		params.push('page=' + qaPage);
 		params.push('page_size=' + qaPageSize);
 		const data = await api.getJson('/api/v1/analytics/qa-records/?' + params.join('&'));
+		if (seq !== _qaLoadSeq) return;  // 过时请求，忽略
 
 		qaTotal = data.total || 0;
 		const rows = data.rows || [];
 
 		const typeBadge = t => {
-		const map = { rag: ['tag-info', 'RAG'], chit_chat: ['tag-primary', '闲聊'], agent: ['tag-success', 'Agent'], cache: ['tag-warning', '缓存'] };
-		const [cls, text] = map[t] || ['', t || '-'];
-		return `<span class="tag ${cls}">${escapeHtml(text)}</span>`;
-	};
+			// 与 QaRecord 实际写入值对齐（rag/reasoning/mixed/refused/agent/general），
+			// 与顶部筛选下拉选项保持一致；未知类型回退为无配色裸标签
+			const map = {
+				rag: ['tag-info', 'RAG'],
+				reasoning: ['tag-primary', '推理'],
+				mixed: ['tag-warning', '混合'],
+				refused: ['tag-danger', '拒答'],
+				agent: ['tag-success', 'Agent'],
+				general: ['tag-info', '通用'],
+			};
+			const [cls, text] = map[t] || ['', t || '-'];
+			return `<span class="tag ${cls}">${escapeHtml(text)}</span>`;
+		};
 		const ratingBadge = r => {
 			if (r === 1) return '<span class="tag tag-success">👍 好评</span>';
 			if (r === -1) return '<span class="tag tag-danger">👎 差评</span>';
@@ -1079,14 +1379,8 @@ async function loadQaRecords() {
             <td class="text-sub text-sm">${formatDate(r.created_at)}</td>
           </tr>`).join('');
 
-		box.innerHTML = `
-      <table class="table table-bordered">
-        <thead><tr>
-          <th>ID</th><th>问题</th><th>回答类型</th><th>缓存</th><th>评分</th>
-          <th>总延迟</th><th>Token 总数</th><th>预估费用</th><th>时间</th>
-        </tr></thead>
-        <tbody>${tableHtml}</tbody>
-      </table>`;
+		// 仅渲染 tbody 行，表格结构与表头在 HTML 中静态声明
+		box.innerHTML = tableHtml;
 
 		// QA 行点击：容器级事件委托，避免每行 setAttribute('onclick', ...) 的 eval 模式
 		if (!box._qaRowListener) {
@@ -1099,42 +1393,44 @@ async function loadQaRecords() {
 			box._qaRowListener = true;
 		}
 
-		renderPagination(pbox, qaPage, Math.ceil(qaTotal / qaPageSize), (p) => { qaPage = p; loadQaRecords(); });
+		renderQaPagination();
 	} catch (e) {
-		box.innerHTML = `<div class="card card-error">加载 QA 记录失败：${escapeHtml(e.message || '')}</div>`;
+		if (seq !== _qaLoadSeq) return;  // 过时请求，忽略
+		box.innerHTML = '<tr><td colspan="9" class="empty">加载 QA 记录失败：' + escapeHtml(e.message || '') + '</td></tr>';
 		toast('加载 QA 记录失败', 'error');
 		console.error('load qa records failed:', e);
 	}
 }
 
-/* 通用分页渲染 */
-function renderPagination(container, current, totalPages, onClick) {
-	if (!container) return;
-	if (totalPages <= 1) { container.innerHTML = ''; return; }
-	const show = [];
-	const add = v => show.push(v);
-	add(1);
-	if (current - 1 > 2) add('...');
-	for (let i = Math.max(2, current - 1); i <= Math.min(totalPages - 1, current + 1); i++) add(i);
-	if (current + 1 < totalPages - 1) add('...');
-	add(totalPages);
+/* ============================================================================
+ * 分页：复用公共 Pagination 组件（common.js）。
+ * 首次 render 绑定回调，后续 update 仅刷新页码状态；切换每页条数后重置回第 1 页
+ * ============================================================================ */
+let _qaPaginationInited = false; // 分页组件是否已初始化
 
-	container.innerHTML = `
-    <button class="page-btn" data-page="${current - 1}" ${current <= 1 ? 'disabled' : ''}>上一页</button>
-    ${show.map(p => p === '...'
-		? `<span class="page-btn page-btn-ellipsis" disabled>…</span>`
-		: `<button class="page-btn ${p === current ? 'active' : ''}" data-page="${p}">${p}</button>`).join('')}
-    <button class="page-btn" data-page="${current + 1}" ${current >= totalPages ? 'disabled' : ''}>下一页</button>
-    <span class="ml-8">第 ${current} / ${totalPages} 页，共 ${qaTotal || 0} 条</span>`;
-
-	// 给所有带 data-page 的按钮绑定事件
-	container.querySelectorAll('button[data-page]').forEach(btn => {
-		btn.addEventListener('click', () => {
-			if (btn.disabled) return;
-			const page = parseInt(btn.getAttribute('data-page'), 10);
-			if (!isNaN(page) && page >= 1 && page <= totalPages) onClick(page);
+function renderQaPagination() {
+	const totalPages = Math.max(1, Math.ceil(qaTotal / qaPageSize));
+	if (!_qaPaginationInited) {
+		Pagination.render({
+			container: '#qaPagination',
+			page: qaPage,
+			totalPages: totalPages,
+			total: qaTotal,
+			pageSize: qaPageSize,
+			align: 'right',
+			pageSizeOptions: [20, 50, 100],
+			onPageChange(p) { qaPage = p; loadQaRecords(); },
+			onPageSizeChange(size) { qaPageSize = size; qaPage = 1; loadQaRecords(); },
 		});
-	});
+		_qaPaginationInited = true;
+	} else {
+		Pagination.update({
+			page: qaPage,
+			totalPages: totalPages,
+			total: qaTotal,
+			pageSize: qaPageSize,
+		});
+	}
 }
 
 /* QA 详情弹窗 */
@@ -1176,22 +1472,22 @@ async function loadDailyReport() {
 		// 并行拉取日报对比数据和趋势数据，减少等待时间
 		const trendDays = $('#dailyTrendDays')?.value || 30;
 		const rootType = getSelectedRootType();
-		const sep = rootType ? '&' : '?';
 		const rtQ = rootType ? `?root_type=${encodeURIComponent(rootType)}` : '';
 		const [dailyData, trendData] = await Promise.all([
 			api.getJson('/api/v1/analytics/daily/' + rtQ),
-			api.getJson(`/api/v1/analytics/trend/?days=${trendDays}${rootType ? sep + 'root_type=' + encodeURIComponent(rootType) : ''}`),
+			// 日报天数选择器独立于概览时间范围，forceDays 强制按 days 查询
+			api.getJson(buildTrendUrl({ days: trendDays, forceDays: true, rootType })),
 		]);
 
 		const t = dailyData.today || {};
 		const y = dailyData.yesterday || {};
 
 		const fields = [
-			{ label: '日期', tf: v => v, yf: v => v },
-			{ label: 'QA 次数', tf: v => (v || 0).toLocaleString(), yf: v => (v || 0).toLocaleString(), cmp: true },
-			{ label: '好评数', tf: v => (v || 0).toLocaleString(), yf: v => (v || 0).toLocaleString(), cmp: true },
-			{ label: '差评数', tf: v => (v || 0).toLocaleString(), yf: v => (v || 0).toLocaleString(), cmp: true, warn: true },
-			{ label: '准确率', tf: v => (v * 100 || 0).toFixed(2) + '%', yf: v => (v * 100 || 0).toFixed(2) + '%', cmp: true },
+			{ key: 'date', label: '日期', tf: v => v, yf: v => v },
+			{ key: 'qa_count', label: 'QA 次数', tf: v => (v || 0).toLocaleString(), yf: v => (v || 0).toLocaleString(), cmp: true },
+			{ key: 'good', label: '好评数', tf: v => (v || 0).toLocaleString(), yf: v => (v || 0).toLocaleString(), cmp: true },
+			{ key: 'bad', label: '差评数', tf: v => (v || 0).toLocaleString(), yf: v => (v || 0).toLocaleString(), cmp: true, warn: true },
+			{ key: 'accuracy', label: '准确率', tf: v => (v * 100 || 0).toFixed(2) + '%', yf: v => (v * 100 || 0).toFixed(2) + '%', cmp: true },
 		];
 
 		const diff = (tVal, yVal, warn) => {
@@ -1215,33 +1511,41 @@ async function loadDailyReport() {
 		// 缓存趋势数据，勾选指标时直接重渲染无需重新请求 API
 		dailyTrendData = trendData.trend || [];
 
-		// 渲染多日趋势折线图：QA次数 / 好评 / 差评 / 准确率（双 Y 轴）
+		// 渲染多日趋势折线图：QA次数 / 好评 / 差评 / 准确率（双 Y 轴，ECharts）
 		const trendChartHtml = renderDailyTrendChart(dailyTrendData);
 
+		// 先销毁旧图表实例，避免 innerHTML 整体替换后残留孤立的 ECharts 实例
+		destroyDailyTrendChart();
+		// 趋势区 + 摘要表合并为一张卡片，内部用分隔线间隔（同 overview-card / 队列卡片方案）
 		box.innerHTML = `
-      ${trendChartHtml}
-      <div class="card mt-16">
-        <div class="card-title">📅 每日摘要对比</div>
-        <table class="table table-bordered">
-          <thead><tr>
-            <th>指标</th><th>今日 (${escapeHtml(t.date || '-')})</th><th>昨日 (${escapeHtml(y.date || '-')})</th><th>环比</th>
-          </tr></thead>
-          <tbody>
-            ${fields.map(f => {
-	const tv = t[f.label === '日期' ? 'date' : (f.label === 'QA 次数' ? 'qa_count' : f.label === '好评数' ? 'good' : f.label === '差评数' ? 'bad' : f.label === '准确率' ? 'accuracy' : '')];
-	const yv = y[f.label === '日期' ? 'date' : (f.label === 'QA 次数' ? 'qa_count' : f.label === '好评数' ? 'good' : f.label === '差评数' ? 'bad' : f.label === '准确率' ? 'accuracy' : '')];
-	const cmpEl = f.cmp ? diff(tv, yv, f.warn) : '';
-	return `<tr><td>${f.label}</td><td>${f.tf(tv)}</td><td>${f.yf(yv)}</td><td>${cmpEl}</td></tr>`;
-}).join('')}
-          </tbody>
-        </table>
+      <div class="card daily-card">
+        <div class="daily-trend-section">
+          ${trendChartHtml}
+        </div>
+        <div class="daily-summary-section">
+          <div class="card-title">📅 每日摘要对比</div>
+          <table class="table table-bordered">
+            <thead><tr>
+              <th>指标</th><th>今日 (${escapeHtml(t.date || '-')})</th><th>昨日 (${escapeHtml(y.date || '-')})</th><th>环比</th>
+            </tr></thead>
+            <tbody>
+				${fields.map(f => {
+					const tv = t[f.key];
+					const yv = y[f.key];
+					const cmpEl = f.cmp ? diff(tv, yv, f.warn) : '';
+					return `<tr><td>${f.label}</td><td>${f.tf(tv)}</td><td>${f.yf(yv)}</td><td>${cmpEl}</td></tr>`;
+				}).join('')}
+			</tbody>
+          </table>
+        </div>
       </div>`;
 
-		// 日报趋势图 checkbox + 天数选择器事件委托：绑在 #dailyBody 上（不会被 toggleDailyMetric 替换）
+		// DOM 就绪后创建/刷新趋势图实例（空数据时容器不存在则跳过）
+		initDailyTrendChart();
+
+		// 天数选择器事件委托：绑在 #dailyBody 上（checkbox 勾选由 TrendChart 组件内部处理）
 		if (!box._dailyListener) {
 			box.addEventListener('change', (evt) => {
-				const cb = evt.target.closest('input[data-daily-metric]');
-				if (cb) { toggleDailyMetric(cb.getAttribute('data-daily-metric')); return; }
 				const sel = evt.target.closest('select[data-action="reload-daily"]');
 				if (sel) { loadDailyReport(); return; }
 			});
@@ -1255,153 +1559,62 @@ async function loadDailyReport() {
 }
 
 /**
- * 渲染日报趋势折线图（双 Y 轴 SVG）
- * - 左轴：QA次数 / 好评数 / 差评数（计数值，共用一个量纲）
- * - 右轴：准确率（百分比，0-100%）
+ * 渲染日报趋势区内容 HTML（不含外层卡片，由 loadDailyReport 组装成一张合并卡片）
+ * - 正常数据：输出头部（标题 + 天数选择器）与图表容器，实际图表由 initDailyTrendChart 在 DOM 就绪后创建
+ * - 空数据 / 仅 1 天时不建图表，直接返回占位文案
  * - 输入 trend: [{date, qa_count, good, bad, accuracy, avg_total_ms, avg_ttft_ms}, ...]
  */
 function renderDailyTrendChart(trend) {
 	if (!trend || trend.length === 0) {
-		return '<div class="card mb-16"><div class="card-title">📈 多日趋势</div><div class="empty">暂无趋势数据</div></div>';
+		return '<div class="card-title">📈 多日趋势</div><div class="empty">暂无趋势数据</div>';
 	}
 	if (trend.length === 1) {
-		return '<div class="card mb-16"><div class="card-title">📈 多日趋势</div><div class="empty">仅 1 天数据，暂无法绘制趋势图</div></div>';
+		return '<div class="card-title">📈 多日趋势</div><div class="empty">仅 1 天数据，暂无法绘制趋势图</div>';
 	}
 
 	/* 读取当前选中的天数，重渲染时保持选中项不变 */
 	const curDays = $('#dailyTrendDays')?.value || '30';
 
-	const w = 760, h = 230, pad = 26, padR = 50;
-	const days = trend.map(t => t.date.slice(5)); // MM-DD
-	const qaCounts = trend.map(t => t.qa_count || 0);
-	const goods = trend.map(t => t.good || 0);
-	const bads = trend.map(t => t.bad || 0);
-	const accs = trend.map(t => (t.accuracy || 0) * 100);
-
-	// 左轴范围：仅统计已勾选指标的最大值，避免未显示指标拉伸 Y 轴
-	const leftVals = [];
-	if (dailyMetricVisible.qa) leftVals.push(...qaCounts);
-	if (dailyMetricVisible.good) leftVals.push(...goods);
-	if (dailyMetricVisible.bad) leftVals.push(...bads);
-	const leftMax = Math.max(...leftVals, 1);
-	const leftMin = 0;
-
-	// 右轴范围（准确率），仅当准确率勾选时才计算
-	const showRight = dailyMetricVisible.accuracy;
-	let rightMin = 0, rightMax = 100;
-	if (showRight) {
-		rightMin = Math.min(...accs) - 5;
-		rightMax = Math.max(...accs) + 5;
-		rightMin = Math.max(0, rightMin);
-		rightMax = Math.min(100, rightMax);
-		if (rightMax - rightMin < 1) { rightMin = 0; rightMax = 100; }
-	}
-
-	const xStep = (w - pad - padR) / (days.length - 1);
-	// 左轴坐标映射
-	const yLeft = v => h - pad - ((v - leftMin) / (leftMax - leftMin)) * (h - 2 * pad);
-	// 右轴坐标映射（准确率）
-	const yRight = v => h - pad - ((v - rightMin) / (rightMax - rightMin)) * (h - 2 * pad);
-
-	// 折线点坐标
-	const linePts = arr => arr.map((v, i) => `${pad + i * xStep},${yLeft(v)}`).join(' ');
-	const accPts = accs.map((v, i) => `${pad + i * xStep},${yRight(v)}`).join(' ');
-
-	// 网格线 + 左轴刻度
-	let grid = '';
-	for (let i = 0; i <= 5; i++) {
-		const yv = pad + (h - 2 * pad) * i / 5;
-		const label = Math.round(leftMax - (leftMax - leftMin) * i / 5);
-		grid += `<line x1="${pad}" y1="${yv}" x2="${w - padR}" y2="${yv}" stroke="#e5e7eb" stroke-dasharray="3 3"/>`;
-		grid += `<text x="${pad - 6}" y="${yv + 4}" text-anchor="end" font-size="10" fill="#9ca3af">${label}</text>`;
-	}
-	// 右轴刻度（仅当准确率勾选时显示）
-	if (showRight) {
-		for (let i = 0; i <= 5; i++) {
-			const yv = pad + (h - 2 * pad) * i / 5;
-			const label = (rightMax - (rightMax - rightMin) * i / 5).toFixed(0) + '%';
-			grid += `<text x="${w - padR + 6}" y="${yv + 4}" text-anchor="start" font-size="10" fill="#9ca3af">${label}</text>`;
-		}
-	}
-
-	// X 轴标签（数据多时隔点显示，避免重叠）
-	const xLabels = days.map((d, i) => {
-		const showEvery = days.length > 20 ? 5 : (days.length > 10 ? 3 : 1);
-		if (i % showEvery !== 0 && i !== days.length - 1) return '';
-		return `<text x="${pad + i * xStep}" y="${h - pad + 16}" text-anchor="middle" font-size="10" fill="#6b7280">${d}</text>`;
-	}).join('');
-
-	// 数据点圆点
-	const dots = (arr, color, useRight) => arr.map((v, i) => {
-		const yy = useRight ? yRight(v) : yLeft(v);
-		return `<circle cx="${pad + i * xStep}" cy="${yy}" r="2.5" fill="${color}"/>`;
-	}).join('');
-
-	// 按勾选状态动态生成折线和数据点
-	let polylines = '';
-	let dotHtml = '';
-	if (dailyMetricVisible.qa) {
-		polylines += `<polyline points="${linePts(qaCounts)}" fill="none" stroke="#2563eb" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`;
-		dotHtml += dots(qaCounts, '#2563eb', false);
-	}
-	if (dailyMetricVisible.good) {
-		polylines += `<polyline points="${linePts(goods)}" fill="none" stroke="#059669" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>`;
-		dotHtml += dots(goods, '#059669', false);
-	}
-	if (dailyMetricVisible.bad) {
-		polylines += `<polyline points="${linePts(bads)}" fill="none" stroke="#dc2626" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>`;
-		dotHtml += dots(bads, '#dc2626', false);
-	}
-	if (showRight) {
-		polylines += `<polyline points="${accPts}" fill="none" stroke="#7c3aed" stroke-width="2" stroke-dasharray="6 3" stroke-linecap="round" stroke-linejoin="round"/>`;
-		dotHtml += dots(accs, '#7c3aed', true);
-	}
-
-	/* 左侧勾选框列：布局抽到 .chart-sidebar，.daily-sidebar 仅覆盖 min-width */
-	const sidebarHtml = `
-      <div class="chart-sidebar daily-sidebar">
-        <label class="checkbox"><input type="checkbox" ${dailyMetricVisible.qa ? 'checked' : ''} data-daily-metric="qa"><span class="metric-dot dot-blue"></span>QA次数</label>
-        <label class="checkbox"><input type="checkbox" ${dailyMetricVisible.good ? 'checked' : ''} data-daily-metric="good"><span class="metric-dot dot-green"></span>好评</label>
-        <label class="checkbox"><input type="checkbox" ${dailyMetricVisible.bad ? 'checked' : ''} data-daily-metric="bad"><span class="metric-dot dot-red"></span>差评</label>
-        <label class="checkbox"><input type="checkbox" ${dailyMetricVisible.accuracy ? 'checked' : ''} data-daily-metric="accuracy"><span class="metric-dot dot-purple"></span>准确率</label>
-      </div>`;
-
-	/* 标题放在顶部，左右两栏：勾选框栏 + SVG图；天数选择器放标题右侧并减小大小 */
 	return `
-      <div class="chart-wrap">
-        <div class="daily-chart-header">
-          <div class="text-lg fw-600">📈 最近 ${trend.length} 天趋势</div>
-          <select class="select select-xs" data-action="reload-daily" id="dailyTrendDays">
-            <option value="7" ${curDays === '7' ? 'selected' : ''}>7 天</option>
-            <option value="14" ${curDays === '14' ? 'selected' : ''}>14 天</option>
-            <option value="30" ${curDays === '30' ? 'selected' : ''}>30 天</option>
-          </select>
-        </div>
-        <div class="chart-row">
-          ${sidebarHtml}
-          <div class="chart-container chart-container-flex" style="height:${h + 20}px">
-            <svg class="chart-svg" viewBox="0 0 ${w} ${h}" preserveAspectRatio="xMidYMid meet">
-              ${grid}${xLabels}${polylines}${dotHtml}
-            </svg>
-          </div>
-        </div>
-      </div>`;
+      <div class="daily-chart-header">
+        <div class="text-lg fw-600">📈 最近 ${trend.length} 天趋势</div>
+        <select class="select select-xs" data-action="reload-daily" id="dailyTrendDays">
+          <option value="7" ${curDays === '7' ? 'selected' : ''}>7 天</option>
+          <option value="14" ${curDays === '14' ? 'selected' : ''}>14 天</option>
+          <option value="30" ${curDays === '30' ? 'selected' : ''}>30 天</option>
+        </select>
+      </div>
+      <div id="dailyTrendChart"></div>`;
 }
 
-/**
- * 切换日报趋势图中某条指标线的显示/隐藏
- * 使用缓存的 dailyTrendData 直接重渲染，无需重新请求 API
- */
-function toggleDailyMetric(metric) {
-	dailyMetricVisible[metric] = !dailyMetricVisible[metric];
-	// 至少保留一条指标，避免全部隐藏后图表空白
-	if (!Object.values(dailyMetricVisible).some(v => v)) {
-		dailyMetricVisible[metric] = true;
-	}
-	// 仅替换图表区域，不重载表格
-	const dailyBody = $('#dailyBody');
-	const chartWrap = dailyBody.querySelector('.chart-wrap');
-	if (chartWrap) {
-		chartWrap.outerHTML = renderDailyTrendChart(dailyTrendData);
-	}
+/* 日报趋势图实例（ECharts）：每次加载重建（DOM 整体替换），勾选状态由 dailyMetricVisible 恢复 */
+let dailyTrendChart = null;
+
+/** 销毁日报趋势图实例（重载/空态前调用，释放 ECharts 与 ResizeObserver） */
+function destroyDailyTrendChart() {
+	if (dailyTrendChart) { dailyTrendChart.destroy(); dailyTrendChart = null; }
+}
+
+/** 创建/刷新日报趋势图（ECharts）：需在 renderDailyTrendChart 输出的 DOM 就绪后调用 */
+function initDailyTrendChart() {
+	const container = $('#dailyTrendChart');
+	if (!container) return;
+	dailyTrendChart = TrendChart.create({
+		container: container,
+		series: [
+			{ key: 'qa', label: 'QA次数', color: '#2563eb', axis: 'left', visible: dailyMetricVisible.qa, get: t => t.qa_count || 0 },
+			{ key: 'good', label: '好评', color: '#059669', axis: 'left', visible: dailyMetricVisible.good },
+			{ key: 'bad', label: '差评', color: '#dc2626', axis: 'left', visible: dailyMetricVisible.bad },
+			{ key: 'accuracy', label: '准确率', color: '#7c3aed', axis: 'right', dashed: true, visible: dailyMetricVisible.accuracy, get: t => (t.accuracy || 0) * 100 },
+		],
+		axes: {
+			// 左轴：计数值（QA/好评/差评），从 0 起算、不设上限；右轴：准确率百分比，0-100 封顶
+			left: { toFixed: 0, includeZero: true, clampMin: 0, clampMax: null },
+			right: { unit: '%', toFixed: 0, includeZero: false, clampMin: 0, clampMax: 100, defaultMin: 0, defaultMax: 100, minSpan: 5, padMin: 5, padMax: 5 },
+		},
+		options: { chartHeight: '100%', legendWidth: 130 },
+		// 勾选状态回写开关对象，重载（如切换天数）时用 dailyMetricVisible 恢复勾选
+		onToggle: (key, visible) => { dailyMetricVisible[key] = visible; },
+	});
+	if (dailyTrendChart) dailyTrendChart.render(dailyTrendData);
 }

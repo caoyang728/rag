@@ -58,7 +58,7 @@ class TestDocAuditPending(KnowledgeViewsExtraBase):
 
     @pytest.mark.integration
     def test_team_leader_sees_own_team_docs(self):
-        """团队组长看到本团队 pending_team 文档，audit_step 标注组长审核"""
+        """团队组长看到本团队 pending_team 文档，audit_step 显示「审核」"""
         resp = self.client.get(
             '/api/v1/knowledge/documents/pending-audits/',
             **_auth_headers(self.team_leader))
@@ -66,7 +66,7 @@ class TestDocAuditPending(KnowledgeViewsExtraBase):
         rows = resp.json()['rows']
         assert len(rows) == 1
         assert rows[0]['id'] == self.pending_doc.id
-        assert '团队组长' in rows[0]['audit_step']
+        assert rows[0]['audit_step'] == '审核'
 
     @pytest.mark.integration
     def test_super_admin_sees_all(self):
@@ -233,7 +233,7 @@ class TestDocAuditPendingCompliance(KnowledgeViewsExtraBase):
 
     @pytest.mark.integration
     def test_dept_manager_sees_compliance_docs(self):
-        """部门经理看到本部门 pending_compliance 文档，audit_step 标注部门经理复核"""
+        """部门经理看到本部门 pending_compliance 文档，audit_step 显示「复核」"""
         resp = self.client.get(
             '/api/v1/knowledge/documents/pending-audits/',
             **_auth_headers(self.dept_manager))
@@ -242,16 +242,16 @@ class TestDocAuditPendingCompliance(KnowledgeViewsExtraBase):
         ids = {r['id'] for r in rows}
         assert self.compliance_doc.id in ids
         row = next(r for r in rows if r['id'] == self.compliance_doc.id)
-        assert '部门经理' in row['audit_step']
+        assert row['audit_step'] == '复核'
 
     @pytest.mark.integration
     def test_super_admin_sees_compliance_as_compliance_audit(self):
-        """超管看到 pending_compliance 文档，audit_step 标注合规审核"""
+        """超管看到 pending_compliance 文档，audit_step 显示「复核」"""
         resp = self.client.get(
             '/api/v1/knowledge/documents/pending-audits/',
             **_auth_headers(self.super_admin))
         row = next(r for r in resp.json()['rows'] if r['id'] == self.compliance_doc.id)
-        assert '合规审核' in row['audit_step']
+        assert row['audit_step'] == '复核'
 
     @pytest.mark.integration
     def test_other_team_leader_cannot_audit_other_docs(self):
@@ -418,4 +418,161 @@ class TestCeleryStatusDegraded(KnowledgeViewsExtraBase):
             **_auth_headers(self.super_admin))
         assert resp.status_code == 200
         assert resp.json()['celery_ok'] is False
+
+
+# ============================================================================
+# DocAuditRejectedView（已驳回列表）/ DocAuditRecordView（审核记录）
+# ============================================================================
+class TestDocAuditRejectedList(KnowledgeViewsExtraBase):
+    """DocAuditRejectedView 已驳回文档列表测试"""
+
+    @pytest.fixture(autouse=True)
+    def _env(self):
+        """在基类环境基础上补充已驳回文档与驳回日志"""
+        self._init_env()
+        from apps.knowledge.models import DocOperationLog
+        self.rejected_doc = _create_document(
+            self.category_node, self.normal_user, team_id=self.team.id,
+            dept_id=self.dept.id, title='已驳回文档', file_name='rejected.txt',
+            audit_status='rejected')
+        # 模拟驳回操作日志（驳回理由 / 驳回人 / 时间）
+        DocOperationLog.objects.create(
+            action='doc_audit_reject',
+            operator=self.team_leader,
+            operator_name=self.team_leader.username,
+            document=self.rejected_doc,
+            detail={'comment': '格式不符合规范'},
+        )
+
+    @pytest.mark.integration
+    def test_team_leader_sees_own_team_rejected_docs(self):
+        """团队组长看到本团队已驳回文档，含驳回理由"""
+        resp = self.client.get(
+            '/api/v1/knowledge/documents/audit-rejected/',
+            **_auth_headers(self.team_leader))
+        assert resp.status_code == 200
+        rows = resp.json()['rows']
+        assert len(rows) == 1
+        assert rows[0]['id'] == self.rejected_doc.id
+        assert rows[0]['audit_status'] == 'rejected'
+        assert rows[0]['reject_comment'] == '格式不符合规范'
+        assert rows[0]['owner_username'] == self.normal_user.username
+
+    @pytest.mark.integration
+    def test_super_admin_sees_all_rejected(self):
+        """超管看到全部已驳回文档"""
+        resp = self.client.get(
+            '/api/v1/knowledge/documents/audit-rejected/',
+            **_auth_headers(self.super_admin))
+        assert resp.status_code == 200
+        ids = {r['id'] for r in resp.json()['rows']}
+        assert self.rejected_doc.id in ids
+
+    @pytest.mark.integration
+    def test_normal_user_denied_403(self):
+        """无审核权限的普通用户 → 403"""
+        resp = self.client.get(
+            '/api/v1/knowledge/documents/audit-rejected/',
+            **_auth_headers(self.normal_user))
+        assert resp.status_code == 403
+
+
+class TestDocAuditRecordList(KnowledgeViewsExtraBase):
+    """DocAuditRecordView 审核记录列表测试"""
+
+    @pytest.fixture(autouse=True)
+    def _env(self):
+        """在基类环境基础上补充审核操作日志"""
+        self._init_env()
+        from apps.knowledge.models import DocOperationLog
+        # 待审文档（用于产生审核通过/驳回记录）
+        self.pending_doc = _create_document(
+            self.category_node, self.normal_user, team_id=self.team.id,
+            dept_id=self.dept.id, title='记录文档', file_name='record.txt',
+            audit_status='pending_team')
+        DocOperationLog.objects.create(
+            action='doc_audit_approve',
+            operator=self.team_leader,
+            operator_name=self.team_leader.username,
+            document=self.pending_doc,
+            detail={'comment': '内容无误', 'approver': self.team_leader.username,
+                    'to_status': 'pending_compliance'},
+        )
+        DocOperationLog.objects.create(
+            action='doc_audit_reject',
+            operator=self.team_leader,
+            operator_name=self.team_leader.username,
+            document=self.pending_doc,
+            detail={'comment': '缺少附件', 'rejector': self.team_leader.username},
+        )
+
+    @pytest.mark.integration
+    def test_team_leader_sees_own_team_records(self):
+        """团队组长看到本团队文档的审核记录（倒序）"""
+        resp = self.client.get(
+            '/api/v1/knowledge/documents/audit-records/',
+            **_auth_headers(self.team_leader))
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data['count'] == 2
+        labels = {r['action_label'] for r in data['rows']}
+        assert labels == {'审核通过', '驳回'}
+        assert data['rows'][0]['document_title'] == '记录文档'
+
+    @pytest.mark.integration
+    def test_super_admin_sees_all_records(self):
+        """超管看到全部审核记录"""
+        resp = self.client.get(
+            '/api/v1/knowledge/documents/audit-records/',
+            **_auth_headers(self.super_admin))
+        assert resp.status_code == 200
+        assert resp.json()['count'] == 2
+
+    @pytest.mark.integration
+    def test_normal_user_denied_403(self):
+        """无审核权限的普通用户 → 403"""
+        resp = self.client.get(
+            '/api/v1/knowledge/documents/audit-records/',
+            **_auth_headers(self.normal_user))
+        assert resp.status_code == 403
+
+
+class TestDocAuditPagination(KnowledgeViewsExtraBase):
+    """待审核列表分页测试（page/page_size 切片）"""
+
+    @pytest.fixture(autouse=True)
+    def _env(self):
+        self._init_env()
+        # 基类文档置终态，避免混入待审列表
+        Document.objects.filter(id__in=[
+            self.doc_own_private.id, self.doc_other_public.id,
+            self.doc_other_private.id,
+        ]).update(audit_status='passed')
+        # 补充 3 个本团队待审文档
+        for i in range(3):
+            _create_document(
+                self.category_node, self.normal_user, team_id=self.team.id,
+                dept_id=self.dept.id, title=f'分页文档{i}', file_name=f'page{i}.txt',
+                audit_status='pending_team')
+
+    @pytest.mark.integration
+    def test_page_size_slices(self):
+        """超管按 page_size=2 切片，count 为总数"""
+        resp = self.client.get(
+            '/api/v1/knowledge/documents/pending-audits/?page=1&page_size=2',
+            **_auth_headers(self.super_admin))
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data['count'] == 3
+        assert len(data['rows']) == 2
+
+    @pytest.mark.integration
+    def test_page_2_returns_remaining(self):
+        """第 2 页返回剩余 1 条"""
+        resp = self.client.get(
+            '/api/v1/knowledge/documents/pending-audits/?page=2&page_size=2',
+            **_auth_headers(self.super_admin))
+        data = resp.json()
+        assert data['count'] == 3
+        assert len(data['rows']) == 1
 

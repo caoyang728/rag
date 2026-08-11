@@ -249,13 +249,17 @@ def aggregate_system_metrics(report_date: Optional[date] = None) -> dict:
         'p99_latency_total': total_percentiles['p99'],
         'p50_latency_llm': llm_percentiles['p50'],
         'p95_latency_llm': llm_percentiles['p95'],
+        'p99_latency_llm': llm_percentiles['p99'],
         'p50_latency_retrieval': retrieval_percentiles['p50'],
         'p95_latency_retrieval': retrieval_percentiles['p95'],
+        'p99_latency_retrieval': retrieval_percentiles['p99'],
         'p50_ttfb': ttfb_percentiles['p50'],
         'p95_ttfb': ttfb_percentiles['p95'],
+        'p99_ttfb': ttfb_percentiles['p99'],
         # 缓存命中延迟
         'cache_hit_p50_latency': cache_hit_percentiles['p50'],
         'cache_hit_p95_latency': cache_hit_percentiles['p95'],
+        'cache_hit_p99_latency': cache_hit_percentiles['p99'],
         # 比率指标
         'cache_hit_rate': round(cache_hit_rate, 4),
         'llm_success_rate': round(llm_success_rate, 4),

@@ -18,10 +18,9 @@ _ROUTE_CASES = [
     # --- 关键词权重 ---
     ('/api/v1/analytics/keywords/', views.KeywordWeightListView),
     ('/api/v1/analytics/keywords/1/', views.KeywordWeightDetailView),
-    # --- 日报 & 趋势 & 概览 ---
+    # --- 日报 & 趋势 ---
     ('/api/v1/analytics/daily/', views.DailyReportView),
     ('/api/v1/analytics/trend/', views.TrendReportView),
-    ('/api/v1/analytics/overview/', views.OverviewStatsView),
     ('/api/v1/analytics/qa-records/', views.QaRecordView),
     # --- 差评反馈 ---
     ('/api/v1/analytics/bad-feedbacks/', views.BadFeedbackListView),

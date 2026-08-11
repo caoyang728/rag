@@ -9,8 +9,6 @@ const WIKI_API = '/api/v1/wiki';
 const NODE_API = '/api/v1/knowledge/nodes';
 
 let wikiPage = 1;         // 当前列表页码
-let wikiTotalPages = 1;   // 列表总页数
-let wikiCount = 0;        // 列表总条数
 let wikiDetailId = null;  // 当前详情页 ID
 let generateNodes = [];   // 生成弹窗的扁平化节点列表
 let selectedGenerateNodeId = null; // 生成弹窗选中的节点 ID
@@ -210,10 +208,22 @@ async function loadWikiList(page) {
 
 	try {
 		const data = await api.getJson(`${WIKI_API}/pages/?${params.toString()}`);
-		wikiTotalPages = Math.max(1, Math.ceil((data.count || 0) / 20));
-		wikiCount = data.count || 0;
+		const count = data.count || 0;
+		const totalPages = Math.max(1, Math.ceil(count / 20));
 		renderWikiList(data.results || []);
-		renderWikiPagination();
+
+		// 使用公共 Pagination 组件渲染分页
+		const pgnState = { page: wikiPage, totalPages, total: count, pageSize: 20 };
+		if (wikiPage > 1) {
+			Pagination.update(pgnState);
+		} else {
+			Pagination.render({
+				container: '#wikiPagination',
+				...pgnState,
+				align: 'center',
+				onPageChange: (p) => loadWikiList(p)
+			});
+		}
 	} catch (e) {
 		box.innerHTML = `<div class="empty" style="padding:60px 0"><div class="empty-icon" style="font-size:48px">😥</div><div>加载失败：${escapeHtml(e.message)}</div></div>`;
 	}
@@ -239,36 +249,6 @@ function renderWikiList(rows) {
         <span>🕐 ${formatDate(r.updated_at)}</span>
       </div>
     </div>`).join('');
-}
-
-function renderWikiPagination() {
-	const container = $('#wikiPagination');
-	if (!container) return;
-	if (wikiTotalPages <= 1) { container.innerHTML = ''; return; }
-
-	const show = [];
-	const add = v => show.push(v);
-	add(1);
-	if (wikiPage - 1 > 2) add('...');
-	for (let i = Math.max(2, wikiPage - 1); i <= Math.min(wikiTotalPages - 1, wikiPage + 1); i++) add(i);
-	if (wikiPage + 1 < wikiTotalPages - 1) add('...');
-	add(wikiTotalPages);
-
-	container.innerHTML = `
-    <button class="page-btn" data-page="${wikiPage - 1}" ${wikiPage <= 1 ? 'disabled' : ''}>上一页</button>
-    ${show.map(p => p === '...'
-		? `<span class="page-btn page-btn-ellipsis" disabled>…</span>`
-		: `<button class="page-btn ${p === wikiPage ? 'active' : ''}" data-page="${p}">${p}</button>`).join('')}
-    <button class="page-btn" data-page="${wikiPage + 1}" ${wikiPage >= wikiTotalPages ? 'disabled' : ''}>下一页</button>
-    <span class="ml-8">第 ${wikiPage} / ${wikiTotalPages} 页，共 ${wikiCount} 条</span>`;
-
-	container.querySelectorAll('button[data-page]').forEach(btn => {
-		btn.addEventListener('click', () => {
-			if (btn.disabled) return;
-			const p = parseInt(btn.getAttribute('data-page'), 10);
-			if (!isNaN(p) && p >= 1 && p <= wikiTotalPages) loadWikiList(p);
-		});
-	});
 }
 
 /* ============ 详情 ============ */

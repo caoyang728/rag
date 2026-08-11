@@ -2976,9 +2976,113 @@ class PendingDocsView(APIView):
 # 文档审核（双审：团队组长审核 → 部门经理/合规复核）
 # ============================================================================
 
+def _page_params(request):
+    """解析列表分页参数（page/page_size），page_size 上限 100，默认每页 10 条"""
+    page = max(1, int(request.query_params.get('page', 1)))
+    page_size = min(100, max(1, int(request.query_params.get('page_size', 10))))
+    return page, page_size
+
+
+def _has_doc_audit_page_access(user):
+    """文档审核页/接口访问权限：知识管理员 / 部门经理 / 团队组长 / 超管"""
+    from apps.users.models import Department, Team, has_permission
+    if user.is_super_admin or user.is_kb_admin:
+        return True
+    if has_permission(user, 'kb.manage_all') or has_permission(user, 'kb.manage'):
+        return True
+    return (Team.objects.filter(leader_id=user.id, is_deleted=False).exists()
+            or Department.objects.filter(leader_id=user.id, is_deleted=False).exists())
+
+
+def _audit_scope_ids(user):
+    """返回当前用户可审核的团队/部门 ID 集合；超管/知识管理员返回 (None, None) 表示全部范围"""
+    from apps.users.models import Department, Team
+    if user.is_super_admin or user.is_kb_admin:
+        return None, None
+    team_ids = set(Team.objects.filter(
+        leader_id=user.id, is_deleted=False).values_list('id', flat=True))
+    dept_ids = set(Department.objects.filter(
+        leader_id=user.id, is_deleted=False).values_list('id', flat=True))
+    return team_ids, dept_ids
+
+
+def _doc_audit_scope(user, doc, team_ids=None, dept_ids=None):
+    """当前用户对该文档是否有审核范围（按归属团队/部门 + 管理角色）
+
+    超管/知识管理员（team_ids/dept_ids 为 None）覆盖全部范围；
+    团队组长仅覆盖其管理的团队，部门经理仅覆盖其管理的部门。
+    """
+    if team_ids is None or dept_ids is None:
+        return True
+    return (doc.team_id in team_ids) or (doc.dept_id in dept_ids)
+
+
+def _audit_step_for(user, doc, team_ids=None, dept_ids=None):
+    """当前用户对处于待审状态文档应显示的阶段文案
+
+    仅返回「审核 / 复核」，不带括号内的角色后缀（如 团队组长/管理员代审），
+    页面阶段列与弹窗统一使用该文案。
+    """
+    if doc.audit_status == 'pending_team':
+        # 团队组长审核：文档 team_id 对应团队 leader；
+        # 超管/知识管理员兜底代审（防止团队 leader 空缺）
+        if doc.team_id and team_ids and doc.team_id in team_ids:
+            return '审核'
+        if user.is_super_admin or user.is_kb_admin:
+            return '审核'
+        return ''
+    if doc.audit_status == 'pending_compliance':
+        # 复核：超管/知识管理员，或文档归属部门的部门经理
+        if user.is_super_admin or user.is_kb_admin:
+            return '复核'
+        if doc.dept_id and dept_ids and doc.dept_id in dept_ids:
+            return '复核'
+        return ''
+    return ''
+
+
+def _doc_audit_row(doc):
+    """构建审核列表行数据（归属路径 / 上传人 / 可见性 / 版本 等元信息）"""
+    from apps.users.models import Department, Team
+    dept_name, team_name = '', ''
+    if doc.team_id:
+        t = Team.objects.filter(id=doc.team_id, is_deleted=False).only('name', 'department_id').first()
+        if t:
+            team_name = t.name
+            d = Department.objects.filter(id=t.department_id, is_deleted=False).only('name').first()
+            if d:
+                dept_name = d.name
+    elif doc.dept_id:
+        d = Department.objects.filter(id=doc.dept_id, is_deleted=False).only('name').first()
+        if d:
+            dept_name = d.name
+    return {
+        'id': doc.id,
+        'uuid': str(doc.uuid),
+        'title': doc.title,
+        'file_name': doc.file_name,
+        'file_type': doc.file_type,
+        'file_size': doc.file_size,
+        'visibility_level': doc.visibility_level,
+        'secret_level': doc.secret_level,
+        'audit_status': doc.audit_status,
+        'owner_id': doc.owner_id,
+        'owner_name': doc.owner.real_name or doc.owner.username if doc.owner else '',
+        'owner_username': doc.owner.username if doc.owner else '',
+        'node_id': doc.node_id,
+        'node_name': doc.node.name if doc.node else '',
+        'dept_name': dept_name,
+        'team_name': team_name,
+        'version': doc.version,
+        'version_tag': doc.version_tag or '',
+        'created_at': doc.created_at.isoformat() if doc.created_at else '',
+        'updated_at': doc.updated_at.isoformat() if doc.updated_at else '',
+    }
+
+
 class DocAuditPendingView(APIView):
     """GET /api/v1/knowledge/documents/pending-audits/
-    获取待当前用户审核的文档列表
+    获取待当前用户审核的文档列表（支持分页）
 
     审核规则（对齐 Document.AUDIT_STATUS_CHOICES）：
     - pending_team: 待团队组长审核 → 文档 team_id 对应当前用户为团队 leader
@@ -2989,18 +3093,10 @@ class DocAuditPendingView(APIView):
     def get(self, request):
         user = request.user
         # 访问入口权限校验：仅知识管理员 / 部门经理 / 团队组长 / 超管可访问
-        from apps.users.models import Department, Team, has_permission
-        if not (user.is_super_admin
-                or user.is_kb_admin
-                or has_permission(user, 'kb.manage_all')
-                or has_permission(user, 'kb.manage')):
-            is_leader = (
-                Team.objects.filter(leader_id=user.id, is_deleted=False).exists()
-                or Department.objects.filter(leader_id=user.id, is_deleted=False).exists()
-            )
-            if not is_leader:
-                raise PermissionDenied("无文档审核权限")
+        if not _has_doc_audit_page_access(user):
+            raise PermissionDenied("无文档审核权限")
 
+        team_ids, dept_ids = _audit_scope_ids(user)
         qs = Document.objects.filter(
             is_deleted=False,
             audit_status__in=['pending_team', 'pending_compliance'],
@@ -3009,74 +3105,133 @@ class DocAuditPendingView(APIView):
         # 按用户身份 + audit_status 过滤范围
         rows = []
         for doc in qs:
-            can_audit = False
-            audit_step = ''
-            if doc.audit_status == 'pending_team':
-                # 团队组长审核：文档 team_id 对应团队 leader
-                if doc.team_id and Team.objects.filter(
-                    id=doc.team_id, leader_id=user.id, is_deleted=False
-                ).exists():
-                    can_audit = True
-                    audit_step = '审核（团队组长）'
-                # 用户显式拥有 kb_admin / super_admin：也可以审（兜底，防止团队 leader 空缺）
-                elif user.is_super_admin or user.is_kb_admin:
-                    can_audit = True
-                    audit_step = '审核（管理员代审）'
-            elif doc.audit_status == 'pending_compliance':
-                # 复核：部门经理 / kb_admin / super_admin
-                if user.is_super_admin or user.is_kb_admin:
-                    can_audit = True
-                    audit_step = '复核（合规审核）'
-                elif doc.dept_id and Department.objects.filter(
-                    id=doc.dept_id, leader_id=user.id, is_deleted=False
-                ).exists():
-                    can_audit = True
-                    audit_step = '复核（部门经理）'
-            if not can_audit:
+            audit_step = _audit_step_for(user, doc, team_ids, dept_ids)
+            if not audit_step:
                 continue
+            row = _doc_audit_row(doc)
+            row['audit_step'] = audit_step
+            rows.append(row)
 
-            # 解析节点路径（部门/团队）
-            dept_name = ''
-            team_name = ''
-            if doc.team_id:
-                t = Team.objects.filter(id=doc.team_id, is_deleted=False).only('name', 'department_id').first()
-                if t:
-                    team_name = t.name
-                    d = Department.objects.filter(id=t.department_id, is_deleted=False).only('name').first()
-                    if d:
-                        dept_name = d.name
-            elif doc.dept_id:
-                d = Department.objects.filter(id=doc.dept_id, is_deleted=False).only('name').first()
-                if d:
-                    dept_name = d.name
+        page, page_size = _page_params(request)
+        count = len(rows)
+        start = (page - 1) * page_size
+        return Response({
+            'rows': rows[start:start + page_size],
+            'count': count,
+        })
 
+
+class DocAuditRejectedView(APIView):
+    """GET /api/v1/knowledge/documents/audit-rejected/
+    获取已驳回文档列表（当前用户审核范围内，支持分页）
+
+    同时返回最近一次驳回理由与驳回时间（来自 doc_audit_reject 操作日志）。
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        if not _has_doc_audit_page_access(user):
+            raise PermissionDenied("无文档审核权限")
+
+        team_ids, dept_ids = _audit_scope_ids(user)
+        qs = Document.objects.filter(
+            is_deleted=False,
+            audit_status='rejected',
+        ).select_related('owner', 'node').order_by('-updated_at')
+
+        # 按用户审核范围过滤
+        rows = []
+        doc_ids = []
+        for doc in qs:
+            if not _doc_audit_scope(user, doc, team_ids, dept_ids):
+                continue
+            rows.append(_doc_audit_row(doc))
+            doc_ids.append(doc.id)
+
+        # 批量取各文档最近一次驳回记录（order_by document_id 分组 + -created_at 取最新）
+        reject_logs = {}
+        for log in DocOperationLog.objects.filter(
+            action='doc_audit_reject', document_id__in=doc_ids
+        ).order_by('document_id', '-created_at'):
+            if log.document_id not in reject_logs:
+                reject_logs[log.document_id] = log
+
+        for row in rows:
+            log = reject_logs.get(row['id'])
+            row['reject_comment'] = (log.detail or {}).get('comment', '') if log else ''
+            row['rejected_at'] = log.created_at.isoformat() if log and log.created_at else ''
+
+        page, page_size = _page_params(request)
+        count = len(rows)
+        start = (page - 1) * page_size
+        return Response({
+            'rows': rows[start:start + page_size],
+            'count': count,
+        })
+
+
+def _audit_record_action_label(action, detail=None):
+    """审核记录动作文案映射
+
+    doc_audit_approve 的流转目标状态记录在 detail.to_status，
+    用于区分「审核通过」（→待复核）与「复核通过」（→已发布）。
+    """
+    if action == 'doc_audit_approve':
+        return '复核通过' if (detail or {}).get('to_status') == 'passed' else '审核通过'
+    return {
+        'doc_audit_reject': '驳回',
+        'doc_audit_team_pass': '团队审核通过',
+        'doc_audit_team_reject': '团队审核驳回',
+        'doc_audit_compliance_pass': '合规复核通过',
+        'doc_audit_compliance_reject': '合规复核驳回',
+    }.get(action, action)
+
+
+class DocAuditRecordView(APIView):
+    """GET /api/v1/knowledge/documents/audit-records/
+    获取文档审核记录（当前用户审核范围内的 doc_audit 操作日志，支持分页）
+
+    记录来源为 DocOperationLog（只追加不删），按时间倒序展示。
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        if not _has_doc_audit_page_access(user):
+            raise PermissionDenied("无文档审核权限")
+
+        team_ids, dept_ids = _audit_scope_ids(user)
+        logs = DocOperationLog.objects.filter(
+            action__startswith='doc_audit',
+            document__isnull=False,
+        ).select_related('document').order_by('-created_at')
+
+        # 仅展示当前用户审核范围内的文档记录
+        rows = []
+        for log in logs:
+            doc = log.document
+            if doc.is_deleted:
+                continue
+            if not _doc_audit_scope(user, doc, team_ids, dept_ids):
+                continue
             rows.append({
-                'id': doc.id,
-                'uuid': str(doc.uuid),
-                'title': doc.title,
-                'file_name': doc.file_name,
-                'file_type': doc.file_type,
-                'file_size': doc.file_size,
-                'visibility_level': doc.visibility_level,
-                'secret_level': doc.secret_level,
-                'audit_status': doc.audit_status,
-                'audit_step': audit_step,
-                'owner_id': doc.owner_id,
-                'owner_name': doc.owner.real_name or doc.owner.username if doc.owner else '',
-                'owner_email': doc.owner.email if doc.owner else '',
-                'node_id': doc.node_id,
-                'node_name': doc.node.name if doc.node else '',
-                'dept_name': dept_name,
-                'team_name': team_name,
-                'version': doc.version,
-                'version_tag': doc.version_tag or '',
-                'created_at': doc.created_at.isoformat() if doc.created_at else '',
-                'updated_at': doc.updated_at.isoformat() if doc.updated_at else '',
+                'id': log.id,
+                'document_id': doc.id,
+                'document_title': doc.title,
+                'action': log.action,
+                'action_label': _audit_record_action_label(log.action, log.detail),
+                'operator_name': log.operator_name,
+                'comment': (log.detail or {}).get('comment', ''),
+                'created_at': log.created_at.isoformat() if log.created_at else '',
             })
 
+        page, page_size = _page_params(request)
+        count = len(rows)
+        start = (page - 1) * page_size
         return Response({
-            'rows': rows,
-            'count': len(rows),
+            'rows': rows[start:start + page_size],
+            'count': count,
         })
 
 
@@ -3130,8 +3285,11 @@ class DocAuditApproveView(APIView):
             return Response({"detail": f"文档当前状态 {doc.audit_status} 不可审核"}, status=400)
 
         doc.save(update_fields=['audit_status', 'updated_at'])
-        _log_operation(request, f'doc_audit_approve_{doc.audit_status}', document=doc,
-                       detail={'comment': comment, 'approver': user.username})
+        # action 固定为 doc_audit_approve（避免超长值截断导致操作日志丢失），
+        # 流转目标状态写入 detail.to_status，供审核记录区分「审核通过 / 复核通过」
+        _log_operation(request, 'doc_audit_approve', document=doc,
+                       detail={'comment': comment, 'approver': user.username,
+                               'to_status': doc.audit_status})
         logger.info(f"Doc audit approved: id={pk}, status={doc.audit_status}, approver={user.username}")
         return Response({
             "ok": True,

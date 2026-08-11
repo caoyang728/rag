@@ -28,6 +28,9 @@ class QaRecord(models.Model):
         ('reasoning', 'reasoning'),
         ('mixed', 'mixed'),
         ('refused', 'refused'),
+        # agent/general 由 agent 模块写入（任务编排 / 通用闲聊兜底），choices 与实际写入值对齐
+        ('agent', 'agent'),
+        ('general', 'general'),
     ]
 
     id = models.BigAutoField(primary_key=True)

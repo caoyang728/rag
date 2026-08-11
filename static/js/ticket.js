@@ -21,9 +21,9 @@ let _currentRows = [];
 let _currentApproval = null;
 // 提交防重锁（防止审批通过/驳回/撤回重复提交）
 let _submitting = false;
-// 当前分页页码（每页固定 _PAGE_SIZE 条，由后端 page_size 控制）
+// 当前分页页码（每页 _PAGE_SIZE 条，由后端 page_size 控制）
 let _currentPage = 1;
-const _PAGE_SIZE = 20;
+let _PAGE_SIZE = 20;
 
 // 统一工单中心 API 前缀
 const _TICKET_API = '/api/v1/auth/tickets/';
@@ -69,10 +69,16 @@ function refreshCurrent() {
 	loadList();
 }
 
+// 请求序号：loadList 每次调用自增，只有最新请求的响应才会被应用。
+// 防止快速连续操作（切条数后立即翻页、连续点页码等）时旧请求后返回覆盖新状态，
+// 导致表格数据与分页状态错乱。
+let _requestSeq = 0;
+
 /* ============================================================================
  * 统一工单列表加载（全类型）
  * ============================================================================ */
 function loadList() {
+	const seq = ++_requestSeq;
 	const tbody = $('#ticketTable');
 	tbody.innerHTML = _loadingRow(9);
 
@@ -90,13 +96,23 @@ function loadList() {
 
 	api.getJson(_TICKET_API + '?' + params.toString())
 		.then(res => {
+			if (seq !== _requestSeq) return; // 已有更新的请求发出，丢弃本次旧响应
+			const count = res?.count || 0;
+			const totalPages = Math.max(1, Math.ceil(count / _PAGE_SIZE));
+			// 数据量减少（如工单被处理/撤回）导致当前页越界时，回退到最后一页重新加载
+			if (_currentPage > totalPages) {
+				_currentPage = totalPages;
+				loadList();
+				return;
+			}
 			const rows = res?.rows || [];
 			_currentRows = rows;
-			if (_currentView === 'pending') _setBadge('pending', res?.count || rows.length);
+			if (_currentView === 'pending') _setBadge('pending', count || rows.length);
 			_renderTable(rows, _currentView);
-			_renderPagination(res?.count || 0);
+			_renderPagination(count);
 		})
 		.catch(err => {
+			if (seq !== _requestSeq) return;
 			_setBadge('pending', 0);
 			_renderPagination(0);
 			_renderTableError('加载工单失败');
@@ -123,37 +139,34 @@ function _renderTable(rows, view) {
 	// 行点击已委托到 tbody（DOMContentLoaded 绑定一次），翻页/刷新无需重复绑定
 }
 
-/* 分页渲染：底部页码条 + 总条数（每页 _PAGE_SIZE 条，服务端已按 page/page_size 切片） */
+/* Pagination 组件是否已初始化（首次用 render，后续用 update） */
+let _paginationInited = false;
+
+/**
+ * 分页渲染：委托给通用 Pagination 组件。
+ * 首次调用时创建组件并绑定回调，后续仅更新状态。
+ * 组件提供居中对齐 + 每页条数切换（10/20/50）。
+ */
 function _renderPagination(count) {
-	const el = $('#ticketPagination');
-	if (!el) return;
 	const totalPages = Math.max(1, Math.ceil((count || 0) / _PAGE_SIZE));
-	if (totalPages <= 1) { el.innerHTML = ''; return; }
-	// 窗口化页码：始终显示首页/末页，当前页前后各 1 页，跳过的用省略号
-	const show = [];
-	const add = v => show.push(v);
-	add(1);
-	if (_currentPage - 1 > 2) add('...');
-	for (let i = Math.max(2, _currentPage - 1); i <= Math.min(totalPages - 1, _currentPage + 1); i++) add(i);
-	if (_currentPage + 1 < totalPages - 1) add('...');
-	add(totalPages);
-	el.innerHTML = `
-		<button class="page-btn" data-page="${_currentPage - 1}" ${_currentPage <= 1 ? 'disabled' : ''}>上一页</button>
-		${show.map(p => p === '...'
-			? `<span class="page-btn page-btn-ellipsis" disabled>…</span>`
-			: `<button class="page-btn ${p === _currentPage ? 'active' : ''}" data-page="${p}">${p}</button>`).join('')}
-		<button class="page-btn" data-page="${_currentPage + 1}" ${_currentPage >= totalPages ? 'disabled' : ''}>下一页</button>
-		<span style="margin-left:8px">第 ${_currentPage} / ${totalPages} 页，共 ${count} 条</span>`;
-	el.querySelectorAll('button[data-page]').forEach(btn => {
-		btn.addEventListener('click', () => {
-			if (btn.disabled) return;
-			const p = parseInt(btn.dataset.page, 10);
-			if (!isNaN(p) && p >= 1 && p <= totalPages) {
-				_currentPage = p;
-				loadList();
-			}
+	if (!_paginationInited) {
+		// 首次渲染：创建组件，绑定翻页和每页条数回调
+		Pagination.render({
+			container: '#ticketPagination',
+			page: _currentPage,
+			totalPages: totalPages,
+			total: count,
+			pageSize: _PAGE_SIZE,
+			align: 'center',
+			// pageSizeOptions: [10, 20, 50],
+			onPageChange(p) { _currentPage = p; loadList(); },
+			onPageSizeChange(size) { _PAGE_SIZE = size; _currentPage = 1; loadList(); },
 		});
-	});
+		_paginationInited = true;
+	} else {
+		// 后续刷新：仅更新状态，复用已有 DOM 和回调
+		Pagination.update({ page: _currentPage, totalPages: totalPages, total: count, pageSize: _PAGE_SIZE });
+	}
 }
 
 function _renderTableError(msg) {

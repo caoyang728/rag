@@ -15,8 +15,10 @@ urlpatterns = [
     path("documents/upload/", views.DocumentUploadView.as_view()),
     path("documents/<int:doc_id>/chunks/", views.DocumentChunksView.as_view()),
     path("documents/pending/", views.PendingDocsView.as_view()),
-    # 文档审核：待审核列表 / 通过 / 驳回
+    # 文档审核：待审核列表 / 已驳回列表 / 审核记录 / 通过 / 驳回
     path("documents/pending-audits/", views.DocAuditPendingView.as_view()),
+    path("documents/audit-rejected/", views.DocAuditRejectedView.as_view()),
+    path("documents/audit-records/", views.DocAuditRecordView.as_view()),
     path("documents/<int:pk>/audit-approve/", views.DocAuditApproveView.as_view()),
     path("documents/<int:pk>/audit-reject/", views.DocAuditRejectView.as_view()),
     path("celery/status/", views.CeleryStatusView.as_view()),

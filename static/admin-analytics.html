@@ -33,8 +33,7 @@
 				<!-- ========== Tab 栏 ========== -->
 				<div class="tabs" id="analyticsTabs">
 					<div class="tab-item active" data-tab="overview" onclick="switchTab('overview')">📊 概览</div>
-					<div class="tab-item" data-tab="system" onclick="switchTab('system')">⚙️ 系统指标</div>
-					<div class="tab-item" data-tab="realtime" onclick="switchTab('realtime')">🚀 实时监控</div>
+					<div class="tab-item" data-tab="system" onclick="switchTab('system')">📅 历史指标</div>
 					<div class="tab-item" data-tab="queue" onclick="switchTab('queue')">📦 队列深度</div>
 					<div class="tab-item" data-tab="org" onclick="switchTab('org')">🏢 部门/团队</div>
 					<div class="tab-item" data-tab="qa" onclick="switchTab('qa')">📝 QA 记录</div>
@@ -47,95 +46,90 @@
 			<div class="analytics-content">
 			<!-- ========== Tab 1: 概览 ========== -->
 			<div class="tab-panel active" data-panel="overview">
-				<div class="panel-header flex items-center justify-between mb-12">
-					<div class="flex gap-4 time-range-group" id="timeRangeButtons">
-						<button class="btn btn-sm btn-ghost" onclick="setTimeRange('today')">今日</button>
-						<button class="btn btn-sm btn-primary" onclick="setTimeRange('week')">本周</button>
-						<button class="btn btn-sm btn-ghost" onclick="setTimeRange('month')">本月</button>
-						<button class="btn btn-sm btn-ghost" onclick="showCustomDateRange()">自定义</button>
-					</div>
-					<button class="btn" onclick="exportReport()">📥 导出报表</button>
-				</div>
 				<div class="panel-body">
-				<div class="kpi-grid">
-					<div class="kpi-card">
-						<div class="kpi-label">总问答数</div>
-						<div class="kpi-value">--</div>
-						<div class="kpi-trend up">▲ 12.4% vs 上周</div>
+				<div class="card overview-card">
+					<!-- 今日实时：合并原"实时监控"Tab,Redis 秒级计数,固定展示今日累计;
+					     横向 flex 容器,卡片窄化排成一行,超出宽度横向滑动 -->
+					<div class="overview-realtime">
+						<div class="overview-realtime-head flex items-center justify-between">
+							<div class="text-lg fw-600">🚀 今日实时</div>
+							<div id="realtimeFreshness"></div>
+						</div>
+						<div id="realtimeStrip" class="realtime-strip"></div>
 					</div>
-					<div class="kpi-card">
-						<div class="kpi-label">满意率</div>
-						<div class="kpi-value">--<span class="text-sm text-sub">%</span></div>
-						<div class="kpi-trend up">▲ 2.1 pt · 达标 ≥ 85%</div>
-					</div>
-					<div class="kpi-card">
-						<div class="kpi-label">平均响应耗时</div>
-						<div class="kpi-value">--<span class="text-sm text-sub">s</span></div>
-						<div class="kpi-trend up">▼ 0.32s 优化</div>
-					</div>
-					<div class="kpi-card">
-						<div class="kpi-label">活跃用户</div>
-						<div class="kpi-value">--</div>
-						<div class="kpi-trend down">▼ 3 · 环比降 2.3%</div>
-					</div>
-				</div>
-
-				<div class="chart-wrap mb-16">
-					<div class="text-lg fw-500 mb-8">📈 满意率与响应耗时趋势（近 7 天）</div>
-					<div class="chart-container" id="trendChart"></div>
-				</div>
-				</div>
-			</div>
-
-			<!-- ========== Tab 2: 系统指标（P50/P95/P99 / 缓存命中率 / 失败率） ========== -->
-			<div class="tab-panel" data-panel="system">
-				<div class="panel-header flex items-center justify-between mb-12">
-					<div class="text-lg fw-600">⚙️ 系统性能指标报表（每日预计算，凌晨 2 点生成）</div>
-					<div class="flex gap-8 items-center">
-						<label class="text-sm text-sub">日期：</label>
-						<input type="date" class="input input-date" id="systemMetricsDate"
-							onchange="loadSystemMetrics()">
-					</div>
-				</div>
-				<div id="systemMetricsBody" class="panel-body"></div>
-			</div>
-
-			<!-- ========== Tab 3: 实时监控 ========== -->
-			<div class="tab-panel" data-panel="realtime">
-				<div class="panel-header flex items-center justify-between mb-12">
-					<div class="text-lg fw-600">🚀 今日实时指标（每 5 分钟从 Redis 同步）</div>
-					<button class="btn btn-sm" onclick="loadRealtime()">🔄 立即刷新</button>
-				</div>
-				<div id="realtimeBody" class="panel-body"></div>
-			</div>
-
-			<!-- ========== Tab 4: 队列深度 ========== -->
-			<div class="tab-panel" data-panel="queue">
-				<div class="panel-body">
-				<div class="card mb-12 card-shrink">
-					<div class="card-title flex justify-between items-center">
-						<span>📡 实时队列状态</span>
-						<div class="flex gap-8 items-center">
-							<label class="text-sm text-sub">历史窗口：</label>
-							<select class="select select-sm" id="queueHours" onchange="loadQueueDepth()">
-								<option value="1">最近 1 小时</option>
-								<option value="6">最近 6 小时</option>
-								<option value="24" selected>最近 24 小时</option>
-								<option value="72">最近 3 天</option>
-								<option value="168">最近 7 天</option>
-							</select>
+					<div class="overview-toolbar flex items-center justify-between">
+						<!-- 趋势图标题并入工具栏左侧，与时间范围/导出同排 -->
+						<div class="text-lg fw-500" id="trendTitle">📈 指标趋势（近 7 天）</div>
+						<div class="flex items-center gap-16">
+							<div class="flex gap-4 time-range-group" id="timeRangeButtons">
+								<button class="btn btn-sm btn-primary" onclick="setTimeRange('7d')">近7天</button>
+								<button class="btn btn-sm btn-ghost" onclick="setTimeRange('30d')">近30天</button>
+								<button class="btn btn-sm btn-ghost" onclick="setTimeRange('90d')">近90天</button>
+								<button class="btn btn-sm btn-ghost" onclick="showCustomDateRange()">自定义</button>
+							</div>
+							<button class="btn" onclick="exportReport()">📥 导出报表</button>
 						</div>
 					</div>
-					<div id="queueSnapshotBody"></div>
-				</div>
-				<div class="card" id="queueHistoryCard">
-					<div class="card-title">📈 队列深度历史趋势</div>
-					<div id="queueDepthHistory"></div>
+					<!-- KPI 卡片数据（总问答数/满意率/平均耗时/活跃用户）已并入下方趋势折线图,不再单独展示 -->
+					<div class="trend-section">
+						<div class="chart-container" id="trendChart"></div>
+					</div>
 				</div>
 				</div>
 			</div>
 
-			<!-- ========== Tab 5: 部门/团队统计 ========== -->
+			<!-- ========== Tab 2: 历史指标（原"系统指标",P50/P95/P99 / 缓存命中率 / 失败率） ========== -->
+			<div class="tab-panel" data-panel="system">
+				<div class="panel-body">
+					<!-- 单卡容器：标题/日期选择与内容合并为一个整体卡片，header 用分隔线区分
+					     （与 overview-card 同款"header + 内部分隔线"方案） -->
+					<div class="card system-card">
+						<div class="system-card-header flex items-center justify-between">
+							<div class="text-lg fw-600">📅 历史性能指标报表（每日预计算，凌晨 2 点生成）</div>
+							<div class="flex gap-8 items-center">
+								<label class="text-sm text-sub">日期：</label>
+								<input type="date" class="input input-date" id="systemMetricsDate"
+									onchange="loadSystemMetrics()">
+							</div>
+						</div>
+						<div id="systemMetricsBody"></div>
+					</div>
+				</div>
+			</div>
+
+			<!-- ========== Tab 3: 队列深度 ========== -->
+			<div class="tab-panel" data-panel="queue">
+				<div class="panel-body">
+				<!-- 实时状态 + 历史趋势合并为一张卡片，内部用分隔线间隔，
+				     避免两张卡片各自圆角/边框拼出断裂感（同 overview-card 方案） -->
+				<div class="card queue-card">
+					<!-- 实时快照区：顶部固定 + 与历史趋势区分隔 -->
+					<div class="queue-snapshot-section">
+						<div class="card-title flex justify-between items-center">
+							<span>📡 实时队列状态</span>
+							<div class="flex gap-8 items-center">
+								<label class="text-sm text-sub">历史窗口：</label>
+								<select class="select select-sm" id="queueHours" onchange="loadQueueDepth()">
+									<option value="1">最近 1 小时</option>
+									<option value="6">最近 6 小时</option>
+									<option value="24" selected>最近 24 小时</option>
+									<option value="72">最近 3 天</option>
+									<option value="168">最近 7 天</option>
+								</select>
+							</div>
+						</div>
+						<div id="queueSnapshotBody"></div>
+					</div>
+					<!-- 历史趋势区：占满卡片剩余高度 -->
+					<div class="queue-history-section">
+						<div class="card-title">📈 队列深度历史趋势</div>
+						<div id="queueDepthHistory"></div>
+					</div>
+				</div>
+				</div>
+			</div>
+
+			<!-- ========== Tab 4: 部门/团队统计 ========== -->
 			<div class="tab-panel" data-panel="org">
 				<div class="panel-header flex items-center justify-between mb-12">
 					<div class="text-lg fw-600">🏢 部门/团队使用统计（每日预计算）</div>
@@ -153,28 +147,83 @@
 				<div id="orgUsageBody" class="panel-body"></div>
 			</div>
 
-			<!-- ========== Tab 6: QA 记录列表 ========== -->
+			<!-- ========== Tab 5: QA 记录列表 ========== -->
 			<div class="tab-panel" data-panel="qa">
-				<div class="panel-header flex items-center justify-between mb-12">
-					<div class="text-lg fw-600">📝 QA 记录明细</div>
-					<div class="flex gap-8 items-center">
-						<label class="text-sm text-sub">开始：</label>
-						<input type="date" class="input input-date" id="qaStartDate">
-						<label class="text-sm text-sub">结束：</label>
-						<input type="date" class="input input-date" id="qaEndDate">
-						<button class="btn btn-sm" onclick="qaPage=1;loadQaRecords()">查询</button>
+				<div class="card flex flex-col overflow-hidden flex-1 min-h-0" style="padding:0">
+					<!-- 工具栏：标题 + 筛选条件同一行从左到右排列 -->
+					<div class="flex items-center gap-8 flex-wrap shrink-0 qa-toolbar">
+						<div class="text-lg fw-600">📝 QA 记录明细</div>
+						<select id="qaAnswerType" class="select" style="width:100px" onchange="onQaFilterChange()">
+							<option value="">全部类型</option>
+							<option value="rag">RAG</option>
+							<option value="reasoning">推理</option>
+							<option value="mixed">混合</option>
+							<option value="agent">Agent</option>
+							<option value="refused">拒答</option>
+							<option value="general">通用</option>
+						</select>
+						<select id="qaCache" class="select" style="width:100px" onchange="onQaFilterChange()">
+							<option value="">全部缓存</option>
+							<option value="1">命中缓存</option>
+							<option value="0">未命中</option>
+						</select>
+						<select id="qaRating" class="select" style="width:130px" onchange="onQaFilterChange()">
+							<option value="">全部评分</option>
+							<option value="1">好评</option>
+							<option value="0">中性/未评</option>
+							<option value="-1">差评</option>
+						</select>
+						<select id="qaLatency" class="select" style="width:100px" onchange="onQaFilterChange()">
+							<option value="">全部延迟</option>
+							<option value="0-1000">&lt; 1s</option>
+							<option value="1000-3000">1~3s</option>
+							<option value="3000-5000">3~5s</option>
+							<option value="5000-">&gt; 5s</option>
+						</select>
+						<!-- label 与日期输入框零间距组合 -->
+						<div class="flex items-center">
+							<label class="text-sm text-sub">开始：</label>
+							<input type="date" class="input input-date" id="qaStartDate" style="width:130px"
+								onchange="onQaFilterChange()">
+						</div>
+						<div class="flex items-center">
+							<label class="text-sm text-sub">结束：</label>
+							<input type="date" class="input input-date" id="qaEndDate" style="width:130px"
+								onchange="onQaFilterChange()">
+						</div>
+						<input id="qaSearchInput" class="input" placeholder="搜索问题" style="width:150px"
+							autocomplete="off" oninput="onQaSearchInput()">
 					</div>
+					<!-- 表格：card-scroll 内滚动 + 表头吸顶 -->
+					<div class="card-scroll">
+						<table class="table table-bordered">
+							<thead>
+								<tr>
+									<th>ID</th>
+									<th>问题</th>
+									<th>回答类型</th>
+									<th>缓存</th>
+									<th>评分</th>
+									<th>总延迟</th>
+									<th>Token 总数</th>
+									<th>预估费用</th>
+									<th>时间</th>
+								</tr>
+							</thead>
+							<tbody id="qaRecordsBody"></tbody>
+						</table>
+					</div>
+					<!-- 分页：复用公共 Pagination 组件（common.js） -->
+					<div class="shrink-0" id="qaPagination"></div>
 				</div>
-				<div id="qaRecordsBody" class="panel-body"></div>
-				<div id="qaPagination" class="pagination panel-footer"></div>
 			</div>
 
-			<!-- ========== Tab 8: 日报详情 ========== -->
+			<!-- ========== Tab 6: 日报详情 ========== -->
 			<div class="tab-panel" data-panel="daily">
 				<div id="dailyBody" class="panel-body"></div>
 			</div>
 
-			<!-- ========== Tab 9: 运营工具（关键词 + 差评反馈） ========== -->
+			<!-- ========== Tab 7: 运营工具（关键词 + 差评反馈） ========== -->
 			<div class="tab-panel" data-panel="tools">
 				<div class="panel-body">
 				<div class="grid-2 grid-cols-5-4">
@@ -280,8 +329,8 @@
 			</div>
 		</div>
 		<div class="modal-footer">
-			<button class="btn-cancel" onclick="closeAllOverlays()">取消</button>
-			<button class="btn-save" onclick="submitNewKeyword()">确定新增</button>
+			<button class="btn" onclick="closeAllOverlays()">取消</button>
+			<button class="btn btn-primary" onclick="submitNewKeyword()">确定新增</button>
 		</div>
 	</div>
 
@@ -300,6 +349,8 @@
 	<script src="/static/js/common.js"></script>
 	<script src="/static/js/api.js"></script>
 	<script src="/static/js/layout.js"></script>
+	<!-- ECharts：仅本页趋势图使用，defer 加载不阻塞首屏；DOMContentLoaded 时已就绪 -->
+	<script defer src="/static/vendor/echarts.min.js"></script>
 	<script src="/static/js/admin-analytics.js"></script>
 
 	<!-- ===== Template Fragments ===== -->

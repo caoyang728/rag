@@ -79,7 +79,6 @@ function setProfileMenu(m) {
 	// 权限页加载异步数据
 	if (m === 'permissions') {
 		loadMyPermissions();
-		loadPermissionApplications();
 	}
 }
 
@@ -439,20 +438,6 @@ const MODULE_LABELS = {
 	kb: '知识库', user: '用户管理', audit: '审计', system: '系统',
 	chat: '对话', org: '组织架构', compliance: '合规',
 };
-// 工单状态标签(对齐 PermissionApprovalTicket.TicketStatus)
-const TICKET_STATUS_LABELS = {
-	PENDING: '待审批', APPROVED: '已通过', REJECTED: '已驳回',
-	CANCELLED: '已撤回', EXECUTED: '已执行',
-};
-const TICKET_STATUS_COLORS = {
-	PENDING: 'tag-warning', APPROVED: 'tag-success', REJECTED: 'tag-danger',
-	CANCELLED: '', EXECUTED: 'tag-info',
-};
-// 变更类型标签(对齐 TicketChangeType)
-const CHANGE_TYPE_LABELS = {
-	GRANT: '授权', REVOKE: '撤销', ROLE_CHANGE: '角色变更',
-	SCOPE_CHANGE: '范围变更', EXPIRE_EXTEND: '延期',
-};
 // scope 类型标签(对齐 ScopeType)
 const SCOPE_TYPE_LABELS = { TEAM: '团队', DEPT: '部门', GLOBAL: '全局', NONE: '全局' };
 
@@ -516,78 +501,4 @@ function _renderRoleTag(r) {
 	if (r.scope_type === 'TEAM' && r.scope_name) scopeTxt = ` @ ${escapeHtml(r.scope_name)}`;
 	else if (r.scope_type === 'DEPT' && r.scope_name) scopeTxt = ` @ ${escapeHtml(r.scope_name)}`;
 	return `<span class="tag ${cls}">${escapeHtml(r.name)}${scopeTxt}</span>`;
-}
-
-async function loadPermissionApplications() {
-	const box = document.getElementById('myApplicationsList');
-	if (!box) return;
-	try {
-		const data = await api.getJson('/api/v1/auth/permissions/applications/');
-		const rows = data.rows || [];
-		box.innerHTML = '';
-		if (rows.length === 0) {
-			box.innerHTML = '<div style="padding:14px;background:var(--hover);border-radius:var(--radius);font-size:13px;color:var(--text-sub);text-align:center">暂无申请记录</div>';
-			return;
-		}
-		const cardTmpl = document.getElementById('tmpl-perm-request');
-		rows.forEach(a => {
-			const clone = cardTmpl.content.cloneNode(true);
-
-			// 角色名 + 变更类型徽章
-			const roleTxt = a.previous_role_name
-				? `${escapeHtml(a.previous_role_name)} → ${escapeHtml(a.role_name || '—')}`
-				: escapeHtml(a.role_name || '—');
-			const changeBadge = `<span class="tag tag-sm" style="background:var(--hover);color:var(--text-sub)">${CHANGE_TYPE_LABELS[a.change_type] || a.change_type}</span>`;
-			clone.querySelector('.perm-app-role').innerHTML = roleTxt + ' ' + changeBadge;
-
-			// 状态标签
-			const statusEl = clone.querySelector('.perm-app-status');
-			statusEl.textContent = TICKET_STATUS_LABELS[a.status] || a.status;
-			const statusCls = TICKET_STATUS_COLORS[a.status] || '';
-			if (statusCls) statusEl.classList.add(statusCls);
-
-			// 元信息:scope + 审批进度 + 审批人 + 时间
-			// 全局角色后端返回 scope_name='全局',与 scope 标签重复,此处去重
-			const scopeLabel = SCOPE_TYPE_LABELS[a.scope_type] || '';
-			const scopeTxt = (a.scope_name && a.scope_name !== scopeLabel)
-				? `${scopeLabel} · ${escapeHtml(a.scope_name)}`
-				: scopeLabel;
-			const stepTxt = a.total_steps > 0 ? ` · 进度 ${a.current_step + 1}/${a.total_steps}` : '';
-			const approverTxt = a.approver_name ? ` · 审批人 ${escapeHtml(a.approver_name)}` : '';
-			clone.querySelector('.perm-app-meta').textContent = `${scopeTxt}${stepTxt}${approverTxt} · ${formatDate(a.created_at)}`;
-
-			clone.querySelector('.perm-app-reason').textContent = '理由:' + (a.reason || '—');
-
-			if (a.reviewer_comment) {
-				const commentEl = clone.querySelector('.perm-app-comment');
-				commentEl.textContent = '审批意见:' + escapeHtml(a.reviewer_comment);
-				commentEl.style.display = '';
-			}
-
-			// 待审批状态可撤回
-			if (a.status === 'PENDING') {
-				const actionsEl = clone.querySelector('.perm-app-actions');
-				actionsEl.innerHTML = '<button class="btn btn-sm" style="color:var(--danger)" onclick="withdrawApplication(' + a.id + ')">撤回申请</button>';
-				actionsEl.style.display = '';
-			}
-
-			box.appendChild(clone);
-		});
-	} catch (e) {
-		console.error('load applications failed:', e);
-		box.innerHTML = '<span class="text-sub text-sm" style="color:var(--danger)">加载失败</span>';
-	}
-}
-
-/* ============ 撤回申请记录 ============ */
-async function withdrawApplication(id) {
-	if (!confirm('确定撤回此申请?')) return;
-	try {
-		await api.postJson(`/api/v1/auth/permissions/applications/${id}/withdraw/`, {});
-		toast('已撤回', 'success');
-		loadPermissionApplications();
-	} catch (e) {
-		toast(e.message || '撤回失败', 'error');
-		console.error('withdraw application failed:', e);
-	}
 }

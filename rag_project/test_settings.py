@@ -27,7 +27,8 @@ from .settings import *  # noqa: F401,F403,E402
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': 'rag_test',
+        # TEST_DB_NAME 用于并行测试隔离（pytest-django 会在其后加 test_ 前缀）
+        'NAME': os.getenv('TEST_DB_NAME', 'rag_test'),
         'USER': os.getenv('PG_DB_USER', 'root'),
         # 密码一律从 .env 读取，代码内不保留默认口令（避免真实密码随代码泄露）；
         # 缺省时留空会让连接校验失败，迫使部署方显式配置
@@ -86,3 +87,29 @@ LOGGING = {
 
 # 敏感词审查：测试时默认关闭（避免依赖词库数据）
 SENSITIVE_FILTER_ENABLED = os.getenv('TEST_SENSITIVE_FILTER_ENABLED', '0') == '1'
+
+# --- 精简中间件（降低每个请求的内存 & IO 开销） ---
+# AuditMiddleware: 每次 POST/PUT/DELETE 都写 AuditLog DB 记录，测试时无意义；
+#   其单元测试（test_middleware.py）直接实例化类测试，不依赖 MIDDLEWARE 列表。
+# SlowRequestMiddleware: 仅记录慢请求日志，测试中无用。
+# WhiteNoiseMiddleware: 测试不涉及静态文件服务。
+# 注意：IpFilterMiddleware 必须保留 —— test_views_middleware.py 的集成测试
+#   依赖真实中间件链路验证白名单/黑名单/过期自动解封行为。
+MIDDLEWARE = [
+    'corsheaders.middleware.CorsMiddleware',
+    'django.middleware.security.SecurityMiddleware',
+    'django.contrib.sessions.middleware.SessionMiddleware',
+    'django.middleware.common.CommonMiddleware',
+    'django.middleware.csrf.CsrfViewMiddleware',
+    'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'django.contrib.messages.middleware.MessageMiddleware',
+    'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'apps.security.middleware.IpFilterMiddleware',   # IP 白/黑名单（集成测试依赖）
+]
+
+# --- 禁用 loguru 文件日志（测试中只保留 stdout WARNING+，减少 IO） ---
+from loguru import logger as _test_logger
+_test_logger.remove()
+_test_logger.add(sys.stdout, level='WARNING',
+                 format='{time:HH:mm:ss} | {level: <7} | {message}',
+                 colorize=False)

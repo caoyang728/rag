@@ -16,13 +16,10 @@
 	<div class="layout">
 		<div id="sidebar-container"></div>
 		<div class="main main-flex">
-			<div class="page-header flex items-center justify-between">
+			<div class="page-header">
 				<div class="flex items-baseline gap-10">
 					<div class="page-title">审计日志与安全</div>
 					<div class="page-subtitle">全链路操作留痕，IP 黑白名单管控，登录异常追踪</div>
-				</div>
-				<div class="page-actions">
-					<button class="btn btn-primary" onclick="exportAuditLogs()">📥 导出 Excel</button>
 				</div>
 			</div>
 			<div class="card p-0 flex flex-col overflow-hidden" style="flex:1;min-height:0">
@@ -40,8 +37,7 @@
 
 	<!-- ===== Templates ===== -->
 	<template id="tmpl-audit-tab">
-		<div class="flex gap-8 mb-16 shrink-0 flex-wrap items-center"
-			style="padding:12px;background:var(--primary-light);border-radius:var(--radius);border:1px solid var(--border)">
+		<div class="audit-filter-bar flex gap-8 shrink-0 flex-wrap items-center">
 			<input class="input audit-filter-username" style="width:180px" placeholder="🔍 用户名">
 			<select class="select audit-filter-action" style="width:150px">
 				<option value="">全部操作类型</option>
@@ -63,6 +59,8 @@
 			<input class="input audit-filter-end" type="date" style="width:150px">
 			<button class="btn btn-primary btn-sm audit-btn-query" style="width:72px">查询</button>
 			<button class="btn btn-sm audit-btn-reset" style="width:72px">重置</button>
+			<span style="flex:1"></span>
+			<button class="btn btn-primary btn-sm" onclick="exportAuditLogs()">📥 导出 Excel</button>
 		</div>
 		<div class="card-scroll">
 			<table class="table" style="border:1px solid var(--border);border-radius:var(--radius)">
@@ -84,9 +82,12 @@
 	</template>
 
 	<template id="tmpl-whitelist-tab">
-		<div class="flex justify-between mb-16" style="flex-shrink:0">
-			<div class="text-sub text-sm whitelist-info">白名单外 IP 将直接返回 403</div>
-			<button class="btn btn-primary btn-sm" onclick="showAddWhitelist()">＋ 新增白名单</button>
+		<div class="flex justify-between items-center shrink-0">
+			<div class="tab-info-bar whitelist-info">
+				<span class="tab-info-icon">✅</span>
+				<span>命中白名单的 IP 直接放行（即使同 IP 也在黑名单中）；白名单外的 IP 会继续检查黑名单；都不命中则默认放行，共 <span class="tab-info-count">0</span> 条规则</span>
+			</div>
+			<button class="btn btn-primary btn-sm" onclick="showAddWhitelist()" style="margin-right:8px">＋ 新增白名单</button>
 		</div>
 		<div class="card-scroll">
 			<table class="table" style="border:1px solid var(--border);border-radius:var(--radius)">
@@ -106,9 +107,12 @@
 	</template>
 
 	<template id="tmpl-blacklist-tab">
-		<div class="flex justify-between mb-16 shrink-0">
-			<div class="text-sub text-sm">黑名单 IP 将被永久拒绝访问，登录失败 5 次自动封禁 15 分钟</div>
-			<button class="btn btn-primary btn-sm" onclick="showAddBlacklist()">＋ 手动封禁</button>
+		<div class="flex justify-between items-center shrink-0">
+			<div class="tab-info-bar">
+				<span class="tab-info-icon">🚫</span>
+				<span>黑名单 IP 将被<strong style="color:var(--danger)">永久拒绝</strong>访问（但若同 IP 也在白名单中则优先放行），登录失败 5 次自动封禁 15 分钟</span>
+			</div>
+			<button class="btn btn-primary btn-sm" onclick="showAddBlacklist()" style="margin-right:8px">＋ 手动封禁</button>
 		</div>
 		<div class="card-scroll">
 			<table class="table" style="border:1px solid var(--border);border-radius:var(--radius)">
@@ -135,9 +139,12 @@
 		- 新增/编辑统一走 #modal-sensitive 弹窗（word 和 category 仅新增时可编辑）
 	-->
 	<template id="tmpl-sensitive-tab">
-		<div class="flex justify-between mb-16 shrink-0">
-			<div class="text-sub text-sm">LLM 输出实时审查词库，命中 block 立即中断流式，mask 脱敏后下发，warn 仅记录告警</div>
-			<button class="btn btn-primary btn-sm" onclick="showAddSensitive()">＋ 新增敏感词</button>
+		<div class="flex justify-between items-center shrink-0">
+			<div class="tab-info-bar">
+				<span class="tab-info-icon">🛡️</span>
+				<span>LLM 输出实时审查词库 — 命中 <span class="badge badge-danger" style="font-size:11px">block</span> 立即中断流式，<span class="badge badge-warn" style="font-size:11px">mask</span> 脱敏后下发，<span class="badge badge-info" style="font-size:11px">warn</span> 仅记录告警</span>
+			</div>
+			<button class="btn btn-primary btn-sm" onclick="showAddSensitive()" style="margin-right:8px">＋ 新增敏感词</button>
 		</div>
 		<div class="card-scroll">
 			<table class="table" style="border:1px solid var(--border);border-radius:var(--radius)">
@@ -159,16 +166,22 @@
 	</template>
 
 	<template id="tmpl-login-tab">
-		<div class="flex justify-between mb-16 shrink-0">
-			<div class="text-sub text-sm">近 24 小时登录尝试记录，异常尝试将自动加入黑名单</div>
-			<div class="flex gap-8">
-				<select class="select login-filter-result" style="width:140px">
-					<option value="">全部结果</option>
-					<option value="success">成功</option>
-					<option value="wrong_password">失败</option>
-				</select>
-				<button class="btn btn-sm" onclick="loadLoginAttempts()">刷新</button>
-			</div>
+		<div class="tab-info-bar shrink-0">
+			<span class="tab-info-icon">🔐</span>
+			<span>近 24 小时登录尝试记录，异常尝试将<strong style="color:var(--danger)">自动加入黑名单</strong></span>
+		</div>
+		<div class="audit-filter-bar flex gap-8 shrink-0 flex-wrap items-center">
+			<input class="input login-filter-username" style="width:160px" placeholder="🔍 用户名">
+			<input class="input login-filter-ip" style="width:180px" placeholder="🌐 IP 地址">
+			<select class="select login-filter-result" style="width:130px">
+				<option value="">全部结果</option>
+				<option value="success">成功</option>
+				<option value="wrong_password">失败</option>
+			</select>
+			<button class="btn btn-primary btn-sm" onclick="filterLoginAttempts()">查询</button>
+			<button class="btn btn-sm" onclick="resetLoginFilter()">重置</button>
+			<span style="flex:1"></span>
+			<button class="btn btn-primary btn-sm" onclick="exportLoginAttempts()">📥 导出 Excel</button>
 		</div>
 		<div class="card-scroll">
 			<table class="table" style="border:1px solid var(--border);border-radius:var(--radius)">
@@ -227,44 +240,62 @@
 		新增：word + category + action + is_regex 可编辑
 		编辑：仅 action + is_enabled 可编辑（后端 PUT 限制），word/category 显示但禁用
 	-->
-	<div class="modal" id="modal-sensitive">
+	<div class="modal modal-sm" id="modal-sensitive" style="width:520px">
 		<div class="modal-header">
 			<div class="modal-title" id="modal-sensitive-title">新增敏感词</div>
 			<button class="modal-close" onclick="closeAllOverlays()">✕</button>
 		</div>
 		<div class="modal-body">
+			<div class="sensitive-action-guide">
+				<div class="sensitive-action-item sensitive-action-block">
+					<span class="sensitive-action-badge">block</span>
+					<span>命中立即中断流式输出</span>
+				</div>
+				<div class="sensitive-action-item sensitive-action-mask">
+					<span class="sensitive-action-badge">mask</span>
+					<span>替换为 *** 后下发</span>
+				</div>
+				<div class="sensitive-action-item sensitive-action-warn">
+					<span class="sensitive-action-badge">warn</span>
+					<span>仅记录告警日志</span>
+				</div>
+			</div>
 			<form id="form-sensitive" autocomplete="off">
 				<div class="form-item">
-					<label class="form-label">敏感词 <span style="color:var(--danger)">*</span></label>
+					<label class="form-label">敏感词 <span class="required">*</span></label>
 					<input class="input sensitive-input-word" type="text" maxlength="128" placeholder="输入敏感词（最长 128 字符）">
 				</div>
-				<div class="form-item">
-					<label class="form-label">分类</label>
-					<select class="select sensitive-input-category" style="width:100%">
-						<option value="other">其它</option>
-						<option value="phone">手机号</option>
-						<option value="id_card">身份证</option>
-						<option value="email">邮箱</option>
-						<option value="bank_card">银行卡</option>
-						<option value="secret">内部机密</option>
-					</select>
+				<div class="form-row">
+					<div class="form-item" style="flex:1">
+						<label class="form-label">分类</label>
+						<select class="select sensitive-input-category" style="width:100%">
+							<option value="other">其它</option>
+							<option value="phone">手机号</option>
+							<option value="id_card">身份证</option>
+							<option value="email">邮箱</option>
+							<option value="bank_card">银行卡</option>
+							<option value="secret">内部机密</option>
+						</select>
+					</div>
+					<div class="form-item" style="flex:1">
+						<label class="form-label">处理动作</label>
+						<select class="select sensitive-input-action" style="width:100%">
+							<option value="mask">mask · 脱敏替换</option>
+							<option value="block">block · 拦截中断</option>
+							<option value="warn">warn · 仅告警</option>
+						</select>
+					</div>
 				</div>
-				<div class="form-item">
-					<label class="form-label">处理动作</label>
-					<select class="select sensitive-input-action" style="width:100%">
-						<option value="mask">mask · 脱敏替换</option>
-						<option value="block">block · 拦截中断</option>
-						<option value="warn">warn · 仅告警</option>
-					</select>
-				</div>
-				<div class="form-item">
-					<label class="form-label">高级选项</label>
-					<div class="flex gap-8 items-center" style="flex-wrap:wrap">
-						<label class="flex items-center gap-4" style="font-size:13px;cursor:pointer">
-							<input class="sensitive-input-regex" type="checkbox"> 作为正则表达式处理
+				<div class="form-item" style="margin-bottom:0">
+					<label class="form-label">选项</label>
+					<div class="flex gap-16 items-center">
+						<label class="flex items-center gap-4 sensitive-toggle-label">
+							<input class="sensitive-input-regex" type="checkbox">
+							<span>正则表达式</span>
 						</label>
-						<label class="flex items-center gap-4" style="font-size:13px;cursor:pointer">
-							<input class="sensitive-input-enabled" type="checkbox" checked> 启用
+						<label class="flex items-center gap-4 sensitive-toggle-label">
+							<input class="sensitive-input-enabled" type="checkbox" checked>
+							<span>启用</span>
 						</label>
 					</div>
 				</div>

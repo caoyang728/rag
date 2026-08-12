@@ -77,8 +77,17 @@ const api = {
 	},
 
 	_formatError(data) {
-		// 如果有 details（字段校验错误），转为友好提示
-		if (data && data.details && typeof data.details === 'object') {
+		if (!data) return '请求失败';
+		// DRF 异常处理器将 PermissionDenied / Http404 等包装为
+		// {code, message, details: {detail: "原始错误信息"}}，
+		// 其中 details 仅含单个 detail 键，属于业务错误而非字段校验错误，
+		// 直接返回该错误信息即可（避免拼出 "detail: xxx" 的歧义格式）。
+		if (data.details && typeof data.details === 'object'
+			&& 'detail' in data.details && Object.keys(data.details).length === 1) {
+			return data.details.detail || data.message || '请求失败';
+		}
+		// 字段校验错误（details 含多个字段名 → 错误列表）
+		if (data.details && typeof data.details === 'object') {
 			const msgs = [];
 			for (const [field, errors] of Object.entries(data.details)) {
 				const errList = Array.isArray(errors) ? errors : [errors];
@@ -94,7 +103,7 @@ const api = {
 			}
 			return msgs.join('；');
 		}
-		return data ? (data.detail || data.message || '请求失败') : '请求失败';
+		return data.detail || data.message || '请求失败';
 	},
 
 	async handleError(res) {

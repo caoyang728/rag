@@ -21,6 +21,12 @@ function safeLink(url) {
 	return '';
 }
 
+// 行内代码：将反引号 `code` 转为 <code> 标签；
+// 入参文本应已过 HTML 转义，反引号不在转义范围内，因此正则仍可正常匹配
+function handleInlineCode(text) {
+	return text.replace(/`([^`\n]+)`/g, (m, code) => `<code class="md-inline-code">${code}</code>`);
+}
+
 // 行内格式化：链接 / 图片 / 粗体 / 斜体（入参已是 HTML 转义后的文本）
 function mdInline(text) {
 	return text
@@ -54,8 +60,7 @@ function renderMarkdown(src) {
 		codeBlocks.push(`<pre class="md-code"><code>${escapeHtml(code.replace(/\n$/, ''))}</code></pre>`);
 		return `\u0000MDCODE${idx}\u0000`;
 	});
-	// 行内代码（单行，防跨行误匹配）
-	s = s.replace(/`([^`\n]+)`/g, (m, code) => `<code class="md-inline-code">${escapeHtml(code)}</code>`);
+	// 行内代码：不再在此提前替换，改为各输出点在 escapeHtml 之后调用 handleInlineCode，避免双重转义
 
 	const lines = s.split('\n');
 	let html = '';
@@ -66,7 +71,8 @@ function renderMarkdown(src) {
 
 	const flushPara = () => {
 		if (paraBuf.length) {
-			html += `<p>${mdInline(paraBuf.join(' '))}</p>\n`;
+			// paraBuf 中每行已过 escapeHtml，再处理行内代码 → 其他行内格式
+			html += `<p>${mdInline(handleInlineCode(paraBuf.join(' ')))}</p>\n`;
 			paraBuf = [];
 		}
 	};
@@ -83,11 +89,12 @@ function renderMarkdown(src) {
 		if (tableRows.length < 2) { tableRows = []; return; }
 		const head = tableRows[0];
 		let t = '<table><thead><tr>';
-		head.forEach(c => { t += `<th>${mdInline(c)}</th>`; });
+		// 表格单元格：先转义再处理行内代码和格式
+		head.forEach(c => { t += `<th>${mdInline(handleInlineCode(escapeHtml(c)))}</th>`; });
 		t += '</tr></thead><tbody>';
 		for (let i = 1; i < tableRows.length; i++) {
 			t += '<tr>';
-			tableRows[i].forEach(c => { t += `<td>${mdInline(c)}</td>`; });
+			tableRows[i].forEach(c => { t += `<td>${mdInline(handleInlineCode(escapeHtml(c)))}</td>`; });
 			t += '</tr>';
 		}
 		html += t + '</tbody></table>\n';
@@ -121,19 +128,19 @@ function renderMarkdown(src) {
 
 		const indent = (line.match(/^\s*/) || [''])[0].length;
 
-		// 引用块
+		// 引用块：先转义再处理行内代码和格式
 		if (/^\s*>\s?/.test(line)) {
 			flushPara(); closeLists(); flushTable();
-			quoteBuf.push(mdInline(escapeHtml(line.replace(/^\s*>\s?/, ''))));
+			quoteBuf.push(mdInline(handleInlineCode(escapeHtml(line.replace(/^\s*>\s?/, '')))));
 			continue;
 		}
 		if (quoteBuf.length) flushQuote();
 
-		// 标题
+		// 标题：先转义再处理行内代码和格式
 		const h = line.match(/^(#{1,6})\s+(.*)$/);
 		if (h) {
 			flushAll();
-			html += `<h${h[1].length}>${mdInline(escapeHtml(h[2]))}</h${h[1].length}>\n`;
+			html += `<h${h[1].length}>${mdInline(handleInlineCode(escapeHtml(h[2])))}</h${h[1].length}>\n`;
 			continue;
 		}
 
@@ -160,7 +167,8 @@ function renderMarkdown(src) {
 				listStack.push({ indent: itemIndent, tag });
 				html += `<${tag}>\n`;
 			}
-			html += `<li>${mdInline(content)}</li>\n`;
+			// 列表项：content 已过 escapeHtml，再处理行内代码和格式
+			html += `<li>${mdInline(handleInlineCode(content))}</li>\n`;
 			continue;
 		}
 		if (listStack.length && !/^\s*$/.test(line)) {
@@ -225,7 +233,9 @@ async function loadWikiList(page) {
 			});
 		}
 	} catch (e) {
-		box.innerHTML = `<div class="empty" style="padding:60px 0"><div class="empty-icon" style="font-size:48px">😥</div><div>加载失败：${escapeHtml(e.message)}</div></div>`;
+		// 403 等业务错误直接展示后端消息，无需"加载失败"前缀
+		const msg = e.status === 403 ? e.message : `加载失败：${e.message}`;
+		box.innerHTML = `<div class="empty" style="padding:60px 0"><div class="empty-icon" style="font-size:48px">😥</div><div>${escapeHtml(msg)}</div></div>`;
 	}
 }
 
@@ -266,7 +276,9 @@ async function openWikiDetail(id) {
 		renderWikiDetail(d);
 		window.scrollTo(0, 0);
 	} catch (e) {
-		body.innerHTML = `<div class="empty" style="padding:60px 0"><div class="empty-icon" style="font-size:48px">😥</div><div>加载失败：${escapeHtml(e.message)}</div></div>`;
+		// 403 等业务错误直接展示后端消息，无需"加载失败"前缀
+		const msg = e.status === 403 ? e.message : `加载失败：${e.message}`;
+		body.innerHTML = `<div class="empty" style="padding:60px 0"><div class="empty-icon" style="font-size:48px">😥</div><div>${escapeHtml(msg)}</div></div>`;
 	}
 }
 
@@ -289,10 +301,11 @@ function renderWikiDetail(d) {
 	$('#wikiDetailActions').innerHTML = actions.join('');
 
 	const tags = (d.tags || []).map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('');
+	// 章节内容同样走 Markdown 渲染，复用 wiki-md 样式
 	const sections = (d.sections || []).map(s => `
     <div class="wiki-section">
       <div class="wiki-section-title">${escapeHtml(s.title)}</div>
-      <div class="wiki-section-content">${escapeHtml(s.content)}</div>
+      <div class="wiki-md wiki-section-content">${renderMarkdown(s.content)}</div>
     </div>`).join('');
 	const outgoing = (d.outgoing_links || []).map(l => `
     <a class="wiki-link-item" onclick="openWikiDetail(${l.target_page_id})">→ ${escapeHtml(l.link_text || l.target_title)}</a>`).join('') || '<div class="text-sub">暂无</div>';

@@ -274,7 +274,7 @@ def _get_or_create_entity(name: str, etype: str, desc: str, doc_id: int,
             source_doc_ids=[doc_id],
         )
         is_new = True
-    entity_map[name] = entity
+    entity_map[name] = (entity, is_new)
     return entity, is_new
 
 

@@ -763,22 +763,13 @@
 }
 
 /* ===== 按钮 ===== */
+/* 继承 common.css 的 display/height/min-width/gap 等布局属性，
+   仅覆盖本页面需要差异化的视觉样式 */
 .btn {
 	padding: 7px 14px;
-	border: 1px solid var(--border);
-	border-radius: 6px;
 	background: var(--white);
 	color: var(--text);
-	font-size: 13px;
 	cursor: pointer;
-	transition: all .15s;
-	white-space: nowrap;
-	font-weight: 500;
-}
-
-.btn:hover {
-	background: var(--hover);
-	border-color: var(--text-sub);
 }
 
 .btn-primary {

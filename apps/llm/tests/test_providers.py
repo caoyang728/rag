@@ -227,6 +227,102 @@ class TestDeepSeekProvider:
         assert frames[0]['finish_reason'] == 'error'
         assert 'down' in frames[0]['delta']
 
+    def test_init_creates_openai_client(self):
+        """__init__ 调用 super().__init__ 并用 OpenAI 客户端实例化"""
+        with patch('apps.llm.providers.deepseek.OpenAI') as mock_openai:
+            p = DeepSeekProvider(
+                api_key='sk-test',
+                base_url='https://api.deepseek.com/v1',
+                model='deepseek-chat',
+                timeout=60,
+            )
+        assert p.api_key == 'sk-test'
+        assert p.base_url == 'https://api.deepseek.com/v1'
+        assert p.model == 'deepseek-chat'
+        assert p.timeout == 60
+        mock_openai.assert_called_once_with(
+            api_key='sk-test',
+            base_url='https://api.deepseek.com/v1',
+            timeout=60,
+        )
+        assert p.client is mock_openai.return_value
+
+    def test_chat_passes_tools_and_tool_choice(self):
+        """chat 传 tools/tool_choice 时应透传到 create 请求"""
+        p = _make_deepseek()
+        p.client.chat.completions.create.return_value = _make_resp()
+        tools = [{'type': 'function', 'function': {'name': 'search'}}]
+
+        p.chat([{'role': 'user', 'content': 'q'}], tools=tools, tool_choice='auto')
+
+        kwargs = p.client.chat.completions.create.call_args.kwargs
+        assert kwargs['tools'] == tools
+        assert kwargs['tool_choice'] == 'auto'
+        assert kwargs['stream'] is False
+
+    def test_stream_passes_tools_and_tool_choice(self):
+        """stream 传 tools/tool_choice 时应透传"""
+        p = _make_deepseek()
+        p.client.chat.completions.create.return_value = []
+        tools = [{'type': 'function', 'function': {'name': 'search'}}]
+
+        list(p.stream([{'role': 'user', 'content': 'q'}], tools=tools, tool_choice='auto'))
+
+        kwargs = p.client.chat.completions.create.call_args.kwargs
+        assert kwargs['tools'] == tools
+        assert kwargs['tool_choice'] == 'auto'
+        assert kwargs['stream'] is True
+
+    def test_stream_skips_chunk_without_choices(self):
+        """流式帧 choices 为空时应跳过，不产出增量帧"""
+        p = _make_deepseek()
+        empty = MagicMock()
+        empty.choices = []
+        text = MagicMock()
+        text.choices = [MagicMock()]
+        text.choices[0].finish_reason = None
+        text.choices[0].delta.content = '你'
+        resp = MagicMock()
+        resp.__enter__.return_value = [empty, text]
+        p.client.chat.completions.create.return_value = resp
+
+        frames = list(p.stream([{'role': 'user', 'content': 'q'}]))
+        assert frames[0]['delta'] == '你'
+        assert frames[-1]['content'] == '你'
+        assert frames[-1]['finish'] is True
+
+    def test_stream_captures_finish_reason_from_chunk(self):
+        """流式过程中 chunk 携带 finish_reason 时结束帧沿用该值"""
+        p = _make_deepseek()
+        chunk = MagicMock()
+        chunk.choices = [MagicMock()]
+        chunk.choices[0].finish_reason = 'tool_calls'
+        chunk.choices[0].delta.content = None
+        resp = MagicMock()
+        resp.__enter__.return_value = [chunk]
+        p.client.chat.completions.create.return_value = resp
+
+        frames = list(p.stream([{'role': 'user', 'content': 'q'}]))
+        assert frames[-1]['finish_reason'] == 'tool_calls'
+
+    def test_stream_client_disconnect_raises_generator_exit(self):
+        """客户端断开（close 生成器）时记录日志并重新抛出 GeneratorExit"""
+        p = _make_deepseek()
+        chunk = MagicMock()
+        chunk.choices = [MagicMock()]
+        chunk.choices[0].finish_reason = None
+        chunk.choices[0].delta.content = '你'
+        resp = MagicMock()
+        resp.__enter__.return_value = [chunk]
+        p.client.chat.completions.create.return_value = resp
+
+        with patch('apps.llm.providers.deepseek.logger') as mock_logger:
+            gen = p.stream([{'role': 'user', 'content': 'q'}])
+            next(gen)  # 拿到首帧后中断（模拟客户端断开）
+            gen.close()
+
+        mock_logger.info.assert_called_once()
+
 
 # ============================================================================
 # _OpenAICompatibleProvider（stubs）

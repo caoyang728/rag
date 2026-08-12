@@ -135,6 +135,32 @@ class TestCheckMigrations:
             assert common.check_migrations() is False
 
 
+@pytest.mark.integration
+class TestCheckTableExistsErrors:
+    """common.check_table_exists：异常降级路径"""
+
+    @pytest.mark.django_db
+    def test_when_db_error_then_false(self):
+        """查询异常时返回 False 而非抛错，供编排命令安全降级"""
+        with patch('django.db.connection') as mock_conn:
+            mock_conn.cursor.side_effect = RuntimeError('db down')
+            assert common.check_table_exists('user_role_list') is False
+
+
+@pytest.mark.unit
+class TestSetupDjango:
+    """common.setup_django：Django 环境初始化"""
+
+    def test_when_success_then_true(self):
+        with patch('django.setup') as mock_setup:
+            assert common.setup_django() is True
+            mock_setup.assert_called_once()
+
+    def test_when_failure_then_false(self):
+        with patch('django.setup', side_effect=RuntimeError('settings broken')):
+            assert common.setup_django() is False
+
+
 @pytest.mark.unit
 class TestDbConnection:
     """common.test_db_connection：psycopg 直连测试（mock psycopg 隔离）"""
@@ -163,6 +189,17 @@ class TestDbConnection:
     def test_when_connect_raises_psycopg_error_then_false(self, monkeypatch):
         self._patch_env(monkeypatch)
         with patch('psycopg.connect', side_effect=RuntimeError('connect refused')):
+            assert common.test_db_connection() is False
+
+    def test_when_connect_raises_psycopg_db_error_then_false(self, monkeypatch):
+        """psycopg.Error 子类异常走 DB 错误分支，返回 False"""
+        import psycopg
+
+        class _FakeConnError(psycopg.Error):
+            pass
+
+        self._patch_env(monkeypatch)
+        with patch('psycopg.connect', side_effect=_FakeConnError('connection refused')):
             assert common.test_db_connection() is False
 
     def test_when_uses_database_url_then_parses(self, monkeypatch):

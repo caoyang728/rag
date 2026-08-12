@@ -143,6 +143,116 @@ class TestApiEmbed:
 
 
 # ============================================================================
+# ApiEmbeddingClient —— 配置解析缺失分支
+# ============================================================================
+class TestApiConfigResolution:
+    """_resolve_embedding_params / _resolve_rerank_params 配置缺失分支"""
+
+    @pytest.mark.unit
+    def test_embedding_model_not_in_llm_table(self):
+        """LLMModel 表未配置 embedding model 时 base_url 留空（记 warning）"""
+        with patch('apps.llm.embedding.EmbeddingConfig') as mock_cfg, \
+             patch('apps.system.config_loader.get_config_value') as mock_get_cfg, \
+             patch('apps.system.config_loader.get_llm_model_config') as mock_llm_model:
+            mock_cfg.api_key.return_value = 'sk-test'
+            mock_get_cfg.side_effect = lambda key, default=None, value_type=None: {
+                'EMBEDDING_MODEL': 'bge-m3',
+                'RERANK_MODEL': 'bge-reranker',
+            }.get(key, default)
+            # LLMModel 表未命中（返回 None）→ base_url 留空
+            mock_llm_model.return_value = None
+            client = ApiEmbeddingClient()
+
+        assert client.base_url == ''
+        assert client.embed_model == 'bge-m3'
+
+    @pytest.mark.unit
+    def test_rerank_reuses_embedding_base_url(self):
+        """LLMModel 表未配置 rerank 模型时复用 embedding 的 base_url"""
+        with patch('apps.llm.embedding.EmbeddingConfig') as mock_cfg, \
+             patch('apps.system.config_loader.get_config_value') as mock_get_cfg, \
+             patch('apps.system.config_loader.get_llm_model_config') as mock_llm_model:
+            mock_cfg.api_key.return_value = 'sk-test'
+            mock_cfg.dim.return_value = 1024
+            mock_get_cfg.side_effect = lambda key, default=None, value_type=None: {
+                'EMBEDDING_MODEL': 'bge-m3',
+                'RERANK_MODEL': 'bge-reranker',
+            }.get(key, default)
+            # 第一次调用（embedding）返回 base_url；第二次调用（rerank）未配置
+            mock_llm_model.side_effect = [
+                {'base_url': 'https://api.x.com/v1'},
+                None,
+            ]
+            client = ApiEmbeddingClient()
+
+        assert client.embed_model == 'bge-m3'
+        assert client.rerank_model == 'bge-reranker'
+        assert client.base_url == 'https://api.x.com/v1'
+
+
+# ============================================================================
+# ApiEmbeddingClient —— 云 API embed 异常分支
+# ============================================================================
+class TestApiEmbedErrorBranches:
+    """ApiEmbeddingClient.embed 的 HTTP 错误 / 未知异常 / 重试耗尽分支"""
+
+    @pytest.mark.unit
+    @patch('apps.llm.embedding.requests.post')
+    def test_api_embed_http_error_with_detail(self, mock_post):
+        """HTTP 400：从响应 error.message 提取错误详情并返回 []（非 429 不重试）"""
+        client = _make_api_client()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 400
+        mock_resp.text = 'plain text'
+        mock_resp.json.return_value = {'error': {'message': 'invalid request'}}
+        mock_resp.raise_for_status.side_effect = requests.exceptions.HTTPError('400 Client Error')
+        mock_post.return_value = mock_resp
+
+        assert client.embed(['x']) == []
+        assert mock_post.call_count == 1
+
+    @pytest.mark.unit
+    @patch('apps.llm.embedding.requests.post')
+    def test_api_embed_http_error_json_parse_fail(self, mock_post):
+        """HTTP 错误且响应体解析失败时回退到 resp.text[:200]"""
+        client = _make_api_client()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 400
+        mock_resp.text = 'raw body'
+        mock_resp.json.side_effect = ValueError('no json')
+        mock_resp.raise_for_status.side_effect = requests.exceptions.HTTPError('400 Client Error')
+        mock_post.return_value = mock_resp
+
+        assert client.embed(['x']) == []
+
+    @pytest.mark.unit
+    @patch('apps.llm.embedding.time.sleep')
+    @patch('apps.llm.embedding.requests.post')
+    def test_api_embed_429_retries_exhausted(self, mock_post, mock_sleep):
+        """持续 429 时耗尽全部重试机会并返回 []"""
+        client = _make_api_client()
+        resp_429 = MagicMock()
+        resp_429.status_code = 429
+        # 最后一次 429 走 HTTPError 分支（raise_for_status 抛错）并 continue
+        resp_429.raise_for_status.side_effect = requests.exceptions.HTTPError('429 Too Many Requests')
+        mock_post.return_value = resp_429
+
+        assert client.embed(['x']) == []
+        # 1 次初始请求 + 3 次指数退避重试，最后一次 429 走 HTTPError 分支的 continue
+        assert mock_post.call_count == 4
+        assert mock_sleep.call_count == 3
+
+    @pytest.mark.unit
+    @patch('apps.llm.embedding.requests.post')
+    def test_api_embed_unknown_exception(self, mock_post):
+        """非 requests 异常（如响应解析异常）记 error 并返回 []"""
+        client = _make_api_client()
+        mock_post.side_effect = ValueError('unexpected')
+
+        assert client.embed(['x']) == []
+
+
+# ============================================================================
 # ApiEmbeddingClient —— 云 API rerank
 # ============================================================================
 class TestApiRerank:
@@ -193,6 +303,15 @@ class TestApiRerank:
             {'index': 1, 'score': 0.9},
             {'index': 0, 'score': 0.7},
         ]
+
+    @pytest.mark.unit
+    @patch('apps.llm.embedding.requests.post')
+    def test_api_rerank_error(self, mock_post):
+        """rerank 请求异常时返回 []（不向上抛出，调用方按空结果降级）"""
+        client = _make_api_client()
+        mock_post.side_effect = requests.exceptions.ConnectionError('down')
+
+        assert client.rerank('q', ['d1']) == []
 
 
 # ============================================================================
@@ -261,6 +380,26 @@ class TestDockerEmbed:
 
         assert client.embed(['a', 'b']) == [[0.1], [0.2]]
 
+    @pytest.mark.unit
+    @patch('apps.llm.embedding.requests.post')
+    def test_docker_embed_unknown_format(self, mock_post):
+        """响应既非 list 也不含 embeddings/data 时记 warning 并返回 []"""
+        client = _make_docker_client()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {'unexpected': True}
+        mock_post.return_value = mock_resp
+
+        assert client.embed(['x']) == []
+
+    @pytest.mark.unit
+    @patch('apps.llm.embedding.requests.post')
+    def test_docker_embed_request_exception(self, mock_post):
+        """Docker 请求异常时返回 []（不向上抛出）"""
+        client = _make_docker_client()
+        mock_post.side_effect = requests.exceptions.ConnectionError('docker down')
+
+        assert client.embed(['x']) == []
+
 
 # ============================================================================
 # EmbeddingClient —— 统一客户端优先级与兜底
@@ -317,6 +456,45 @@ class TestEmbeddingClientPriority:
 
         with pytest.raises(EmbeddingException):
             client.embed(['x'])
+
+    @pytest.mark.unit
+    def test_embedding_client_api_first_docker_fallback(self):
+        """provider=api：云 API 失败（返回空）时降级到 Docker 兜底并返回其结果"""
+        client = _make_embedding_client(provider='api')
+        client._api_client = MagicMock()
+        client._api_client.embed.return_value = []  # 主路失败
+        client._docker_client = MagicMock()
+        client._docker_client.embed.return_value = [[0.5]]  # 兜底成功
+
+        assert client.embed(['x']) == [[0.5]]
+        client._api_client.embed.assert_called_once()
+        client._docker_client.embed.assert_called_once()
+
+
+# ============================================================================
+# EmbeddingClient.rerank —— 统一客户端转发
+# ============================================================================
+class TestEmbeddingClientRerank:
+    """EmbeddingClient.rerank 空入参拦截与转发测试"""
+
+    @pytest.mark.unit
+    def test_rerank_empty_docs(self):
+        """docs 为空时直接返回 []，不调用 api_client"""
+        client = _make_embedding_client(provider='api')
+        client._api_client = MagicMock()
+
+        assert client.rerank('q', []) == []
+        client._api_client.rerank.assert_not_called()
+
+    @pytest.mark.unit
+    def test_rerank_delegates_to_api_client(self):
+        """非空 docs 时透传给 api_client.rerank 并透传返回结果"""
+        client = _make_embedding_client(provider='api')
+        client._api_client = MagicMock()
+        client._api_client.rerank.return_value = [{'index': 0, 'score': 0.9}]
+
+        assert client.rerank('q', ['d1'], top_k=1) == [{'index': 0, 'score': 0.9}]
+        client._api_client.rerank.assert_called_once_with('q', ['d1'], 1)
 
 
 # ============================================================================

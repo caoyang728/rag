@@ -156,9 +156,9 @@
 							</select>
 							<select class="select" id="filterVisible" style="width:130px" onchange="loadUploadHistory(1)">
 								<option value="">全部可见范围</option>
-								<option value="team">仅团队</option>
+								<option value="public">公开</option>
 								<option value="dept">部门</option>
-								<option value="public">全公司</option>
+								<option value="team">团队</option>
 							</select>
 							<select class="select" id="filterStatus" style="width:150px" onchange="loadUploadHistory(1)">
 								<option value="">全部状态</option>
@@ -167,8 +167,14 @@
 								<option value="chunking">切片中</option>
 								<option value="embedding">向量构建中</option>
 								<option value="embedding_failed">向量构建失败</option>
-								<option value="done">已完成</option>
 								<option value="failed">解析失败</option>
+								<option value="graph_pending">等待图谱构建</option>
+								<option value="graph_extracting">图谱构建中</option>
+								<option value="graph_failed">图谱构建失败</option>
+								<option value="wiki_pending">等待Wiki生成</option>
+								<option value="wiki_extracting">Wiki生成中</option>
+								<option value="wiki_failed">Wiki生成失败</option>
+								<option value="done">已完成</option>
 							</select>
 							<label class="checkbox"><input type="checkbox" id="showDeleted" onchange="toggleShowDeleted(this)">显示已删除</label>
 						</div>

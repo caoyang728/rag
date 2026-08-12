@@ -12,7 +12,10 @@ apps.security.sensitive_filter 单元测试 —— AC 自动机敏感词审查�
 - mock _get_redis 返回 None，绕过多进程版本号同步
 - 重置单例避免测试间状态污染（_instance / _redis_client 为类级属性）
 """
+import time as time_mod
+
 import pytest
+from django.test import override_settings
 from unittest.mock import patch, MagicMock
 
 from apps.security.sensitive_filter import (
@@ -158,6 +161,249 @@ class TestAhocorasick:
         ac.add_word("乙")
         ac.add_word("丙")
         assert ac.word_count == 3
+
+    @pytest.mark.unit
+    def test_add_word_empty_ignored(self):
+        """添加空串词应被忽略，不改变词库"""
+        ac = Ahocorasick()
+        ac.add_word('')
+        assert ac.word_count == 0
+        ac.add_word('正常词')
+        assert ac.word_count == 1
+
+
+# ============================================================================
+# HitResult —— 表示层
+# ============================================================================
+class TestHitResult:
+    """HitResult repr 输出测试"""
+
+    @pytest.mark.unit
+    def test_repr(self):
+        """repr 展示 word/action/category 三元信息"""
+        h = HitResult('敏感词', 'political', 'block', start=2, end=5)
+        r = repr(h)
+        assert '敏感词' in r
+        assert 'action=block' in r
+        assert 'cat=political' in r
+
+
+# ============================================================================
+# SensitiveFilter 配置同步
+# ============================================================================
+class TestSensitiveFilterConfig:
+    """_sync_config_from_settings 配置同步测试"""
+
+    @pytest.mark.unit
+    @override_settings(SENSITIVE_FILTER_CHUNK_SIZE='not-an-int')
+    def test_sync_config_invalid_value_keeps_defaults(self):
+        """settings 配置值类型非法时静默使用默认值（不抛异常）"""
+        SensitiveFilter._sync_config_from_settings()
+        assert SensitiveFilter.CHUNK_SIZE == 32
+
+
+# ============================================================================
+# Redis 版本号同步与熔断降级
+# ============================================================================
+class TestSensitiveFilterRedis:
+    """_get_redis / _read_redis_version / _incr_redis_version 熔断与降级测试"""
+
+    @pytest.mark.unit
+    def test_get_redis_circuit_breaker_active(self):
+        """熔断窗口内直接返回 None，不再尝试建连"""
+        SensitiveFilter._redis_client = None
+        SensitiveFilter._redis_unavailable_until = time_mod.time() + 60
+        with patch('redis.Redis') as mock_redis_cls:
+            assert SensitiveFilter._get_redis() is None
+        mock_redis_cls.assert_not_called()
+
+    @pytest.mark.unit
+    def test_get_redis_without_redis_url_uses_env_params(self):
+        """REDIS_URL 未配置时用 env 参数建连"""
+        SensitiveFilter._redis_client = None
+        with override_settings(REDIS_URL=''), \
+             patch.dict('os.environ', {
+                 'REDIS_DB_HOST': 'my-redis',
+                 'REDIS_DB_PORT': '6380',
+                 'REDIS_DB_PASSWORD': 'secret',
+                 'REDIS_DB_CAPTCHA': '3',
+             }), \
+             patch('redis.Redis') as mock_redis_cls:
+            mock_redis_cls.return_value.ping.return_value = True
+            client = SensitiveFilter._get_redis()
+
+        assert client is mock_redis_cls.return_value
+        mock_redis_cls.assert_called_once_with(
+            host='my-redis', port=6380, password='secret',
+            decode_responses=True, db=3)
+        mock_redis_cls.return_value.ping.assert_called_once()
+
+    @pytest.mark.unit
+    def test_get_redis_connection_failure_sets_breaker(self):
+        """建连/握手失败时设置 5s 熔断并返回 None（不报错）
+
+        默认 settings.REDIS_URL 存在，走 Redis.from_url 建连路径。
+        """
+        SensitiveFilter._redis_client = None
+        with patch('redis.Redis') as mock_redis_cls:
+            mock_redis_cls.from_url.return_value.ping.side_effect = ConnectionError('redis down')
+            assert SensitiveFilter._get_redis() is None
+        assert SensitiveFilter._redis_client is None
+        assert SensitiveFilter._redis_unavailable_until > time_mod.time()
+
+    @pytest.mark.unit
+    def test_read_redis_version_exception_clears_client(self):
+        """读取版本号连接异常时清空缓存客户端并返回 0"""
+        mock_client = MagicMock()
+        mock_client.get.side_effect = ConnectionError('redis down')
+        SensitiveFilter._redis_client = mock_client
+
+        assert SensitiveFilter._read_redis_version() == 0
+        assert SensitiveFilter._redis_client is None
+        assert SensitiveFilter._redis_unavailable_until > time_mod.time()
+
+    @pytest.mark.unit
+    def test_incr_redis_version_without_redis_returns_zero(self):
+        """Redis 不可用时自增返回 0（不报错）"""
+        with patch.object(SensitiveFilter, '_get_redis', return_value=None):
+            assert SensitiveFilter._incr_redis_version() == 0
+
+    @pytest.mark.unit
+    def test_incr_redis_version_exception_clears_client(self):
+        """自增异常时清空缓存客户端并返回 0"""
+        mock_client = MagicMock()
+        mock_client.incr.side_effect = ConnectionError('redis down')
+        SensitiveFilter._redis_client = mock_client
+
+        assert SensitiveFilter._incr_redis_version() == 0
+        assert SensitiveFilter._redis_client is None
+
+
+# ============================================================================
+# 单例刷新：TTL / Redis 版本号分歧 / force_reload
+# ============================================================================
+class TestSensitiveFilterSingletonReload:
+    """单例 TTL 刷新与 force_reload 重载行为测试"""
+
+    @pytest.mark.unit
+    def test_get_instance_redis_version_read_failure(self):
+        """首次初始化时读 Redis 版本号异常不阻断实例创建"""
+        mock_words = [_make_sw('违规', 'other', 'block', False)]
+        with patch('apps.security.models.SensitiveWord.objects') as mock_manager, \
+             patch.object(SensitiveFilter, '_read_redis_version',
+                          side_effect=RuntimeError('redis down')):
+            mock_manager.filter.return_value.iterator.return_value = mock_words
+            sf = SensitiveFilter.get_instance()
+
+        assert sf._version == 1
+        assert sf._last_redis_version == 0
+
+    @pytest.mark.unit
+    def test_get_instance_reload_on_redis_version_diverged(self):
+        """Redis 版本号分歧时立即重载词库（绕过 TTL 守卫）"""
+        mock_words = [_make_sw('违规', 'other', 'block', False)]
+        with patch('apps.security.models.SensitiveWord.objects') as mock_manager, \
+             patch.object(SensitiveFilter, '_get_redis', return_value=None), \
+             patch.object(SensitiveFilter, '_read_redis_version', side_effect=[0, 5]):
+            mock_manager.filter.return_value.iterator.return_value = mock_words
+            sf = SensitiveFilter.get_instance()
+            assert sf._version == 1
+            # 第二次调用：Redis 版本号 5 与本地 0 分歧 → 强制重载
+            sf2 = SensitiveFilter.get_instance()
+
+        assert sf2 is sf
+        assert sf._version == 2
+        assert sf._last_redis_version == 5
+
+    @pytest.mark.unit
+    def test_force_reload_with_instance_updates_version(self):
+        """force_reload 重载本进程词库并同步 Redis 版本号"""
+        mock_words = [_make_sw('违规', 'other', 'block', False)]
+        # force_reload 内部会再次 _load_from_db，故 DB mock 需全程保持生效
+        with patch('apps.security.models.SensitiveWord.objects') as mock_manager, \
+             patch.object(SensitiveFilter, '_get_redis', return_value=None), \
+             patch.object(SensitiveFilter, '_incr_redis_version', return_value=7):
+            mock_manager.filter.return_value.iterator.return_value = mock_words
+            sf = SensitiveFilter.get_instance()
+            SensitiveFilter.force_reload()
+
+        assert sf._version == 2
+        assert sf._last_redis_version == 7
+
+    @pytest.mark.unit
+    def test_force_reload_incr_failure_keeps_local_version(self):
+        """force_reload 时 Redis 自增失败不影响本进程重载"""
+        mock_words = [_make_sw('违规', 'other', 'block', False)]
+        with patch('apps.security.models.SensitiveWord.objects') as mock_manager, \
+             patch.object(SensitiveFilter, '_get_redis', return_value=None), \
+             patch.object(SensitiveFilter, '_incr_redis_version',
+                          side_effect=RuntimeError('redis down')):
+            mock_manager.filter.return_value.iterator.return_value = mock_words
+            sf = SensitiveFilter.get_instance()
+            SensitiveFilter.force_reload()  # 不应抛出
+
+        assert sf._version == 2
+        assert sf._last_redis_version == 0
+
+    @pytest.mark.unit
+    def test_force_reload_before_instance_incr_only(self):
+        """单例未创建时 force_reload 仅自增版本号"""
+        SensitiveFilter._instance = None
+        with patch.object(SensitiveFilter, '_incr_redis_version') as mock_incr:
+            SensitiveFilter.force_reload()
+        mock_incr.assert_called_once()
+
+    @pytest.mark.unit
+    def test_maybe_reload_within_ttl_noop(self):
+        """TTL 窗口内 _maybe_reload 不触发重载"""
+        sf = _build_filter([])
+        sf._maybe_reload()
+        assert sf._version == 1
+
+    @pytest.mark.unit
+    def test_maybe_reload_ttl_expired_double_check(self):
+        """TTL 过期后第一次检查通过、锁内二次检查发现未过期 → 不重载"""
+        sf = _build_filter([])
+        t0 = time_mod.time()
+        with patch('apps.security.sensitive_filter.time.time',
+                   side_effect=[t0 + 400, t0 + 100]):
+            sf._maybe_reload()
+        assert sf._version == 1
+
+    @pytest.mark.unit
+    def test_force_reload_local_same_version_noop(self):
+        """版本号未分歧时 _force_reload_local 直接返回，不重载"""
+        sf = _build_filter([])
+        assert sf._last_redis_version == 0
+        sf._force_reload_local(0)
+        assert sf._version == 1
+
+
+# ============================================================================
+# _load_from_db 异常数据容错
+# ============================================================================
+class TestSensitiveFilterLoad:
+    """_load_from_db 加载异常数据容错测试"""
+
+    @pytest.mark.unit
+    @patch.object(SensitiveFilter, '_is_enabled', return_value=True)
+    def test_load_skips_invalid_regex(self, _mock_enabled):
+        """非法正则词跳过并记 warning，不影响其余词加载"""
+        mock_words = [
+            _make_sw('[', 'other', 'mask', True),  # 非法正则
+            _make_sw('正常词', 'other', 'block', False),
+        ]
+        with patch('apps.security.models.SensitiveWord.objects') as mock_manager, \
+             patch.object(SensitiveFilter, '_get_redis', return_value=None):
+            mock_manager.filter.return_value.iterator.return_value = mock_words
+            sf = SensitiveFilter.get_instance()
+
+        assert sf._version == 1
+        assert sf._ac.word_count == 1
+        # 正常词仍可命中
+        hits = sf.check('含正常词')
+        assert len(hits) == 1
+        assert hits[0].action == 'block'
 
 
 # ============================================================================
@@ -331,6 +577,65 @@ class TestSensitiveFilterFeed:
         outputs, hit = sf.feed(state, '正常内容')
         assert hit is None
         assert outputs == ['正常内容']
+
+    @pytest.mark.unit
+    @patch.object(SensitiveFilter, '_is_enabled', return_value=True)
+    def test_feed_empty_delta(self, _mock_enabled):
+        """空 delta 直接返回 ([], None)，不修改 buffer"""
+        sf = _build_filter([('违规', 'other', 'block', False)])
+        state = sf.new_state()
+        outputs, hit = sf.feed(state, '')
+        assert outputs == []
+        assert hit is None
+        assert state['buffer'] == ''
+
+    @pytest.mark.unit
+    @patch.object(SensitiveFilter, '_is_enabled', return_value=True)
+    def test_feed_mask_result_below_window_kept_in_buffer(self, _mock_enabled):
+        """脱敏后文本不足窗口长度时留在 buffer 暂不下发"""
+        sf = _build_filter([('秘密', 'secret', 'mask', False)])
+        state = sf.new_state()
+        # 分隔符触发审查；脱敏后 '***。' 长度 4 <= WINDOW_SIZE 16
+        outputs, hit = sf.feed(state, '秘密。')
+        assert hit is None
+        assert outputs == []
+        assert state['buffer'] == '***。'
+
+    @pytest.mark.unit
+    @patch.object(SensitiveFilter, '_is_enabled', return_value=False)
+    def test_flush_disabled_drains_buffer(self, _mock_enabled):
+        """审查关闭时 flush 下发 buffer 残余内容"""
+        sf = _build_filter([])
+        state = sf.new_state()
+        state['buffer'] = '残余内容'
+        outputs, hit = sf.flush(state)
+        assert hit is None
+        assert outputs == ['残余内容']
+        assert state['buffer'] == ''
+
+    @pytest.mark.unit
+    @patch.object(SensitiveFilter, '_is_enabled', return_value=True)
+    def test_check_regex_hit(self, _mock_enabled):
+        """正则词（手机号）通过 re 模块命中并带 start/end"""
+        sf = _build_filter([(r'1[3-9]\d{9}', 'phone', 'mask', True)])
+        hits = sf.check('联系电话13812345678')
+        assert len(hits) == 1
+        assert hits[0].word == r'1[3-9]\d{9}'
+        assert hits[0].category == 'phone'
+        assert hits[0].action == 'mask'
+        assert hits[0].start == 4  # '联系电话' 4 个字符
+        assert hits[0].end == 15
+
+    @pytest.mark.unit
+    @patch.object(SensitiveFilter, '_is_enabled', return_value=True)
+    def test_feed_warn_records_hit(self, _mock_enabled):
+        """warn 命中不影响下发，仅记录到 warn_hits 供审计"""
+        sf = _build_filter([('提醒', 'other', 'warn', False)])
+        state = sf.new_state()
+        outputs, hit = sf.feed(state, '这里有提醒。')
+        assert hit is None
+        assert len(state['warn_hits']) == 1
+        assert state['warn_hits'][0].word == '提醒'
 
 
 # ============================================================================

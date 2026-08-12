@@ -415,6 +415,74 @@ function escapeHtml(s) {
 	if (s == null) return '';
 	return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
+/**
+ * 校验 IP 模式是否合法（单 IP / CIDR / 通配符 / 范围）
+ * @param {string} pattern - IP 模式
+ * @returns {{ valid: boolean, error?: string }}
+ *
+ * 支持的格式示例：
+ * - 单 IP：10.0.0.1
+ * - CIDR：10.0.0.0/24
+ * - 通配符：10.0.*.* 或 10.*.*.*
+ * - IP 范围：10.0.0.1-10.0.0.100
+ */
+function validateIpPattern(pattern) {
+	if (!pattern || !pattern.trim()) return { valid: false, error: 'IP 不能为空' };
+	pattern = pattern.trim();
+
+	// CIDR 格式
+	if (pattern.includes('/')) {
+		const parts = pattern.split('/');
+		if (parts.length !== 2) return { valid: false, error: 'CIDR 格式错误，示例：10.0.0.0/24' };
+		const ip = parts[0];
+		const prefix = parseInt(parts[1], 10);
+		if (!_isValidIpv4(ip)) return { valid: false, error: 'CIDR 中的 IP 地址不合法' };
+		if (isNaN(prefix) || prefix < 0 || prefix > 32) return { valid: false, error: 'CIDR 前缀长度需为 0~32' };
+		return { valid: true };
+	}
+
+	// 通配符格式
+	if (pattern.includes('*')) {
+		const parts = pattern.split('.');
+		if (parts.length !== 4) return { valid: false, error: '通配符格式需为四段，示例：10.0.*.*' };
+		for (const part of parts) {
+			if (part === '*') continue;
+			const num = parseInt(part, 10);
+			if (isNaN(num) || num < 0 || num > 255) return { valid: false, error: `通配符中的 "${part}" 不是合法的 0~255 数字` };
+		}
+		return { valid: true };
+	}
+
+	// IP 范围格式
+	if (pattern.includes('-')) {
+		const parts = pattern.split('-');
+		if (parts.length !== 2) return { valid: false, error: '范围格式错误，示例：10.0.0.1-10.0.0.100' };
+		const start = parts[0].trim();
+		const end = parts[1].trim();
+		if (!_isValidIpv4(start)) return { valid: false, error: '范围起始 IP 不合法' };
+		if (!_isValidIpv4(end)) return { valid: false, error: '范围结束 IP 不合法' };
+		// 校验起止顺序
+		const startNum = ipv4ToNumber(start);
+		const endNum = ipv4ToNumber(end);
+		if (startNum > endNum) return { valid: false, error: '范围起始 IP 不能大于结束 IP' };
+		return { valid: true };
+	}
+
+	// 单 IP 格式
+	if (!_isValidIpv4(pattern)) return { valid: false, error: 'IP 地址不合法，示例：10.0.0.1' };
+	return { valid: true };
+}
+function _isValidIpv4(ip) {
+	const parts = ip.split('.');
+	if (parts.length !== 4) return false;
+	return parts.every(p => {
+		const n = parseInt(p, 10);
+		return !isNaN(n) && n >= 0 && n <= 255 && String(n) === p;
+	});
+}
+function ipv4ToNumber(ip) {
+	return ip.split('.').reduce((acc, octet) => (acc << 8) + parseInt(octet, 10), 0) >>> 0;
+}
 function _errMsg(err, fallback) {
 	try {
 		if (typeof err === 'string') return err;

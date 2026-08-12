@@ -16,7 +16,7 @@ apps.analytics.low_score_analyzer 单元测试 —— 低分对话规则归因�
 """
 import pytest
 from types import SimpleNamespace
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, ANY as unittest_mock_ANY
 
 from apps.analytics import low_score_analyzer
 from apps.users.models import User
@@ -125,6 +125,17 @@ class TestGetRetrievalSignal:
         assert sig['hit_count'] == 2
         assert sig['max_rerank'] == 0.0
         # 有命中切片但无有效 rerank 分 → 仍视为有上下文
+        assert sig['has_context'] is True
+
+    @pytest.mark.unit
+    def test_all_rerank_values_invalid(self):
+        """全部 rerank 值非法 → 无有效 rerank 分可统计，走空分兜底分支"""
+        hits = [{'chunk_id': 1, 'rerank': 'abc'}, {'chunk_id': 2, 'rerank': [1, 2]}]
+        sig = low_score_analyzer._get_retrieval_signal(_qa_record(retrieval_scores=hits))
+        assert sig['hit_count'] == 2
+        assert sig['max_rerank'] == 0.0
+        assert sig['avg_rerank'] == 0.0
+        # 有命中切片 → 仍视为有上下文（max/avg 为 0）
         assert sig['has_context'] is True
 
 
@@ -369,6 +380,79 @@ class TestBuildLLMPrompt:
 
 
 # ============================================================================
+# _llm_generate_suggestions —— LLM 个性化建议生成（get_llm 全部 mock）
+# ============================================================================
+class TestLLMGenerateSuggestions:
+    """LLM 建议生成三态：成功 / 响应不可用降级模板 / 调用异常降级模板"""
+
+    @pytest.fixture
+    def qa(self):
+        return _qa_record(retrieval_scores=[{'chunk_id': 1, 'rerank': 0.8}])
+
+    def _llm_resp(self, content, total_tokens=10, cost=0.01, latency_ms=5):
+        return {'content': content, 'total_tokens': total_tokens,
+                'cost': cost, 'latency_ms': latency_ms}
+
+    @pytest.mark.unit
+    def test_success_returns_parsed_suggestions(self, qa):
+        """LLM 返回可用 JSON → 诊断 + LLM 建议 + token/cost/latency"""
+        fake_llm = MagicMock()
+        fake_llm.chat.return_value = self._llm_resp(
+            '{"diagnosis": "召回不足", "short_term_actions": ["调大TopK"], '
+            '"long_term_actions": ["补文档"]}')
+        with patch('apps.llm.factory.get_llm', return_value=fake_llm) as mock_get, \
+             patch('apps.analytics.production_eval._build_context_list', return_value=[]):
+            diagnosis, suggestions, tokens, cost, latency = \
+                low_score_analyzer._llm_generate_suggestions(
+                    qa, [{'dimension': 'clarity', 'score': 0.3, 'reason': '模糊'}],
+                    'generation_format', 'detail',
+                    _sig(hit_count=1, max_rerank=0.0, has_context=True), 'test-llm')
+        assert diagnosis == '召回不足'
+        assert suggestions == [
+            {'type': 'short_term', 'action': '调大TopK'},
+            {'type': 'long_term', 'action': '补文档'},
+        ]
+        assert tokens == 10
+        assert cost == 0.01
+        assert latency == 5
+        mock_get.assert_called_once_with(model='test-llm')
+        fake_llm.chat.assert_called_once_with(
+            unittest_mock_ANY, temperature=0, max_tokens=800)
+
+    @pytest.mark.unit
+    def test_unusable_response_falls_back_to_template(self, qa):
+        """LLM 响应解析后无可用建议 → 降级为模板建议"""
+        fake_llm = MagicMock()
+        fake_llm.chat.return_value = self._llm_resp(
+            '{"diagnosis": "x", "short_term_actions": [], "long_term_actions": []}')
+        with patch('apps.llm.factory.get_llm', return_value=fake_llm), \
+             patch('apps.analytics.production_eval._build_context_list', return_value=[]):
+            diagnosis, suggestions, tokens, cost, latency = \
+                low_score_analyzer._llm_generate_suggestions(
+                    qa, [{'dimension': 'clarity', 'score': 0.3, 'reason': '模糊'}],
+                    'generation_format', 'detail', _sig(), 'test-llm')
+        assert diagnosis == ''
+        assert suggestions, '降级后应有模板建议'
+        assert all(s['type'] in ('short_term', 'long_term') for s in suggestions)
+        assert tokens == 0
+        assert cost == 0.0
+
+    @pytest.mark.unit
+    def test_llm_exception_falls_back_to_template(self, qa):
+        """get_llm/chat 抛异常 → 降级模板建议，不阻断归因流程"""
+        with patch('apps.llm.factory.get_llm',
+                   side_effect=RuntimeError('llm down')):
+            diagnosis, suggestions, tokens, cost, latency = \
+                low_score_analyzer._llm_generate_suggestions(
+                    qa, [{'dimension': 'clarity', 'score': 0.3, 'reason': '模糊'}],
+                    'generation_format', 'detail', _sig(), 'test-llm')
+        assert diagnosis == ''
+        assert suggestions
+        assert tokens == 0
+        assert cost == 0.0
+
+
+# ============================================================================
 # DB 测试：analyze_low_score_qa 主入口
 # ============================================================================
 @pytest.mark.django_db
@@ -446,3 +530,18 @@ class TestAnalyzeLowScoreQA:
             model='test-llm')
         assert result['avg_score'] == 0.6
         assert [d['dimension'] for d in result['low_dimensions']] == ['clarity']
+
+    def test_scores_from_db_when_not_provided(self):
+        """scores=None 时从 DB 查询 MultiDimensionScore（避免调用方重复查询）"""
+        from apps.analytics.models import MultiDimensionScore
+        MultiDimensionScore.objects.create(
+            qa_record=self.qa, dimension='clarity', score=0.3, reason='模糊')
+        MultiDimensionScore.objects.create(
+            qa_record=self.qa, dimension='professionalism', score=0.9, reason='ok')
+        with patch('apps.analytics.low_score_analyzer._llm_generate_suggestions') as mock_llm:
+            result = low_score_analyzer.analyze_low_score_qa(self.qa.id)
+        assert result['category'] == 'generation_format'
+        assert result['method'] == 'rule'
+        assert [d['dimension'] for d in result['low_dimensions']] == ['clarity']
+        assert result['avg_score'] == 0.6
+        mock_llm.assert_not_called()

@@ -17,6 +17,7 @@ import json
 
 import pytest
 from unittest.mock import patch, MagicMock
+from types import SimpleNamespace
 
 from apps.system import config_loader
 
@@ -145,6 +146,18 @@ class TestGetConfigValue:
             result = config_loader.get_config_value('EMPTY_KEY', default='def')
             assert result == 'def'
 
+    @pytest.mark.unit
+    def test_get_config_value_redis_write_failure(self):
+        """DB 命中后回填 Redis 失败：仅告警不阻断，仍返回转换后的值"""
+        with patch.object(config_loader, 'cache') as mock_cache, \
+             patch.object(config_loader, '_read_config_from_db') as mock_db:
+            mock_cache.get.return_value = None
+            mock_db.return_value = ('42', 'int')
+            mock_cache.set.side_effect = RuntimeError('redis write down')
+            # 写缓存失败不应影响返回值
+            result = config_loader.get_config_value('LLM_TIMEOUT', default=60, value_type='int')
+            assert result == 42
+
 
 # ============================================================================
 # get_llm_model_config —— LLMModel 配置查询（带缓存）
@@ -188,6 +201,31 @@ class TestGetLLMModelConfig:
             assert result is None
             # 未找到不应回填缓存，避免缓存 None 污染
             mock_cache.set.assert_not_called()
+
+    @pytest.mark.unit
+    def test_get_llm_model_config_redis_read_error(self):
+        """读 LLM 缓存异常时降级到 DB，命中后正常返回"""
+        with patch.object(config_loader, 'cache') as mock_cache, \
+             patch.object(config_loader, '_read_llm_model_from_db') as mock_db:
+            mock_cache.get.side_effect = RuntimeError('redis down')
+            db_data = {'id': 1, 'model_name': 'deepseek-chat', 'base_url': 'http://x'}
+            mock_db.return_value = db_data
+            result = config_loader.get_llm_model_config('deepseek-chat')
+            assert result == db_data
+            # 异常后仍应回填缓存
+            mock_cache.set.assert_called_once()
+
+    @pytest.mark.unit
+    def test_get_llm_model_config_redis_write_error(self):
+        """回填 LLM 缓存失败：仅告警，DB 数据照常返回"""
+        with patch.object(config_loader, 'cache') as mock_cache, \
+             patch.object(config_loader, '_read_llm_model_from_db') as mock_db:
+            mock_cache.get.return_value = None
+            db_data = {'id': 1, 'model_name': 'deepseek-chat', 'base_url': 'http://x'}
+            mock_db.return_value = db_data
+            mock_cache.set.side_effect = RuntimeError('redis write down')
+            result = config_loader.get_llm_model_config('deepseek-chat')
+            assert result == db_data
 
 
 # ============================================================================
@@ -253,6 +291,26 @@ class TestGetLLMConfigBySystemKey:
             assert result['timeout'] == 90
             assert result['api_key'] == 'sk-yyy'
 
+    @pytest.mark.unit
+    def test_get_llm_config_timeout_fallback_when_row_timeout_missing(self):
+        """LLMModel 命中但 timeout 为空时，回退 SystemConfig.LLM_TIMEOUT"""
+        with patch.object(config_loader, 'get_config_value') as mock_get_cfg, \
+             patch.object(config_loader, 'get_llm_model_config') as mock_get_llm, \
+             patch.object(config_loader, '_read_api_key_from_env') as mock_api_key:
+            mock_get_cfg.side_effect = ['deepseek-chat', 45]
+            # LLMModel 行存在但 timeout 为 None（未配置）
+            mock_get_llm.return_value = {
+                'base_url': 'https://api.deepseek.com',
+                'timeout': None,
+                'provider': 'deepseek',
+            }
+            mock_api_key.return_value = ''
+            result = config_loader.get_llm_config_by_system_key('LLM_BASE_MODEL')
+            assert result['source'] == 'db'
+            assert result['base_url'] == 'https://api.deepseek.com'
+            # timeout 回退到 LLM_TIMEOUT 配置值
+            assert result['timeout'] == 45
+
 
 # ============================================================================
 # invalidate_config_cache / invalidate_llm_model_cache —— 缓存失效（延迟双删）
@@ -310,6 +368,15 @@ class TestInvalidateCache:
             config_loader.invalidate_config_cache(None)
             mock_cache.clear.assert_called_once()
 
+    @pytest.mark.unit
+    def test_invalidate_cache_scan_and_clear_both_fail(self):
+        """扫描失败且整体清空也失败时仅记录错误，不向上抛异常"""
+        with patch.object(config_loader, 'cache') as mock_cache:
+            mock_cache.keys.side_effect = RuntimeError('scan not supported')
+            mock_cache.clear.side_effect = RuntimeError('flush failed')
+            # 不应抛异常（缓存最终由 TTL 兜底收敛）
+            config_loader.invalidate_config_cache(None)
+
 
 # ============================================================================
 # _delayed_double_delete —— 立即删 + 启动延迟删线程
@@ -346,6 +413,25 @@ class TestDelayedDoubleDelete:
             config_loader._delayed_double_delete(['sys:cfg:a'])
             mock_thread.assert_called_once()
 
+    @pytest.mark.unit
+    def test_delayed_double_delete_delayed_delete_error_swallowed(self):
+        """延迟删线程内 delete_many 异常被吞掉，仅记录告警不冒泡"""
+        with patch.object(config_loader, 'cache') as mock_cache, \
+             patch.object(config_loader.threading, 'Thread') as mock_thread, \
+             patch.object(config_loader.time, 'sleep') as mock_sleep:
+            captured = {}
+
+            def _fake_thread(target=None, **kwargs):
+                captured['target'] = target
+                return SimpleNamespace(start=lambda: None)
+
+            mock_thread.side_effect = _fake_thread
+            config_loader._delayed_double_delete(['sys:cfg:a'])
+            assert captured['target'] is not None
+            # 立即删成功后，延迟删失败：不应抛异常
+            mock_cache.delete_many.side_effect = RuntimeError('redis down again')
+            captured['target']()
+
 
 # ============================================================================
 # _read_api_key_from_env —— 从 settings 读取 API Key（LLM / Embedding）
@@ -378,3 +464,118 @@ class TestReadApiKeyFromEnv:
         settings.LLM_API_KEY = ''
         result = config_loader._read_api_key_from_env('LLM_BASE_MODEL')
         assert result == ''
+
+
+# ============================================================================
+# _read_config_from_db —— 从 SystemConfig 表读取 value + value_type
+# ============================================================================
+class TestReadConfigFromDb:
+    """_read_config_from_db DB 读取与异常降级测试"""
+
+    @pytest.mark.integration
+    @pytest.mark.django_db
+    def test_read_config_from_db_hit(self):
+        """DB 命中时返回 (value, value_type)"""
+        from apps.system.models import SystemConfig
+        SystemConfig.objects.create(
+            key='LLM_TIMEOUT', value='42', value_type='int',
+            label='LLM 超时', category='llm')
+        assert config_loader._read_config_from_db('LLM_TIMEOUT') == ('42', 'int')
+
+    @pytest.mark.integration
+    @pytest.mark.django_db
+    def test_read_config_from_db_miss(self):
+        """DB 未命中返回 (None, 'string')"""
+        assert config_loader._read_config_from_db('NO_SUCH_KEY') == (None, 'string')
+
+    @pytest.mark.unit
+    def test_read_config_from_db_exception_returns_default(self):
+        """DB 查询异常时降级返回 (None, 'string')，不向上抛"""
+        with patch('apps.system.models.SystemConfig') as mock_cls:
+            mock_cls.objects.filter.side_effect = RuntimeError('db down')
+            assert config_loader._read_config_from_db('LLM_TIMEOUT') == (None, 'string')
+
+    @pytest.mark.unit
+    def test_read_config_from_db_apps_not_loaded(self):
+        """启动期 apps 未加载时降级为 debug 日志并返回 (None, 'string')"""
+        with patch('apps.system.models.SystemConfig') as mock_cls:
+            mock_cls.objects.filter.side_effect = RuntimeError("Apps aren't loaded yet")
+            assert config_loader._read_config_from_db('LLM_TIMEOUT') == (None, 'string')
+
+
+# ============================================================================
+# _read_llm_model_from_db —— 从 LLMModel 表读取启用模型配置
+# ============================================================================
+class TestReadLLMModelFromDb:
+    """_read_llm_model_from_db DB 读取与异常降级测试"""
+
+    @pytest.mark.integration
+    @pytest.mark.django_db
+    def test_read_llm_model_from_db_hit(self):
+        """DB 命中返回完整配置 dict"""
+        from apps.system.models import LLMModel
+        row = LLMModel.objects.create(
+            name='DeepSeek 对话', provider='deepseek', model_type='llm',
+            base_url='https://api.deepseek.com', model_name='deepseek-chat',
+            timeout=120, is_active=True)
+        data = config_loader._read_llm_model_from_db('deepseek-chat', 'llm')
+        assert data is not None
+        assert data['id'] == row.id
+        assert data['base_url'] == 'https://api.deepseek.com'
+        assert data['timeout'] == 120
+        assert data['is_active'] is True
+
+    @pytest.mark.integration
+    @pytest.mark.django_db
+    def test_read_llm_model_from_db_respects_model_type(self):
+        """model_type 限定避免同名跨类型误匹配；不传 type 时不加过滤"""
+        from apps.system.models import LLMModel
+        LLMModel.objects.create(
+            name='M-LLM', provider='p', model_type='llm',
+            model_name='same-name', is_active=True)
+        LLMModel.objects.create(
+            name='M-EMB', provider='p', model_type='embedding',
+            model_name='same-name', is_active=True)
+        # 按类型过滤：只命中 embedding
+        data = config_loader._read_llm_model_from_db('same-name', 'embedding')
+        assert data is not None and data['model_type'] == 'embedding'
+        # 不传类型：不加类型过滤，命中任意一条 active（model_name 一致）
+        data = config_loader._read_llm_model_from_db('same-name', None)
+        assert data is not None and data['model_name'] == 'same-name'
+
+    @pytest.mark.integration
+    @pytest.mark.django_db
+    def test_read_llm_model_from_db_inactive_skipped(self):
+        """仅返回 is_active=True 的模型"""
+        from apps.system.models import LLMModel
+        LLMModel.objects.create(
+            name='M', provider='p', model_type='llm',
+            model_name='dead-model', is_active=False)
+        assert config_loader._read_llm_model_from_db('dead-model', None) is None
+
+    @pytest.mark.unit
+    def test_read_llm_model_from_db_exception_returns_none(self):
+        """DB 查询异常时返回 None，不向上抛"""
+        with patch('apps.system.models.LLMModel') as mock_cls:
+            mock_cls.objects.filter.side_effect = RuntimeError('db down')
+            assert config_loader._read_llm_model_from_db('x', None) is None
+
+    @pytest.mark.unit
+    def test_read_llm_model_from_db_apps_not_loaded(self):
+        """启动期 apps 未加载时返回 None（debug 日志）"""
+        with patch('apps.system.models.LLMModel') as mock_cls:
+            mock_cls.objects.filter.side_effect = RuntimeError("Apps aren't loaded yet")
+            assert config_loader._read_llm_model_from_db('x', None) is None
+
+
+# ============================================================================
+# _cast_value —— 未知 value_type 兜底
+# ============================================================================
+class TestCastValueUnknownType:
+    """_cast_value 对未识别 value_type 的兜底行为"""
+
+    @pytest.mark.unit
+    def test_cast_value_unknown_type_returns_raw(self):
+        """未知 value_type 原样返回，不抛异常"""
+        assert config_loader._cast_value('hello', 'weird_type') == 'hello'
+        assert config_loader._cast_value(123, 'date') == 123

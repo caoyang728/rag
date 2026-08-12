@@ -1,5 +1,10 @@
 """
 security views - IP 白/黑名单 & 登录尝试 & 敏感词 & 验证码
+
+安全配置变更工单化：
+- 低风险（直接生效）：黑名单新增、敏感词新增
+- 中风险（单审）：黑名单解封、敏感词删除/禁用
+- 高风险（双审）：白名单新增/删除/编辑
 """
 import os
 import io
@@ -160,7 +165,14 @@ def verify_captcha(captcha_id, captcha_code):
 
 
 class IpWhitelistView(APIView):
-    """GET/POST /api/v1/security/ip-whitelist/"""
+    """GET/POST /api/v1/security/ip-whitelist/
+
+    支持的 IP 模式格式：
+    - 单 IP：10.0.0.1
+    - CIDR：10.0.0.0/24
+    - 通配符：10.0.*.*
+    - IP 范围：10.0.0.1-10.0.0.100
+    """
     permission_classes = [IsAdminUser]
 
     def get(self, request):
@@ -174,54 +186,120 @@ class IpWhitelistView(APIView):
         return Response({"rows": rows, "count": len(rows)})
 
     def post(self, request):
+        from apps.security.middleware import validate_ip_pattern
+        from apps.users.ticket_service import create_security_ticket
+        from apps.users.models import SecurityConfigType, SecurityOperation
+
         ip_or_cidr = request.data.get("ip_or_cidr")
-        description = request.data.get("description", "")
+        description = request.data.get("description", "").strip()
         if not ip_or_cidr:
             return Response({"detail": "ip_or_cidr 必填"}, status=400)
+        if not description:
+            return Response({"detail": "说明必填，便于后续审计追溯"}, status=400)
+
+        if not validate_ip_pattern(ip_or_cidr):
+            return Response({"detail": "IP 格式不合法，支持：单 IP / CIDR / 通配符（如 10.0.*.*）/ 范围（如 10.0.0.1-10.0.0.100）"}, status=400)
 
         if IpWhitelist.objects.filter(ip_or_cidr=ip_or_cidr).exists():
             return Response({"detail": "该 IP/CIDR 已存在"}, status=400)
 
-        obj = IpWhitelist.objects.create(
-            ip_or_cidr=ip_or_cidr,
-            description=description,
-            is_enabled=True,
-            created_by=request.user
+        # 创建安全配置工单（白名单新增 = 高风险，需双审）
+        ticket = create_security_ticket(
+            actor=request.user,
+            security_type=SecurityConfigType.IP_WHITELIST,
+            operation=SecurityOperation.ADD,
+            target_data={'ip_pattern': ip_or_cidr, 'description': description},
+            reason=f'新增白名单: {ip_or_cidr}',
+            new_data={'ip_pattern': ip_or_cidr, 'description': description},
+            ip_address=request.META.get('REMOTE_ADDR'),
+            user_agent=request.META.get('HTTP_USER_AGENT', ''),
         )
+
         return Response({
-            "id": obj.id, "ip_or_cidr": obj.ip_or_cidr, "description": obj.description,
-            "created_at": obj.created_at.isoformat()
+            "ticket_no": ticket.ticket_no,
+            "status": ticket.status,
+            "risk_level": ticket.risk_level,
+            "detail": "白名单新增需双审，已创建审批工单"
         }, status=201)
 
 
 class IpWhitelistDetailView(APIView):
-    """PUT/DELETE /api/v1/security/ip-whitelist/{id}/"""
+    """PUT/DELETE /api/v1/security/ip-whitelist/{id}/
+
+    白名单编辑/删除 = 高风险，需双审（compliance_admin 审核 + super_admin 复核）
+    """
     permission_classes = [IsAdminUser]
 
     def put(self, request, pk):
+        from apps.users.ticket_service import create_security_ticket
+        from apps.users.models import SecurityConfigType, SecurityOperation
+
         try:
             obj = IpWhitelist.objects.get(id=pk)
-            obj.description = request.data.get("description", obj.description)
-            obj.is_enabled = request.data.get("is_enabled", obj.is_enabled)
-            obj.save()
+            new_desc = request.data.get("description", obj.description)
+            new_enabled = request.data.get("is_enabled", obj.is_enabled)
+
+            # 创建安全配置工单（白名单编辑 = 高风险，需双审）
+            ticket = create_security_ticket(
+                actor=request.user,
+                security_type=SecurityConfigType.IP_WHITELIST,
+                operation=SecurityOperation.EDIT,
+                target_data={'id': obj.id, 'ip_pattern': obj.ip_or_cidr},
+                reason=f'编辑白名单: {obj.ip_or_cidr}',
+                old_data={'description': obj.description, 'is_enabled': obj.is_enabled},
+                new_data={'description': new_desc, 'is_enabled': new_enabled},
+                ip_address=request.META.get('REMOTE_ADDR'),
+                user_agent=request.META.get('HTTP_USER_AGENT', ''),
+            )
+
             return Response({
-                "id": obj.id, "ip_or_cidr": obj.ip_or_cidr, "description": obj.description,
-                "is_enabled": obj.is_enabled
+                "ticket_no": ticket.ticket_no,
+                "status": ticket.status,
+                "risk_level": ticket.risk_level,
+                "detail": "白名单编辑需双审，已创建审批工单"
             })
         except IpWhitelist.DoesNotExist:
             return Response({"detail": "白名单不存在"}, status=404)
 
     def delete(self, request, pk):
+        from apps.users.ticket_service import create_security_ticket
+        from apps.users.models import SecurityConfigType, SecurityOperation
+
         try:
             obj = IpWhitelist.objects.get(id=pk)
-            obj.delete()
-            return Response(status=204)
+
+            # 创建安全配置工单（白名单删除 = 高风险，需双审）
+            ticket = create_security_ticket(
+                actor=request.user,
+                security_type=SecurityConfigType.IP_WHITELIST,
+                operation=SecurityOperation.DELETE,
+                target_data={'id': obj.id, 'ip_pattern': obj.ip_or_cidr},
+                reason=f'删除白名单: {obj.ip_or_cidr}',
+                old_data={'ip_pattern': obj.ip_or_cidr, 'description': obj.description},
+                ip_address=request.META.get('REMOTE_ADDR'),
+                user_agent=request.META.get('HTTP_USER_AGENT', ''),
+            )
+
+            return Response({
+                "ticket_no": ticket.ticket_no,
+                "status": ticket.status,
+                "risk_level": ticket.risk_level,
+                "detail": "白名单删除需双审，已创建审批工单"
+            })
         except IpWhitelist.DoesNotExist:
             return Response({"detail": "白名单不存在"}, status=404)
 
 
 class IpBlacklistView(APIView):
-    """GET/POST /api/v1/security/ip-blacklist/"""
+    """GET/POST /api/v1/security/ip-blacklist/
+
+    支持的 IP 模式格式：
+    - 单 IP：10.0.0.1
+    - 通配符：10.0.*.*
+    - IP 范围：10.0.0.1-10.0.0.100
+
+    黑名单新增 = 低风险（直接生效），解封/删除 = 中风险（单审）
+    """
     permission_classes = [IsAdminUser]
 
     def get(self, request):
@@ -232,44 +310,101 @@ class IpBlacklistView(APIView):
         return Response({"rows": rows, "count": len(rows)})
 
     def post(self, request):
+        from apps.security.middleware import validate_ip_pattern
+        from apps.users.ticket_service import create_security_ticket
+        from apps.users.models import SecurityConfigType, SecurityOperation
+
         ip = request.data.get("ip")
-        reason = request.data.get("reason", "manual")
+        reason = request.data.get("reason", "").strip()
         detail = request.data.get("detail", "")
         if not ip:
             return Response({"detail": "ip 必填"}, status=400)
+        if not reason:
+            return Response({"detail": "封禁原因必填"}, status=400)
 
-        obj, created = IpBlacklist.objects.update_or_create(
-            ip=ip,
-            defaults={
-                "reason": reason,
-                "detail": detail,
-                "is_active": True,
-            }
+        if not validate_ip_pattern(ip):
+            return Response({"detail": "IP 格式不合法，支持：单 IP / 通配符（如 10.0.*.*）/ 范围（如 10.0.0.1-10.0.0.100）"}, status=400)
+
+        # 创建安全配置工单（黑名单新增 = 低风险，直接生效）
+        ticket = create_security_ticket(
+            actor=request.user,
+            security_type=SecurityConfigType.IP_BLACKLIST,
+            operation=SecurityOperation.ADD,
+            target_data={'ip_pattern': ip, 'reason': reason, 'detail': detail},
+            reason=f'新增黑名单: {ip}',
+            new_data={'ip_pattern': ip, 'reason': reason, 'detail': detail},
+            ip_address=request.META.get('REMOTE_ADDR'),
+            user_agent=request.META.get('HTTP_USER_AGENT', ''),
         )
+
         return Response({
-            "id": obj.id, "ip": obj.ip, "reason": obj.reason, "detail": obj.detail,
-            "created": created, "created_at": obj.created_at.isoformat()
-        }, status=201 if created else 200)
+            "ticket_no": ticket.ticket_no,
+            "status": ticket.status,
+            "risk_level": ticket.risk_level,
+            "detail": "黑名单新增已立即生效"
+        }, status=201)
 
 
 class IpBlacklistDetailView(APIView):
-    """PUT/DELETE /api/v1/security/ip-blacklist/{id}/"""
+    """PUT/DELETE /api/v1/security/ip-blacklist/{id}/
+
+    黑名单解封/删除 = 中风险，需单审（compliance_admin 审核）
+    """
     permission_classes = [IsAdminUser]
 
     def put(self, request, pk):
+        from apps.users.ticket_service import create_security_ticket
+        from apps.users.models import SecurityConfigType, SecurityOperation
+
         try:
             obj = IpBlacklist.objects.get(id=pk)
-            obj.is_active = False
-            obj.save()
-            return Response({"id": obj.id, "ip": obj.ip, "is_active": obj.is_active})
+
+            # 创建安全配置工单（黑名单解封 = 中风险，需单审）
+            ticket = create_security_ticket(
+                actor=request.user,
+                security_type=SecurityConfigType.IP_BLACKLIST,
+                operation=SecurityOperation.DELETE,
+                target_data={'id': obj.id, 'ip_pattern': obj.ip},
+                reason=f'解封黑名单: {obj.ip}',
+                old_data={'ip_pattern': obj.ip, 'reason': obj.reason, 'is_active': obj.is_active},
+                ip_address=request.META.get('REMOTE_ADDR'),
+                user_agent=request.META.get('HTTP_USER_AGENT', ''),
+            )
+
+            return Response({
+                "ticket_no": ticket.ticket_no,
+                "status": ticket.status,
+                "risk_level": ticket.risk_level,
+                "detail": "黑名单解封需单审，已创建审批工单"
+            })
         except IpBlacklist.DoesNotExist:
             return Response({"detail": "黑名单不存在"}, status=404)
 
     def delete(self, request, pk):
+        from apps.users.ticket_service import create_security_ticket
+        from apps.users.models import SecurityConfigType, SecurityOperation
+
         try:
             obj = IpBlacklist.objects.get(id=pk)
-            obj.delete()
-            return Response(status=204)
+
+            # 创建安全配置工单（黑名单删除 = 中风险，需单审）
+            ticket = create_security_ticket(
+                actor=request.user,
+                security_type=SecurityConfigType.IP_BLACKLIST,
+                operation=SecurityOperation.DELETE,
+                target_data={'id': obj.id, 'ip_pattern': obj.ip},
+                reason=f'删除黑名单: {obj.ip}',
+                old_data={'ip_pattern': obj.ip, 'reason': obj.reason},
+                ip_address=request.META.get('REMOTE_ADDR'),
+                user_agent=request.META.get('HTTP_USER_AGENT', ''),
+            )
+
+            return Response({
+                "ticket_no": ticket.ticket_no,
+                "status": ticket.status,
+                "risk_level": ticket.risk_level,
+                "detail": "黑名单删除需单审，已创建审批工单"
+            })
         except IpBlacklist.DoesNotExist:
             return Response({"detail": "黑名单不存在"}, status=404)
 
@@ -309,7 +444,10 @@ class LoginAttemptView(APIView):
 
 
 class SensitiveWordView(APIView):
-    """GET/POST /api/v1/security/sensitive-words/"""
+    """GET/POST /api/v1/security/sensitive-words/
+
+    敏感词新增 = 低风险（直接生效），编辑/删除/禁用 = 中风险（单审）
+    """
     permission_classes = [IsAdminUser]
 
     def get(self, request):
@@ -320,6 +458,9 @@ class SensitiveWordView(APIView):
         return Response({"rows": rows, "count": len(rows)})
 
     def post(self, request):
+        from apps.users.ticket_service import create_security_ticket
+        from apps.users.models import SecurityConfigType, SecurityOperation
+
         word = request.data.get("word")
         category = request.data.get("category", "other")
         action = request.data.get("action", "mask")
@@ -356,20 +497,25 @@ class SensitiveWordView(APIView):
         if SensitiveWord.objects.filter(word=word).exists():
             return Response({"detail": "该敏感词已存在"}, status=400)
 
-        # exists() 检查与 create 之间存在竞态：并发创建相同 word 时数据库
-        # unique 约束会抛 IntegrityError，捕获后返回友好的 400 而非 500
-        from django.db import IntegrityError
-        try:
-            obj = SensitiveWord.objects.create(
-                word=word, category=category, action=action, is_regex=is_regex, is_enabled=True
-            )
-        except IntegrityError:
-            return Response({"detail": "该敏感词已存在"}, status=400)
+        # 创建安全配置工单（敏感词新增 = 低风险，直接生效）
+        ticket = create_security_ticket(
+            actor=request.user,
+            security_type=SecurityConfigType.SENSITIVE_WORD,
+            operation=SecurityOperation.ADD,
+            target_data={'word': word, 'category': category, 'action': action, 'is_regex': is_regex},
+            reason=f'新增敏感词: {word}',
+            new_data={'word': word, 'category': category, 'action': action, 'is_regex': is_regex},
+            ip_address=request.META.get('REMOTE_ADDR'),
+            user_agent=request.META.get('HTTP_USER_AGENT', ''),
+        )
+
         # 词库变更：触发 SensitiveFilter 重建 AC 自动机（异步失败不影响接口）
         self._trigger_reload()
         return Response({
-            "id": obj.id, "word": obj.word, "category": obj.category,
-            "action": obj.action, "created_at": obj.created_at.isoformat()
+            "ticket_no": ticket.ticket_no,
+            "status": ticket.status,
+            "risk_level": ticket.risk_level,
+            "detail": "敏感词新增已立即生效"
         }, status=201)
 
     @staticmethod
@@ -386,33 +532,80 @@ class SensitiveWordView(APIView):
 
 
 class SensitiveWordDetailView(APIView):
-    """PUT/DELETE /api/v1/security/sensitive-words/{id}/"""
+    """PUT/DELETE /api/v1/security/sensitive-words/{id}/
+
+    敏感词编辑/删除/禁用 = 中风险，需单审（compliance_admin 审核）
+    """
     permission_classes = [IsAdminUser]
 
     def put(self, request, pk):
+        from apps.users.ticket_service import create_security_ticket
+        from apps.users.models import SecurityConfigType, SecurityOperation
+
         try:
             obj = SensitiveWord.objects.get(id=pk)
-            action = request.data.get("action", obj.action)
+            new_action = request.data.get("action", obj.action)
+            new_enabled = request.data.get("is_enabled", obj.is_enabled)
+
             # choices 校验：防止非法 action 导致审查分支失配
             valid_actions = [c[0] for c in SensitiveWord.ACTION_CHOICES]
-            if action not in valid_actions:
+            if new_action not in valid_actions:
                 return Response({"detail": f"action 必须是 {valid_actions} 之一"}, status=400)
-            obj.action = action
-            obj.is_enabled = request.data.get("is_enabled", obj.is_enabled)
-            obj.save()
-            SensitiveWordView._trigger_reload()
+
+            # 判断是编辑还是禁用
+            if new_enabled != obj.is_enabled and not new_enabled:
+                operation = SecurityOperation.DISABLE
+                reason = f'禁用敏感词: {obj.word}'
+            else:
+                operation = SecurityOperation.EDIT
+                reason = f'编辑敏感词: {obj.word}'
+
+            # 创建安全配置工单（敏感词编辑/禁用 = 中风险，需单审）
+            ticket = create_security_ticket(
+                actor=request.user,
+                security_type=SecurityConfigType.SENSITIVE_WORD,
+                operation=operation,
+                target_data={'id': obj.id, 'word': obj.word},
+                reason=reason,
+                old_data={'action': obj.action, 'is_enabled': obj.is_enabled},
+                new_data={'action': new_action, 'is_enabled': new_enabled},
+                ip_address=request.META.get('REMOTE_ADDR'),
+                user_agent=request.META.get('HTTP_USER_AGENT', ''),
+            )
+
             return Response({
-                "id": obj.id, "word": obj.word, "action": obj.action,
-                "is_enabled": obj.is_enabled
+                "ticket_no": ticket.ticket_no,
+                "status": ticket.status,
+                "risk_level": ticket.risk_level,
+                "detail": "敏感词变更需单审，已创建审批工单"
             })
         except SensitiveWord.DoesNotExist:
             return Response({"detail": "敏感词不存在"}, status=404)
 
     def delete(self, request, pk):
+        from apps.users.ticket_service import create_security_ticket
+        from apps.users.models import SecurityConfigType, SecurityOperation
+
         try:
             obj = SensitiveWord.objects.get(id=pk)
-            obj.delete()
-            SensitiveWordView._trigger_reload()
-            return Response(status=204)
+
+            # 创建安全配置工单（敏感词删除 = 中风险，需单审）
+            ticket = create_security_ticket(
+                actor=request.user,
+                security_type=SecurityConfigType.SENSITIVE_WORD,
+                operation=SecurityOperation.DELETE,
+                target_data={'id': obj.id, 'word': obj.word},
+                reason=f'删除敏感词: {obj.word}',
+                old_data={'word': obj.word, 'category': obj.category, 'action': obj.action},
+                ip_address=request.META.get('REMOTE_ADDR'),
+                user_agent=request.META.get('HTTP_USER_AGENT', ''),
+            )
+
+            return Response({
+                "ticket_no": ticket.ticket_no,
+                "status": ticket.status,
+                "risk_level": ticket.risk_level,
+                "detail": "敏感词删除需单审，已创建审批工单"
+            })
         except SensitiveWord.DoesNotExist:
             return Response({"detail": "敏感词不存在"}, status=404)

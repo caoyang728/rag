@@ -1,12 +1,31 @@
 /* 审计日志与安全 — 主要使用通用 tabs/table 样式 */
 
 #auditBody {
-	padding: 12px;
 	flex: 1;
 	min-height: 0;
 	display: flex;
 	flex-direction: column;
 	overflow: hidden;
+}
+
+/* 审计日志筛选栏：从 inline style 提取，统一水平内边距 */
+.audit-filter-bar {
+	padding: 6px 12px;
+	background: var(--primary-light);
+	border-radius: var(--radius);
+	border: 1px solid var(--border);
+}
+
+/* 表格滚动区域：左右内边距与筛选栏对齐 */
+#auditBody .card-scroll {
+	padding: 0;
+}
+
+/* Pagination 组件自带 .pgn-bar 样式（padding + border-top），
+   外层 .pagination 包装的 padding/margin 会导致双重内边距，此处覆盖消除 */
+#auditBody > .pagination {
+	padding: 0;
+	margin: 0;
 }
 
 /* ============ 敏感词管理 ============ */
@@ -27,6 +46,30 @@
 	opacity: 0.75;
 }
 
+/* 各 tab 顶部信息提示条：左竖线强调 + 柔和背景，视觉上与操作栏区分开 */
+.tab-info-bar {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 8px 14px;
+	background: var(--primary-light);
+	border-left: 3px solid var(--primary);
+	border-radius: 0 var(--radius) var(--radius) 0;
+	font-size: 13px;
+	color: var(--text-sub);
+	line-height: 1.6;
+	flex-shrink: 0;
+}
+.tab-info-bar .tab-info-icon {
+	font-size: 15px;
+	flex-shrink: 0;
+}
+.tab-info-bar .tab-info-count {
+	font-weight: 600;
+	color: var(--primary);
+	margin-left: 2px;
+}
+
 /* checkbox 行对齐优化：label 之间间距 + 防止换行错位 */
 #modal-sensitive .sensitive-input-regex,
 #modal-sensitive .sensitive-input-enabled {
@@ -35,4 +78,62 @@
 	accent-color: var(--primary);
 	cursor: pointer;
 	flex-shrink: 0;
+}
+
+/* ============ 敏感词弹窗美化 ============ */
+/* 动作说明条：三种动作的视觉指引，帮助用户快速理解 block/mask/warn 区别 */
+.sensitive-action-guide {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	margin-bottom: 16px;
+	padding: 10px 12px;
+	background: var(--bg);
+	border-radius: var(--radius);
+	border: 1px solid var(--border);
+}
+.sensitive-action-item {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-size: 12px;
+	color: var(--text-sub);
+}
+.sensitive-action-badge {
+	display: inline-block;
+	padding: 1px 6px;
+	border-radius: 4px;
+	font-size: 11px;
+	font-weight: 600;
+	font-family: 'Courier New', monospace;
+	white-space: nowrap;
+}
+.sensitive-action-block .sensitive-action-badge {
+	background: rgba(239,68,68,.12);
+	color: #dc2626;
+}
+.sensitive-action-mask .sensitive-action-badge {
+	background: rgba(245,158,11,.12);
+	color: #d97706;
+}
+.sensitive-action-warn .sensitive-action-badge {
+	background: rgba(59,130,246,.12);
+	color: #2563eb;
+}
+
+/* 表单行并排布局（分类 + 处理动作） */
+#modal-sensitive .form-row {
+	display: flex;
+	gap: 12px;
+}
+
+/* 选项 label 交互优化 */
+.sensitive-toggle-label {
+	font-size: 13px;
+	cursor: pointer;
+	padding: 4px 0;
+	user-select: none;
+}
+.sensitive-toggle-label:hover {
+	color: var(--primary);
 }

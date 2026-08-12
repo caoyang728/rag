@@ -103,12 +103,21 @@ ol {
 	font-weight: 500;
 	transition: all 0.15s ease;
 	white-space: nowrap;
-	border: 1px solid var(--border)
+	border: 1px solid var(--border);
+	flex-shrink: 0;
+	width: auto
 }
 
 .btn:hover {
 	background: var(--hover);
-	border-color: var(--border-strong)
+	border-color: var(--border-strong);
+	transform: translateY(-1px);
+	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08)
+}
+
+.btn:active {
+	transform: translateY(0);
+	box-shadow: none
 }
 
 .btn-primary {

@@ -322,3 +322,140 @@ class TestAgentWorkflowAPI:
         assert len(data) == 1
         assert data[0]['question'] == '我的'
         assert data[0]['status_display'] == '成功'
+
+
+# ---------------------------------------------------------------------------
+# WorkflowApprovalView —— 工作流内嵌人工确认（敏感工具节点 HITL）
+# ---------------------------------------------------------------------------
+
+class TestWorkflowApprovalAPI:
+    """POST /api/v1/agent/workflows/<id>/approve/  内嵌确认/拒绝
+
+    与工单审批的区别：不创建工单，前端直接确认/拒绝并同步恢复工作流。
+    覆盖：权限校验（发起人/超管）、状态校验（waiting_approval）、
+    节点校验（存在且 blocked）、resume_workflow 成功/异常。
+    """
+
+    def _make_waiting_workflow(self, user, node_status='blocked'):
+        """创建 waiting_approval 工作流 + 一个待确认节点"""
+        from apps.agent.models import AgentWorkflow, WorkflowNodeRun
+        wf = AgentWorkflow.objects.create(
+            user=user, question='测试问题', status='waiting_approval',
+            max_nodes=10, max_duration_sec=300,
+        )
+        WorkflowNodeRun.objects.create(
+            workflow=wf, node_id='tool_1', node_name='发消息',
+            step_type='tool', status=node_status,
+        )
+        return wf
+
+    @patch('apps.agent.workflow.engine.resume_workflow')
+    def test_approve_when_owner_approved_then_resumes(self, mock_resume, authed_client,
+                                                      test_user):
+        """发起人确认通过 → 以 approved=True 同步恢复工作流，返回确认结果"""
+        wf = self._make_waiting_workflow(test_user)
+        resp = authed_client.post(
+            f'/api/v1/agent/workflows/{wf.id}/approve/',
+            data='{"node_id": "tool_1", "approved": true}',
+            content_type='application/json')
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data['workflow_id'] == wf.id
+        assert data['node_id'] == 'tool_1'
+        assert data['approved'] is True
+        assert data['status'] == 'waiting_approval'
+        mock_resume.assert_called_once_with(wf, node_id='tool_1', approved=True)
+
+    @patch('apps.agent.workflow.engine.resume_workflow')
+    def test_approve_when_rejected_then_resumes_false(self, mock_resume, authed_client,
+                                                      test_user):
+        """发起人驳回 → 以 approved=False 恢复（节点 rejected 降级）"""
+        wf = self._make_waiting_workflow(test_user)
+        resp = authed_client.post(
+            f'/api/v1/agent/workflows/{wf.id}/approve/',
+            data='{"node_id": "tool_1", "approved": false}',
+            content_type='application/json')
+        assert resp.status_code == 200
+        assert resp.json()['approved'] is False
+        mock_resume.assert_called_once_with(wf, node_id='tool_1', approved=False)
+
+    def test_approve_when_workflow_not_exists_then_404(self, authed_client):
+        """工作流不存在 → 404"""
+        resp = authed_client.post(
+            '/api/v1/agent/workflows/999999/approve/',
+            {'node_id': 'tool_1'}, format='json')
+        assert resp.status_code == 404
+        assert '工作流不存在' in resp.json()['detail']
+
+    def test_approve_when_other_user_then_403(self, authed_client, test_user):
+        """非发起人且非超管 → 403（敏感工具节点的确认同样受权限约束）"""
+        from apps.users.models import User
+        other = User.objects.create_user(
+            username='approve_other', email='approve_other@example.com', password='x')
+        wf = self._make_waiting_workflow(other)
+        resp = authed_client.post(
+            f'/api/v1/agent/workflows/{wf.id}/approve/',
+            {'node_id': 'tool_1'}, format='json')
+        assert resp.status_code == 403
+        assert '无权操作' in resp.json()['detail']
+
+    @patch('apps.agent.workflow.engine.resume_workflow')
+    def test_approve_when_not_waiting_approval_then_400(self, mock_resume, authed_client,
+                                                        test_user):
+        """工作流不在 waiting_approval（已超时/已恢复）→ 400 拒绝重复审批"""
+        wf = self._make_waiting_workflow(test_user)
+        wf.status = 'running'
+        wf.save(update_fields=['status'])
+        resp = authed_client.post(
+            f'/api/v1/agent/workflows/{wf.id}/approve/',
+            {'node_id': 'tool_1'}, format='json')
+        assert resp.status_code == 400
+        assert '无需审批' in resp.json()['detail']
+        mock_resume.assert_not_called()
+
+    @patch('apps.agent.workflow.engine.resume_workflow')
+    def test_approve_when_node_id_missing_then_400(self, mock_resume, authed_client,
+                                                   test_user):
+        """未传 node_id → 400"""
+        wf = self._make_waiting_workflow(test_user)
+        resp = authed_client.post(
+            f'/api/v1/agent/workflows/{wf.id}/approve/', {}, format='json')
+        assert resp.status_code == 400
+        assert 'node_id 必填' in resp.json()['detail']
+        mock_resume.assert_not_called()
+
+    @patch('apps.agent.workflow.engine.resume_workflow')
+    def test_approve_when_node_not_exists_then_404(self, mock_resume, authed_client,
+                                                   test_user):
+        """node_id 不属于该工作流 → 404"""
+        wf = self._make_waiting_workflow(test_user)
+        resp = authed_client.post(
+            f'/api/v1/agent/workflows/{wf.id}/approve/',
+            {'node_id': 'no_such_node'}, format='json')
+        assert resp.status_code == 404
+        assert '节点不存在' in resp.json()['detail']
+        mock_resume.assert_not_called()
+
+    @patch('apps.agent.workflow.engine.resume_workflow')
+    def test_approve_when_node_not_blocked_then_400(self, mock_resume, authed_client,
+                                                    test_user):
+        """节点已处理（非 blocked）→ 400，避免重复确认"""
+        wf = self._make_waiting_workflow(test_user, node_status='succeeded')
+        resp = authed_client.post(
+            f'/api/v1/agent/workflows/{wf.id}/approve/',
+            {'node_id': 'tool_1'}, format='json')
+        assert resp.status_code == 400
+        assert '无需审批' in resp.json()['detail']
+        mock_resume.assert_not_called()
+
+    @patch('apps.agent.workflow.engine.resume_workflow',
+           side_effect=RuntimeError('engine down'))
+    def test_approve_when_resume_raises_then_500(self, mock_resume, authed_client,
+                                                 test_user):
+        """恢复工作流抛异常 → 500（前端可重试）"""
+        wf = self._make_waiting_workflow(test_user)
+        resp = authed_client.post(
+            f'/api/v1/agent/workflows/{wf.id}/approve/',
+            {'node_id': 'tool_1'}, format='json')
+        assert resp.status_code == 500
+        assert '恢复工作流失败' in resp.json()['detail']

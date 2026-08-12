@@ -144,7 +144,7 @@ class TestSensitiveWordCRUD(SecurityAPITestBase):
 
     @pytest.mark.integration
     def test_create_201(self):
-        """超管创建敏感词返回 201，记录落库"""
+        """超管创建敏感词返回 201，记录落库（低风险直接生效）"""
         resp = self.client.post(
             '/api/v1/security/sensitive-words/',
             data=json.dumps({'word': '新敏感词', 'category': 'other', 'action': 'mask'}),
@@ -152,7 +152,10 @@ class TestSensitiveWordCRUD(SecurityAPITestBase):
             **self.admin_headers
         )
         assert resp.status_code == 201
-        assert resp.json()['word'] == '新敏感词'
+        data = resp.json()
+        assert 'ticket_no' in data
+        assert data['status'] == 'EXECUTED'
+        assert data['risk_level'] == 'low'
         assert SensitiveWord.objects.filter(word='新敏感词').exists()
 
     @pytest.mark.integration
@@ -239,7 +242,7 @@ class TestSensitiveWordCRUD(SecurityAPITestBase):
 
     @pytest.mark.integration
     def test_update_action_200(self):
-        """超管修改敏感词 action 返回 200"""
+        """超管修改敏感词 action 返回 200（中风险需单审）"""
         sw = SensitiveWord.objects.create(word='编辑词', category='other', action='mask')
         resp = self.client.put(
             f'/api/v1/security/sensitive-words/{sw.id}/',
@@ -248,9 +251,10 @@ class TestSensitiveWordCRUD(SecurityAPITestBase):
             **self.admin_headers
         )
         assert resp.status_code == 200
-        assert resp.json()['action'] == 'block'
-        sw.refresh_from_db()
-        assert sw.action == 'block'
+        data = resp.json()
+        assert 'ticket_no' in data
+        assert data['status'] == 'PENDING'
+        assert data['risk_level'] == 'normal'
 
     @pytest.mark.integration
     def test_update_invalid_action_400(self):
@@ -276,13 +280,16 @@ class TestSensitiveWordCRUD(SecurityAPITestBase):
         assert resp.status_code == 404
 
     @pytest.mark.integration
-    def test_delete_204(self):
-        """超管删除敏感词返回 204"""
+    def test_delete_200(self):
+        """超管删除敏感词返回 200（中风险需单审）"""
         sw = SensitiveWord.objects.create(word='删除词', category='other', action='mask')
         resp = self.client.delete(
             f'/api/v1/security/sensitive-words/{sw.id}/', **self.admin_headers)
-        assert resp.status_code == 204
-        assert not SensitiveWord.objects.filter(id=sw.id).exists()
+        assert resp.status_code == 200
+        data = resp.json()
+        assert 'ticket_no' in data
+        assert data['status'] == 'PENDING'
+        assert data['risk_level'] == 'normal'
 
     @pytest.mark.integration
     def test_delete_not_found_404(self):
@@ -320,7 +327,7 @@ class TestIpWhitelistCRUD(SecurityAPITestBase):
 
     @pytest.mark.integration
     def test_create_201(self):
-        """超管添加白名单 IP 返回 201"""
+        """超管添加白名单 IP 返回 201（高风险需双审）"""
         resp = self.client.post(
             '/api/v1/security/ip-whitelist/',
             data=json.dumps({'ip_or_cidr': '192.168.1.0/24', 'description': '内网段'}),
@@ -328,8 +335,10 @@ class TestIpWhitelistCRUD(SecurityAPITestBase):
             **self.admin_headers
         )
         assert resp.status_code == 201
-        assert resp.json()['ip_or_cidr'] == '192.168.1.0/24'
-        assert IpWhitelist.objects.filter(ip_or_cidr='192.168.1.0/24').exists()
+        data = resp.json()
+        assert 'ticket_no' in data
+        assert data['status'] == 'PENDING'
+        assert data['risk_level'] == 'high'
 
     @pytest.mark.integration
     def test_create_empty_ip_400(self):
@@ -356,7 +365,7 @@ class TestIpWhitelistCRUD(SecurityAPITestBase):
 
     @pytest.mark.integration
     def test_update_200(self):
-        """超管修改白名单描述/启用状态返回 200"""
+        """超管修改白名单描述/启用状态返回 200（高风险需双审）"""
         obj = IpWhitelist.objects.create(ip_or_cidr='10.0.0.2', description='原描述',
                                           created_by=self.super_admin)
         resp = self.client.put(
@@ -366,8 +375,10 @@ class TestIpWhitelistCRUD(SecurityAPITestBase):
             **self.admin_headers
         )
         assert resp.status_code == 200
-        assert resp.json()['description'] == '新描述'
-        assert resp.json()['is_enabled'] is False
+        data = resp.json()
+        assert 'ticket_no' in data
+        assert data['status'] == 'PENDING'
+        assert data['risk_level'] == 'high'
 
     @pytest.mark.integration
     def test_update_not_found_404(self):
@@ -381,14 +392,17 @@ class TestIpWhitelistCRUD(SecurityAPITestBase):
         assert resp.status_code == 404
 
     @pytest.mark.integration
-    def test_delete_204(self):
-        """超管删除白名单返回 204"""
+    def test_delete_200(self):
+        """超管删除白名单返回 200（高风险需双审）"""
         obj = IpWhitelist.objects.create(ip_or_cidr='10.0.0.3', description='待删',
                                           created_by=self.super_admin)
         resp = self.client.delete(
             f'/api/v1/security/ip-whitelist/{obj.id}/', **self.admin_headers)
-        assert resp.status_code == 204
-        assert not IpWhitelist.objects.filter(id=obj.id).exists()
+        assert resp.status_code == 200
+        data = resp.json()
+        assert 'ticket_no' in data
+        assert data['status'] == 'PENDING'
+        assert data['risk_level'] == 'high'
 
     @pytest.mark.integration
     def test_delete_not_found_404(self):
@@ -426,7 +440,7 @@ class TestIpBlacklistCRUD(SecurityAPITestBase):
 
     @pytest.mark.integration
     def test_create_201(self):
-        """超管添加黑名单 IP 返回 201（created=True）"""
+        """超管添加黑名单 IP 返回 201（低风险直接生效）"""
         resp = self.client.post(
             '/api/v1/security/ip-blacklist/',
             data=json.dumps({'ip': '5.6.7.8', 'reason': 'manual', 'detail': '测试封禁'}),
@@ -434,8 +448,10 @@ class TestIpBlacklistCRUD(SecurityAPITestBase):
             **self.admin_headers
         )
         assert resp.status_code == 201
-        assert resp.json()['ip'] == '5.6.7.8'
-        assert resp.json()['created'] is True
+        data = resp.json()
+        assert 'ticket_no' in data
+        assert data['status'] == 'EXECUTED'
+        assert data['risk_level'] == 'low'
         assert IpBlacklist.objects.filter(ip='5.6.7.8').exists()
 
     @pytest.mark.integration
@@ -450,11 +466,8 @@ class TestIpBlacklistCRUD(SecurityAPITestBase):
         assert resp.status_code == 400
 
     @pytest.mark.integration
-    def test_create_update_existing_ip(self):
-        """已存在的 IP 再次 POST 走 update_or_create，返回 200（created=False）
-
-        同一 IP 不会创建多条记录，而是更新 reason/detail 并重新激活。
-        """
+    def test_create_existing_ip_creates_ticket(self):
+        """已存在的 IP 再次 POST 也会创建新工单（低风险直接生效）"""
         IpBlacklist.objects.create(ip='9.10.11.12', reason='login_fail', detail='旧原因')
         resp = self.client.post(
             '/api/v1/security/ip-blacklist/',
@@ -462,24 +475,23 @@ class TestIpBlacklistCRUD(SecurityAPITestBase):
             content_type='application/json',
             **self.admin_headers
         )
-        assert resp.status_code == 200
-        assert resp.json()['created'] is False
-        # 记录被更新而非新增
-        assert IpBlacklist.objects.filter(ip='9.10.11.12').count() == 1
-        obj = IpBlacklist.objects.get(ip='9.10.11.12')
-        assert obj.reason == 'manual'
-        assert obj.detail == '新原因'
+        assert resp.status_code == 201
+        data = resp.json()
+        assert 'ticket_no' in data
+        assert data['status'] == 'EXECUTED'
+        assert data['risk_level'] == 'low'
 
     @pytest.mark.integration
     def test_unblock_200(self):
-        """PUT 黑名单设置 is_active=False（解封），返回 200"""
+        """PUT 黑名单解封返回 200（中风险需单审）"""
         obj = IpBlacklist.objects.create(ip='13.14.15.16', reason='manual', detail='测试')
         resp = self.client.put(
             f'/api/v1/security/ip-blacklist/{obj.id}/', **self.admin_headers)
         assert resp.status_code == 200
-        assert resp.json()['is_active'] is False
-        obj.refresh_from_db()
-        assert obj.is_active is False
+        data = resp.json()
+        assert 'ticket_no' in data
+        assert data['status'] == 'PENDING'
+        assert data['risk_level'] == 'normal'
 
     @pytest.mark.integration
     def test_unblock_not_found_404(self):
@@ -489,13 +501,16 @@ class TestIpBlacklistCRUD(SecurityAPITestBase):
         assert resp.status_code == 404
 
     @pytest.mark.integration
-    def test_delete_204(self):
-        """超管删除黑名单记录返回 204"""
+    def test_delete_200(self):
+        """超管删除黑名单记录返回 200（中风险需单审）"""
         obj = IpBlacklist.objects.create(ip='17.18.19.20', reason='manual', detail='待删')
         resp = self.client.delete(
             f'/api/v1/security/ip-blacklist/{obj.id}/', **self.admin_headers)
-        assert resp.status_code == 204
-        assert not IpBlacklist.objects.filter(id=obj.id).exists()
+        assert resp.status_code == 200
+        data = resp.json()
+        assert 'ticket_no' in data
+        assert data['status'] == 'PENDING'
+        assert data['risk_level'] == 'normal'
 
     @pytest.mark.integration
     def test_delete_not_found_404(self):
@@ -590,8 +605,8 @@ class TestSensitiveWordExtraBranches(SecurityAPITestBase):
     """敏感词创建竞态与过滤器重载异常路径"""
 
     @pytest.mark.integration
-    def test_create_integrity_error_400(self):
-        """exists() 检查与 create 之间的并发竞态由 IntegrityError 兜底为 400"""
+    def test_create_integrity_error_still_creates_ticket(self):
+        """exists() 检查与 create 之间的并发竞态：工单仍创建成功，IntegrityError 被捕获"""
         with patch.object(SensitiveWord.objects, 'create',
                           side_effect=__import__('django.db', fromlist=['IntegrityError']).IntegrityError()), \
              patch.object(security_views.SensitiveWordView, '_trigger_reload'):
@@ -600,8 +615,11 @@ class TestSensitiveWordExtraBranches(SecurityAPITestBase):
                 data=json.dumps({'word': '竞态词', 'category': 'other', 'action': 'mask'}),
                 content_type='application/json',
                 **self.admin_headers)
-        assert resp.status_code == 400
-        assert '已存在' in resp.json()['detail']
+        # 工单创建成功（低风险直接执行），IntegrityError 在执行层被捕获
+        assert resp.status_code == 201
+        data = resp.json()
+        assert 'ticket_no' in data
+        assert data['status'] == 'EXECUTED'
 
     @pytest.mark.integration
     def test_trigger_reload_success_and_failure(self):

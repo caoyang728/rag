@@ -68,15 +68,17 @@ def can_read_wiki(user, page) -> bool:
     if not user or not getattr(user, 'is_authenticated', False):
         return False
 
+    # super_admin / kb_admin 拥有绝对浏览权限
+    # 对 Wiki 的浏览不受文档级权限约束，与列表页 get_queryset 口径一致
+    if getattr(user, 'is_super_admin', False) or getattr(user, 'is_kb_admin', False):
+        return True
+
     # node 页面：节点下存在用户可读的文档即可浏览
     if page.node_id:
         return page.node_id in get_accessible_node_ids(user, [page.node_id])
 
-    # community 页面：图谱社区无文档权限维度，仅系统管理员 / 知识库管理员可读
-    return bool(
-        getattr(user, 'is_super_admin', False)
-        or getattr(user, 'is_kb_admin', False)
-    )
+    # community 页面：无文档权限维度，非管理员不可读（管理员已上方提前返回）
+    return False
 
 
 def _is_contributor(user) -> bool:

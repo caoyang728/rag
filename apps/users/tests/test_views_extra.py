@@ -914,46 +914,67 @@ class TestOrgViewSetEdge(UsersAPIExtraBase):
         view.action = 'list'
         assert view.get_serializer_class() is DepartmentSerializer
 
+    def _org_ua_headers(self, username='org_ua'):
+        """构造 user_admin 审批人 header（org 工单单审节点审批者）"""
+        ua = _create_user(username)
+        _grant_global_role(ua, 'user_admin')
+        return _auth_headers(ua)
+
+    def _approve(self, ticket, headers):
+        """审批工单当前节点（HTTP 统一审批入口）"""
+        return self.client.post(
+            f'/api/v1/auth/tickets/{ticket.id}/approve/',
+            data=json.dumps({'comment': '同意'}),
+            content_type='application/json', **headers)
+
     @pytest.mark.integration
-    def test_department_restore_integrity_error_400(self):
-        """恢复已删部门时编码冲突 → 400（覆盖 1407-1410）"""
+    def test_department_restore_execute_integrity_error_rollback(self):
+        """恢复已删部门时执行层落库冲突 → 审批返回 400，工单留 PENDING 可重试
+
+        软删恢复语义已移至工单执行层(_execute_org_change)，落库冲突抛 ValueError
+        回滚审批事务，不再由创建接口兜底。
+        """
         from django.db import IntegrityError
         dept = Department.objects.create(name='旧部门R', code='oldr')
         dept.is_deleted = True
         dept.save()
+        resp = self.client.post(
+            '/api/v1/auth/departments/',
+            data=json.dumps({'name': '旧部门R'}),
+            content_type='application/json', **self.admin_headers)
+        assert resp.status_code == 201
+        ticket = TicketList.objects.get(ticket_no=resp.json()['ticket_no'])
         with patch.object(Department, 'save', side_effect=IntegrityError('dup')):
-            resp = self.client.post(
-                '/api/v1/auth/departments/',
-                data=json.dumps({'name': '旧部门R'}),
-                content_type='application/json', **self.admin_headers)
-        assert resp.status_code == 400
-        assert resp.json()['detail'] == '部门“旧部门R”已存在'
+            aresp = self._approve(ticket, self._org_ua_headers())
+        assert aresp.status_code == 400
+        ticket.refresh_from_db()
+        assert ticket.status == TicketStatus.PENDING
+        dept.refresh_from_db()
+        assert dept.is_deleted is True  # 事务回滚,未被误恢复
 
     @pytest.mark.integration
-    def test_department_create_integrity_error_400(self):
-        """新建部门落库冲突 → 400（覆盖 1416-1419）"""
-        from django.db import IntegrityError
-        with patch('apps.users.serializers.DepartmentWriteSerializer.save',
-                   side_effect=IntegrityError('dup')):
-            resp = self.client.post(
-                '/api/v1/auth/departments/',
-                data=json.dumps({'name': '新部门Z'}),
-                content_type='application/json', **self.admin_headers)
-        assert resp.status_code == 400
-        assert resp.json()['detail'] == '部门“新部门Z”已存在'
+    def test_department_create_returns_ticket(self):
+        """新建部门 → 201 工单（不直接落库，唯一性由创建时预检保证）"""
+        resp = self.client.post(
+            '/api/v1/auth/departments/',
+            data=json.dumps({'name': '新部门Z'}),
+            content_type='application/json', **self.admin_headers)
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data['ticket_no'].startswith('ZZ')
+        assert not Department.objects.filter(name='新部门Z', is_deleted=False).exists()
 
     @pytest.mark.integration
-    def test_department_update_integrity_error_400(self):
-        """更新部门编码冲突 → 400（覆盖 1429-1432）"""
-        from django.db import IntegrityError
-        with patch('apps.users.serializers.DepartmentWriteSerializer.save',
-                   side_effect=IntegrityError('dup')):
-            resp = self.client.patch(
-                f'/api/v1/auth/departments/{self.dept_a.id}/',
-                data=json.dumps({'name': '研发部X'}),
-                content_type='application/json', **self.admin_headers)
-        assert resp.status_code == 400
-        assert resp.json()['detail'] == '部门编码冲突'
+    def test_department_update_returns_ticket(self):
+        """更新部门 → 200 工单（DB 不变，审批后生效）"""
+        resp = self.client.patch(
+            f'/api/v1/auth/departments/{self.dept_a.id}/',
+            data=json.dumps({'name': '研发部X'}),
+            content_type='application/json', **self.admin_headers)
+        assert resp.status_code == 200
+        assert resp.json()['ticket_no'].startswith('ZZ')
+        self.dept_a.refresh_from_db()
+        assert self.dept_a.name == '研发部'
 
     @pytest.mark.integration
     def test_team_list_bad_dept_filter_ignored(self):
@@ -963,14 +984,15 @@ class TestOrgViewSetEdge(UsersAPIExtraBase):
 
     @pytest.mark.integration
     def test_dept_mgr_update_own_dept_team_200(self):
-        """部门经理可操作本部门团队（覆盖 1643-1650）"""
+        """部门经理可操作本部门团队 → 200 工单（组织变更走审批,不直接落库）"""
         resp = self.client.patch(
             f'/api/v1/auth/teams/{self.team_a.id}/',
             data=json.dumps({'description': '部门经理改'}),
             content_type='application/json', **self.dept_mgr_headers)
         assert resp.status_code == 200
+        assert resp.json()['ticket_no'].startswith('ZZ')
         self.team_a.refresh_from_db()
-        assert self.team_a.description == '部门经理改'
+        assert self.team_a.description is None  # 审批前不生效
 
     @pytest.mark.integration
     def test_team_get_serializer_class(self):
@@ -983,65 +1005,59 @@ class TestOrgViewSetEdge(UsersAPIExtraBase):
 
     @pytest.mark.integration
     def test_team_create_dept_id_as_list(self):
-        """department_id 传数组 → 取首元素（覆盖 1673-1674）"""
+        """department_id 传数组 → 取首元素写入工单目标数据（覆盖取首元素分支）"""
         resp = self.client.post(
             '/api/v1/auth/teams/',
             data=json.dumps({'name': '列表部门团队', 'department_id': [self.dept_b.id]}),
             content_type='application/json', **self.admin_headers)
         assert resp.status_code == 201
-        team = Team.objects.get(name='列表部门团队')
-        assert team.department_id == self.dept_b.id
+        ticket = TicketList.objects.get(ticket_no=resp.json()['ticket_no'])
+        assert ticket.org_detail.target_data['department_id'] == self.dept_b.id
+        assert not Team.objects.filter(name='列表部门团队').exists()
 
     @pytest.mark.integration
-    def test_team_restore_integrity_error_400(self):
-        """恢复已删团队时落库冲突 → 400（覆盖 1705-1708）"""
+    def test_team_restore_execute_integrity_error_rollback(self):
+        """恢复已删团队时执行层落库冲突 → 审批返回 400，工单留 PENDING"""
         from django.db import IntegrityError
         team = Team.objects.create(name='旧团队R', code='oldtr', department=self.dept_a)
         team.is_deleted = True
         team.save()
+        resp = self.client.post(
+            '/api/v1/auth/teams/',
+            data=json.dumps({'name': '旧团队R', 'department_id': self.dept_a.id}),
+            content_type='application/json', **self.admin_headers)
+        assert resp.status_code == 201
+        ticket = TicketList.objects.get(ticket_no=resp.json()['ticket_no'])
         with patch.object(Team, 'save', side_effect=IntegrityError('dup')):
-            resp = self.client.post(
-                '/api/v1/auth/teams/',
-                data=json.dumps({'name': '旧团队R', 'department_id': self.dept_a.id}),
-                content_type='application/json', **self.admin_headers)
-        assert resp.status_code == 400
-        assert resp.json()['detail'] == '部门“研发部”下已存在团队“旧团队R”'
+            aresp = self._approve(ticket, self._org_ua_headers())
+        assert aresp.status_code == 400
+        ticket.refresh_from_db()
+        assert ticket.status == TicketStatus.PENDING
+        team.refresh_from_db()
+        assert team.is_deleted is True
 
     @pytest.mark.integration
-    def test_team_create_integrity_error_400(self):
-        """新建团队落库冲突 → 400（覆盖 1713-1723）"""
-        from django.db import IntegrityError
-        with patch.object(Team.objects, 'create', side_effect=IntegrityError('dup')):
-            resp = self.client.post(
-                '/api/v1/auth/teams/',
-                data=json.dumps({'name': '新团队Z', 'department_id': self.dept_a.id}),
-                content_type='application/json', **self.admin_headers)
-        assert resp.status_code == 400
-        assert resp.json()['detail'] == '部门“研发部”下已存在团队“新团队Z”'
+    def test_team_create_returns_ticket(self):
+        """新建团队 → 201 工单（不直接落库，唯一性由创建时预检保证）"""
+        resp = self.client.post(
+            '/api/v1/auth/teams/',
+            data=json.dumps({'name': '新团队Z', 'department_id': self.dept_a.id}),
+            content_type='application/json', **self.admin_headers)
+        assert resp.status_code == 201
+        assert resp.json()['ticket_no'].startswith('ZZ')
+        assert not Team.objects.filter(name='新团队Z', department=self.dept_a).exists()
 
     @pytest.mark.integration
-    def test_team_create_unexpected_error_500(self):
-        """新建团队未知异常 → 500（覆盖 1724-1726）"""
-        client = Client(raise_request_exception=False)
-        with patch.object(Team.objects, 'create', side_effect=RuntimeError('boom')):
-            resp = client.post(
-                '/api/v1/auth/teams/',
-                data=json.dumps({'name': '新团队Y', 'department_id': self.dept_a.id}),
-                content_type='application/json', **self.admin_headers)
-        assert resp.status_code == 500
-
-    @pytest.mark.integration
-    def test_team_update_integrity_error_400(self):
-        """更新团队编码冲突 → 400（覆盖 1735-1738）"""
-        from django.db import IntegrityError
-        with patch('apps.users.serializers.TeamWriteSerializer.save',
-                   side_effect=IntegrityError('dup')):
-            resp = self.client.patch(
-                f'/api/v1/auth/teams/{self.team_a.id}/',
-                data=json.dumps({'description': 'x'}),
-                content_type='application/json', **self.admin_headers)
-        assert resp.status_code == 400
-        assert resp.json()['detail'] == '团队编码冲突'
+    def test_team_update_returns_ticket(self):
+        """更新团队 → 200 工单（DB 不变，审批后生效）"""
+        resp = self.client.patch(
+            f'/api/v1/auth/teams/{self.team_a.id}/',
+            data=json.dumps({'description': 'x'}),
+            content_type='application/json', **self.admin_headers)
+        assert resp.status_code == 200
+        assert resp.json()['ticket_no'].startswith('ZZ')
+        self.team_a.refresh_from_db()
+        assert self.team_a.description is None
 
     @pytest.mark.integration
     def test_team_destroy_with_docs_400(self):

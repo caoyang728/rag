@@ -67,16 +67,7 @@ function findNodeById(id) {
 }
 
 
-function closeModal(id) {
-	var el = document.getElementById(id);
-	if (el) el.classList.remove('show');
-	// 检查是否还有其他弹窗打开
-	var activeModals = document.querySelectorAll('.modal.show');
-	if (activeModals.length === 0) {
-		var mask = document.getElementById('mask');
-		if (mask) mask.classList.remove('show');
-	}
-}
+/* 本页不再自行定义 closeModal,统一使用 common.js 版本(负责弹窗层级栈与独立遮蔽层管理) */
 
 /* ============ 动态加载根类型 ============ */
 function loadRootTypes() {
@@ -524,32 +515,7 @@ function closeDocListModal() {
 	closeModal('docListModal');
 }
 
-/* ---- 模态框 z-index 堆叠管理（防止背景穿透） ---- */
-var _modalZStack = [];
-var _MODAL_Z_BASE = 10000;
-var _origShowModal = showModal;
-var _origCloseModal = closeModal;
-
-window.showModal = function (id) {
-	var idx = _modalZStack.indexOf(id);
-	if (idx !== -1) _modalZStack.splice(idx, 1);
-	_modalZStack.push(id);
-	_origShowModal(id);
-	var m = document.getElementById(id);
-	if (m) m.style.zIndex = _MODAL_Z_BASE + _modalZStack.length;
-	var mask = document.getElementById('mask');
-	if (mask) mask.style.zIndex = _MODAL_Z_BASE + _modalZStack.length - 1;
-};
-
-window.closeModal = function (id) {
-	var idx = _modalZStack.indexOf(id);
-	if (idx !== -1) _modalZStack.splice(idx, 1);
-	_origCloseModal(id);
-	if (_modalZStack.length > 0) {
-		var mask = document.getElementById('mask');
-		if (mask) mask.style.zIndex = _MODAL_Z_BASE + _modalZStack.length - 1;
-	}
-};
+/* 模态框 z-index 堆叠管理已统一由 common.js 按层级(level)动态分配,此处不再覆盖 */
 
 /* ---- 从节点详情页点击"查看本节点文档" ---- */
 function viewNodeDocs(nodeId) {

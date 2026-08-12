@@ -82,11 +82,55 @@ function showMask(show) {
 	}
 	m.classList.toggle('show', !!show);
 }
+/* 弹窗层级模型:每层弹窗 = 独立遮蔽层(.modal-layer) + 弹窗本体(.modal)。
+   z-index 阶梯:第 N 层遮蔽层 = 10000+(N-1)*100,弹窗本体再 +1;
+   二次确认弹窗永远比当前栈顶弹窗高一层;toast = 20000 高于一切。
+   层级正确后,上层遮蔽层天然拦截点击(穿透从机制上消除),
+   下方 pointer-events 栈管理仅作双保险。 */
+const _MODAL_LEVEL_BASE = 10000;   // 第一层遮蔽层 z-index 基准
+const _MODAL_LEVEL_STEP = 100;     // 每升一级的 z-index 步进
+
+// 弹窗栈:记录 .modal 打开顺序,用于推导新弹窗层级与恢复栈顶交互
+const _modalStack = [];
+
+// 恢复当前最上层弹窗的交互(关闭上层弹窗/二次确认弹窗后调用)
+function _restoreTopModalInteraction() {
+	if (_modalStack.length > 0) {
+		_modalStack[_modalStack.length - 1].style.pointerEvents = '';
+	}
+}
+
+// 为弹窗获取/创建其独立遮蔽层(遮蔽层与弹窗解耦,不迁移弹窗 DOM,
+// 仅通过 z-index 区间保证层级:遮罩 < 弹窗本体 < 上层遮罩;同一弹窗复用同一遮蔽层)
+function _modalLayerFor(m) {
+	let layer = m._modalLayerEl;
+	if (!layer) {
+		layer = document.createElement('div');
+		layer.className = 'modal-layer';
+		document.body.appendChild(layer);
+		m._modalLayerEl = layer;
+	}
+	return layer;
+}
+
+// 隐藏弹窗的独立遮蔽层(弹窗关闭时调用,防止遮罩残留)
+function _hideModalLayer(m) {
+	if (m._modalLayerEl) {
+		m._modalLayerEl.classList.remove('show');
+	}
+}
+
 function closeAllOverlays() {
 	$$('.modal').forEach(m => m.classList.remove('show'));
 	$$('.drawer').forEach(d => d.classList.remove('show'));
 	$$('.confirm-overlay').forEach(o => o.classList.remove('show'));
+	// 隐藏所有独立遮蔽层,防止残留
+	$$('.modal-layer').forEach(l => l.classList.remove('show'));
 	showMask(false);
+	// 恢复一级弹窗交互(showConfirmDialog 激活期间被禁用,防止点击穿透;
+	// 二级弹窗可能经此路径关闭,统一恢复避免残留)
+	$$('.modal').forEach(m => { m.style.pointerEvents = ''; });
+	_modalStack.length = 0;
 }
 
 /* ============ 二次确认弹窗(带模糊背景,层级高于普通弹窗) ============ */
@@ -170,9 +214,19 @@ function showConfirmDialog(opts) {
 	});
 
 	// 上下文对象:供按钮回调操作弹窗
+	// 二级弹窗激活期间禁用一级弹窗交互(pointer-events:none),防止点击穿透;
+	// 关闭时恢复 —— 双保险:即使遮罩定位/z-index 异常,一级弹窗也无法被点击
+	const _setModalsInteractive = (interactive) => {
+		$$('.modal.show').forEach(m => { m.style.pointerEvents = interactive ? '' : 'none'; });
+	};
 	const ctx = {
 		el: dialog,
-		close() { overlay.classList.remove('show'); },
+		close() {
+			overlay.classList.remove('show');
+			// 只恢复最上层弹窗交互;若 confirm 之上还有弹窗(如 A→B→confirm),
+			// 下层弹窗 A 仍保持禁用,避免关闭 confirm 后穿透到 A
+			_restoreTopModalInteraction();
+		},
 		setError(msg) {
 			const errEl = bodyEl.querySelector('#confirmDialogErr');
 			if (errEl) {
@@ -185,6 +239,14 @@ function showConfirmDialog(opts) {
 	// 关闭按钮关闭；不允许点击背景遮罩关闭（避免误触丢失输入内容）
 	closeBtn.onclick = () => ctx.close();
 
+	// 二次确认弹窗激活期间禁用所有弹窗交互,防止点击穿透;
+	// 关闭时只恢复最上层弹窗交互(下层弹窗仍需保持禁用,避免继续穿透)
+	// 层级:永远比当前栈顶弹窗高一层(如栈顶在第 2 层,则确认弹窗落在第 3 层),
+	// 保证其遮蔽层能盖住栈内全部弹窗
+	const confirmLevel = _modalStack.length + 1;
+	overlay.style.zIndex = _MODAL_LEVEL_BASE + (confirmLevel - 1) * _MODAL_LEVEL_STEP;
+	dialog.style.zIndex = _MODAL_LEVEL_BASE + (confirmLevel - 1) * _MODAL_LEVEL_STEP + 1;
+	_setModalsInteractive(false);
 	overlay.classList.add('show');
 	if (typeof opts.onShow === 'function') opts.onShow(ctx);
 	return ctx;
@@ -193,11 +255,35 @@ function showConfirmDialog(opts) {
 /**
  * 显示模态框
  * @param {string} id - 模态框元素ID
+ * @param {Object} [opts]
+ *   - level: number 弹窗层级(1=第一层,2=第二层,以此类推),不传默认第一层(向后兼容)
+ *            未显式传层级时,若已有弹窗打开则自动升到下一层(栈深+1)
  */
-function showModal(id) {
+function showModal(id, opts) {
+	opts = opts || {};
 	const m = document.getElementById(id);
-	if (m) m.classList.add('show');
-	showMask(true);
+	if (m) {
+		// 清除可能残留的 inline pointer-events(showConfirmDialog 禁用一级弹窗后,
+		// 若弹窗在二级弹窗激活期间被关闭,inline 样式会残留到下次打开)
+		m.style.pointerEvents = '';
+		// 同一弹窗重复打开时先出栈再重新入栈,保证打开顺序正确
+		const dup = _modalStack.indexOf(m);
+		if (dup >= 0) _modalStack.splice(dup, 1);
+		// 层级:默认栈深+1(首个弹窗=第一层),显式传 level 时以参数为准
+		const level = opts.level || (_modalStack.length + 1);
+		// 本层独立遮蔽层:z-index 夹在"下层弹窗之上、本层弹窗之下",
+		// 从机制上拦截对下层弹窗的点击(穿透);模糊背景盖住下层弹窗
+		const layer = _modalLayerFor(m);
+		layer.style.zIndex = _MODAL_LEVEL_BASE + (level - 1) * _MODAL_LEVEL_STEP;
+		layer.classList.add('show');
+		m.style.zIndex = _MODAL_LEVEL_BASE + (level - 1) * _MODAL_LEVEL_STEP + 1;
+		// 禁用已打开弹窗的交互(双保险:即使 z-index 被页面干扰,下层也无法被点击)
+		_modalStack.forEach(below => { below.style.pointerEvents = 'none'; });
+		_modalStack.push(m);
+		m.classList.add('show');
+	}
+	// 不再调用 showMask(true):遮蔽统一走每层独立 .modal-layer,
+	// 若同时显示会叠加两层半透明遮罩导致背景过暗
 }
 
 /**
@@ -206,7 +292,15 @@ function showModal(id) {
  */
 function closeModal(id) {
 	var el = document.getElementById(id);
+	var wasShow = el && el.classList.contains('show');
 	if (el) el.classList.remove('show');
+	// 隐藏该弹窗的独立遮蔽层,防止遮罩残留
+	if (el) _hideModalLayer(el);
+	// 出栈并恢复当前最上层弹窗的交互(叠加场景关闭上层后,下层重新可点;
+	// 单独弹窗场景栈为空,恢复为 no-op)
+	var idx = el ? _modalStack.indexOf(el) : -1;
+	if (idx >= 0) _modalStack.splice(idx, 1);
+	if (wasShow) _restoreTopModalInteraction();
 	var activeModals = document.querySelectorAll('.modal.show');
 	if (activeModals.length === 0) {
 		showMask(false);

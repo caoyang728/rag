@@ -1779,3 +1779,157 @@ class TestRoleChangeAndRevokeGlobal(TicketTestBase):
         assert UserRoleRel.objects.filter(
             user=self.target_user, role__role_key='kb_admin',
             status=GrantStatus.REVOKED).exists()
+
+
+# ============================================================================
+# 组织变更工单（TicketOrgDetail）—— 创建/审批执行/失败回滚/回避原则
+# ============================================================================
+class TestOrgTicketService(TicketTestBase):
+    """org 工单：风险分级与审批链 / 审批执行生效 / 执行失败回滚 / 驳回不生效"""
+
+    def _make_org_ticket(self, applicant=None, org_type='dept', operation='add',
+                         name='新部门', **extra):
+        """创建组织变更工单（默认：新增部门，normal 单审）
+
+        extra 可覆盖 target_data/new_data/old_data 等，供编辑/删除场景定制。
+        """
+        from apps.users.ticket_service import create_org_ticket
+        applicant = applicant or self.applicant
+        kwargs = {
+            'actor': applicant,
+            'org_type': org_type,
+            'operation': operation,
+            'target_data': {'name': name, 'code': 'xx'},
+            'reason': f'测试{operation}',
+            'new_data': ({'name': name, 'code': 'xx'} if operation != 'delete' else None),
+            'old_data': ({'name': name, 'code': 'xx'} if operation in ('edit', 'delete') else None),
+        }
+        kwargs.update(extra)
+        return create_org_ticket(**kwargs)
+
+    @pytest.mark.integration
+    def test_create_org_ticket_add_dept_normal_single_chain(self):
+        """新增部门 → PENDING/normal/单审链[USER_ADMIN]/工单号 ZZ 前缀 + org_detail 落库"""
+        ticket = self._make_org_ticket()
+        assert ticket.status == TicketStatus.PENDING
+        assert ticket.risk_level == 'normal'
+        assert ticket.ticket_no.startswith('ZZ')
+        assert ticket.biz_type == TicketBizType.ORG
+        chain = ticket.approval_chain
+        assert len(chain) == 1
+        assert chain[0]['approver_role'] == 'USER_ADMIN'
+        assert '组织变更' in ticket.title
+        assert ticket.org_detail.org_type == 'dept'
+        assert ticket.org_detail.operation == 'add'
+        assert ticket.org_detail.target_data['name'] == '新部门'
+
+    @pytest.mark.integration
+    def test_create_org_ticket_delete_dept_high_double_chain(self):
+        """删除部门 → high/双审链[USER_ADMIN, SUPER_ADMIN]"""
+        ticket = self._make_org_ticket(operation='delete', name='旧部门')
+        assert ticket.risk_level == 'high'
+        chain = ticket.approval_chain
+        assert len(chain) == 2
+        assert chain[0]['approver_role'] == 'USER_ADMIN'
+        assert chain[1]['approver_role'] == 'SUPER_ADMIN'
+
+    @pytest.mark.integration
+    def test_approve_org_add_dept_creates_department(self):
+        """新增部门工单审批通过 → EXECUTED + 部门落库"""
+        ticket = self._make_org_ticket(name='审批新部门')
+        approved = approve_ticket(ticket, self.user_admin1, comment='同意')
+        assert approved.status == TicketStatus.EXECUTED
+        assert Department.objects.filter(name='审批新部门', is_deleted=False).exists()
+
+    @pytest.mark.integration
+    def test_approve_org_edit_team_updates_team(self):
+        """编辑团队工单审批通过 → 名称/描述生效"""
+        ticket = self._make_org_ticket(
+            org_type='team', operation='edit', name='后端组',
+            target_data={'id': self.team1.id, 'name': '后端组'},
+            old_data={'name': '后端组', 'code': self.team1.code, 'description': ''},
+            new_data={'name': '后端一组', 'code': self.team1.code, 'description': '新描述',
+                      'department_id': self.team1.department_id},
+        )
+        approved = approve_ticket(ticket, self.user_admin1, comment='同意')
+        assert approved.status == TicketStatus.EXECUTED
+        self.team1.refresh_from_db()
+        assert self.team1.name == '后端一组'
+        assert self.team1.description == '新描述'
+
+    @pytest.mark.integration
+    def test_approve_org_delete_team_double_review_soft_deletes(self):
+        """删除团队双审 → 第一审后仍 PENDING → 超管复核后软删"""
+        ticket = self._make_org_ticket(
+            org_type='team', operation='delete', name='空团队',
+            target_data={'id': self.team3.id, 'name': '空团队'},
+            old_data={'name': '空团队', 'code': self.team3.code},
+        )
+        # 第 1 节点：USER_ADMIN 审核
+        approve_ticket(ticket, self.user_admin1, comment='审核')
+        ticket.refresh_from_db()
+        assert ticket.status == TicketStatus.PENDING
+        assert ticket.current_step == 1
+        assert self.team3.is_deleted is False
+        # 第 2 节点：SUPER_ADMIN 复核（sa2 ≠ 申请人 sa1 的场景下由 ua1 审首节点，
+        # sa2 复核，双人独立性满足）
+        approve_ticket(ticket, self.sa2, comment='复核')
+        ticket.refresh_from_db()
+        assert ticket.status == TicketStatus.EXECUTED
+        self.team3.refresh_from_db()
+        assert self.team3.is_deleted is True
+
+    @pytest.mark.integration
+    def test_execute_failure_rolls_back_keeps_pending(self):
+        """执行失败（目标已删除）→ 抛 ValueError，工单留在 PENDING 可重试"""
+        ticket = self._make_org_ticket(
+            operation='edit', name='幽灵部门',
+            target_data={'id': 999999, 'name': '幽灵部门'},
+            old_data={'name': '幽灵部门', 'code': 'ghost'},
+            new_data={'name': '改名部门', 'code': 'ghost2'},
+        )
+        with pytest.raises(ValueError):
+            approve_ticket(ticket, self.user_admin1, comment='同意')
+        ticket.refresh_from_db()
+        assert ticket.status == TicketStatus.PENDING
+        assert ticket.current_step == 0
+        assert not Department.objects.filter(name='改名部门').exists()
+
+    @pytest.mark.integration
+    def test_applicant_cannot_approve_own_org_ticket(self):
+        """回避原则：申请人即使持有 user_admin 角色也不能审自己的工单"""
+        _grant_role(self.user_admin1, 'user_admin')  # 已持角色，作为申请人
+        ticket = self._make_org_ticket(applicant=self.user_admin1)
+        # ua2 才是当前节点合法审批人（回避 ua1）
+        assert not _can_approve_for_role(self.user_admin1, 'USER_ADMIN', ticket)
+        assert _can_approve_for_role(self.user_admin2, 'USER_ADMIN', ticket)
+        approve_ticket(ticket, self.user_admin2, comment='同意')
+        ticket.refresh_from_db()
+        assert ticket.status == TicketStatus.EXECUTED
+
+    @pytest.mark.integration
+    def test_reject_org_ticket_no_effect(self):
+        """驳回组织工单 → REJECTED 终态，部门未创建"""
+        ticket = self._make_org_ticket(name='驳回部门')
+        reject_ticket(ticket, self.user_admin1, comment='不同意')
+        ticket.refresh_from_db()
+        assert ticket.status == TicketStatus.REJECTED
+        assert not Department.objects.filter(name='驳回部门').exists()
+
+    @pytest.mark.integration
+    def test_org_dispatch_does_not_break_permission_ticket(self):
+        """回归：分发增加 org/security 分支后，permission 工单审批路径不受影响"""
+        UserTeamScopeRel.objects.create(
+            user=self.target_user, role=self.contributor,
+            team=self.team2, status=GrantStatus.ACTIVE,
+        )
+        ticket = create_ticket(
+            applicant=self.team_leader2, target_user=self.target_user,
+            change_type=TicketChangeType.REVOKE, role=self.contributor,
+            scope_type=ScopeType.TEAM, scope_id=self.team2.id,
+            reason='回归撤销贡献者',
+        )
+        assert ticket.status == TicketStatus.EXECUTED  # 空链直接执行
+        assert not UserTeamScopeRel.objects.filter(
+            user=self.target_user, role=self.contributor,
+            team=self.team2, status=GrantStatus.ACTIVE).exists()

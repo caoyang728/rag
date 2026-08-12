@@ -621,7 +621,12 @@ function closeModelModal() {
 	closeModal('modelManageModal');
 	// 同时关闭可能残留的二级表单弹窗（showConfirmDialog），避免下次打开时表单还在
 	const overlay = document.getElementById('confirmOverlay');
-	if (overlay) overlay.classList.remove('show');
+	if (overlay) {
+		overlay.classList.remove('show');
+		// 恢复最上层弹窗交互(showConfirmDialog 激活期间被禁用,此处直接操作 overlay 绕过 ctx.close,
+		// 需手动恢复;closeModal 已同步弹窗栈,这里只需恢复栈顶,不能恢复全部,否则下层弹窗又会可穿透)
+		_restoreTopModalInteraction();
+	}
 }
 
 /* ============ 加载模型列表 ============ */

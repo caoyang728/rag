@@ -1365,8 +1365,11 @@ class DepartmentViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         from django.db.models import Prefetch
+        # teams 的 annotate(user_count) 供 DepartmentSerializer.get_teams 直接读取，
+        # 避免嵌套团队逐个统计成员数的 N+1 查询
         return super().get_queryset().prefetch_related(
-            Prefetch('teams', queryset=Team.objects.filter(is_deleted=False).select_related('leader'))
+            Prefetch('teams', queryset=Team.objects.filter(is_deleted=False).select_related('leader')
+                     .annotate(user_count=models.Count('members', filter=models.Q(members__is_deleted=False))))
         ).annotate(user_count=models.Count('users', filter=models.Q(users__is_deleted=False)))
 
     def _check_can_manage_dept(self):
@@ -1396,54 +1399,100 @@ class DepartmentViewSet(viewsets.ModelViewSet):
         if Department.objects.filter(name=name, is_deleted=False).exists():
             return Response({"detail": f"部门“{name}”已存在"}, status=400)
 
-        deleted_dept = Department.objects.filter(name=name, is_deleted=True).first()
-        if deleted_dept:
-            restored_code = data["code"]
-            if Department.objects.filter(code=restored_code, is_deleted=False).exclude(id=deleted_dept.id).exists():
-                restored_code = _ensure_unique_code(restored_code, Department)
-            deleted_dept.is_deleted = False
-            deleted_dept.name = name
-            deleted_dept.code = restored_code
-            try:
-                deleted_dept.save()
-            except IntegrityError:
-                return Response({"detail": f"部门“{name}”已存在"}, status=400)
-            logger.info(f"Department.create - restored deleted department: {deleted_dept.name}")
-            return Response(DepartmentSerializer(deleted_dept).data, status=201)
-
-        ser = DepartmentWriteSerializer(data=data)
-        ser.is_valid(raise_exception=True)
-        try:
-            dept = ser.save()
-        except IntegrityError:
-            return Response({"detail": f"部门“{name}”已存在"}, status=400)
-        return Response(DepartmentSerializer(dept).data, status=201)
+        # 组织变更一律走工单:创建时预检,审批通过后由 _execute_org_change 落库
+        # (软删同名行恢复语义也在执行层处理,保证 KnowledgeNode ref_id 身份)
+        from apps.users.models import OrgChangeType, OrgOperation
+        from apps.users.ticket_service import create_org_ticket
+        ticket = create_org_ticket(
+            actor=request.user,
+            org_type=OrgChangeType.DEPT,
+            operation=OrgOperation.ADD,
+            target_data={"name": name, "code": data["code"]},
+            reason=f'新增部门: {name}',
+            new_data={"name": name, "code": data["code"]},
+            ip_address=_client_ip(request),
+            user_agent=request.META.get("HTTP_USER_AGENT", "")[:256],
+        )
+        logger.info(f"Department.create - user: {request.user.username}, name: {name}, ticket: {ticket.ticket_no}")
+        return Response({
+            "ticket_no": ticket.ticket_no,
+            "status": ticket.status,
+            "risk_level": ticket.risk_level,
+            "detail": "部门新增需审批，已创建工单",
+        }, status=201)
 
     def update(self, request, *args, **kwargs):
         self._check_can_manage_dept()
         dept = self.get_object()
         # leader_id 不再直接写库(同 create),部门经理通过任命工单设置
         data = {k: v for k, v in request.data.items() if k != 'leader_id'}
-        ser = DepartmentWriteSerializer(dept, data=data, partial=kwargs.get('partial', False))
-        ser.is_valid(raise_exception=True)
-        try:
-            dept = ser.save()
-        except IntegrityError:
-            return Response({"detail": "部门编码冲突"}, status=400)
-        return Response(DepartmentSerializer(dept).data)
+        name = data.get("name")
+        code = data.get("code")
+        # 创建工单前预检唯一性(审批期间变化由执行层二次校验兜底)
+        if name is not None:
+            name = str(name).strip()
+            if Department.objects.filter(name=name, is_deleted=False).exclude(id=dept.id).exists():
+                return Response({"detail": f"部门“{name}”已存在"}, status=400)
+        if code is not None:
+            code = str(code).strip()
+            if Department.objects.filter(code=code, is_deleted=False).exclude(id=dept.id).exists():
+                return Response({"detail": "部门编码冲突"}, status=400)
+
+        from apps.users.models import OrgChangeType, OrgOperation
+        from apps.users.ticket_service import create_org_ticket
+        new_data = {
+            "name": name if name is not None else dept.name,
+            "code": (code if code is not None else (dept.code or '')) or '',
+        }
+        ticket = create_org_ticket(
+            actor=request.user,
+            org_type=OrgChangeType.DEPT,
+            operation=OrgOperation.EDIT,
+            target_data={"id": dept.id, "name": dept.name, "code": dept.code or ''},
+            reason=f'编辑部门: {dept.name}',
+            old_data={"name": dept.name, "code": dept.code or ''},
+            new_data=new_data,
+            ip_address=_client_ip(request),
+            user_agent=request.META.get("HTTP_USER_AGENT", "")[:256],
+        )
+        logger.info(f"Department.update - user: {request.user.username}, id: {dept.id}, ticket: {ticket.ticket_no}")
+        return Response({
+            "ticket_no": ticket.ticket_no,
+            "status": ticket.status,
+            "risk_level": ticket.risk_level,
+            "detail": "部门编辑需审批，已创建工单",
+        })
 
     def destroy(self, request, *args, **kwargs):
         self._check_can_manage_dept()
         dept = self.get_object()
+        # 创建工单前预检(审批期间变化由执行层二次校验兜底)
         user_count = User.objects.filter(department=dept, is_deleted=False).count()
         if user_count > 0:
             return Response({"detail": f"该部门下还有 {user_count} 个用户，无法删除"}, status=400)
         team_count = Team.objects.filter(department=dept, is_deleted=False).count()
         if team_count > 0:
             return Response({"detail": f"该部门下还有 {team_count} 个团队，请先删除或迁移团队"}, status=400)
-        dept.is_deleted = True
-        dept.save()
-        return Response(status=204)
+
+        from apps.users.models import OrgChangeType, OrgOperation
+        from apps.users.ticket_service import create_org_ticket
+        ticket = create_org_ticket(
+            actor=request.user,
+            org_type=OrgChangeType.DEPT,
+            operation=OrgOperation.DELETE,
+            target_data={"id": dept.id, "name": dept.name},
+            reason=f'删除部门: {dept.name}',
+            old_data={"name": dept.name, "code": dept.code or ''},
+            ip_address=_client_ip(request),
+            user_agent=request.META.get("HTTP_USER_AGENT", "")[:256],
+        )
+        logger.info(f"Department.destroy - user: {request.user.username}, id: {dept.id}, ticket: {ticket.ticket_no}")
+        return Response({
+            "ticket_no": ticket.ticket_no,
+            "status": ticket.status,
+            "risk_level": ticket.risk_level,
+            "detail": "部门删除为高风险操作，已创建工单，需双审后生效",
+        })
 
 
 class PermissionViewSet(viewsets.ModelViewSet):
@@ -1681,8 +1730,8 @@ class TeamViewSet(viewsets.ModelViewSet):
             logger.error(f"Team.create - department_id {dept_id} does not exist")
             return Response({"detail": "指定的部门不存在"}, status=400)
 
-        data["department_id"] = dept_id
-
+        # 组织变更一律走工单:创建时预检,审批通过后由 _execute_org_change 落库
+        # (软删同名行恢复语义也在执行层处理,保证 KnowledgeNode ref_id 身份)
         if Team.objects.filter(name=name, department_id=dept_id, is_deleted=False).exists():
             return Response({"detail": f"部门“{dept.name}”下已存在团队“{name}”"}, status=400)
 
@@ -1692,55 +1741,90 @@ class TeamViewSet(viewsets.ModelViewSet):
             data["code"] = _auto_code(name, prefix)
         data["code"] = _ensure_unique_code(data["code"], Team)
 
-        deleted_team = Team.objects.filter(name=name, department_id=dept_id, is_deleted=True).first()
-        if deleted_team:
-            restored_code = data["code"]
-            if Team.objects.filter(code=restored_code, is_deleted=False).exclude(id=deleted_team.id).exists():
-                restored_code = _ensure_unique_code(restored_code, Team)
-            deleted_team.is_deleted = False
-            deleted_team.name = name
-            deleted_team.code = restored_code
-            deleted_team.description = data.get("description", "")
-            deleted_team.department_id = dept_id
-            try:
-                deleted_team.save()
-            except IntegrityError:
-                return Response({"detail": f"部门“{dept.name}”下已存在团队“{name}”"}, status=400)
-            logger.info(f"Team.create - restored deleted team: {deleted_team.name}, department_id: {dept_id}")
-            return Response(TeamSerializer(deleted_team).data, status=201)
-
-        logger.info(f"Team.create - creating new team with data: {data}")
-        try:
-            team = Team.objects.create(
-                name=data["name"],
-                code=data["code"],
-                department_id=dept_id,
-                description=data.get("description")
-            )
-            logger.info(f"Team.create - success, team id: {team.id}, department_id: {team.department_id}")
-            return Response(TeamSerializer(team).data, status=201)
-        except IntegrityError:
-            return Response({"detail": f"部门“{dept.name}”下已存在团队“{name}”"}, status=400)
-        except Exception as e:
-            logger.error(f"Team.create - failed, exception: {str(e)}")
-            raise
+        from apps.users.models import OrgChangeType, OrgOperation
+        from apps.users.ticket_service import create_org_ticket
+        ticket = create_org_ticket(
+            actor=request.user,
+            org_type=OrgChangeType.TEAM,
+            operation=OrgOperation.ADD,
+            target_data={"name": name, "code": data["code"], "department_id": dept_id},
+            reason=f'新增团队: {name}(部门: {dept.name})',
+            new_data={"name": name, "code": data["code"], "department_id": dept_id,
+                      "description": data.get("description", "")},
+            ip_address=_client_ip(request),
+            user_agent=request.META.get("HTTP_USER_AGENT", "")[:256],
+        )
+        logger.info(f"Team.create - user: {request.user.username}, name: {name}, department_id: {dept_id}, ticket: {ticket.ticket_no}")
+        return Response({
+            "ticket_no": ticket.ticket_no,
+            "status": ticket.status,
+            "risk_level": ticket.risk_level,
+            "detail": "团队新增需审批，已创建工单",
+        }, status=201)
 
     def update(self, request, *args, **kwargs):
         team = self.get_object()
         self._check_can_manage_team(team.department_id)
         # leader_id 不再直接写库(同 create),团队组长通过任命工单设置
         data = {k: v for k, v in request.data.items() if k != 'leader_id'}
-        ser = TeamWriteSerializer(team, data=data, partial=kwargs.get('partial', False))
-        ser.is_valid(raise_exception=True)
-        try:
-            team = ser.save()
-        except IntegrityError:
-            return Response({"detail": "团队编码冲突"}, status=400)
-        return Response(TeamSerializer(team).data)
+        new_name = data.get("name")
+        new_code = data.get("code")
+        new_dept_id = data.get("department_id")
+        # 创建工单前预检唯一性(审批期间变化由执行层二次校验兜底)
+        if new_dept_id is not None:
+            try:
+                new_dept_id = int(new_dept_id)
+            except (TypeError, ValueError):
+                return Response({"detail": "部门ID不合法"}, status=400)
+            self._check_can_manage_team(new_dept_id)
+            if not Department.objects.filter(id=new_dept_id, is_deleted=False).exists():
+                return Response({"detail": "指定的部门不存在"}, status=400)
+        if new_name is not None:
+            new_name = str(new_name).strip()
+            if Team.objects.filter(name=new_name, department_id=new_dept_id or team.department_id,
+                                  is_deleted=False).exclude(id=team.id).exists():
+                return Response({"detail": f"部门下已存在团队“{new_name}”"}, status=400)
+        if new_code is not None:
+            new_code = str(new_code).strip()
+            if Team.objects.filter(code=new_code, is_deleted=False).exclude(id=team.id).exists():
+                return Response({"detail": "团队编码冲突"}, status=400)
+
+        from apps.users.models import OrgChangeType, OrgOperation
+        from apps.users.ticket_service import create_org_ticket
+        old_dept = team.department
+        new_data = {
+            "name": new_name if new_name is not None else team.name,
+            "code": (new_code if new_code is not None else (team.code or '')) or '',
+            "department_id": new_dept_id if new_dept_id is not None else team.department_id,
+            "description": data.get("description", team.description or ''),
+        }
+        ticket = create_org_ticket(
+            actor=request.user,
+            org_type=OrgChangeType.TEAM,
+            operation=OrgOperation.EDIT,
+            target_data={"id": team.id, "name": team.name,
+                         "department_id": team.department_id, "department_name": old_dept.name if old_dept else ''},
+            reason=f'编辑团队: {team.name}',
+            old_data={"name": team.name, "code": team.code or '',
+                      "department_id": team.department_id,
+                      "department_name": old_dept.name if old_dept else '',
+                      "description": team.description or ''},
+            new_data=new_data,
+            ip_address=_client_ip(request),
+            user_agent=request.META.get("HTTP_USER_AGENT", "")[:256],
+        )
+        logger.info(f"Team.update - user: {request.user.username}, id: {team.id}, ticket: {ticket.ticket_no}")
+        return Response({
+            "ticket_no": ticket.ticket_no,
+            "status": ticket.status,
+            "risk_level": ticket.risk_level,
+            "detail": "团队编辑需审批，已创建工单",
+        })
 
     def destroy(self, request, *args, **kwargs):
         team = self.get_object()
         self._check_can_manage_team(team.department_id)
+        # 创建工单前预检(审批期间变化由执行层二次校验兜底)
         # 单团队 FK：统计 User.team 指向该团队的用户
         user_count = User.objects.filter(team=team, is_deleted=False).count()
         if user_count > 0:
@@ -1760,9 +1844,25 @@ class TeamViewSet(viewsets.ModelViewSet):
                     status=400
                 )
 
-        team.is_deleted = True
-        team.save()
-        return Response(status=204)
+        from apps.users.models import OrgChangeType, OrgOperation
+        from apps.users.ticket_service import create_org_ticket
+        ticket = create_org_ticket(
+            actor=request.user,
+            org_type=OrgChangeType.TEAM,
+            operation=OrgOperation.DELETE,
+            target_data={"id": team.id, "name": team.name, "department_id": team.department_id},
+            reason=f'删除团队: {team.name}',
+            old_data={"name": team.name, "code": team.code or '', "department_id": team.department_id},
+            ip_address=_client_ip(request),
+            user_agent=request.META.get("HTTP_USER_AGENT", "")[:256],
+        )
+        logger.info(f"Team.destroy - user: {request.user.username}, id: {team.id}, ticket: {ticket.ticket_no}")
+        return Response({
+            "ticket_no": ticket.ticket_no,
+            "status": ticket.status,
+            "risk_level": ticket.risk_level,
+            "detail": "团队删除为高风险操作，已创建工单，需双审后生效",
+        })
 
 
 # ============================================================================
@@ -2458,8 +2558,10 @@ def _ticket_visible_scope(user):
     q = models.Q(applicant=user)
 
     # user_admin：用户角色授权/变更类权限工单（详情子表 role 非空）
+    # 组织变更工单（部门/团队增删改）也归用户管理员管辖，与角色工单同视角
     if has_permission(user, 'user.manage_all') or has_permission(user, 'user.manage'):
         q |= models.Q(biz_type=TicketBizType.PERMISSION, permission_detail__role__isnull=False)
+        q |= models.Q(biz_type=TicketBizType.ORG)
 
     # maintain_admin：配置/定时任务/模型变更工单
     if has_permission(user, 'system.config.write'):
@@ -2615,6 +2717,16 @@ def _serialize_center_ticket(t, config_map=None, model_map=None, dept_map=None, 
         'operation': t.operation,
         'operation_display': _CENTER_OPERATION_DISPLAY.get(t.operation, t.operation),
         'changed_fields': [],
+        # security 特有字段占位
+        'security_type': '',
+        'security_type_display': '',
+        'security_target': '',
+        # org 特有字段占位
+        'org_type': '',
+        'org_type_display': '',
+        'org_name': '',
+        'old_data': None,
+        'new_data': None,
     }
 
     # --- permission：详情子表（change_type/role/scope 等） ---
@@ -2682,6 +2794,49 @@ def _serialize_center_ticket(t, config_map=None, model_map=None, dept_map=None, 
             ad = getattr(t, 'agent_approval_detail', None)
             row['reason'] = ad.reason if ad else ''
             row['operation'] = t.operation or 'agent_approval'
+        # --- security：安全配置（TicketSecurityDetail），目标取 target_data 快照 ---
+        elif t.biz_type == TicketBizType.SECURITY:
+            sd = getattr(t, 'security_detail', None)
+            if sd:
+                from apps.users.models import SecurityConfigType, SecurityOperation
+                target_data = sd.target_data or {}
+                # 目标展示值:白名单/黑名单取 ip_pattern,敏感词取 word
+                target_val = target_data.get('ip_pattern') or target_data.get('word') or ''
+                row.update({
+                    'security_type': sd.security_type,
+                    'security_type_display': dict(SecurityConfigType.choices).get(sd.security_type, sd.security_type),
+                    'operation': sd.operation,
+                    'operation_display': dict(SecurityOperation.choices).get(sd.operation, sd.operation),
+                    'security_target': target_val,
+                    'reason': sd.reason or '',
+                })
+        # --- org：组织变更（TicketOrgDetail），old/new 直接读子表 JSON ---
+        elif t.biz_type == TicketBizType.ORG:
+            od = getattr(t, 'org_detail', None)
+            row['reason'] = od.reason if od and od.reason else (row.get('reason') or '')
+            if od:
+                from apps.users.models import OrgChangeType, OrgOperation
+                # operation_display 由 组织类型+操作 组合计算（主表 _CENTER_OPERATION_DISPLAY 仅覆盖模型域）
+                org_op_labels = {
+                    (OrgChangeType.DEPT, OrgOperation.ADD): '部门新增',
+                    (OrgChangeType.DEPT, OrgOperation.EDIT): '部门编辑',
+                    (OrgChangeType.DEPT, OrgOperation.DELETE): '部门删除',
+                    (OrgChangeType.TEAM, OrgOperation.ADD): '团队新增',
+                    (OrgChangeType.TEAM, OrgOperation.EDIT): '团队编辑',
+                    (OrgChangeType.TEAM, OrgOperation.DELETE): '团队删除',
+                }
+                row.update({
+                    'org_type': od.org_type,
+                    'org_type_display': dict(OrgChangeType.choices).get(od.org_type, od.org_type),
+                    'operation': od.operation,
+                    'operation_display': org_op_labels.get((od.org_type, od.operation),
+                                                           od.operation),
+                    # target_data 为创建时的目标快照(名称等),部门/团队可能已被其他工单变更,展示用快照
+                    'org_name': (od.target_data or {}).get('name', ''),
+                    'old_data': od.old_data,
+                    'new_data': od.new_data,
+                    'changed_fields': sorted(set((od.old_data or {}).keys()) | set((od.new_data or {}).keys())),
+                })
     return row
 
 
@@ -2748,6 +2903,7 @@ class TicketCenterView(APIView):
             'applicant', 'permission_detail__target_user',
             'permission_detail__role', 'permission_detail__previous_role',
             'config_detail', 'schedule_detail', 'model_detail',
+            'org_detail', 'security_detail',
         )
         if type_list:
             qs = qs.filter(biz_type__in=type_list)
@@ -2852,7 +3008,9 @@ class TicketCenterApproveView(APIView):
         ticket = TicketList.objects.filter(pk=pk).first()
         if not ticket:
             return Response({"detail": "工单不存在"}, status=404)
-        if ticket.biz_type == TicketBizType.PERMISSION:
+        # 共享审批池类型（权限/组织变更/IP黑白名单）：统一走 ticket_service 审批，
+        # 类型无关，回避原则/双人独立性由 _can_approve_for_role 保证，执行由分发函数落地
+        if ticket.biz_type in (TicketBizType.PERMISSION, TicketBizType.ORG, TicketBizType.SECURITY):
             return TicketApproveView().post(request, pk)
         # 系统域工单：委托 system 侧审批视图（内部含权限校验/依赖检查/执行生效）
         from apps.system.views import ApproveTicketView
@@ -2870,7 +3028,7 @@ class TicketCenterRejectView(APIView):
         ticket = TicketList.objects.filter(pk=pk).first()
         if not ticket:
             return Response({"detail": "工单不存在"}, status=404)
-        if ticket.biz_type == TicketBizType.PERMISSION:
+        if ticket.biz_type in (TicketBizType.PERMISSION, TicketBizType.ORG, TicketBizType.SECURITY):
             return TicketRejectView().post(request, pk)
         from apps.system.views import RejectTicketView
         return RejectTicketView().post(request, pk)
@@ -2889,7 +3047,7 @@ class TicketCenterWithdrawView(APIView):
         ticket = TicketList.objects.filter(pk=pk).first()
         if not ticket:
             return Response({"detail": "工单不存在"}, status=404)
-        if ticket.biz_type == TicketBizType.PERMISSION:
+        if ticket.biz_type in (TicketBizType.PERMISSION, TicketBizType.ORG, TicketBizType.SECURITY):
             # 与 AccessApplicationWithdrawView 一致：仅创建人 + PENDING
             if ticket.applicant_id != request.user.id:
                 return Response({"detail": "仅创建人可撤回工单"}, status=403)

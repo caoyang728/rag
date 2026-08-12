@@ -34,9 +34,12 @@ class DepartmentSerializer(serializers.ModelSerializer):
 
     def get_teams(self, obj):
         # 使用 related manager 以利用 prefetch_related 优化，避免 N+1 查询
+        # user_count 优先读取 ViewSet Prefetch 中的 annotate 值，未预加载时回退实时统计
         return [{"id": t.id, "name": t.name, "code": t.code,
                  "leader_id": t.leader_id,
-                 "leader_name": (t.leader.real_name or t.leader.username) if t.leader else None}
+                 "leader_name": (t.leader.real_name or t.leader.username) if t.leader else None,
+                 "user_count": t.user_count if hasattr(t, 'user_count')
+                 else User.objects.filter(team=t, is_deleted=False).count()}
                 for t in obj.teams.all() if not t.is_deleted]
 
 

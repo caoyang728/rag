@@ -32,7 +32,16 @@ TICKET_API = '/api/v1/auth/tickets/'
 
 
 class TicketCenterTestBase(UsersAPIExtraBase):
-    """工单中心测试公共基座 —— 提供配置/权限两类工单的创建辅助"""
+    """工单中心测试公共基座 —— 提供配置/权限/组织三类工单的创建辅助"""
+
+    def _make_user_with_perm(self, username, perm_key, role_key, role_name):
+        """创建带指定功能权限的用户（绑定角色 + 权限点），归属 dept_a/team_a"""
+        user = _create_user(username, department=self.dept_a, team=self.team_a)
+        role = _get_or_create_role(role_key, name=role_name, is_builtin=True,
+                                   role_type=RoleType.GLOBAL, data_scope=DataScope.GLOBAL)
+        _grant_permission(role, perm_key)
+        _grant_global_role(user, role_key)
+        return user
 
     def _make_config_ticket(self, applicant=None, key='search.top_k', risk_level='normal',
                             new_value='10'):
@@ -180,15 +189,6 @@ class TestTicketCenterListView(TicketCenterTestBase):
 class TestTicketCenterVisibleScope(TicketCenterTestBase):
     """工单中心展示矩阵：超管全量 / user_admin 角色工单 / maintain 配置工单 /
     kb_admin 文档工单 / 部门经理管辖部门 / 组长管辖团队 / 个人仅自己"""
-
-    def _make_user_with_perm(self, username, perm_key, role_key, role_name):
-        """创建带指定功能权限的用户（绑定角色 + 权限点），归属 dept_a/team_a"""
-        user = _create_user(username, department=self.dept_a, team=self.team_a)
-        role = _get_or_create_role(role_key, name=role_name, is_builtin=True,
-                                   role_type=RoleType.GLOBAL, data_scope=DataScope.GLOBAL)
-        _grant_permission(role, perm_key)
-        _grant_global_role(user, role_key)
-        return user
 
     def _make_doc_ticket(self, applicant=None, target_user=None):
         """创建文档/节点授权工单（permission 域 + role=None，等价 knowledge._create_doc_ticket）"""
@@ -410,3 +410,114 @@ class TestTicketCenterWithdrawView(TicketCenterTestBase):
         assert resp.status_code == 409
         t.refresh_from_db()
         assert t.status == TicketStatus.EXECUTED
+
+
+# ============================================================================
+# org 组织变更工单 —— 工单中心序列化 / 可见范围 / 统一审批路由
+# ============================================================================
+class TestOrgTicketCenter(TicketCenterTestBase):
+    """org 工单在工单中心：行序列化字段 / user_admin 可见范围 / 审批生效"""
+
+    def _make_org_ticket(self, applicant=None, name='工单中心新部门', operation='add'):
+        """创建部门新增 org 工单（normal 单审链 [USER_ADMIN]）"""
+        from apps.users.ticket_service import create_org_ticket
+        return create_org_ticket(
+            actor=applicant or self.normal_user,
+            org_type='dept',
+            operation=operation,
+            target_data={'name': name, 'code': 'gzzx'},
+            reason=f'测试{operation}: {name}',
+            new_data={'name': name, 'code': 'gzzx'} if operation != 'delete' else None,
+            old_data={'name': name, 'code': 'gzzx'} if operation in ('edit', 'delete') else None,
+        )
+
+    @pytest.mark.integration
+    def test_org_row_has_detail_fields(self):
+        """org 工单行包含组织类型/操作/目标名/变更前后快照，供前端按类型渲染"""
+        t = self._make_org_ticket()
+        resp = self.client.get(TICKET_API + '?view=all', **self.admin_headers)
+        assert resp.status_code == 200
+        row = next(r for r in resp.json()['rows'] if r['biz_type'] == 'org')
+        assert row['ticket_no'] == t.ticket_no
+        assert row['org_type'] == 'dept'
+        assert row['org_type_display'] == '部门'
+        assert row['operation'] == 'add'
+        assert row['operation_display'] == '部门新增'
+        assert row['org_name'] == '工单中心新部门'
+        assert row['old_data'] is None
+        assert row['new_data']['name'] == '工单中心新部门'
+        assert '组织变更' in row['title']
+
+    @pytest.mark.integration
+    def test_org_edit_row_shows_operation_and_old_new(self):
+        """org 编辑工单行：操作显示"部门编辑"，old/new 双快照齐全"""
+        from apps.users.models import Department
+        d = Department.objects.create(name='老名字', code='old')
+        t = self._make_org_ticket(operation='edit', name='老名字')
+        od = t.org_detail
+        od.target_data = {'id': d.id, 'name': '老名字'}
+        od.old_data = {'name': '老名字', 'code': 'old'}
+        od.new_data = {'name': '新名字', 'code': 'old'}
+        od.save()
+        resp = self.client.get(TICKET_API + '?view=all', **self.admin_headers)
+        row = next(r for r in resp.json()['rows'] if r['biz_type'] == 'org')
+        assert row['operation_display'] == '部门编辑'
+        assert row['old_data']['name'] == '老名字'
+        assert row['new_data']['name'] == '新名字'
+
+    @pytest.mark.integration
+    def test_user_admin_sees_org_tickets_in_all_view(self):
+        """user_admin（user.manage_all）→ view=all 可见 org 工单（与角色工单同视角）"""
+        user_admin = self._make_user_with_perm('useradmin_org', 'user.manage_all',
+                                               'user_admin', '用户管理员')
+        self._make_org_ticket()          # org 工单
+        self._make_config_ticket()       # 配置工单（user_admin 不可见）
+        resp = self.client.get(TICKET_API + '?view=all', **_auth_headers(user_admin))
+        assert resp.status_code == 200
+        rows = resp.json()['rows']
+        assert len(rows) == 1
+        assert rows[0]['biz_type'] == 'org'
+
+    @pytest.mark.integration
+    def test_approve_org_ticket_via_center_executes(self):
+        """工单中心统一审批入口审批 org 工单 → EXECUTED + 部门落库"""
+        t = self._make_org_ticket()
+        # org 审批链首节点为 USER_ADMIN：构造 user_admin 审批人走中心入口
+        from apps.users.tests.test_views_base import _grant_global_role
+        ua = _create_user('ua_center')
+        _grant_global_role(ua, 'user_admin')
+        resp = self.client.post(TICKET_API + f'{t.id}/approve/',
+                                data=json.dumps({'comment': '同意'}),
+                                content_type='application/json',
+                                **_auth_headers(ua))
+        assert resp.status_code == 200, resp.content
+        t.refresh_from_db()
+        assert t.status == TicketStatus.EXECUTED
+        from apps.users.models import Department
+        assert Department.objects.filter(name='工单中心新部门', is_deleted=False).exists()
+
+    @pytest.mark.integration
+    def test_reject_org_ticket_via_center(self):
+        """工单中心统一驳回入口驳回 org 工单 → REJECTED 终态"""
+        t = self._make_org_ticket()
+        from apps.users.tests.test_views_base import _grant_global_role
+        ua = _create_user('ua_reject')
+        _grant_global_role(ua, 'user_admin')
+        resp = self.client.post(TICKET_API + f'{t.id}/reject/',
+                                data=json.dumps({'comment': '不同意'}),
+                                content_type='application/json',
+                                **_auth_headers(ua))
+        assert resp.status_code == 200, resp.content
+        t.refresh_from_db()
+        assert t.status == TicketStatus.REJECTED
+
+    @pytest.mark.integration
+    def test_withdraw_org_ticket_by_applicant(self):
+        """创建人撤回 org 工单 → CANCELLED"""
+        t = self._make_org_ticket()
+        resp = self.client.post(TICKET_API + f'{t.id}/withdraw/',
+                                data=json.dumps({}), content_type='application/json',
+                                **self.normal_headers)
+        assert resp.status_code == 200
+        t.refresh_from_db()
+        assert t.status == TicketStatus.CANCELLED

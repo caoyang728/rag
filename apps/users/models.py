@@ -100,6 +100,7 @@ class TicketBizType(models.TextChoices):
     - schedule：定时任务变更，业务字段在主表 detail JSON
     - agent：Agent 工作流人工确认（HITL），详情在 TicketAgentApprovalDetail
     - security：安全配置变更（IP 白名单/黑名单/敏感词），详情在 TicketSecurityDetail
+    - org：组织架构变更（部门/团队增删改），详情在 TicketOrgDetail
     """
     PERMISSION = 'permission', _('权限审批')
     CONFIG = 'config', _('配置变更')
@@ -107,6 +108,7 @@ class TicketBizType(models.TextChoices):
     SCHEDULE = 'schedule', _('定时任务')
     AGENT = 'agent', _('Agent审批')
     SECURITY = 'security', _('安全配置')
+    ORG = 'org', _('组织变更')
 
 
 class UserStatus(models.TextChoices):
@@ -663,6 +665,11 @@ class TicketList(models.Model):
         return getattr(self, 'agent_approval_detail', None)
 
     @property
+    def _od(self):
+        # org 组织变更详情子表（biz_type=org 时有效）
+        return getattr(self, 'org_detail', None)
+
+    @property
     def change_type(self):
         d = self._pd
         return d.change_type if d else None
@@ -720,7 +727,7 @@ class TicketList(models.Model):
     @property
     def reason(self):
         # 统一 reason 代理：各类型详情子表各自存储申请/变更原因，按类型依次取
-        for d in (self._pd, self._cd, self._sd, self._md, self._ad):
+        for d in (self._pd, self._cd, self._sd, self._md, self._ad, self._od):
             if d:
                 return d.reason
         return ''
@@ -970,6 +977,64 @@ class TicketSecurityDetail(models.Model):
 
     def __str__(self):
         return f'SecurityDetail<{self.ticket_id}> {self.security_type}:{self.operation}'
+
+
+class OrgChangeType(models.TextChoices):
+    """组织变更目标类型 —— TicketOrgDetail.org_type 枚举
+
+    标识本次工单变更的是部门还是团队，用于审批展示与执行时路由到对应逻辑。
+    """
+    DEPT = 'dept', _('部门')
+    TEAM = 'team', _('团队')
+
+
+class OrgOperation(models.TextChoices):
+    """组织变更操作类型 —— TicketOrgDetail.operation 枚举
+
+    标识本次工单对目标组织的操作类型，用于审批展示与执行时选择对应逻辑。
+    """
+    ADD = 'add', _('新增')
+    EDIT = 'edit', _('编辑')
+    DELETE = 'delete', _('删除')
+
+
+class TicketOrgDetail(models.Model):
+    """组织架构变更工单详情 —— 关联统一主表，biz_type=org
+
+    与主表 TicketList 一对一：主表管流程（审批链/状态/时间），本表管业务
+    （部门还是团队、什么操作、变更前后数据快照）。
+
+    风险分级策略（由创建方在提交时决定 risk_level）：
+    - 普通（单审 USER_ADMIN）：部门/团队新增、编辑
+    - 高风险（双审 USER_ADMIN + SUPER_ADMIN）：部门/团队删除（破坏性操作）
+
+    执行时机：审批链全部通过后由 _execute_org_change 落库（Department/Team 的
+    post_save 信号会自动同步知识节点树），创建工单时只做预检不落库。
+    """
+    ticket = models.OneToOneField(TicketList, on_delete=models.CASCADE,
+                                  related_name='org_detail',
+                                  help_text=_('关联统一工单主表'))
+    org_type = models.CharField(max_length=16, choices=OrgChangeType.choices,
+                                help_text=_('组织类型（部门/团队）'))
+    operation = models.CharField(max_length=16, choices=OrgOperation.choices,
+                                 help_text=_('操作类型'))
+    target_data = models.JSONField(help_text=_('目标数据快照（如 id/name/code/description/department_id 等）'))
+    old_data = models.JSONField(null=True, blank=True,
+                                help_text=_('变更前数据（编辑/删除时）'))
+    new_data = models.JSONField(null=True, blank=True,
+                                help_text=_('变更后数据（新增/编辑时）'))
+    reason = models.TextField(blank=True, default='',
+                              help_text=_('变更原因'))
+
+    class Meta:
+        db_table = 'org_ticket_detail'
+        verbose_name = _('组织变更工单详情')
+        indexes = [
+            models.Index(fields=['org_type'], name='idx_org_detail_type'),
+        ]
+
+    def __str__(self):
+        return f'OrgDetail<{self.ticket_id}> {self.org_type}:{self.operation}'
 
 
 class TicketFlowLog(models.Model):

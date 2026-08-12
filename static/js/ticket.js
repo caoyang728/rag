@@ -184,6 +184,8 @@ const _bizTypeMap = {
 	'config': '<span class="badge badge-warn">配置变更</span>',
 	'schedule': '<span class="badge badge-default">定时任务</span>',
 	'model': '<span class="badge badge-danger">模型变更</span>',
+	'org': '<span class="badge badge-info">组织变更</span>',
+	'security': '<span class="badge badge-warn">安全设置</span>',
 };
 
 function _renderTicketRow(t, view) {
@@ -206,6 +208,16 @@ function _renderTicketRow(t, view) {
 			<div class="text-sub text-xs mono">${escapeHtml(t.config_key || '')}</div>`;
 	} else if (t.biz_type === 'model') {
 		targetHtml = `<div>${escapeHtml(t.model_name || '—')}</div>`;
+	} else if (t.biz_type === 'org') {
+		// org=目标部门/团队名 + 操作类型(部门新增/编辑/删除等)
+		targetHtml = `
+			<div>${escapeHtml(t.org_name || '—')}</div>
+			<div class="text-sub text-xs">${escapeHtml(t.operation_display || '')}</div>`;
+	} else if (t.biz_type === 'security') {
+		// security=目标 IP/敏感词 + 类型/操作(如 IP白名单 · 新增)
+		targetHtml = `
+			<div class="mono">${escapeHtml(t.security_target || '—')}</div>
+			<div class="text-sub text-xs">${escapeHtml(t.security_type_display || '')} · ${escapeHtml(t.operation_display || '')}</div>`;
 	}
 
 	// 状态列：待我审批视角固定显示"待审批"，其他视角显示实际状态
@@ -415,7 +427,86 @@ function _renderBizDetail(t) {
 	if (t.biz_type === 'model') {
 		return _renderModelDetail(t);
 	}
+	if (t.biz_type === 'org') {
+		return _renderOrgDetail(t);
+	}
+	if (t.biz_type === 'security') {
+		return _renderSecurityDetail(t);
+	}
 	return '';
+}
+
+// 安全配置详情:配置类型/操作/目标/申请理由(target_data 快照由后端透传)
+function _renderSecurityDetail(t) {
+	return `
+		<div class="detail-section-title">变更内容</div>
+		<div class="detail-grid">
+			<div class="detail-cell">
+				<div class="detail-cell-label">安全配置类型</div>
+				<div class="detail-cell-value">${escapeHtml(t.security_type_display || '—')}</div>
+			</div>
+			<div class="detail-cell">
+				<div class="detail-cell-label">操作</div>
+				<div class="detail-cell-value">${escapeHtml(t.operation_display || '—')}</div>
+			</div>
+			<div class="detail-cell">
+				<div class="detail-cell-label">目标</div>
+				<div class="detail-cell-value mono">${escapeHtml(t.security_target || '—')}</div>
+			</div>
+		</div>
+		<div class="detail-section-title">申请理由</div>
+		<div class="reason-box">${escapeHtml(t.reason) || '—'}</div>`;
+}
+
+// 组织变更详情:组织类型/操作/目标/变更前后内容/申请理由
+// old_data/new_data 为后端序列化透传的 JSON 快照(如 {name, code, department_id})
+function _renderOrgDetail(t) {
+	const oldData = t.old_data || {};
+	const newData = t.new_data || {};
+	// 变更字段并集:新增场景只有 new,删除场景只有 old,编辑场景两者都有
+	const keys = t.changed_fields && t.changed_fields.length
+		? t.changed_fields
+		: (Object.keys(newData).length ? Object.keys(newData) : Object.keys(oldData));
+	const fieldLabels = {
+		'name': '名称',
+		'code': '编码',
+		'description': '描述',
+		'department_id': '所属部门',
+		'department_name': '所属部门',
+	};
+	const diffRows = keys.map(k => {
+		const label = fieldLabels[k] || k;
+		const oldV = oldData[k] !== undefined ? String(oldData[k]) : '';
+		const newV = newData[k] !== undefined ? String(newData[k]) : '';
+		// 新值列:删除场景显示"（删除）";原值列:字段有变化才显示旧值
+		const newHtml = newV === '' ? '<span class="text-sub">（删除）</span>' : escapeHtml(newV);
+		const oldHtml = (oldV !== '' && String(oldV) !== newV) ? `原值: ${escapeHtml(oldV)}` : '';
+		return `
+			<div class="detail-cell">
+				<div class="detail-cell-label">${escapeHtml(label)}</div>
+				<div class="detail-cell-value">${newHtml}</div>
+				${oldHtml ? `<div class="detail-cell-sub">${oldHtml}</div>` : ''}
+			</div>`;
+	}).join('');
+	return `
+		<div class="detail-section-title">变更内容</div>
+		<div class="detail-grid">
+			<div class="detail-cell">
+				<div class="detail-cell-label">组织类型</div>
+				<div class="detail-cell-value">${escapeHtml(t.org_type_display || '—')}</div>
+			</div>
+			<div class="detail-cell">
+				<div class="detail-cell-label">操作</div>
+				<div class="detail-cell-value">${escapeHtml(t.operation_display || '—')}</div>
+			</div>
+			<div class="detail-cell">
+				<div class="detail-cell-label">目标</div>
+				<div class="detail-cell-value">${escapeHtml(t.org_name || '—')}</div>
+			</div>
+		</div>
+		${diffRows ? `<div class="detail-section-title">变更前后</div><div class="detail-grid">${diffRows}</div>` : ''}
+		<div class="detail-section-title">申请理由</div>
+		<div class="reason-box">${escapeHtml(t.reason) || '—'}</div>`;
 }
 
 function _renderPermDetail(t) {

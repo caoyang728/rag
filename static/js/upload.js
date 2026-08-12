@@ -12,6 +12,10 @@ let uploadPaginationInited = false;
 let uploadRequestSeq = 0;
 /** 归属节点下拉中可选的文件夹节点 ID 集合（仅 FOLDER 可选，用于 startUpload 二次拦截组织节点） */
 let folderNodeIds = new Set();
+/** 状态统计缓存：避免重复请求，key 为状态值，value 为数量 */
+let statusCountsCache = null;
+/** 状态统计上次请求时间（5秒节流） */
+let statusCountsLastFetch = 0;
 
 document.addEventListener('DOMContentLoaded', () => {
 	initUploadPage();
@@ -29,6 +33,8 @@ async function initUploadPage() {
 	await loadUploadHistory();
 	initSearchFilter();
 	await loadFilterOptions();
+	// 状态统计：点击下拉框时触发（5秒节流）
+	initStatusCountsOnFocus();
 	// 队列深度展示（异步刷新，不阻塞页面主流程）
 	refreshQueueDepth();
 	const visRadio = document.querySelector('#visRow .upload-radio-inline.selected input');
@@ -48,6 +54,69 @@ function initSearchFilter() {
 	}
 
 	startUploadPolling();
+}
+
+/* ============ 状态统计（点击下拉框时触发，5秒节流） ============ */
+function initStatusCountsOnFocus() {
+	const filterStatus = $('#filterStatus');
+	if (!filterStatus) return;
+
+	filterStatus.addEventListener('focus', async () => {
+		const now = Date.now();
+		// 5秒节流：距上次请求不足5秒则跳过
+		if (now - statusCountsLastFetch < 5000) return;
+		statusCountsLastFetch = now;
+
+		await fetchStatusCounts();
+	});
+}
+
+async function fetchStatusCounts() {
+	try {
+		const data = await api.getJson('/api/v1/knowledge/documents/status_counts/');
+		statusCountsCache = data;
+		updateStatusCountsUI(data);
+	} catch (e) {
+		console.warn('获取状态统计失败:', e);
+	}
+}
+
+function updateStatusCountsUI(counts) {
+	const filterStatus = $('#filterStatus');
+	if (!filterStatus || !counts) return;
+
+	// 状态值与统计 key 的映射
+	const statusMap = {
+		'pending': 'pending',
+		'parsing': 'parsing',
+		'chunking': 'chunking',
+		'embedding': 'embedding',
+		'embedding_failed': 'embedding_failed',
+		'failed': 'failed',
+		'graph_pending': 'graph_pending',
+		'graph_extracting': 'graph_extracting',
+		'graph_failed': 'graph_failed',
+		'wiki_pending': 'wiki_pending',
+		'wiki_extracting': 'wiki_extracting',
+		'wiki_failed': 'wiki_failed',
+		'done': 'done',
+	};
+
+	// 更新每个选项的文本
+	Array.from(filterStatus.options).forEach(opt => {
+		const countKey = statusMap[opt.value];
+		if (!countKey) return; // "全部状态" 选项无 value，跳过
+
+		// 获取原始文本（不含数量部分）
+		const baseText = opt.dataset.baseText || opt.textContent.replace(/\s*\(\d+\)$/, '');
+		// 首次访问时保存原始文本
+		if (!opt.dataset.baseText) {
+			opt.dataset.baseText = baseText;
+		}
+
+		const count = counts[countKey] || 0;
+		opt.textContent = count > 0 ? `${baseText} (${count})` : baseText;
+	});
 }
 
 async function loadFilterOptions() {
@@ -196,6 +265,9 @@ async function loadUploadHistory(page = 1) {
 		});
 
 		renderUploadPagination();
+		// 切换页码后将表格滚动层滚回顶部，避免用户在旧位置看到新数据
+		const tableScroll = document.querySelector('#uploadHistorySection .table-scroll');
+		if (tableScroll) tableScroll.scrollTop = 0;
 	startUploadPolling();
 	} catch (e) {
 		if (seq !== uploadRequestSeq) return;

@@ -1243,6 +1243,26 @@ class DocumentFilter(django_filters.FilterSet):
     def filter_status(self, queryset, name, value):
         if value == 'parsing':
             return queryset.filter(models.Q(status='parsing') | models.Q(status='desensitizing'))
+        if value == 'done':
+            # "已完成"要求整条流水线全部结束：解析完成 + 图谱/Wiki 构建完成或跳过
+            return queryset.filter(
+                status='done',
+                graph_status__in=('done', 'skipped'),
+                wiki_status__in=('done', 'skipped'),
+            )
+        # 图谱/Wiki 状态筛选：status=done 且对应字段匹配
+        if value == 'graph_pending':
+            return queryset.filter(status='done', graph_status='pending')
+        if value == 'graph_extracting':
+            return queryset.filter(status='done', graph_status='extracting')
+        if value == 'graph_failed':
+            return queryset.filter(status='done', graph_status='failed')
+        if value == 'wiki_pending':
+            return queryset.filter(status='done', wiki_status='pending')
+        if value == 'wiki_extracting':
+            return queryset.filter(status='done', wiki_status='extracting')
+        if value == 'wiki_failed':
+            return queryset.filter(status='done', wiki_status='failed')
         return queryset.filter(status=value)
 
     class Meta:
@@ -1432,6 +1452,63 @@ class DocumentViewSet(viewsets.ModelViewSet):
         cache.set(cache_key, dept_list, 3600)
         
         return Response(dept_list)
+
+    @action(detail=False, methods=["get"], url_path="status_counts")
+    def status_counts(self, request):
+        """获取文档各状态的数量统计（用于下拉框展示）
+
+        返回各维度状态的数量，供前端筛选下拉框展示。
+        仅统计当前用户可见的文档（复用 get_queryset 权限逻辑）。
+        """
+        from django.db.models import Count, Q
+
+        qs = self.get_queryset()
+
+        # 主状态统计（排除图谱/Wiki相关的组合状态）
+        main_status_counts = qs.values('status').annotate(
+            count=Count('id')
+        ).order_by('status')
+        main_counts = {item['status']: item['count'] for item in main_status_counts}
+
+        # 图谱/Wiki 状态统计（仅统计 status=done 的文档）
+        done_qs = qs.filter(status='done')
+        graph_counts_raw = done_qs.values('graph_status').annotate(
+            count=Count('id')
+        ).order_by('graph_status')
+        graph_counts = {item['graph_status']: item['count'] for item in graph_counts_raw}
+
+        wiki_counts_raw = done_qs.values('wiki_status').annotate(
+            count=Count('id')
+        ).order_by('wiki_status')
+        wiki_counts = {item['wiki_status']: item['count'] for item in wiki_counts_raw}
+
+        # 组合返回，key 与前端筛选 value 对应
+        result = {
+            # 主状态
+            'pending': main_counts.get('pending', 0),
+            'parsing': main_counts.get('parsing', 0) + main_counts.get('desensitizing', 0),
+            'chunking': main_counts.get('chunking', 0),
+            'embedding': main_counts.get('embedding', 0),
+            'embedding_failed': main_counts.get('embedding_failed', 0),
+            'failed': main_counts.get('failed', 0),
+            'done': main_counts.get('done', 0),
+            # 图谱状态（基于 status=done 的文档）
+            'graph_pending': graph_counts.get('pending', 0),
+            'graph_extracting': graph_counts.get('extracting', 0),
+            'graph_failed': graph_counts.get('failed', 0),
+            # Wiki 状态（基于 status=done 的文档）
+            'wiki_pending': wiki_counts.get('pending', 0),
+            'wiki_extracting': wiki_counts.get('extracting', 0),
+            'wiki_failed': wiki_counts.get('failed', 0),
+        }
+
+        # "已完成"要求整条流水线全部结束
+        result['done'] = done_qs.filter(
+            graph_status__in=('done', 'skipped'),
+            wiki_status__in=('done', 'skipped'),
+        ).count()
+
+        return Response(result)
 
     def get_object(self):
         obj = super().get_object()

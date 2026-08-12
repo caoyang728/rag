@@ -382,3 +382,73 @@ class TestSystemConfigScheduler:
         sched._apply_snapshot(snapshot)
         assert sched.schedule['job-a'] is existing  # 仍是原 entry 对象
         assert existing.updated is True
+
+    @pytest.mark.unit
+    def test_setup_schedule_runs_super_then_initial_reload(self, monkeypatch):
+        """setup_schedule：先执行原生流程，再以 initial=True 触发配置覆盖"""
+        sched = self._make_scheduler(monkeypatch)
+        reloaded = []
+        super_called = []
+        monkeypatch.setattr(sched, '_reload_from_config',
+                            lambda initial=False: reloaded.append(initial))
+        monkeypatch.setattr('apps.system.schedulers.PersistentScheduler.setup_schedule',
+                            lambda self: super_called.append(1))
+        sched.setup_schedule()
+        assert super_called == [1]  # 原生 setup_schedule 被调用
+        assert reloaded == [True]  # 启动期覆盖走 initial=True
+
+    @pytest.mark.unit
+    def test_tick_reloads_config_before_super_tick(self, monkeypatch):
+        """tick：每个周期先检查调度配置变化，再执行原生 tick"""
+        sched = self._make_scheduler(monkeypatch)
+        reloaded = []
+        monkeypatch.setattr(sched, '_reload_from_config', lambda: reloaded.append(1))
+        monkeypatch.setattr('apps.system.schedulers.PersistentScheduler.tick',
+                            lambda self, *a, **k: 29)
+        assert sched.tick() == 29
+        assert reloaded == [1]
+
+    @pytest.mark.unit
+    def test_tick_forward_args_to_super(self, monkeypatch):
+        """tick 的 args/kwargs 原样透传给原生 tick"""
+        sched = self._make_scheduler(monkeypatch)
+        received = []
+        monkeypatch.setattr(sched, '_reload_from_config', lambda: None)
+        monkeypatch.setattr('apps.system.schedulers.PersistentScheduler.tick',
+                            lambda self, *a, **k: received.append((a, k)) or 'x')
+        assert sched.tick(1, 'a', foo='bar') == 'x'
+        assert received == [((1, 'a'), {'foo': 'bar'})]
+
+    @pytest.mark.unit
+    def test_reload_when_apply_snapshot_raises_then_keeps_current(self, monkeypatch):
+        """重建调度失败：保留当前调度且 beat 不崩溃（logger.exception 兜底）"""
+        sched = self._make_scheduler(monkeypatch)
+        sched.schedule = {'old': 'entry'}
+        # 快照包含现有条目名，避免重建失败前先把条目 pop 掉（与生产行为一致）
+        snapshot = {'old': {'task': 't.a', 'cron': '0 2 * * *', 'enabled': True}}
+        monkeypatch.setattr('apps.system.scheduler_registry.load_schedule_snapshot',
+                            lambda: snapshot)
+
+        def boom(*a, **k):
+            raise RuntimeError('cron build failed')
+
+        monkeypatch.setattr('apps.system.scheduler_registry.build_crontab', boom)
+        sched._reload_from_config()
+        # 快照未应用：调度与 _last_snapshot 均保持原状
+        assert sched.schedule == {'old': 'entry'}
+        assert sched._last_snapshot is None
+
+    @pytest.mark.unit
+    def test_apply_snapshot_when_sync_fails_then_schedule_still_updated(self, monkeypatch):
+        """持久化 sync 失败：调度已生效仅告警，不阻断热更新"""
+        sched = self._make_scheduler(monkeypatch)
+
+        def _sync_fail():
+            raise RuntimeError('persist failed')
+
+        monkeypatch.setattr(sched, 'sync', _sync_fail)
+        snapshot = {'job-a': {'task': 't.a', 'cron': '0 2 * * *', 'enabled': True}}
+        sched._apply_snapshot(snapshot)
+        # 内存中的调度已更新（持久化失败不阻断）
+        assert 'job-a' in sched.schedule
+        assert sched._last_snapshot == snapshot

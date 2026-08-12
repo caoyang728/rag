@@ -99,12 +99,14 @@ class TicketBizType(models.TextChoices):
     - model：LLM 模型变更（修改/停用/删除），业务字段在主表 detail JSON
     - schedule：定时任务变更，业务字段在主表 detail JSON
     - agent：Agent 工作流人工确认（HITL），详情在 TicketAgentApprovalDetail
+    - security：安全配置变更（IP 白名单/黑名单/敏感词），详情在 TicketSecurityDetail
     """
     PERMISSION = 'permission', _('权限审批')
     CONFIG = 'config', _('配置变更')
     MODEL = 'model', _('模型变更')
     SCHEDULE = 'schedule', _('定时任务')
     AGENT = 'agent', _('Agent审批')
+    SECURITY = 'security', _('安全配置')
 
 
 class UserStatus(models.TextChoices):
@@ -910,6 +912,64 @@ class TicketAgentApprovalDetail(models.Model):
 
     def __str__(self):
         return f'AgentApprovalDetail<{self.ticket_id}> wf={self.workflow_id}'
+
+
+class SecurityConfigType(models.TextChoices):
+    """安全配置类型 —— TicketSecurityDetail.security_type 枚举
+
+    标识本次工单涉及的安全配置类别，用于审批时展示与执行时路由到对应 Service。
+    """
+    IP_WHITELIST = 'ip_whitelist', _('IP白名单')
+    IP_BLACKLIST = 'ip_blacklist', _('IP黑名单')
+    SENSITIVE_WORD = 'sensitive_word', _('敏感词')
+
+
+class SecurityOperation(models.TextChoices):
+    """安全配置操作类型 —— TicketSecurityDetail.operation 枚举
+
+    标识本次工单对目标配置的操作类型，用于审批展示与执行时选择对应逻辑。
+    """
+    ADD = 'add', _('新增')
+    EDIT = 'edit', _('编辑')
+    DELETE = 'delete', _('删除')
+    DISABLE = 'disable', _('禁用')
+
+
+class TicketSecurityDetail(models.Model):
+    """安全配置工单详情 —— 关联统一主表，biz_type=security
+
+    与主表 TicketList 一对一：主表管流程（审批链/状态/时间），本表管业务
+    （哪个安全配置、什么操作、变更前后数据）。
+
+    风险分级策略（由调用方在创建工单时根据 security_type + operation 决定 risk_level）：
+    - 低风险（直接生效）：黑名单新增、敏感词新增
+    - 中风险（单审）：黑名单解封、敏感词删除/禁用
+    - 高风险（双审）：白名单新增/删除/编辑
+    """
+    ticket = models.OneToOneField(TicketList, on_delete=models.CASCADE,
+                                  related_name='security_detail',
+                                  help_text=_('关联统一工单主表'))
+    security_type = models.CharField(max_length=32, choices=SecurityConfigType.choices,
+                                     help_text=_('安全配置类型'))
+    operation = models.CharField(max_length=16, choices=SecurityOperation.choices,
+                                 help_text=_('操作类型'))
+    target_data = models.JSONField(help_text=_('目标数据快照（如 ip/pattern/reason/category 等）'))
+    old_data = models.JSONField(null=True, blank=True,
+                                help_text=_('变更前数据（编辑/删除时）'))
+    new_data = models.JSONField(null=True, blank=True,
+                                help_text=_('变更后数据（新增/编辑时）'))
+    reason = models.TextField(blank=True, default='',
+                              help_text=_('变更原因'))
+
+    class Meta:
+        db_table = 'security_ticket_detail'
+        verbose_name = _('安全配置工单详情')
+        indexes = [
+            models.Index(fields=['security_type'], name='idx_sec_detail_type'),
+        ]
+
+    def __str__(self):
+        return f'SecurityDetail<{self.ticket_id}> {self.security_type}:{self.operation}'
 
 
 class TicketFlowLog(models.Model):

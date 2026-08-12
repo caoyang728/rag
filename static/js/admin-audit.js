@@ -22,6 +22,12 @@ let _whitePage = 1;            // 白名单当前页码
 let _blackPage = 1;            // 黑名单当前页码
 let _sensitivePage = 1;        // 敏感词当前页码
 let _loginPage = 1;            // 登录记录当前页码
+// 登录尝试筛选条件
+let _loginFilter = {
+	username: '',
+	ip: '',
+	result: ''
+};
 
 document.addEventListener('DOMContentLoaded', () => {
 	initAuditPage();
@@ -162,8 +168,8 @@ async function renderAuditTab(tab) {
 			const tmpl = document.getElementById('tmpl-whitelist-tab');
 			const frag = tmpl.content.cloneNode(true);
 
-			// Set info count
-			frag.querySelector('.whitelist-info').textContent = '白名单外 IP 将直接返回 403，共 ' + items.length + ' 条规则';
+			// Set info count（模板中已有基础文案，仅更新数量）
+			frag.querySelector('.whitelist-info .tab-info-count').textContent = items.length;
 
 			// 前端分页：全量数据按 _TAB_PAGE_SIZE 切片展示当前页
 			const totalPages = Math.max(1, Math.ceil(items.length / _TAB_PAGE_SIZE));
@@ -300,17 +306,19 @@ async function renderAuditTab(tab) {
 	if (tab === 'login') {
 		try {
 			const params = new URLSearchParams({ page: _loginPage, page_size: _TAB_PAGE_SIZE });
-			const resultFilter = window._loginResultFilter || '';
-			if (resultFilter) params.set('result', resultFilter);
+			if (_loginFilter.username) params.set('username', _loginFilter.username);
+			if (_loginFilter.ip) params.set('ip', _loginFilter.ip);
+			if (_loginFilter.result) params.set('result', _loginFilter.result);
 			const data = await api.getJson('/api/v1/security/login-attempts/?' + params.toString());
 			const items = data.rows || [];
 
 			const tmpl = document.getElementById('tmpl-login-tab');
 			const frag = tmpl.content.cloneNode(true);
 
-			// Set filter select value
-			frag.querySelector('.login-filter-result').value = window._loginResultFilter || '';
-			frag.querySelector('.login-filter-result').onchange = function () { filterLoginAttempts(this.value); };
+			// 回填筛选条件
+			frag.querySelector('.login-filter-username').value = _loginFilter.username;
+			frag.querySelector('.login-filter-ip').value = _loginFilter.ip;
+			frag.querySelector('.login-filter-result').value = _loginFilter.result;
 
 			// Generate table rows
 			const tbody = frag.querySelector('.login-tbody');
@@ -404,69 +412,227 @@ function copyAuditJson() {
 }
 
 async function showAddWhitelist() {
-	const ip = prompt('请输入 IP 或 CIDR：');
-	if (!ip) return;
-	const desc = prompt('请输入说明（可选）：');
-
-	try {
-		await api.postJson('/api/v1/security/ip-whitelist/', { ip_or_cidr: ip, description: desc || '' });
-		toast('已添加白名单', 'success');
-		await setAuditTab('white');
-	} catch (e) {
-		toast(e.message || '添加失败', 'error');
-	}
+	showConfirmDialog({
+		title: '新增白名单',
+		bannerText: '命中白名单的 IP 直接放行，白名单外的 IP 会继续检查黑名单',
+		bannerType: 'info',
+		bannerIcon: '✅',
+		bodyHtml:
+			'<div class="form-item">' +
+			'  <label class="form-label">IP / CIDR <span class="required">*</span></label>' +
+			'  <input class="input" id="dlg-whitelist-ip" style="width:100%" placeholder="单 IP / CIDR / 通配符 / 范围，如 10.0.0.1、10.0.0.0/24、10.0.*.*">' +
+			'  <div class="form-hint">支持格式：单 IP（10.0.0.1）、CIDR（10.0.0.0/24）、通配符（10.0.*.*）、范围（10.0.0.1-10.0.0.100）</div>' +
+			'</div>' +
+			'<div class="form-item" style="margin-bottom:0">' +
+			'  <label class="form-label">说明 <span class="required">*</span></label>' +
+			'  <input class="input" id="dlg-whitelist-desc" style="width:100%" placeholder="原因, 便于后续审计追溯">' +
+			'</div>',
+		buttons: [
+			{ text: '取消', type: 'cancel' },
+			{
+				text: '确认添加', type: 'primary',
+				onClick: async (ctx) => {
+					const ip = document.getElementById('dlg-whitelist-ip').value.trim();
+					if (!ip) { ctx.setError('请输入 IP 或 CIDR'); return; }
+					const check = validateIpPattern(ip);
+					if (!check.valid) { ctx.setError(check.error); return; }
+					const desc = document.getElementById('dlg-whitelist-desc').value.trim();
+					if (!desc) { ctx.setError('请输入说明'); return; }
+					try {
+						const res = await api.postJson('/api/v1/security/ip-whitelist/', { ip_or_cidr: ip, description: desc });
+						ctx.close();
+						if (res.status === 'executed') {
+							toast('白名单新增已立即生效', 'success');
+						} else {
+							toast(`已创建审批工单 ${res.ticket_no}，需双审后生效`, 'info');
+						}
+						await setAuditTab('white');
+					} catch (e) {
+						ctx.setError(e.message || '添加失败');
+					}
+				}
+			}
+		],
+		onShow: (ctx) => {
+			document.getElementById('dlg-whitelist-ip').focus();
+			// 回车提交
+			ctx.el.addEventListener('keydown', (ev) => {
+				if (ev.key === 'Enter') {
+					ev.preventDefault();
+					ctx.el.querySelector('.btn-save')?.click();
+				}
+			});
+		}
+	});
 }
 
 async function editWhitelist(idx) {
 	const x = _whitelistCache[idx];
 	if (!x) return;
-	const ip = prompt('修改 IP 或 CIDR：', x.ip_or_cidr);
-	if (!ip) return;
-	const desc = prompt('修改说明：', x.description || '');
 
-	try {
-		await api.put(`/api/v1/security/ip-whitelist/${x.id}/`, { ip_or_cidr: ip, description: desc || '' });
-		toast('已更新白名单', 'success');
-		await setAuditTab('white');
-	} catch (e) {
-		toast(e.message || '更新失败', 'error');
-	}
+	showConfirmDialog({
+		title: '编辑白名单',
+		bannerText: '修改后立即生效',
+		bannerType: 'info',
+		bannerIcon: '✏️',
+		bodyHtml:
+			'<div class="form-item">' +
+			'  <label class="form-label">IP / CIDR <span class="required">*</span></label>' +
+			`  <input class="input" id="dlg-whitelist-ip" style="width:100%" value="${escapeHtml(x.ip_or_cidr)}">` +
+			'  <div class="form-hint">支持格式：单 IP（10.0.0.1）、CIDR（10.0.0.0/24）、通配符（10.0.*.*）、范围（10.0.0.1-10.0.0.100）</div>' +
+			'</div>' +
+			'<div class="form-item" style="margin-bottom:0">' +
+			'  <label class="form-label">说明 <span class="required">*</span></label>' +
+			`  <input class="input" id="dlg-whitelist-desc" style="width:100%" value="${escapeHtml(x.description || '')}">` +
+			'</div>',
+		buttons: [
+			{ text: '取消', type: 'cancel' },
+			{
+				text: '保存修改', type: 'primary',
+				onClick: async (ctx) => {
+					const ip = document.getElementById('dlg-whitelist-ip').value.trim();
+					if (!ip) { ctx.setError('请输入 IP 或 CIDR'); return; }
+					const check = validateIpPattern(ip);
+					if (!check.valid) { ctx.setError(check.error); return; }
+					const desc = document.getElementById('dlg-whitelist-desc').value.trim();
+					if (!desc) { ctx.setError('请输入说明'); return; }
+					try {
+						const res = await api.put(`/api/v1/security/ip-whitelist/${x.id}/`, { ip_or_cidr: ip, description: desc });
+						ctx.close();
+						if (res.status === 'executed') {
+							toast('白名单编辑已立即生效', 'success');
+						} else {
+							toast(`已创建审批工单 ${res.ticket_no}，需双审后生效`, 'info');
+						}
+						await setAuditTab('white');
+					} catch (e) {
+						ctx.setError(e.message || '更新失败');
+					}
+				}
+			}
+		],
+		onShow: (ctx) => {
+			document.getElementById('dlg-whitelist-ip').focus();
+			ctx.el.addEventListener('keydown', (ev) => {
+				if (ev.key === 'Enter') {
+					ev.preventDefault();
+					ctx.el.querySelector('.btn-save')?.click();
+				}
+			});
+		}
+	});
 }
 
 async function deleteWhitelist(id) {
-	if (!confirm('确定删除此白名单？')) return;
-	try {
-		await api.deleteJson(`/api/v1/security/ip-whitelist/${id}/`);
-		toast('已删除', 'success');
-		await setAuditTab('white');
-	} catch (e) {
-		toast(e.message || '删除失败', 'error');
-	}
+	showConfirmDialog({
+		title: '删除白名单',
+		bannerText: '删除白名单需双审，审批通过后生效',
+		bannerType: 'danger',
+		bannerIcon: '⚠',
+		buttons: [
+			{ text: '取消', type: 'cancel' },
+			{
+				text: '确认删除', type: 'danger',
+				onClick: async (ctx) => {
+					try {
+						const res = await api.deleteJson(`/api/v1/security/ip-whitelist/${id}/`);
+						ctx.close();
+						if (res.status === 'executed') {
+							toast('白名单已删除', 'success');
+						} else {
+							toast(`已创建审批工单 ${res.ticket_no}，需双审后生效`, 'info');
+						}
+						await setAuditTab('white');
+					} catch (e) {
+						ctx.setError(e.message || '删除失败');
+					}
+				}
+			}
+		]
+	});
 }
 
 async function showAddBlacklist() {
-	const ip = prompt('请输入要封禁的 IP 地址：');
-	if (!ip) return;
-	const reason = prompt('请输入封禁原因：', 'manual');
-
-	try {
-		await api.postJson('/api/v1/security/ip-blacklist/', { ip: ip, reason: reason || 'manual', detail: '人工封禁' });
-		toast('已封禁 IP', 'success');
-		await setAuditTab('black');
-	} catch (e) {
-		toast(e.message || '封禁失败', 'error');
-	}
+	showConfirmDialog({
+		title: '手动封禁 IP',
+		bannerText: '黑名单新增将立即生效，无需审批',
+		bannerType: 'danger',
+		bannerIcon: '🚫',
+		bodyHtml:
+			'<div class="form-item">' +
+			'  <label class="form-label">IP 地址 <span class="required">*</span></label>' +
+			'  <input class="input" id="dlg-blacklist-ip" style="width:100%" placeholder="单 IP / 通配符 / 范围，如 10.0.0.1、10.0.*.*、10.0.0.1-10.0.0.100">' +
+			'  <div class="form-hint">支持格式：单 IP（10.0.0.1）、通配符（10.0.*.*）、范围（10.0.0.1-10.0.0.100）</div>' +
+			'</div>' +
+			'<div class="form-item" style="margin-bottom:0">' +
+			'  <label class="form-label">封禁原因 <span class="required">*</span></label>' +
+			'  <input class="input" id="dlg-blacklist-reason" style="width:100%" placeholder="必填，便于后续审计追溯">' +
+			'</div>',
+		buttons: [
+			{ text: '取消', type: 'cancel' },
+			{
+				text: '确认封禁', type: 'danger',
+				onClick: async (ctx) => {
+					const ip = document.getElementById('dlg-blacklist-ip').value.trim();
+					if (!ip) { ctx.setError('请输入 IP 地址'); return; }
+					const check = validateIpPattern(ip);
+					if (!check.valid) { ctx.setError(check.error); return; }
+					const reason = document.getElementById('dlg-blacklist-reason').value.trim();
+					if (!reason) { ctx.setError('请输入封禁原因'); return; }
+					try {
+						const res = await api.postJson('/api/v1/security/ip-blacklist/', { ip, reason, detail: '人工封禁' });
+						ctx.close();
+						if (res.status === 'executed') {
+							toast('黑名单新增已立即生效', 'success');
+						} else {
+							toast(`已创建审批工单 ${res.ticket_no}`, 'info');
+						}
+						await setAuditTab('black');
+					} catch (e) {
+						ctx.setError(e.message || '封禁失败');
+					}
+				}
+			}
+		],
+		onShow: (ctx) => {
+			document.getElementById('dlg-blacklist-ip').focus();
+			ctx.el.addEventListener('keydown', (ev) => {
+				if (ev.key === 'Enter') {
+					ev.preventDefault();
+					ctx.el.querySelector('.btn-reject')?.click();
+				}
+			});
+		}
+	});
 }
 
 async function unblockIp(id) {
-	if (!confirm('确定解封此 IP？')) return;
-	try {
-		await api.put(`/api/v1/security/ip-blacklist/${id}/`, {});
-		toast('已解封', 'success');
-		await setAuditTab('black');
-	} catch (e) {
-		toast(e.message || '解封失败', 'error');
-	}
+	showConfirmDialog({
+		title: '解封 IP',
+		bannerText: '解封需单审，审批通过后生效',
+		bannerType: 'info',
+		bannerIcon: '🔓',
+		buttons: [
+			{ text: '取消', type: 'cancel' },
+			{
+				text: '确认解封', type: 'primary',
+				onClick: async (ctx) => {
+					try {
+						const res = await api.put(`/api/v1/security/ip-blacklist/${id}/`, {});
+						ctx.close();
+						if (res.status === 'executed') {
+							toast('已解封', 'success');
+						} else {
+							toast(`已创建审批工单 ${res.ticket_no}，需单审后生效`, 'info');
+						}
+						await setAuditTab('black');
+					} catch (e) {
+						ctx.setError(e.message || '解封失败');
+					}
+				}
+			}
+		]
+	});
 }
 
 /* ---- 敏感词管理 CRUD ----
@@ -567,10 +733,14 @@ async function saveSensitive() {
 		const category = $('.sensitive-input-category').value;
 		const isRegex = $('.sensitive-input-regex').checked;
 		try {
-			await api.postJson('/api/v1/security/sensitive-words/', {
+			const res = await api.postJson('/api/v1/security/sensitive-words/', {
 				word, category, action, is_regex: isRegex
 			});
-			toast('已添加，词库已生效', 'success');
+			if (res.status === 'executed') {
+				toast('敏感词新增已立即生效', 'success');
+			} else {
+				toast(`已创建审批工单 ${res.ticket_no}`, 'info');
+			}
 			_sensitiveEditId = null;  // 状态收口：关闭前重置，防止残留
 			closeAllOverlays();
 			await setAuditTab('sensitive');
@@ -580,10 +750,14 @@ async function saveSensitive() {
 	} else {
 		// 编辑模式：仅 action 和 is_enabled 可改
 		try {
-			await api.put(`/api/v1/security/sensitive-words/${_sensitiveEditId}/`, {
+			const res = await api.put(`/api/v1/security/sensitive-words/${_sensitiveEditId}/`, {
 				action, is_enabled: isEnabled
 			});
-			toast('已更新，词库已生效', 'success');
+			if (res.status === 'executed') {
+				toast('敏感词变更已立即生效', 'success');
+			} else {
+				toast(`已创建审批工单 ${res.ticket_no}，需单审后生效`, 'info');
+			}
 			_sensitiveEditId = null;  // 状态收口：关闭前重置，防止残留
 			closeAllOverlays();
 			await setAuditTab('sensitive');
@@ -594,14 +768,32 @@ async function saveSensitive() {
 }
 
 async function deleteSensitive(id) {
-	if (!confirm('确定删除此敏感词？删除后立即从审查词库移除。')) return;
-	try {
-		await api.deleteJson(`/api/v1/security/sensitive-words/${id}/`);
-		toast('已删除', 'success');
-		await setAuditTab('sensitive');
-	} catch (e) {
-		toast(e.message || '删除失败', 'error');
-	}
+	showConfirmDialog({
+		title: '删除敏感词',
+		bannerText: '删除敏感词需单审，审批通过后生效',
+		bannerType: 'danger',
+		bannerIcon: '⚠',
+		buttons: [
+			{ text: '取消', type: 'cancel' },
+			{
+				text: '确认删除', type: 'danger',
+				onClick: async (ctx) => {
+					try {
+						const res = await api.deleteJson(`/api/v1/security/sensitive-words/${id}/`);
+						ctx.close();
+						if (res.status === 'executed') {
+							toast('敏感词已删除', 'success');
+						} else {
+							toast(`已创建审批工单 ${res.ticket_no}，需单审后生效`, 'info');
+						}
+						await setAuditTab('sensitive');
+					} catch (e) {
+						ctx.setError(e.message || '删除失败');
+					}
+				}
+			}
+		]
+	});
 }
 
 async function loadAuditLogs() {
@@ -610,18 +802,34 @@ async function loadAuditLogs() {
 }
 
 async function loadLoginAttempts() {
+	// 从筛选栏读取当前筛选条件并刷新
+	const body = $('#auditBody');
+	if (body) {
+		const usernameInput = body.querySelector('.login-filter-username');
+		const ipInput = body.querySelector('.login-filter-ip');
+		const resultSelect = body.querySelector('.login-filter-result');
+		if (usernameInput) _loginFilter.username = usernameInput.value.trim();
+		if (ipInput) _loginFilter.ip = ipInput.value.trim();
+		if (resultSelect) _loginFilter.result = resultSelect.value;
+	}
+	_loginPage = 1;
 	await setAuditTab('login');
+}
+
+function filterLoginAttempts() {
+	// 点击"查询"按钮，从筛选栏读取条件
+	loadLoginAttempts();
+}
+
+function resetLoginFilter() {
+	_loginFilter = { username: '', ip: '', result: '' };
+	_loginPage = 1;
+	setAuditTab('login');
 }
 
 function resetAuditFilter() {
 	auditFilter = { username: '', action: '', ip: '', startDate: '', endDate: '', page: 1 };
 	loadAuditLogs();
-}
-
-function filterLoginAttempts(result) {
-	window._loginResultFilter = result;
-	_loginPage = 1; // 筛选条件变化时重置页码
-	setAuditTab('login');
 }
 
 function formatResource(targetType, targetId) {
@@ -682,6 +890,65 @@ async function exportAuditLogs() {
 		a.click();
 		URL.revokeObjectURL(a.href);
 		toast(`导出 ${rows.length} 条记录`, 'success');
+	} catch (e) {
+		toast('导出失败: ' + (e.message || '未知错误'), 'error');
+	}
+}
+
+/**
+ * 导出登录尝试记录为 CSV，支持当前筛选条件
+ */
+async function exportLoginAttempts() {
+	try {
+		// 从筛选栏读取最新条件
+		const body = $('#auditBody');
+		if (body) {
+			const usernameInput = body.querySelector('.login-filter-username');
+			const ipInput = body.querySelector('.login-filter-ip');
+			const resultSelect = body.querySelector('.login-filter-result');
+			if (usernameInput) _loginFilter.username = usernameInput.value.trim();
+			if (ipInput) _loginFilter.ip = ipInput.value.trim();
+			if (resultSelect) _loginFilter.result = resultSelect.value;
+		}
+
+		const baseParams = [];
+		if (_loginFilter.username) baseParams.push('username=' + encodeURIComponent(_loginFilter.username));
+		if (_loginFilter.ip) baseParams.push('ip=' + encodeURIComponent(_loginFilter.ip));
+		if (_loginFilter.result) baseParams.push('result=' + encodeURIComponent(_loginFilter.result));
+
+		// 先取第一页获取 total
+		let url = '/api/v1/security/login-attempts/?page=1&page_size=200';
+		if (baseParams.length) url += '&' + baseParams.join('&');
+		const first = await api.getJson(url);
+		let rows = first.rows || [];
+		const totalPages = Math.ceil((first.total || 0) / 200) || 1;
+
+		// 分批拉取剩余页
+		for (let p = 2; p <= totalPages; p++) {
+			url = '/api/v1/security/login-attempts/?page=' + p + '&page_size=200';
+			if (baseParams.length) url += '&' + baseParams.join('&');
+			const pageData = await api.getJson(url);
+			rows = rows.concat(pageData.rows || []);
+		}
+
+		// 结果中文映射
+		const resultLabel = { success: '成功', wrong_password: '密码错误', user_not_found: '用户不存在', locked: '账户锁定', captcha_fail: '验证码失败', ip_denied: 'IP 拒绝' };
+		const BOM = '\uFEFF';
+		const header = '时间,用户,IP地址,User-Agent,结果\n';
+		const csv = rows.map(r => [
+			formatDate(r.created_at),
+			(r.username || '-').replace(/,/g, ' '),
+			(r.ip || '-').replace(/,/g, ' '),
+			(r.user_agent || '-').replace(/,/g, ' ').replace(/"/g, '""'),
+			resultLabel[r.result] || r.result || '-'
+		].map(v => `"${v}"`).join(',')).join('\n');
+		const blob = new Blob([BOM + header + csv], { type: 'text/csv;charset=utf-8' });
+		const a = document.createElement('a');
+		a.href = URL.createObjectURL(blob);
+		a.download = 'login_attempts_' + new Date().toISOString().slice(0, 10) + '.csv';
+		a.click();
+		URL.revokeObjectURL(a.href);
+		toast(`导出 ${rows.length} 条登录记录`, 'success');
 	} catch (e) {
 		toast('导出失败: ' + (e.message || '未知错误'), 'error');
 	}

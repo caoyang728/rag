@@ -85,7 +85,7 @@ class TestGraphExtractTask:
                 patch('apps.graph.extractor.batch_extract_for_document') as mock_batch:
             result = graph_extract_task(self.node.id)
 
-        assert result == {'ok': True, 'processed': 2, 'failed': 0, 'total': 2}
+        assert result == {'ok': True, 'processed': 2, 'failed': 0, 'total': 2, 'timed_out': False}
         # 逐文档清理 + 抽取
         assert mock_clean.call_count == 2
         assert mock_batch.call_count == 2

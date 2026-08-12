@@ -97,3 +97,35 @@ class TestResumeWorkflowFromTicket:
             hitl.resume_workflow_from_ticket(ticket)
 
         mock_resume.assert_not_called()
+
+    def test_resume_when_no_detail_then_skip(self, test_user, db):
+        """工单无 agent_approval_detail（非 HITL 工单）→ 记日志并安全跳过"""
+        ticket = MagicMock(agent_approval_detail=None, status=TicketStatus.EXECUTED)
+
+        with patch('apps.agent.workflow.engine.resume_workflow') as mock_resume:
+            hitl.resume_workflow_from_ticket(ticket)
+
+        mock_resume.assert_not_called()
+
+    def test_resume_when_workflow_missing_then_skip(self, test_user, db):
+        """工单指向的工作流不存在（已删除/被清理）→ 记日志并安全跳过"""
+        detail = MagicMock(workflow_id=999999, node_id='ap1')
+        ticket = MagicMock(agent_approval_detail=detail, status=TicketStatus.EXECUTED)
+
+        with patch('apps.agent.workflow.engine.resume_workflow') as mock_resume:
+            hitl.resume_workflow_from_ticket(ticket)
+
+        mock_resume.assert_not_called()
+
+    def test_resume_when_engine_raises_then_logged(self, test_user, db):
+        """恢复引擎抛异常 → 仅记日志，异常不向上抛（审批结果已落库，业务不可丢）"""
+        wf = _make_workflow(test_user, db)
+        detail = MagicMock(workflow_id=wf.id, node_id='ap1')
+        ticket = MagicMock(agent_approval_detail=detail, status=TicketStatus.EXECUTED)
+
+        with patch('apps.agent.workflow.engine.resume_workflow',
+                   side_effect=RuntimeError('engine boom')) as mock_resume:
+            # 不应抛异常，恢复失败由日志兜底
+            hitl.resume_workflow_from_ticket(ticket)
+
+        mock_resume.assert_called_once_with(wf, node_id='ap1', approved=True)

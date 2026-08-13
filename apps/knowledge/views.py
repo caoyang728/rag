@@ -691,6 +691,9 @@ _PREVIEW_IMAGE_MAX_WIDTH = 1400                 # 页图渲染目标宽度(px)�
 _PREVIEW_IMAGE_CACHE_TTL = 600                  # 页图缓存秒数
 _PREVIEW_PDF_CACHE_TTL = 3600                   # LibreOffice 转 PDF 产物缓存秒数
 _PREVIEW_OFFICE_TYPES = ('docx', 'spreadsheet', 'presentation')
+# 敏感内容扫描上限：文档审核弹窗读取原始文件的最大字节数（扫描为抽样检测，
+# 无需与预览一样读满 50MB；超限只扫前段，命中统计不保证覆盖全文）
+MAX_SENSITIVE_SCAN_BYTES = 20 * 1024 * 1024
 # 代码高亮语言推断：前端按 language 选取关键字表，后端只负责扩展名映射
 _CODE_LANGUAGE_BY_EXT = {
     '.py': 'python', '.java': 'java', '.js': 'javascript', '.ts': 'typescript',
@@ -3466,3 +3469,78 @@ class DocAuditRejectView(APIView):
             "title": doc.title,
             "reject_comment": comment,
         })
+
+
+# ============================================================================
+# 文档审核 · 敏感内容扫描
+# ============================================================================
+
+def _get_doc_scan_text(doc):
+    """获取待扫描文本：优先原始文件（脱敏前内容），文件缺失时降级为切片拼接
+
+    审核关注的是脱敏前的真实内容（切片入库前已脱敏，扫切片找不到手机号/邮箱），
+    因此优先读原始文件；文件缺失（OSS 过期/本地被清理）时降级扫描已入库切片，
+    此时只能检出敏感词（切片文本已被脱敏）。
+
+    Returns:
+        (text, source)：source 为 raw / chunks / none（无可扫描内容）
+    """
+    # 1. 原始文件优先
+    try:
+        content = _read_doc_bytes(doc, MAX_SENSITIVE_SCAN_BYTES)
+        text = _extract_text_content(content, doc.file_type, doc.file_name)
+        if text:
+            return text, 'raw'
+    except Http404:
+        # 文件缺失 → 降级扫描切片
+        pass
+    except Exception as e:
+        logger.warning(f'[SensitiveScan] read raw file failed doc={doc.id}: {e}')
+
+    # 2. 切片降级：拼接前 500 个切片、总量不超过 1M 字符（防超大文档拖垮接口）
+    parts = []
+    total = 0
+    for c in doc.chunks.order_by('chunk_index').iterator():
+        if len(parts) >= 500 or total >= 1_000_000:
+            break
+        if c.content:
+            parts.append(c.content)
+            total += len(c.content)
+    if parts:
+        return '\n\n'.join(parts), 'chunks'
+    return '', 'none'
+
+
+class DocSensitiveScanView(APIView):
+    """GET /api/v1/knowledge/documents/<id>/sensitive-scan/
+    扫描文档内容的敏感信息（敏感词/手机号/邮箱/IP/身份证/银行卡），返回统计与命中片段
+
+    供文档审核弹窗打开时调用，帮助审核人快速定位敏感内容。
+    访问权限与文档审核页面一致：知识管理员/部门经理/团队组长/超管，
+    且仅限本人审核范围内的文档（跨团队/跨部门文档返回 403）。
+    扫描源优先原始文件（脱敏前内容），文件缺失时降级扫描已入库切片。
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        from apps.knowledge.sensitive_scan import build_scan_response
+        user = request.user
+        if not _has_doc_audit_page_access(user):
+            raise PermissionDenied("无文档审核权限")
+        try:
+            doc = Document.objects.get(pk=pk, is_deleted=False)
+        except Document.DoesNotExist:
+            return Response({"detail": "文档不存在"}, status=404)
+
+        # 归属范围校验：与待审列表一致，防止越权查看他人团队的文档内容
+        team_ids, dept_ids = _audit_scope_ids(user)
+        if not _doc_audit_scope(user, doc, team_ids, dept_ids):
+            raise PermissionDenied("无该文档的审核权限")
+
+        text, source = _get_doc_scan_text(doc)
+        if not text:
+            # 无任何可扫描内容：返回空结果而非报错，前端展示「未检测到敏感内容」
+            return Response({'ok': True, 'source': source, 'scanned_chars': 0,
+                             'total': 0, 'categories': [], 'fragments': [],
+                             'truncated': False})
+        return Response(build_scan_response(text, source))

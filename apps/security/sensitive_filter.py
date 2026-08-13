@@ -430,14 +430,20 @@ class SensitiveFilter:
 
     # ---------- 全量审查（非流式场景）----------
 
-    def check(self, text: str) -> List[HitResult]:
+    def check(self, text: str, record: bool = True) -> List[HitResult]:
         """对完整文本做全量审查，返回所有命中
 
-        用于：缓存命中 / 任务拆分的一次性 delta / 落库后二次审查
+        用于：缓存命中 / 任务拆分的一次性 delta / 落库后二次审查 / 文档审核批量扫描
+
+        Args:
+            text: 待审查文本
+            record: 是否累计命中统计（默认 True）。LLM 流式热路径需要计数；
+                    批量离线扫描（如文档审核弹窗）传 False，避免一次性扫描
+                    大量文本污染 SensitiveWord.hit_count。
         """
         if not text or not self._is_enabled():
             return []
-        return self._scan(text)
+        return self._scan(text, record=record)
 
     # ---------- 流式增量审查 ----------
 
@@ -505,8 +511,14 @@ class SensitiveFilter:
     def _has_separator(self, text: str) -> bool:
         return any(ch in self._SEPARATORS for ch in text)
 
-    def _scan(self, text: str) -> List[HitResult]:
-        """对一段文本做 AC + 正则扫描，返回全部命中"""
+    def _scan(self, text: str, record: bool = True) -> List[HitResult]:
+        """对一段文本做 AC + 正则扫描，返回全部命中
+
+        Args:
+            text: 待扫描文本
+            record: 是否累计命中统计（透传给 _record_hits）；
+                    批量离线扫描（如文档审核）传 False，避免污染敏感词命中计数
+        """
         hits: List[HitResult] = []
 
         # AC 自动机匹配普通词
@@ -529,8 +541,10 @@ class SensitiveFilter:
                     start=m.start(), end=m.end(),
                 ))
 
-        # 命中统计：check/feed/flush 都经由 _scan，在此统一计数，覆盖全部入口
-        self._record_hits(hits)
+        # 命中统计：check/feed/flush 都经由 _scan，在此统一计数，覆盖全部入口；
+        # record=False（离线批量扫描）时跳过，避免污染 LLM 流式命中统计
+        if record:
+            self._record_hits(hits)
 
         return hits
 

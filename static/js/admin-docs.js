@@ -340,16 +340,17 @@ function openDocModal(d) {
 			</div>` : ''}
 		</div>
 
-		<div class="detail-section-title">敏感词检测</div>
-		<div class="doc-scan-todo">
-			<span class="doc-scan-todo-icon">⚠</span>
-			<span>敏感词自动检测待接入（TODO），后续在此展示检测结果</span>
+		<div class="detail-section-title">敏感内容检测</div>
+		<div id="docScanArea">
+			<div class="doc-scan-loading">检测中...</div>
 		</div>
 	`;
 	// 已驳回文档不可再审核：隐藏通过/拒绝按钮
 	$('#btnDocApprove').style.display = isRejected ? 'none' : '';
 	$('#btnDocReject').style.display = isRejected ? 'none' : '';
 	showModal('docModal');
+	// 弹窗打开后异步加载敏感内容检测结果（不阻塞审核操作）
+	_loadSensitiveScan(d.id);
 }
 
 /* ---------- 弹窗标题：按审核状态生成 ---------- */
@@ -365,6 +366,65 @@ function _docModalTitle(d) {
 // 预览元信息来源：当前列表数据中按 id 查找，找不到返回 null
 function getDocForPreview(id) {
 	return Promise.resolve((_currentDocs || []).find(x => x.id === id) || null);
+}
+
+/* ============================================================================
+ * 敏感内容检测 —— 弹窗内自动扫描（敏感词/手机号/邮箱/IP/身份证/银行卡）
+ * ============================================================================ */
+
+// 打开弹窗后异步加载检测结果：不阻塞审核操作，失败仅展示占位提示
+function _loadSensitiveScan(docId) {
+	const area = $('#docScanArea');
+	if (!area) return;
+	api.getJson(`/api/v1/knowledge/documents/${docId}/sensitive-scan/`)
+		.then(res => {
+			if (res?.ok !== true) { area.innerHTML = _scanErrorHtml(res?.detail || '检测失败'); return; }
+			area.innerHTML = res.total > 0 ? _scanResultHtml(res) : _scanCleanHtml();
+		})
+		.catch(err => {
+			area.innerHTML = _scanErrorHtml(_errMsg(err, '检测服务异常'));
+		});
+}
+
+/* 有命中：统计（上方）与详细片段（下方）上下排列，片段上下文保留原文换行/空格 */
+function _scanResultHtml(res) {
+	const cats = (res.categories || []).map(c => `
+		<li class="doc-scan-stats-item">
+			<span>${escapeHtml(c.label)}</span>
+			<span class="doc-scan-stats-count">${c.count}</span>
+		</li>
+	`).join('');
+	// ctx 为 pre-wrap，插值必须紧贴标签，否则模板缩进/换行会被原样渲染成片段首行空白
+	const frags = (res.fragments || []).map(f => `
+		<div class="doc-scan-frag">
+			<div class="doc-scan-frag-head">
+				<span class="doc-scan-cat">${escapeHtml(f.label)}</span>
+				<span class="doc-scan-frag-count">${f.count > 1 ? `共 ${f.count} 处` : ''}</span>
+			</div>
+			<div class="doc-scan-frag-ctx">${escapeHtml(f.context_before)}<mark class="doc-scan-mark">${escapeHtml(f.matched)}</mark>${escapeHtml(f.context_after)}</div>
+		</div>
+	`).join('');
+	return `
+		<div class="doc-scan-summary">
+			<div class="doc-scan-summary-title">⚠ 共检测到 ${res.total} 处敏感内容</div>
+			<ul class="doc-scan-stats-list">${cats}</ul>
+		</div>
+		<div class="doc-scan-detail">
+			<div class="doc-scan-detail-title">详细片段</div>
+			<div class="doc-scan-frags">${frags}</div>
+			${res.truncated ? '<div class="text-sub text-xs" style="margin-top:8px">片段较多，仅展示前 30 条</div>' : ''}
+		</div>
+	`;
+}
+
+/* 无命中：绿色提示 */
+function _scanCleanHtml() {
+	return `<div class="doc-scan-clean"><span class="doc-scan-clean-icon">✓</span><span>未检测到敏感内容</span></div>`;
+}
+
+/* 检测失败：非阻断提示（不影响审核操作） */
+function _scanErrorHtml(msg) {
+	return `<div class="doc-scan-todo"><span class="doc-scan-todo-icon">⚠</span><span>敏感内容检测失败：${escapeHtml(msg)}</span></div>`;
 }
 
 /* ============================================================================

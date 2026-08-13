@@ -117,6 +117,27 @@ class TestAuditMiddlewareLogging:
         assert log is not None
         assert log.actor_username == 'bodyuser'
 
+    @patch('apps.audit.middleware._get_user_from_jwt', return_value=(None, ''))
+    def test_login_username_when_body_consumed_by_drf_then_still_captured(self, _mock_jwt):
+        """登录请求体被 DRF 解析消费后（模拟 read），process_response 仍能拿到用户名
+
+        回归：process_request 阶段提前缓存用户名，避免 RawPostDataException 导致 actor_username 为空
+        """
+        request = self.factory.post(
+            '/api/v1/auth/login/',
+            data=json.dumps({'username': 'alice'}),
+            content_type='application/json',
+        )
+        # 先走 process_request 预读缓存
+        self.mw.process_request(request)
+        # 模拟 DRF JSONParser 消费请求流
+        request.read()
+        self.mw.process_response(request, HttpResponse(status=200))
+
+        log = AuditLog.objects.filter(action='login').first()
+        assert log is not None
+        assert log.actor_username == 'alice'
+
     @patch('apps.audit.middleware._get_user_from_jwt', return_value=(None, 'admin'))
     def test_result_success_for_2xx(self, _mock_jwt):
         """响应 < 400 时 result=success"""

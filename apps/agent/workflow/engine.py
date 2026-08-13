@@ -213,10 +213,9 @@ class WorkflowRunner:
         - 'run_tool'：敏感工具已批准，可继续执行工具
         - 'rejected'：被拒绝，节点跳过并降级
 
-        审批分流：
-        - 显式 approval 节点：创建工单（TicketList），走正式审批流程（审计可追溯）
-        - 敏感工具节点（web_search/text2sql）：不创建工单，前端展示内嵌确认/拒绝按钮，
-          用户确认后直接调用 API 恢复工作流（轻量级 HITL，避免频繁创建工单干扰用户）
+        统一内嵌确认（HITL 不创建工单）：显式 approval 节点与敏感工具节点
+        均在聊天界面内嵌展示确认/拒绝按钮，用户确认后直接调用 API 恢复工作流，
+        避免为工作流确认产生工单、污染工单中心的待我审批。
         """
         run = self.node_runs[nid]
         if run.status == 'approved':
@@ -235,39 +234,30 @@ class WorkflowRunner:
             self.degraded_reasons.append(f'节点 {node.get("name") or nid} 被人工拒绝')
             return 'rejected'
         if run.status == 'blocked':
-            # 已有待审批状态 → 维持等待，重新发送审批事件
+            # 已有待确认状态 → 维持等待，重新发送审批事件
             self.blocked = True
             self._emit_approval_event(nid, node, run)
             return BLOCKED
 
-        # pending：首次遇到 → 分流处理
-        needs_ticket = node.get('type') == 'approval'
-        if needs_ticket:
-            # 显式 approval 节点：创建正式工单
-            from apps.agent.workflow.hitl import create_approval_ticket
-            ticket = create_approval_ticket(self.workflow, node, self.user)
-            self._mark_node(nid, 'blocked', output={'output': '', 'meta': {}},
-                            ticket_id=ticket.id, emit=True)
-        else:
-            # 敏感工具节点：不创建工单，直接标记 blocked 等待内嵌确认
-            self._mark_node(nid, 'blocked', output={'output': '', 'meta': {}}, emit=True)
+        # pending：首次遇到 → 统一标记 blocked，等待对话框内嵌确认（不创建工单）
+        self._mark_node(nid, 'blocked', output={'output': '', 'meta': {}}, emit=True)
         self._emit_approval_event(nid, node, self.node_runs[nid])
         self.blocked = True
         return BLOCKED
 
     def _emit_approval_event(self, nid: str, node: dict, run):
-        """发送审批事件：区分工单审批（ticket）和内嵌确认（inline）
+        """发送审批事件（统一内嵌确认）
 
-        前端据此渲染不同 UI：ticket 显示工单链接，inline 显示确认/拒绝按钮。
+        前端在聊天界面内嵌渲染确认/拒绝按钮，用户确认后调用
+        POST /api/v1/agent/workflows/{id}/approve/ 恢复工作流。
         """
-        is_ticket = node.get('type') == 'approval'
         self._emit({
             'type': 'workflow_approval_required',
             'node_id': nid,
             'node_name': node.get('name', nid),
-            'ticket_id': run.ticket_id if is_ticket else None,
+            'ticket_id': None,
             'reason': node.get('reason', ''),
-            'approval_type': 'ticket' if is_ticket else 'inline',
+            'approval_type': 'inline',
         })
 
     # ------------------------------------------------------------------
@@ -620,7 +610,7 @@ def run_workflow_stream(user, session, question: str, plan: dict,
 
 
 def resume_workflow(workflow: AgentWorkflow, node_id: str, approved: bool):
-    """人工确认后恢复工作流执行（hitl.resume_workflow_from_ticket 调用）
+    """人工确认后恢复工作流执行（由 WorkflowApprovalView 内嵌确认接口调用）
 
     - approved=True：节点置 approved（敏感工具则继续执行工具），工作流继续
     - approved=False：节点置 rejected，下游依赖跳过，基于已有结果降级汇总

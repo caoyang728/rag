@@ -118,8 +118,7 @@ def workflow_env(test_user, db):
          patch('apps.agent.executor._check_full_text', return_value=('答案', None)), \
          patch('apps.agent.executor._make_filtered_event'), \
          patch('apps.memory.manager.MemoryManager'), \
-         patch('apps.agent.models.AgentTrace.batch_create_from_traces'), \
-         patch('apps.agent.workflow.hitl.create_approval_ticket'):
+         patch('apps.agent.models.AgentTrace.batch_create_from_traces'):
         yield test_user, session
 
 
@@ -162,7 +161,7 @@ class TestRunWorkflowStream:
         assert wf.node_runs.get(node_id='finalize').status == 'pending'
 
     def test_run_workflow_when_approval_node_then_blocked(self, workflow_env):
-        """approval 节点：创建 HITL 工单，工作流停留 waiting_approval，done 无 message_id"""
+        """approval 节点：统一内嵌确认（不创建工单），工作流停留 waiting_approval，done 无 message_id"""
         user, session = workflow_env
         plan = {'nodes': [
             {'id': 'r1', 'name': '研究', 'type': 'research', 'question': '子问题', 'depends_on': []},
@@ -173,13 +172,14 @@ class TestRunWorkflowStream:
         from apps.agent.react import agent_ask
         agent_ask.return_value = {'answer': '结果', 'citations': [], 'chunks': [],
                                   'tool_traces': [], 'llm_stats': {}}
-        from apps.agent.workflow.hitl import create_approval_ticket
-        create_approval_ticket.return_value = MagicMock(id=100, ticket_no='AG20260001')
 
         events = list(engine.run_workflow_stream(user, session, '总问题', plan))
         appr_ev = [e for e in events if e['type'] == 'workflow_approval_required']
         assert len(appr_ev) == 1
-        assert appr_ev[0]['ticket_id'] == 100
+        # 统一内嵌确认：不产生工单，事件不含 ticket_id
+        assert appr_ev[0]['approval_type'] == 'inline'
+        assert appr_ev[0]['ticket_id'] is None
+        assert appr_ev[0]['node_id'] == 'ap1'
 
         done = events[-1]
         assert done['status'] == 'waiting_approval'
@@ -190,7 +190,7 @@ class TestRunWorkflowStream:
         assert wf.status == 'waiting_approval'
         node = wf.node_runs.get(node_id='ap1')
         assert node.status == 'blocked'
-        assert node.ticket_id == 100
+        assert node.ticket_id is None
 
     def test_run_workflow_when_sensitive_tool_then_blocked(self, workflow_env):
         """敏感工具（web_search）不显式声明审批也须强制人工确认"""
@@ -200,13 +200,11 @@ class TestRunWorkflowStream:
              'tool_name': 'web_search', 'params': {'query': 'xx'}, 'depends_on': []},
         ]}
 
-        from apps.agent.workflow.hitl import create_approval_ticket
-        create_approval_ticket.return_value = MagicMock(id=101, ticket_no='AG20260002')
-
         events = list(engine.run_workflow_stream(user, session, '联网问题', plan))
         appr_ev = [e for e in events if e['type'] == 'workflow_approval_required']
         assert len(appr_ev) == 1
         assert appr_ev[0]['node_id'] == 'w1'
+        assert appr_ev[0]['approval_type'] == 'inline'
 
         done = events[-1]
         assert done['status'] == 'waiting_approval'

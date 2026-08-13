@@ -21,26 +21,8 @@ from apps.users.models import (
     UserRoleRel, GrantStatus, has_permission,
 )
 from apps.users.ticket_service import cancel_ticket, _can_approve_for_role, parse_change_summary
+from apps.users.services.ticket_base import get_approved_approver_ids
 from apps.users.utils import _client_ip, _serialize_chain_nodes, _client_ua, _resolve_scope_name
-
-
-def _notify_workflow_resolved(ticket):
-    """Agent 人工确认工单进入终态后，恢复对应工作流执行
-
-    审批通过（APPROVED/EXECUTED）→ 工作流继续执行剩余节点；
-    驳回（REJECTED）→ 工作流标记该节点被拒并降级继续。
-    复用统一工单状态机，工单本身不删除只改状态。
-
-    HITL 恢复失败不影响审批结果（工作流可通过详情页手动重试），故异常仅记录。
-    """
-    if not ticket or getattr(ticket, 'biz_type', None) != TicketBizType.AGENT:
-        return
-    try:
-        from apps.agent.workflow.hitl import resume_workflow_from_ticket
-        resume_workflow_from_ticket(ticket)
-    except Exception:
-        logger.exception(
-            f'[Workflow] resume after agent ticket resolved failed: ticket={ticket.id}')
 
 
 class TicketApproveView(APIView):
@@ -86,8 +68,6 @@ class TicketApproveView(APIView):
             return Response({"detail": str(e)}, status=400)
 
         logger.info(f"Ticket approved: id={pk}, ticket_no={ticket.ticket_no}, approver={request.user.username}")
-        # Agent 人工确认工单通过后，恢复对应工作流继续执行
-        _notify_workflow_resolved(ticket)
         return Response({
             "ok": True,
             "ticket_no": ticket.ticket_no,
@@ -142,8 +122,6 @@ class TicketRejectView(APIView):
             return Response({"detail": str(e)}, status=400)
 
         logger.info(f"Ticket rejected: id={pk}, ticket_no={ticket.ticket_no}, rejector={request.user.username}")
-        # Agent 人工确认工单被驳回后，工作流对应节点标记被拒并降级
-        _notify_workflow_resolved(ticket)
         return Response({
             "ok": True,
             "ticket_no": ticket.ticket_no,
@@ -245,13 +223,6 @@ def _user_approvable_roles(user):
         roles.add('TEAM_LEADER')
     if Department.objects.filter(leader_id=user.id, is_deleted=False).exists():
         roles.add('DEPT_LEADER')
-    # Agent 工作流人工确认（HITL）：发起人可审批自己发起的确认工单。
-    # 仅当用户确实发起过 agent 工单时才加入粗过滤集合，避免普通用户的 pending 视图
-    # 被大量无关 agent 工单污染（精确的"仅发起人"判定由 _can_user_approve_ticket 兜底）。
-    if TicketList.objects.filter(
-        applicant=user, biz_type=TicketBizType.AGENT, status=TicketStatus.PENDING,
-    ).exists():
-        roles.add('WORKFLOW_OWNER')
     return roles
 
 
@@ -278,7 +249,14 @@ def _can_user_approve_ticket(user, ticket):
     if role == 'SYSTEM_AUDITOR':
         if not user.has_perm('system.config.write'):
             return False
-        return ticket.applicant_id != user.id
+        # 防自审：创建人不能审自己提交的工单（避免自己发起的工单出现在待我审批）
+        if ticket.applicant_id == user.id:
+            return False
+        # 双人独立性：已审过该工单任一前序节点的人不能再审后续节点，
+        # 与权限域 _can_approve_for_role 共用公共判定，避免逻辑漂移
+        if user.id in get_approved_approver_ids(ticket):
+            return False
+        return True
     return _can_approve_for_role(user, role, ticket)
 
 

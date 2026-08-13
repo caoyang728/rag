@@ -1102,48 +1102,30 @@ async function sendChat() {
 					break;
 				}
 				case 'workflow_approval_required': {
-					// 审批节点阻塞：工作流暂停等待人工确认（HITL）
+					// HITL，统一在对话框内嵌确认
 					setWorkflowNodeStatus(chunk.node_id, 'blocked');
 					if (wfStatusEl) {
 						wfStatusEl.textContent = '等待人工确认';
 						wfStatusEl.className = 'workflow-status waiting_approval';
 					}
-					const approvalType = chunk.approval_type || 'ticket';
 					const apprEl = elemFromTpl('tmpl-workflow-approval', (frag) => {
 						frag.querySelector('.wf-approval-reason').textContent = chunk.reason || '';
 						const actionsEl = frag.querySelector('.wf-approval-actions');
-						if (approvalType === 'inline') {
-							// 内嵌确认（敏感工具）：直接在聊天界面确认/拒绝，不创建工单
-							const confirmBtn = document.createElement('button');
-							confirmBtn.className = 'btn btn-sm btn-primary';
-							confirmBtn.textContent = '✓ 确认执行';
-							confirmBtn.addEventListener('click', () => {
-								submitInlineApproval(wfId, chunk.node_id, true, apprEl, mid, answerContentEl, answerTextEl);
-							});
-							const rejectBtn = document.createElement('button');
-							rejectBtn.className = 'btn btn-sm btn-danger';
-							rejectBtn.textContent = '✗ 拒绝';
-							rejectBtn.addEventListener('click', () => {
-								submitInlineApproval(wfId, chunk.node_id, false, apprEl, mid, answerContentEl, answerTextEl);
-							});
-							actionsEl.appendChild(confirmBtn);
-							actionsEl.appendChild(rejectBtn);
-						} else {
-							// 工单审批（显式 approval 节点）：跳转工单中心，审批后手动刷新
-							const link = document.createElement('a');
-							link.className = 'btn btn-sm wf-approval-link';
-							link.target = '_blank';
-							link.href = '/static/ticket.html';
-							link.textContent = '前往审批';
-							const refreshBtn = document.createElement('button');
-							refreshBtn.className = 'btn btn-sm wf-approval-refresh';
-							refreshBtn.textContent = '我已审批，刷新结果';
-							refreshBtn.addEventListener('click', () => {
-								refreshWorkflowResult(wfId, mid, answerContentEl, answerTextEl);
-							});
-							actionsEl.appendChild(link);
-							actionsEl.appendChild(refreshBtn);
-						}
+						// 内嵌确认：直接在聊天界面确认/拒绝，调用 API 恢复工作流
+						const confirmBtn = document.createElement('button');
+						confirmBtn.className = 'btn btn-sm btn-primary';
+						confirmBtn.textContent = '✓ 确认执行';
+						confirmBtn.addEventListener('click', () => {
+							submitInlineApproval(wfId, chunk.node_id, true, apprEl, mid, answerContentEl, answerTextEl);
+						});
+						const rejectBtn = document.createElement('button');
+						rejectBtn.className = 'btn btn-sm btn-danger';
+						rejectBtn.textContent = '✗ 拒绝';
+						rejectBtn.addEventListener('click', () => {
+							submitInlineApproval(wfId, chunk.node_id, false, apprEl, mid, answerContentEl, answerTextEl);
+						});
+						actionsEl.appendChild(confirmBtn);
+						actionsEl.appendChild(rejectBtn);
 					});
 					if (wfBodyEl) wfBodyEl.appendChild(apprEl);
 					scrollChatBottom();

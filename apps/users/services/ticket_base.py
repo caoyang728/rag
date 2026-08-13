@@ -78,7 +78,6 @@ class ApproverRole:
     USER_ADMIN = 'USER_ADMIN'      # 用户管理员(部门经理/文档管理员/合规管理员审批链第一节点)
     KB_ADMIN = 'KB_ADMIN'          # 文档管理员(部门级跨部门 viewer/contributor 授权审核)
     SUPER_ADMIN = 'SUPER_ADMIN'    # 超级管理员(全局高权角色审批链第二节点 / super_admin 双人复核)
-    WORKFLOW_OWNER = 'WORKFLOW_OWNER'  # Agent 工作流人工确认发起人(HITL 自助确认,超管兜底)
 
 
 class ApproveStepStatus:

@@ -2,7 +2,7 @@
 apps.users.views 覆盖率补充测试 —— 针对覆盖报告中的缺失行（错误路径/边界条件）
 
 按视图分组的补充用例：
-- 辅助函数直测：_ensure_unique_code / _client_ip / _can_user_approve_ticket / _notify_workflow_resolved
+- 辅助函数直测：_ensure_unique_code / _client_ip / _can_user_approve_ticket
 - LoginView：LoginAttempt 写入异常兜底（验证码失败/密码错误/成功登录三种场景）
 - Profile/Reset/PasswordReset：邮箱不可自改、密码强度边界、邮件发送失败、重置参数边界
 - UserViewSet：manage_all 快路径 / 数据范围各分支 / 更新越权 / 角色过滤 / 批量导入导出
@@ -40,7 +40,7 @@ from apps.users.services.user_service import (
     check_user_manage, check_can_manage_user, get_manageable_user_ids, filter_role_ids,
 )
 from apps.users.utils import _client_ip
-from apps.users.views_tickets import _can_user_approve_ticket, _notify_workflow_resolved
+from apps.users.views_tickets import _can_user_approve_ticket
 from apps.users.views_users import UserViewSet
 from apps.users.views_org import DepartmentViewSet, TeamViewSet
 from apps.users.tests.test_views_base import (
@@ -76,7 +76,7 @@ def _make_custom_role_user(username, role_key, perm_key,
 # 辅助函数直测
 # ============================================================================
 class TestHelperFunctions(UsersAPIExtraBase):
-    """_ensure_unique_code / _client_ip / _can_user_approve_ticket / _notify_workflow_resolved"""
+    """_ensure_unique_code / _client_ip / _can_user_approve_ticket"""
 
     def test_ensure_unique_code_exclude_id(self):
         """exclude_id 分支：排除自身后无冲突 → 原 code 返回"""
@@ -139,26 +139,6 @@ class TestHelperFunctions(UsersAPIExtraBase):
             status=TicketStatus.PENDING, approval_chain=[{'approver_role': 'SUPER_ADMIN'}],
             current_step=0, applicant_id=self.normal_user.id, target_user_id=None)
         assert _can_user_approve_ticket(self.super_admin, ticket) is True
-
-    def test_notify_workflow_resolved_skip_non_agent(self):
-        """非 AGENT 工单直接返回"""
-        with patch('apps.agent.workflow.hitl.resume_workflow_from_ticket') as mock_resume:
-            _notify_workflow_resolved(SimpleNamespace(biz_type='permission', id=1))
-            mock_resume.assert_not_called()
-
-    def test_notify_workflow_resolved_success(self):
-        """AGENT 工单 → 恢复工作流被调用"""
-        ticket = SimpleNamespace(biz_type='agent', id=1)
-        with patch('apps.agent.workflow.hitl.resume_workflow_from_ticket') as mock_resume:
-            _notify_workflow_resolved(ticket)
-            mock_resume.assert_called_once()
-
-    def test_notify_workflow_resolved_exception_suppressed(self):
-        """恢复失败异常被吞掉（覆盖 2306-2311 except 分支）"""
-        ticket = SimpleNamespace(biz_type='agent', id=1)
-        with patch('apps.agent.workflow.hitl.resume_workflow_from_ticket',
-                   side_effect=RuntimeError('boom')):
-            _notify_workflow_resolved(ticket)  # 不抛异常即通过
 
 
 # ============================================================================

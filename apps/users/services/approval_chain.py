@@ -53,19 +53,6 @@ def _can_approve_for_role(user, approver_role: str, ticket=None) -> bool:
     if not user or not getattr(user, 'is_authenticated', False):
         return False
 
-    # 特殊节点 0：Agent 工作流人工确认（HITL）—— 发起人自助确认 + 超管兜底
-    # 该节点独立于权限域，发起人本人就是被授权的确认人，因此必须放在"回避原则"
-    # 闸门之前判定（否则发起人被"不能审自己工单"拦截）。
-    if approver_role == ApproverRole.WORKFLOW_OWNER:
-        if not ticket:
-            return False
-        if user.id == ticket.applicant_id:
-            return True
-        return UserRoleRel.objects.filter(
-            user=user, role__role_key='super_admin',
-            status=GrantStatus.ACTIVE,
-        ).exists()
-
     # 闸 1:回避原则 —— 申请人/目标用户不能审自己工单
     if ticket:
         if user.id == ticket.applicant_id:

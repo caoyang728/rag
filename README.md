@@ -320,6 +320,9 @@ rag/
 
 ## 四、核心 API 概览
 
+<details>
+<summary>展开查看完整 API 列表</summary>
+
 ### 认证 & 用户
 
 | Method | Path | 说明 |
@@ -488,6 +491,8 @@ rag/
 | POST | `/api/v1/analytics/low-score-analysis/run/` | 手动触发归因（异步） |
 | GET | `/api/v1/analytics/low-score-analysis/stats/` | 归因分类统计（分布图） |
 
+</details>
+
 ---
 
 ## 五、技术栈
@@ -511,6 +516,9 @@ rag/
 ---
 
 ## 六、数据库表概览
+
+<details>
+<summary>展开查看全部数据库表</summary>
 
 ### 用户与权限（users）
 
@@ -649,6 +657,8 @@ rag/
 | AgentTrace | `agent_trace` | Agent 工具调用链记录（每轮工具名/参数/结果/耗时，供「思考过程」展示与端到端 Tracing） |
 | AgentWorkflow | `agent_workflow` | 多 Agent 工作流执行实例（节点 DAG + 状态机 planning→running→succeeded/failed/degraded/waiting_approval） |
 | WorkflowNodeRun | `agent_workflow_node` | 工作流节点执行轨迹（research/tool/approval/finalize 的输入/输出/耗时/错误，审批节点关联工单 ID） |
+
+</details>
 
 ---
 

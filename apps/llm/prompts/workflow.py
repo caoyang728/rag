@@ -4,7 +4,7 @@
 - 汇总器（Finalizer）：把各子 Agent/工具节点的输出合并为最终答案
 
 节点类型约定：
-- research：子 Agent 独立检索+推理（内部工具集：knowledge_search/wiki_search/graph_search/calculator）
+- research：子 Agent 独立检索+推理（内部工具集：knowledge_search，自动按 Wiki→图谱→文档检索）
 - tool：直接调用工具（web_search/text2sql 等敏感工具会由系统强制要求人工确认）
 - approval：显式人工确认节点（HITL），确认前工作流暂停，拒绝则跳过并降级
 """
@@ -38,7 +38,9 @@ WORKFLOW_PLAN_USER_TEMPLATE = """用户问题：
 
 节点规则：
 1. 每个节点 type 只能取 research（子 Agent 执行）或 tool（直接调用工具）；
-2. tool 节点仅限注册表内工具：knowledge_search / web_search / calculator / text2sql / wiki_search / graph_search；
+2. tool 节点仅限注册表内工具：knowledge_search / web_search / text2sql；
+   内部知识检索统一使用 knowledge_search（会自动按 Wiki → 知识图谱 → 内部文档 顺序检索），
+   禁止生成 wiki_search / graph_search 工具节点，避免破坏该固定检索顺序；
    web_search 与 text2sql 属于敏感工具，系统会自动要求人工确认，不要额外添加确认节点；
 3. 需要人工拍板的场景（如"是否允许执行某动作"）用显式 approval 节点：
    {{"id": "n4", "name": "确认是否允许执行", "type": "approval",

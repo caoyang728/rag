@@ -222,6 +222,63 @@ class TestHybridSearch:
         bm_kwargs = mock_bm.call_args[1]
         assert bm_kwargs['top_k'] == 15
 
+    @patch('apps.retrieval.hybrid.get_config_value')
+    @patch('apps.retrieval.hybrid._enrich_chunks')
+    @patch('apps.retrieval.hybrid.rerank_docs')
+    @patch('apps.retrieval.hybrid.rrf_fuse')
+    @patch('apps.retrieval.hybrid.bm25_search')
+    @patch('apps.retrieval.hybrid.vector_search')
+    @patch('apps.retrieval.hybrid.get_embedding_client')
+    def test_hybrid_search_when_system_config_top_k_then_priority(
+            self, mock_embed_cls, mock_vec, mock_bm, mock_rrf, mock_rerank,
+            mock_enrich, mock_cfg):
+        """未显式传 top_k 时，SystemConfig 的 VECTOR_TOP_K / BM25_TOP_K 优先于 settings"""
+        mock_cfg.side_effect = lambda key, default=None, value_type=None: {
+            'VECTOR_TOP_K': 42, 'BM25_TOP_K': 21,
+        }.get(key, default)
+        mock_embed = MagicMock()
+        mock_embed.embed_one.return_value = [0.1]
+        mock_embed_cls.return_value = mock_embed
+        mock_vec.return_value = [{'chunk_id': i, 'document_id': 1} for i in range(5)]
+        mock_bm.return_value = [{'chunk_id': i, 'document_id': 1} for i in range(5)]
+        mock_rrf.return_value = [{'chunk_id': i, 'document_id': 1} for i in range(5)]
+        mock_rerank.return_value = [{'chunk_id': i, 'document_id': 1} for i in range(3)]
+
+        from apps.retrieval.hybrid import hybrid_search
+        user = MagicMock()
+        hybrid_search('q', user, do_rerank=True)
+
+        assert mock_vec.call_args[1]['top_k'] == 42
+        assert mock_bm.call_args[1]['top_k'] == 21
+
+    @patch('apps.retrieval.hybrid.get_config_value')
+    @patch('apps.retrieval.hybrid._enrich_chunks')
+    @patch('apps.retrieval.hybrid.rerank_docs')
+    @patch('apps.retrieval.hybrid.rrf_fuse')
+    @patch('apps.retrieval.hybrid.bm25_search')
+    @patch('apps.retrieval.hybrid.vector_search')
+    @patch('apps.retrieval.hybrid.get_embedding_client')
+    def test_hybrid_search_when_system_config_missing_then_settings_fallback(
+            self, mock_embed_cls, mock_vec, mock_bm, mock_rrf, mock_rerank,
+            mock_enrich, mock_cfg):
+        """SystemConfig 未配置时回退 settings（.env）默认值，与旧部署行为一致"""
+        mock_cfg.return_value = None
+        mock_embed = MagicMock()
+        mock_embed.embed_one.return_value = [0.1]
+        mock_embed_cls.return_value = mock_embed
+        mock_vec.return_value = [{'chunk_id': i, 'document_id': 1} for i in range(5)]
+        mock_bm.return_value = [{'chunk_id': i, 'document_id': 1} for i in range(5)]
+        mock_rrf.return_value = [{'chunk_id': i, 'document_id': 1} for i in range(5)]
+        mock_rerank.return_value = [{'chunk_id': i, 'document_id': 1} for i in range(3)]
+
+        from django.conf import settings
+        from apps.retrieval.hybrid import hybrid_search
+        user = MagicMock()
+        hybrid_search('q', user, do_rerank=True)
+
+        assert mock_vec.call_args[1]['top_k'] == settings.VECTOR_TOP_K
+        assert mock_bm.call_args[1]['top_k'] == settings.BM25_TOP_K
+
     @patch('apps.retrieval.hybrid._enrich_chunks')
     @patch('apps.retrieval.hybrid.rerank_docs')
     @patch('apps.retrieval.hybrid.rrf_fuse')
@@ -251,6 +308,84 @@ class TestHybridSearch:
         assert 'rerank_ms' in stats
         assert 'total_ms' in stats
         assert all(isinstance(v, int) for v in stats.values())
+
+    @patch('apps.retrieval.hybrid._enrich_chunks')
+    @patch('apps.retrieval.hybrid.rerank_docs')
+    @patch('apps.retrieval.hybrid.rrf_fuse')
+    @patch('apps.retrieval.hybrid.bm25_search')
+    @patch('apps.retrieval.hybrid.vector_search')
+    @patch('apps.retrieval.hybrid.get_embedding_client')
+    def test_hybrid_search_when_rerank_score_below_threshold_then_filtered(
+            self, mock_embed_cls, mock_vec, mock_bm, mock_rrf, mock_rerank, mock_enrich):
+        """rerank 分数低于阈值的片段应被过滤，避免无关文档作为引用返回"""
+        mock_embed = MagicMock()
+        mock_embed.embed_one.return_value = [0.1]
+        mock_embed_cls.return_value = mock_embed
+        mock_vec.return_value = [{'chunk_id': 1, 'document_id': 1}]
+        mock_bm.return_value = [{'chunk_id': 1, 'document_id': 1}]
+        mock_rrf.return_value = [{'chunk_id': 1, 'document_id': 1}]
+        # 高相关 + 低相关（法律类无关文档）混合返回
+        mock_rerank.return_value = [
+            {'chunk_id': 1, 'rerank_score': 0.9, 'document_id': 1},
+            {'chunk_id': 2, 'rerank_score': 0.1, 'document_id': 2},
+        ]
+
+        from apps.retrieval.hybrid import hybrid_search
+        user = MagicMock()
+        with patch('apps.retrieval.hybrid.settings.RETRIEVAL_MIN_RERANK_SCORE', 0.3):
+            result = hybrid_search('q', user, do_rerank=True)
+
+        assert result['chunks'] == [{'chunk_id': 1, 'rerank_score': 0.9, 'document_id': 1}]
+
+    @patch('apps.retrieval.hybrid._enrich_chunks')
+    @patch('apps.retrieval.hybrid.rerank_docs')
+    @patch('apps.retrieval.hybrid.rrf_fuse')
+    @patch('apps.retrieval.hybrid.bm25_search')
+    @patch('apps.retrieval.hybrid.vector_search')
+    @patch('apps.retrieval.hybrid.get_embedding_client')
+    def test_hybrid_search_when_all_rerank_scores_below_threshold_then_empty(
+            self, mock_embed_cls, mock_vec, mock_bm, mock_rrf, mock_rerank, mock_enrich):
+        """所有 rerank 分数均低于阈值时返回空结果（触发上游拒答语义）"""
+        mock_embed = MagicMock()
+        mock_embed.embed_one.return_value = [0.1]
+        mock_embed_cls.return_value = mock_embed
+        mock_vec.return_value = [{'chunk_id': 1, 'document_id': 1}]
+        mock_bm.return_value = [{'chunk_id': 1, 'document_id': 1}]
+        mock_rrf.return_value = [{'chunk_id': 1, 'document_id': 1}]
+        mock_rerank.return_value = [
+            {'chunk_id': 1, 'rerank_score': 0.05, 'document_id': 1},
+        ]
+
+        from apps.retrieval.hybrid import hybrid_search
+        user = MagicMock()
+        with patch('apps.retrieval.hybrid.settings.RETRIEVAL_MIN_RERANK_SCORE', 0.3):
+            result = hybrid_search('q', user, do_rerank=True)
+
+        assert result['chunks'] == []
+
+    @patch('apps.retrieval.hybrid._enrich_chunks')
+    @patch('apps.retrieval.hybrid.rerank_docs')
+    @patch('apps.retrieval.hybrid.rrf_fuse')
+    @patch('apps.retrieval.hybrid.bm25_search')
+    @patch('apps.retrieval.hybrid.vector_search')
+    @patch('apps.retrieval.hybrid.get_embedding_client')
+    def test_hybrid_search_when_rerank_score_missing_then_not_filtered(
+            self, mock_embed_cls, mock_vec, mock_bm, mock_rrf, mock_rerank, mock_enrich):
+        """rerank 失败回退（结果无 rerank_score 字段）时不触发阈值过滤，保持原行为"""
+        mock_embed = MagicMock()
+        mock_embed.embed_one.return_value = [0.1]
+        mock_embed_cls.return_value = mock_embed
+        mock_vec.return_value = [{'chunk_id': 1, 'document_id': 1}]
+        mock_bm.return_value = [{'chunk_id': 1, 'document_id': 1}]
+        mock_rrf.return_value = [{'chunk_id': 1, 'document_id': 1}]
+        mock_rerank.return_value = [{'chunk_id': 1, 'document_id': 1}]
+
+        from apps.retrieval.hybrid import hybrid_search
+        user = MagicMock()
+        with patch('apps.retrieval.hybrid.settings.RETRIEVAL_MIN_RERANK_SCORE', 0.3):
+            result = hybrid_search('q', user, do_rerank=True)
+
+        assert len(result['chunks']) == 1
 
 
 # ============================================================================

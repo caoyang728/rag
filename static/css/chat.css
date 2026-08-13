@@ -46,23 +46,35 @@
 	padding: 12px 24px 16px;
 }
 
-/* ============ 知识库范围选择器（固定下拉） ============ */
+/* ============ 知识来源选择器（跟随触发按钮的下拉面板） ============ */
 .scope-dropdown {
 	position: fixed;
-	top: var(--nav-h);
-	left: 50%;
-	transform: translateX(-50%);
-	width: 360px;
-	max-height: calc(100vh - var(--nav-h) - 20px);
+	top: 0;
+	left: 0;
+	width: 380px;
+	max-height: min(560px, calc(100vh - var(--nav-h) - 24px));
 	background: var(--white);
 	border: 1px solid var(--border);
-	border-top: none;
-	border-radius: 0 0 var(--radius-lg) var(--radius-lg);
-	box-shadow: var(--shadow-xl);
+	border-radius: var(--radius-lg);
+	box-shadow: 0 12px 40px rgba(0, 0, 0, 0.14), 0 2px 8px rgba(0, 0, 0, 0.06);
 	overflow: hidden;
 	display: none;
 	flex-direction: column;
 	z-index: 99;
+	/* 打开动画：轻微下移 + 渐显，避免生硬跳变 */
+	animation: scope-dropdown-in 0.16s ease-out;
+}
+
+@keyframes scope-dropdown-in {
+	from {
+		opacity: 0;
+		transform: translateY(-6px);
+	}
+
+	to {
+		opacity: 1;
+		transform: translateY(0);
+	}
 }
 
 .scope-dropdown.open {
@@ -132,6 +144,126 @@
 	font-size: 11px;
 	color: var(--text-sub);
 	flex-shrink: 0
+}
+
+/* ============ 数据来源开关（聊天页顶部下拉） ============ */
+.source-switches {
+	padding: 6px 8px 8px;
+	border-bottom: 1px solid var(--border);
+}
+
+/* 单个来源项：复选框 + 名称 + 解释文案（两行布局） */
+.source-switch {
+	border-radius: 8px;
+	margin: 1px 4px;
+	align-items: flex-start;
+}
+
+.source-switch input[type="checkbox"] {
+	margin-top: 3px;
+}
+
+/* 来源项内部分层：第一行名称、第二行解释文案 */
+.source-switch .scope-label {
+	display: flex;
+	flex-direction: column;
+	gap: 1px;
+	min-width: 0;
+	white-space: normal;
+	overflow: visible;
+}
+
+.scope-label-name {
+	font-weight: 500;
+	font-size: 13px;
+	color: var(--text);
+}
+
+.scope-label-desc {
+	font-size: 11px;
+	color: var(--text-sub);
+	line-height: 1.4;
+}
+
+/* 内部文档节点树区域（勾选「内部文档」时才展示） */
+.doc-scope-wrap {
+	flex: 1;
+	display: flex;
+	flex-direction: column;
+	min-height: 0;
+}
+
+.doc-scope-wrap .scope-hint {
+	border-bottom: none;
+	padding: 8px 14px 4px;
+	font-weight: 600;
+	color: var(--text-main);
+}
+
+.doc-scope-wrap .scope-quick-actions {
+	border-bottom: none;
+	padding: 2px 14px 6px;
+}
+
+/* ============ 回答正文 / 工具结果的 Markdown 美化 ============ */
+/* 表格（数据库查询结果、Excel 数据、LLM 输出的 md 表格统一走此样式） */
+.md-table-wrap {
+	overflow-x: auto;
+	margin: 8px 0;
+	border: 1px solid var(--border);
+	border-radius: 8px;
+}
+
+.md-table-wrap table {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: 13px;
+}
+
+.md-table-wrap th,
+.md-table-wrap td {
+	padding: 6px 10px;
+	border: 1px solid var(--border);
+	text-align: left;
+	white-space: nowrap;   /* 单元格不换行，超宽横向滚动查看 */
+}
+
+.md-table-wrap thead th {
+	background: var(--hover);
+	font-weight: 600;
+}
+
+.md-table-wrap tbody tr:hover td {
+	background: var(--hover);
+}
+
+/* 引用块 / 分隔线 / 行内元素（回答正文与工具结果共用） */
+.ai-answer-text blockquote,
+.tool-call-result blockquote {
+	margin: 8px 0;
+	padding: 4px 12px;
+	border-left: 3px solid var(--primary);
+	background: var(--hover);
+	color: var(--text-sub);
+	border-radius: 4px;
+}
+
+.ai-answer-text hr,
+.tool-call-result hr {
+	border: none;
+	border-top: 1px solid var(--border);
+	margin: 12px 0;
+}
+
+.ai-answer-text strong,
+.tool-call-result strong {
+	font-weight: 600;
+}
+
+.ai-answer-text a,
+.tool-call-result a {
+	color: var(--primary);
+	text-decoration: underline;
 }
 
 /* ============ 历史会话右栏 ============ */
@@ -634,9 +766,59 @@
 	overflow-y: auto
 }
 
-/* 无引用提示（基于模型知识） */
-.source-llm-hint .source-header {
-	margin-bottom: 0
+/* 来源标签行：明显标识回答的数据来源（📄 内部文档 / 🗄️ 数据库 / 🌐 联网 / 🤖 大模型知识） */
+.answer-source-tags {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 6px;
+	padding: 8px 0 10px;
+	border-bottom: 1px dashed var(--border);
+	margin-bottom: 8px;
+}
+
+.source-tags-title {
+	font-size: 11px;
+	color: var(--text-sub);
+	margin-right: 2px;
+	flex-shrink: 0;
+}
+
+.source-tag {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	padding: 3px 10px;
+	border-radius: 999px;
+	font-size: 11px;
+	font-weight: 500;
+	line-height: 1.5;
+	border: 1px solid transparent;
+}
+
+/* 四类来源标签配色：文档蓝 / 数据库绿 / 联网红 / 大模型紫（Material 色板浅底深字，现代柔和） */
+.tag-doc {
+	color: #0b57d0;
+	background: #e8f0fe;
+	border-color: #c6dafc;
+}
+
+.tag-db {
+	color: #188038;
+	background: #e6f4ea;
+	border-color: #b7e1cd;
+}
+
+.tag-web {
+	color: #a50e0e;
+	background: #fce8e6;
+	border-color: #f5c6c2;
+}
+
+.tag-llm {
+	color: #7b1fa2;
+	background: #f3e8fd;
+	border-color: #e1c7f2;
 }
 
 /* 回答正文中的引用序号上标 */
@@ -663,6 +845,11 @@
 
 	.source-card-sql {
 		max-height: none
+	}
+
+	/* 移动端：来源下拉面板贴近视口宽度，避免超出屏幕 */
+	.scope-dropdown {
+		width: calc(100vw - 24px)
 	}
 }
 

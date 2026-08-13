@@ -12,6 +12,10 @@ retrieval app - 检索层权限过滤
   4. 跨范围共享白名单（ResourceShare：文档级 + 节点级继承）
   5. 兜底：不命中 = 不召回
 
+附加业务过滤（对所有用户生效）：
+  - 仅活跃版本（is_active=True）
+  - 仅双审通过（audit_status='passed'），未过审文档不进入检索链路
+
 节点级共享继承（resource_type=KNOWLEDGE_NODE + inherit_mode=ALL_DESCENDANTS）：
 - 共享给某节点 = 该节点 + 所有后代节点 + 后代节点下所有文档自动可见
 - 通过 DocumentVector.node_path 前缀匹配（startswith）一次搞定，无需递归 CTE
@@ -202,6 +206,11 @@ def build_permission_q(user, root_types=None, node_path_prefix=None, node_ids=No
 
     # 3e) 仅召回活跃版本：非活跃旧版本（被新版本替换）不参与检索，权限判定优先级不变
     q &= Q(is_active=True)
+
+    # 3f) 仅召回双审通过（audit_status='passed'）的文档：
+    #     未过审（待审核/复核中/已驳回）的文档内容不允许进入问答检索链路。
+    #     冗余字段由 vector_store.upsert_vector 与审核流程（通过/驳回）同步。
+    q &= Q(audit_status='passed')
 
     # 4) 黑名单剔除（文档级，has_block_user 标志位跳过空子查询）
     #    对所有用户生效（含超管，Deny Override 铁律）；Owner 绕过由 access.py 二次过滤保证。

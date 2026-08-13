@@ -2,7 +2,7 @@
 agent.tools 包入口单元测试
 
 覆盖 tools/__init__.py 的：
-- get_default_registry：单例创建（首次调用注册 6 个工具）+ 二次调用返回同一实例
+- get_default_registry：单例创建（首次调用注册 3 个工具）+ 二次调用返回同一实例
 - get_available_tool_names：委托 registry.names() 返回工具名列表
 - __all__ 导出符号完整
 
@@ -14,15 +14,14 @@ import apps.agent.tools as tools_pkg
 from apps.agent.tools import (
     get_default_registry, get_available_tool_names,
     BaseTool, ToolContext, ToolRegistry, parse_tool_arguments,
-    KnowledgeSearchTool, WebSearchTool, CalculatorTool, Text2SqlTool,
-    WikiSearchTool, GraphSearchTool,
+    KnowledgeSearchTool, WebSearchTool, Text2SqlTool,
 )
 
 pytestmark = pytest.mark.unit
 
 
 # ============================================================================
-# get_default_registry：单例 + 6 工具注册
+# get_default_registry：单例 + 3 工具注册
 # ============================================================================
 class TestGetDefaultRegistry:
     """get_default_registry 单例与工具注册"""
@@ -32,19 +31,18 @@ class TestGetDefaultRegistry:
         """每个测试前重置模块级单例，确保触发创建分支
 
         _default_registry 是模块级全局变量，单例模式下首次调用才会注册工具；
-        重置后可重复验证创建逻辑（覆盖 __init__.py 第 38-46 行）。
+        重置后可重复验证创建逻辑（覆盖 __init__.py 第 33-37 行）。
         """
         monkeypatch.setattr(tools_pkg, '_default_registry', None)
 
-    def test_get_default_registry_when_first_call_then_creates_with_six_tools(self):
-        """首次调用：创建注册表并注册 6 个工具"""
+    def test_get_default_registry_when_first_call_then_creates_with_three_tools(self):
+        """首次调用：创建注册表并注册 3 个工具"""
         registry = get_default_registry()
         assert registry is not None
         names = set(registry.names())
-        # 6 个内置工具：knowledge_search / web_search / calculator / text2sql / wiki_search / graph_search
+        # 3 个内置工具：knowledge_search / web_search / text2sql
         assert names == {
-            'knowledge_search', 'web_search', 'calculator',
-            'text2sql', 'wiki_search', 'graph_search',
+            'knowledge_search', 'web_search', 'text2sql',
         }
 
     def test_get_default_registry_when_second_call_then_returns_same_instance(self):
@@ -58,16 +56,13 @@ class TestGetDefaultRegistry:
         registry = get_default_registry()
         assert isinstance(registry.get('knowledge_search'), KnowledgeSearchTool)
         assert isinstance(registry.get('web_search'), WebSearchTool)
-        assert isinstance(registry.get('calculator'), CalculatorTool)
         assert isinstance(registry.get('text2sql'), Text2SqlTool)
-        assert isinstance(registry.get('wiki_search'), WikiSearchTool)
-        assert isinstance(registry.get('graph_search'), GraphSearchTool)
 
-    def test_get_default_registry_then_to_openai_tools_returns_six_schemas(self):
-        """导出的 OpenAI tools schema 数量为 6"""
+    def test_get_default_registry_then_to_openai_tools_returns_three_schemas(self):
+        """导出的 OpenAI tools schema 数量为 3"""
         registry = get_default_registry()
         tools = registry.to_openai_tools()
-        assert len(tools) == 6
+        assert len(tools) == 3
         # 每个工具 schema 符合 OpenAI 协议
         for t in tools:
             assert t['type'] == 'function'
@@ -82,15 +77,14 @@ class TestGetDefaultRegistry:
 class TestGetAvailableToolNames:
     """get_available_tool_names 返回工具名列表"""
 
-    def test_get_available_tool_names_then_returns_six_names(self, monkeypatch):
-        """返回 6 个工具名（覆盖 __init__.py 第 56 行）"""
+    def test_get_available_tool_names_then_returns_three_names(self, monkeypatch):
+        """返回 3 个工具名（覆盖 __init__.py 第 47 行）"""
         # 重置单例确保走创建路径
         monkeypatch.setattr(tools_pkg, '_default_registry', None)
         names = get_available_tool_names()
-        assert len(names) == 6
+        assert len(names) == 3
         assert 'knowledge_search' in names
-        assert 'calculator' in names
-        assert 'graph_search' in names
+        assert 'text2sql' in names
 
     def test_get_available_tool_names_then_delegates_to_registry(self, monkeypatch):
         """get_available_tool_names 应委托 registry.names()"""
@@ -110,8 +104,7 @@ class TestToolsAllExports:
         """__all__ 中的符号都能从包导入"""
         expected = {
             'BaseTool', 'ToolContext', 'ToolRegistry', 'parse_tool_arguments',
-            'KnowledgeSearchTool', 'WebSearchTool', 'CalculatorTool', 'Text2SqlTool',
-            'WikiSearchTool', 'GraphSearchTool',
+            'KnowledgeSearchTool', 'WebSearchTool', 'Text2SqlTool',
             'get_default_registry', 'get_available_tool_names',
         }
         assert set(tools_pkg.__all__) == expected

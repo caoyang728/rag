@@ -33,7 +33,7 @@ def _make_llm(answer='最终汇总答案'):
 
 def _agent_ask_side_effect(*, questions):
     """research 节点子 Agent mock：按子问题文本返回对应答案"""
-    def side_effect(user, question, session, root_types=None, node_ids=None):
+    def side_effect(user, question, session, root_types=None, node_ids=None, sources=None):
         return {
             'answer': questions.get(question, '默认答案'),
             'citations': [], 'chunks': [], 'tool_traces': [],
@@ -308,7 +308,7 @@ class TestWorkflowRunnerTopo:
         ]
         from apps.agent.react import agent_ask
         order = []
-        def side_effect(user, question, session, root_types=None, node_ids=None):
+        def side_effect(user, question, session, root_types=None, node_ids=None, sources=None):
             order.append(question)
             return {'answer': '答案:' + question, 'citations': [], 'chunks': [],
                     'tool_traces': [], 'llm_stats': {}}

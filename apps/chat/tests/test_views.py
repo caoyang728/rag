@@ -436,3 +436,38 @@ class TestQaRecordListAPI(ChatAPITestBase):
         # 只返回当前用户的记录
         for r in data['records']:
             assert r['session_id'] != other_session.id
+
+
+class TestChatConfigAPI(ChatAPITestBase):
+    """GET /api/v1/chat/config/ 聊天页来源配置接口测试
+    （返回 SystemConfig CHAT_SOURCE_ENABLED 开启的来源，前端据此渲染来源开关）"""
+
+    def test_config_anonymous_401(self):
+        resp = self.client.get('/api/v1/chat/config/', **self.anon_headers)
+        assert resp.status_code in [401, 403]
+
+    @patch('apps.system.config_loader.get_config_value')
+    def test_config_when_enabled_doc_db_then_returns_only_enabled(self, mock_cfg):
+        """系统配置只开启 doc/db 时，接口只返回开启的来源"""
+        mock_cfg.return_value = 'doc,db'
+        resp = self.client.get('/api/v1/chat/config/', **self.normal_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data['sources_enabled'] == ['doc', 'db']
+        assert data['all_sources'] == ['doc', 'db', 'web', 'llm']
+
+    @patch('apps.system.config_loader.get_config_value')
+    def test_config_when_empty_then_fallback_all(self, mock_cfg):
+        """配置为空（未初始化）时回退全部来源，保证聊天页来源开关可用"""
+        mock_cfg.return_value = ''
+        resp = self.client.get('/api/v1/chat/config/', **self.normal_headers)
+        assert resp.status_code == 200
+        assert resp.json()['sources_enabled'] == ['doc', 'db', 'web', 'llm']
+
+    @patch('apps.system.config_loader.get_config_value')
+    def test_config_when_invalid_keys_then_filtered(self, mock_cfg):
+        """配置含非法 key 时剔除，仅返回合法来源"""
+        mock_cfg.return_value = 'doc,foo,llm'
+        resp = self.client.get('/api/v1/chat/config/', **self.normal_headers)
+        assert resp.status_code == 200
+        assert resp.json()['sources_enabled'] == ['doc', 'llm']

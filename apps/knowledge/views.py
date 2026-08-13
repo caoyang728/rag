@@ -530,6 +530,18 @@ def _sync_vectors_active(doc_ids, is_active):
     DocumentVector.objects.filter(document_id__in=list(doc_ids)).update(is_active=is_active)
 
 
+def _sync_vectors_audit(doc_ids, audit_status):
+    """同步文档的检索向量审核状态（DocumentVector 冗余字段）
+
+    检索层只召回 audit_status='passed' 的文档，审核流程（通过/驳回）后调用，
+    保证未过审文档的向量立即从检索链路移除、过审后立即恢复可检索。
+    """
+    if not doc_ids:
+        return
+    from apps.retrieval.models import DocumentVector
+    DocumentVector.objects.filter(document_id__in=list(doc_ids)).update(audit_status=audit_status)
+
+
 def _extract_text_content(content: bytes, file_type: str, filename: str) -> str:
     """从文件内容中提取文本（用于预览）"""
     ext = os.path.splitext(filename)[1].lower()
@@ -919,12 +931,51 @@ def _build_tree(qs):
     return roots
 
 
+def _visible_node_ids(user, root_type=None):
+    """计算当前用户有权限检索的节点 ID 集合（含祖先节点）
+
+    以检索层 build_permission_q 为唯一口径（与问答实际可召回范围一致）：
+    权限判定 + 双审过滤 + 活跃版本 + 黑名单剔除后，取可召回文档的挂载节点，
+    再沿 parent_id 补齐祖先节点，保证树形结构完整、可逐级下钻。
+    无任何可召回文档时返回空集合。
+    """
+    from apps.retrieval.models import DocumentVector
+    from apps.retrieval.permission import build_permission_q
+
+    perm_q = build_permission_q(user, root_types=[root_type] if root_type else None)
+    visible = set(
+        DocumentVector.objects.filter(perm_q)
+        .values_list('node_id', flat=True).distinct()
+    )
+    if not visible:
+        return visible
+    # 沿 parent_id 向上补齐祖先节点（一次查询全量 id/parent_id，内存走链）
+    parent_map = dict(
+        KnowledgeNode.objects.filter(is_deleted=False)
+        .values_list('id', 'parent_id')
+    )
+    for nid in list(visible):
+        pid = parent_map.get(nid)
+        while pid:
+            visible.add(pid)
+            pid = parent_map.get(pid)
+    return visible
+
+
 class NodeTreeView(APIView):
-    """GET /api/v1/knowledge/nodes/tree/?root_type=company_doc"""
+    """GET /api/v1/knowledge/nodes/tree/?root_type=company_doc&permission_only=1
+
+    permission_only=1 时（聊天页知识库范围选择器专用）：
+    - 仅返回当前用户有权限检索的节点（检索层 build_permission_q 判定，
+      与问答实际可召回范围一致，含双审过滤与黑名单剔除）；
+    - 同时补齐可见节点的祖先节点，保证返回树形结构完整。
+    不传该参数时行为不变（全量树，供上传/后台等场景使用）。
+    """
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
         root_type = request.query_params.get("root_type")
+        permission_only = request.query_params.get("permission_only") == '1'
         qs = KnowledgeNode.objects.filter(is_deleted=False)
         if root_type:
             qs = qs.filter(root_type=root_type)
@@ -935,6 +986,8 @@ class NodeTreeView(APIView):
                 filter=models.Q(documents__is_deleted=False),
             ),
         )
+        if permission_only:
+            qs = qs.filter(id__in=_visible_node_ids(request.user, root_type))
         nodes = qs.order_by("depth", "order_no", "id").values(
             "id", "parent_id", "root_type", "node_type", "node_kind", "name", "depth",
             "node_level", "document_count", "ref_id", "path",
@@ -3401,6 +3454,8 @@ class DocAuditApproveView(APIView):
             return Response({"detail": f"文档当前状态 {doc.audit_status} 不可审核"}, status=400)
 
         doc.save(update_fields=['audit_status', 'updated_at'])
+        # 同步检索向量审核状态：pending_compliance 阶段不可检索，passed 后恢复可检索
+        _sync_vectors_audit([doc.id], doc.audit_status)
         # action 固定为 doc_audit_approve（避免超长值截断导致操作日志丢失），
         # 流转目标状态写入 detail.to_status，供审核记录区分「审核通过 / 复核通过」
         _log_operation(request, 'doc_audit_approve', document=doc,
@@ -3460,6 +3515,8 @@ class DocAuditRejectView(APIView):
 
         doc.audit_status = 'rejected'
         doc.save(update_fields=['audit_status', 'updated_at'])
+        # 同步检索向量审核状态：驳回后该文档立即从检索链路移除
+        _sync_vectors_audit([doc.id], 'rejected')
         _log_operation(request, 'doc_audit_reject', document=doc,
                        detail={'comment': comment, 'rejector': user.username})
         logger.info(f"Doc audit rejected: id={pk}, rejector={user.username}, reason={comment[:100]}")

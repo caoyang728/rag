@@ -9,6 +9,7 @@ router.register("sessions", views.SessionViewSet, basename="session")
 
 urlpatterns = [
     # 同步问答接口 ChatAskView 已软删除，前端全部走 ask_stream SSE 流式
+    path("config/", views.ChatConfigView.as_view()),
     path("ask_stream/", views.ChatAskStreamView.as_view()),
     path("feedback/", views.FeedbackView.as_view()),
     path("records/", views.QaRecordListView.as_view()),

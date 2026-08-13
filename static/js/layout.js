@@ -16,7 +16,7 @@ function renderTopNav(active) {
     </div>
     <div id="scopeNavWrap" class="topnav-scope-wrap" style="display:none">
       <button class="topnav-scope-btn" id="scopeTrigger" onclick="toggleScopePicker()">
-        📚 知识库范围 · <span id="scopeBadge">已全选</span> ▾
+        📚 知识来源 · <span id="scopeBadge">全开</span> ▾
       </button>
     </div>
     <div class="topnav-right">
@@ -266,7 +266,6 @@ function renderSidebar(active) {
     <nav class="sidebar-nav">
       ${groups.map(g => `
         <div class="sidebar-group">
-          <div class="sidebar-group-title">${g.group}</div>
           ${g.items.map(it => {
 		if (it.page) {
 			return `

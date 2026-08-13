@@ -250,23 +250,6 @@
 	background: transparent;
 }
 
-.sidebar-group {
-	margin-bottom: 16px
-}
-
-.sidebar-group-title {
-	padding: 8px 20px;
-	font-size: 11px;
-	color: var(--text-sub);
-	letter-spacing: 0.05em;
-	text-transform: uppercase;
-	/* 滚动时分组标题吸顶，便于识别当前所在分组 */
-	position: sticky;
-	top: 0;
-	background: var(--white);
-	z-index: 1;
-}
-
 .sidebar-item {
 	display: flex;
 	align-items: center;
@@ -307,10 +290,6 @@ body.sidebar-collapsed .sidebar-head {
 	padding: 8px 0;
 }
 
-body.sidebar-collapsed .sidebar-group {
-	margin-bottom: 4px;
-}
-
 body.sidebar-collapsed .sidebar-item {
 	padding: 10px 0;
 	justify-content: center;
@@ -320,16 +299,6 @@ body.sidebar-collapsed .sidebar-item {
 body.sidebar-collapsed .sidebar-item-text,
 body.sidebar-collapsed .sidebar-item-badge {
 	display: none;
-}
-
-/* 分组标题折叠后退化为细分隔线 */
-body.sidebar-collapsed .sidebar-group-title {
-	margin: 8px 12px;
-	padding: 0;
-	height: 1px;
-	background: var(--border);
-	overflow: hidden;
-	text-indent: -999px;
 }
 
 /* 折叠态悬浮提示（data-tip 取自菜单名） */

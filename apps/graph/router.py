@@ -16,7 +16,8 @@ WIKI_SEARCH_THRESHOLD = 0.55       # Wiki 检索最低阈值
 GRAPH_CONFIDENCE_THRESHOLD = 0.45  # GraphRAG 接受阈值（实体全相关+有关系的场景约 0.5+）
 
 
-def decide_route(query: str, user) -> Dict:
+def decide_route(query: str, user, node_ids: Optional[List[int]] = None,
+                 root_types: Optional[List[str]] = None) -> Dict:
     """三层路由决策。
 
     按 Wiki → GraphRAG → RAG 顺序尝试，返回第一个达到阈值的结果。
@@ -25,6 +26,8 @@ def decide_route(query: str, user) -> Dict:
     Args:
         query: 用户问题
         user: 用户对象（透传给各检索层做权限过滤）
+        node_ids: 可选，知识库节点范围限定（聊天页"知识库范围"选择，透传给 RAG 兜底层）
+        root_types: 可选，根类型限定（透传给 RAG 兜底层）
 
     Returns:
         {
@@ -94,7 +97,8 @@ def decide_route(query: str, user) -> Dict:
     # === 第 3 层：RAG 兜底 ===
     t3 = time.time()
     try:
-        rag_result = hybrid_search(query, user, do_rerank=True)
+        rag_result = hybrid_search(query, user, do_rerank=True,
+                                   node_ids=node_ids, root_types=root_types)
     except Exception as e:
         logger.exception(f'[Router] RAG 兜底检索失败: {e}')
         rag_result = {'chunks': [], 'stats': {}}
@@ -123,7 +127,8 @@ def decide_route(query: str, user) -> Dict:
     }
 
 
-def orchestrate(query: str, user, session=None) -> Dict:
+def orchestrate(query: str, user, session=None, node_ids: Optional[List[int]] = None,
+                root_types: Optional[List[str]] = None) -> Dict:
     """编排入口：供 executor 或其他调用方使用。
 
     目前直接调用 decide_route，后续可扩展会话级缓存等。
@@ -132,11 +137,13 @@ def orchestrate(query: str, user, session=None) -> Dict:
         query: 用户问题
         user: 用户对象
         session: 会话对象（预留）
+        node_ids: 可选，知识库节点范围限定（透传给 RAG 兜底层）
+        root_types: 可选，根类型限定（透传给 RAG 兜底层）
 
     Returns:
         同 decide_route
     """
-    return decide_route(query, user)
+    return decide_route(query, user, node_ids=node_ids, root_types=root_types)
 
 
 def _format_rag_context(chunks: List[Dict]) -> str:

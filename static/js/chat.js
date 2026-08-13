@@ -21,6 +21,19 @@ function elemFromTpl(id, fillFn) {
 
 /* ---- 知识库范围选择器状态 ---- */
 const SCOPE_STORAGE_KEY = 'rag_chat_scope';
+// 数据来源开关（与知识范围分开持久化）：doc=内部文档 / db=数据库 / web=联网 / llm=LLM
+const SOURCE_STORAGE_KEY = 'rag_chat_sources';
+const SOURCE_ORDER = ['doc', 'db', 'web', 'llm'];
+// 来源展示元数据（图标/名称/说明），供按系统配置动态渲染来源开关
+const SOURCE_META = {
+	doc: { icon: '📄', label: '内部文档', desc: '已审核通过的企业知识，权威可信' },
+	db: { icon: '🗄️', label: '数据库', desc: '实时查询业务数据库，数据真实' },
+	web: { icon: '🌐', label: '联网', desc: '实时搜索全网公开信息，范围更大，仅供参考' },
+	llm: { icon: '🤖', label: 'LLM', desc: '基于大模型自身知识作答，仅供参考，可能有误' },
+};
+// 系统配置开启的来源（默认全部，页面加载时按 /api/v1/chat/config/ 过滤后只渲染开启项）
+let enabledSources = [...SOURCE_ORDER];
+let currentSources = { doc: true, db: true, web: true, llm: true };
 const MODE_STORAGE_KEY = 'rag_chat_mode';  // 问答模式持久化 key
 const DRAFT_KEY = 'rag_chat_draft';  // 输入草稿 key（sessionStorage，标签页关闭即失效）
 // 会话详情缓存：localStorage 存储，key 格式 rag_session_cache_{id}
@@ -57,6 +70,10 @@ document.addEventListener('DOMContentLoaded', () => {
 		if (scopeOpen && !e.target.closest('#scopeDropdown') && !e.target.closest('#scopeTrigger')) {
 			closeScopePicker();
 		}
+	});
+	// 窗口缩放时下拉框若处于打开状态，重新贴合触发按钮位置
+	window.addEventListener('resize', () => {
+		if (scopeOpen) positionScopeDropdown();
 	});
 });
 
@@ -143,8 +160,10 @@ function renderEmptyState() {
 
 /* ---- 知识库范围选择器 ---- */
 let scopeTreeData = [];
-// 节点树 localStorage 缓存：TTL 2 小时，节点树变更频率低
-const NODES_CACHE_KEY = 'rag_nodes_tree_cache';
+// 节点树 localStorage 缓存：TTL 2 小时，节点树变更频率低。
+// v2：接口改为 permission_only=1（仅返回当前用户有权限的节点），
+// 与旧版全量树缓存数据不兼容，换 key 强制失效避免展示越权节点。
+const NODES_CACHE_KEY = 'rag_nodes_tree_cache_v2';
 const NODES_CACHE_TTL = 2 * 60 * 60 * 1000;  // 2 小时
 
 /* 从 localStorage 读取节点树缓存，过期返回 null */
@@ -184,7 +203,87 @@ function applyScopeData(tree) {
 	updateScopeBadge();
 }
 
-async function initScopePicker() {
+/* 数据来源开关初始化：
+ * 1) 请求 /api/v1/chat/config/ 获取系统配置开启的来源（sources_enabled），
+ *    只渲染开启的来源开关（对应系统配置 CHAT_SOURCE_ENABLED 多选）；
+ *    接口失败时回退渲染全部 4 个来源，保证聊天页不受配置初始化缺失影响。
+ * 2) 从 localStorage 恢复上次勾选（非法值/未开启来源回退开启）。
+ * 3) 保证至少保留一种来源（聊天至少要有一条回答途径，避免整组关闭后
+ *    后端回退全开导致界面行为与用户预期不一致）。 */
+async function initSourceSwitches() {
+	// 拉取系统配置：仅展示管理员开启的来源（失败静默回退全开）
+	try {
+		const data = await api.getJson('/api/v1/chat/config/');
+		if (data && Array.isArray(data.sources_enabled) && data.sources_enabled.length) {
+			const filtered = data.sources_enabled.filter(k => SOURCE_META[k]);
+			// 过滤后为空（全部非法值）时保持默认全开，避免来源开关渲染为空
+			if (filtered.length) enabledSources = filtered;
+			// 配置未开启的来源从当前勾选状态中剔除，避免残留被禁来源的本地状态
+			Object.keys(currentSources).forEach(k => {
+				if (!enabledSources.includes(k)) delete currentSources[k];
+			});
+		}
+	} catch (e) { /* 配置接口失败时保持全开，聊天不受影响 */ }
+
+	try {
+		const saved = JSON.parse(localStorage.getItem(SOURCE_STORAGE_KEY) || 'null');
+		if (saved && typeof saved === 'object') {
+			enabledSources.forEach(k => { currentSources[k] = saved[k] !== false; });
+		}
+	} catch (e) { /* 解析失败回退默认全开 */ }
+	if (!enabledSources.some(k => currentSources[k])) currentSources[enabledSources[0]] = true;
+
+	const switches = $('#sourceSwitches');
+	if (switches) {
+		switches.innerHTML = enabledSources.map(k => `
+			<label class="scope-item source-switch">
+				<input type="checkbox" data-source="${k}" ${currentSources[k] ? 'checked' : ''} onchange="onSourceChange(this)">
+				<span class="scope-label">
+					<span class="scope-label-name">${SOURCE_META[k].icon} ${SOURCE_META[k].label}</span>
+					<span class="scope-label-desc">${SOURCE_META[k].desc}</span>
+				</span>
+			</label>`).join('');
+	}
+	updateSourceDropdown();
+	updateScopeBadge();
+}
+
+/* 勾选/取消勾选数据来源：拦截"最后一个来源被取消"（至少保留一种）；
+ * 切换后持久化并同步文档节点树区域的显隐。 */
+function onSourceChange(cb) {
+	const key = cb.dataset.source;
+	if (!key || !(key in currentSources)) return;
+	if (!cb.checked && enabledSources.filter(k => currentSources[k]).length <= 1) {
+		toast('至少保留一种数据来源', 'warning');
+		cb.checked = true;
+		return;
+	}
+	currentSources[key] = cb.checked;
+	saveSourcesState();
+	updateSourceDropdown();
+	updateScopeBadge();
+}
+
+function saveSourcesState() {
+	localStorage.setItem(SOURCE_STORAGE_KEY, JSON.stringify(currentSources));
+}
+
+/* 当前开启的数据来源列表（按系统配置开启的来源顺序，随请求体发送） */
+function currentSourcesList() {
+	return enabledSources.filter(k => currentSources[k]);
+}
+
+/* 同步来源开关与文档节点树区域的显隐：
+ * 未勾选「内部文档」时不展示知识库节点树；首次开启时懒加载节点树 */
+function updateSourceDropdown() {
+	const wrap = $('#docScopeWrap');
+	if (wrap) wrap.style.display = currentSources.doc ? '' : 'none';
+	if (currentSources.doc && !scopeTreeData.length) loadScopeTree();
+}
+
+/* 加载知识库节点树（仅返回当前用户有权限检索的节点，permission_only=1），
+ * 带 localStorage 缓存（TTL 2h）；数据来自 /api/v1/knowledge/nodes/tree/ */
+async function loadScopeTree() {
 	const saved = localStorage.getItem(SCOPE_STORAGE_KEY);
 	if (saved) {
 		try { selectedScopeIds = new Set(JSON.parse(saved).map(String)); } catch (e) { selectedScopeIds = new Set(); }
@@ -195,7 +294,7 @@ async function initScopePicker() {
 	if (cachedTree && cachedTree.length > 0) {
 		applyScopeData(cachedTree);
 		// 后台静默刷新：不阻塞页面渲染
-		api.getJson('/api/v1/knowledge/nodes/tree/').then(data => {
+		api.getJson('/api/v1/knowledge/nodes/tree/?permission_only=1').then(data => {
 			const freshTree = data.tree || [];
 			if (freshTree.length > 0) {
 				setNodesCache(freshTree);
@@ -207,13 +306,19 @@ async function initScopePicker() {
 
 	// 无缓存或已过期：正常请求
 	try {
-		const data = await api.getJson('/api/v1/knowledge/nodes/tree/');
+		const data = await api.getJson('/api/v1/knowledge/nodes/tree/?permission_only=1');
 		const tree = data.tree || [];
 		applyScopeData(tree);
 		if (tree.length > 0) setNodesCache(tree);
 	} catch (e) {
 		console.error('load nodes failed:', e);
 	}
+}
+
+/* 页面初始化：先恢复来源开关；节点树由 updateSourceDropdown 按需懒加载
+ * （勾选「内部文档」时才会请求，避免未使用时白白拉取） */
+function initScopePicker() {
+	initSourceSwitches();
 }
 
 function flattenScopeNodes(nodes, depth, parentId) {
@@ -323,11 +428,25 @@ function clearAllScopes() {
 	updateScopeBadge();
 }
 
+/* 定位知识来源下拉框：贴在触发按钮正下方（fixed 定位，随按钮位置动态计算），
+ * 避免固定居中在屏幕中间导致视觉上"飘"在导航栏下方 */
+function positionScopeDropdown() {
+	const trigger = $('#scopeTrigger');
+	const dd = $('#scopeDropdown');
+	if (!trigger || !dd) return;
+	const r = trigger.getBoundingClientRect();
+	dd.style.top = r.bottom + 6 + 'px';
+	// 水平方向：优先与按钮左对齐；右侧空间不足时贴右边界，保证不超出视口
+	dd.style.left = Math.max(8, Math.min(r.left, window.innerWidth - dd.offsetWidth - 8)) + 'px';
+}
+
 function toggleScopePicker() {
 	if (scopeOpen) { closeScopePicker(); return; }
 	scopeOpen = true;
-	$('#scopeDropdown').classList.add('open');
+	const dd = $('#scopeDropdown');
+	dd.classList.add('open');
 	$('#scopeTrigger').classList.add('open');
+	positionScopeDropdown();
 }
 
 function closeScopePicker() {
@@ -340,67 +459,125 @@ function saveScopeState() {
 	localStorage.setItem(SCOPE_STORAGE_KEY, JSON.stringify([...selectedScopeIds]));
 }
 
+/* 顶部按钮徽标：展示当前开启的数据来源摘要
+ * 全部开启 → "全开"；部分开启 → 逗号分隔的来源名 */
 function updateScopeBadge() {
-	const cnt = selectedScopeIds.size;
-	const total = allScopeIds.length;
 	const badge = $('#scopeBadge');
 	if (!badge) return;
-	if (cnt === total) {
-		badge.textContent = '已全选';
-	} else if (cnt === 0) {
-		badge.textContent = '未选择';
+	const on = currentSourcesList();
+	if (on.length === enabledSources.length) {
+		badge.textContent = '全开';
 	} else {
-		badge.textContent = '已选 ' + cnt;
+		badge.textContent = on.map(k => SOURCE_META[k].label).join(' / ');
 	}
 }
 
 /* ---- 构建溯源来源 HTML ----
- * 按数据来源渲染四类徽标卡片：
+ * 按数据来源渲染"来源标签行 + 详细卡片"：
+ *   - 来源标签行：明显标识回答的数据来源（📄 内部文档 / 🗄️ 数据库 / 🌐 联网 / 🤖 大模型知识）
  *   - 文档：citations（route_source=wiki/graphrag 或 knowledge_search 工具），标题可点击跳转文档预览
  *   - 数据库：text2sql 工具调用，展示表名 + 行数，可展开查看 SQL（便于复核）
  *   - 网络：web_search 工具调用，展示搜索关键词
- *   - LLM：无任何引用时提示"基于模型知识回答"
+ *   - 拒答（answer_type='refused'）：答案文本已说明原因，不渲染任何来源标识
  * 历史 citations 缺失 document_id 时标题降级为纯文本（兼容缺失字段，不可点击）。
  * @param {Array} citations - 文档引用列表（可能为空）
  * @param {string|null} routeSource - 路由来源（wiki/graphrag_local/graphrag_global/rag/agent）
  * @param {Array} toolTraces - Agent 工具调用链（含 text2sql/web_search 等）
  * @param {boolean} isPending - Agent 工具尚未返回时先不渲染 LLM 占位，避免闪烁
+ * @param {string|number|null} answerType - 后端 done 事件 answer_type（refused/cache/rag/agent/...）；
+ *        未知（如流式 start 阶段）传 null 或 undefined
  */
-function buildSourceHtml(citations, routeSource, toolTraces, isPending, qaRecordId) {
+function buildSourceHtml(citations, routeSource, toolTraces, isPending, qaRecordId, answerType) {
 	const cards = [];
 	const traces = Array.isArray(toolTraces) ? toolTraces : [];
+	const docList = Array.isArray(citations) ? citations : [];
+	// 数据库/网络来源：仅统计执行成功的工具调用，失败的不作为回答来源
+	const dbTraces = traces.filter(t => t.tool_name === 'text2sql'
+		&& t.ok !== false && t.result_ok !== false);
+	const webTraces = traces.filter(t => t.tool_name === 'web_search'
+		&& t.ok !== false && t.result_ok !== false);
 
 	// 1. 文档引用卡片（可点击跳转预览）
-	(Array.isArray(citations) ? citations : []).forEach(c => {
-		cards.push(buildDocSourceCard(c, routeSource, qaRecordId));
-	});
+	docList.forEach(c => cards.push(buildDocSourceCard(c, routeSource, qaRecordId)));
 
 	// 2. 数据库来源（text2sql 工具调用）
-	traces.forEach(t => {
-		if (t.tool_name !== 'text2sql') return;
-		// 执行失败的查询不展示为来源，避免误导用户
-		if (t.ok === false || t.result_ok === false) return;
+	dbTraces.forEach(t => {
 		const card = buildDbSourceCard(t);
 		if (card) cards.push(card);
 	});
 
 	// 3. 网络来源（web_search 工具调用）
-	traces.forEach(t => {
-		if (t.tool_name !== 'web_search') return;
-		if (t.ok === false || t.result_ok === false) return;
-		cards.push(buildWebSourceCard(t));
-	});
+	webTraces.forEach(t => cards.push(buildWebSourceCard(t)));
 
-	// 4. 全无引用 → 基于模型知识（Agent 工具未执行完时先留空，等 done 事件再渲染）
+	// 4. 拒答：答案文本已说明原因（未找到资料/来源已关闭），不渲染来源标识
+	if (answerType === 'refused' || answerType === 'blocked') return '';
+
+	// 5. 来源标签行：start 阶段（answerType=null）不渲染，等 done 事件携带 answer_type
+	//    再统一补充，避免工具执行中闪烁；历史记录缺失 answer_type（undefined）仍渲染，
+	//    由 buildSourceTagsHtml 依据前端开关兜底（兼容旧数据）
+	const tagsReady = answerType !== null;
+	const tagsHtml = tagsReady ? buildSourceTagsHtml(docList.length, dbTraces, webTraces, answerType) : '';
+
+	// 6. 无任何引用/工具调用：
+	//    - Agent 工具未执行完（isPending）先留空，等 done 事件再渲染，避免闪烁
+	//    - 有标签（如"大模型知识 · 仅供参考"）则渲染标签行
+	//    - 无标签（如仅关闭了 LLM 来源且无检索结果）则不渲染，避免误导
 	if (cards.length === 0) {
 		if (isPending) return '';
-		return htmlFromTpl('tmpl-source-llm', () => {});
+		if (!tagsHtml) return '';
+		return htmlFromTpl('tmpl-source-tags-only', (frag) => {
+			frag.querySelector('.answer-source-tags').innerHTML = tagsHtml;
+		});
 	}
 
 	return htmlFromTpl('tmpl-source-block', (frag) => {
 		frag.querySelector('.source-header').textContent = '📎 溯源来源 · ' + cards.length + ' 项';
 		frag.querySelector('.source-list').innerHTML = cards.join('');
+		// 来源标签行插在溯源卡片之前，先给用户明确的数据来源标识
+		if (tagsHtml) {
+			const tagsEl = document.createElement('div');
+			tagsEl.className = 'answer-source-tags';
+			tagsEl.innerHTML = tagsHtml;
+			frag.querySelector('.source-block').insertBefore(tagsEl, frag.querySelector('.source-header'));
+		}
 	});
+}
+
+/* 构建来源标签行（明确标识回答数据来源，置于溯源卡片之前）
+ *   - 文档：有引用时 → 📄 内部文档 · N 篇
+ *   - 数据库：text2sql 成功调用 → 🗄️ 数据库 · 表名
+ *   - 联网：web_search 成功调用 → 🌐 联网搜索
+ *   - 大模型知识：无任何来源且 answer_type='general'（LLM 无工具直接作答）时
+ *     → 🤖 大模型知识 · 仅供参考
+ * 判定原则：只标识"回答确实基于大模型自身知识"的场景。
+ * agent 类型（工作流/工具链）即使无引用也可能是检索无果后的拒答
+ * （如"未检索到相关资料"），不属于 LLM 知识作答，不标识，避免误导；
+ * 前端关闭 LLM 来源时同样不标识（用户未授权该来源）。
+ * 返回标签 HTML 字符串；无可用来源时返回空串（调用方据此决定是否隐藏整行）。 */
+function buildSourceTagsHtml(docCount, dbTraces, webTraces, answerType) {
+	const tags = [];
+	if (docCount > 0) tags.push('<span class="source-tag tag-doc">📄 内部文档 · ' + docCount + ' 篇</span>');
+	dbTraces.forEach(t => {
+		tags.push('<span class="source-tag tag-db">🗄️ 数据库 · ' + escapeHtml(getDbTableName(t)) + '</span>');
+	});
+	if (webTraces.length > 0) tags.push('<span class="source-tag tag-web">🌐 联网搜索</span>');
+	// 无任何检索/工具来源：仅当后端明确标记为 LLM 直接作答（general）且前端开启了
+	// LLM 来源时才视为大模型知识；拒答（agent 工具检索无果）不标识
+	const llmLike = answerType === 'general' && currentSources.llm;
+	if (tags.length === 0 && llmLike) {
+		tags.push('<span class="source-tag tag-llm">🤖 大模型知识 · 仅供参考</span>');
+	}
+	if (tags.length === 0) return '';
+	return '<span class="source-tags-title">数据来源</span>' + tags.join('');
+}
+
+/* 提取数据库表名（供来源标签/卡片展示）：优先工具参数 tables，缺失时从 SQL 的 FROM/JOIN 提取 */
+function getDbTableName(t) {
+	const args = t.tool_args || {};
+	const sql = extractToolSql(t);
+	let tables = Array.isArray(args.tables) ? args.tables.slice() : [];
+	if (tables.length === 0 && sql) tables = extractTablesFromSql(sql);
+	return tables.length > 0 ? tables.join(' / ') : '业务数据库';
 }
 
 /* 文档引用卡片：徽标 + 可点击标题（有 document_id 时跳转预览并定位页码）
@@ -445,12 +622,9 @@ function buildDocSourceCard(c, routeSource, qaRecordId) {
 
 /* 数据库来源卡片：表名 + 行数 + 可展开的 SQL（表名/SQL 均从工具调用链推导，历史数据缺失时降级） */
 function buildDbSourceCard(t) {
-	const args = t.tool_args || {};
 	const sql = extractToolSql(t);
-	// 表名：优先工具参数 tables，缺失时从 SQL 的 FROM/JOIN 子句提取
-	let tables = Array.isArray(args.tables) ? args.tables.slice() : [];
-	if (tables.length === 0 && sql) tables = extractTablesFromSql(sql);
-	const tableName = tables.length > 0 ? tables.join(' / ') : '业务数据库';
+	// 表名：优先工具参数 tables，缺失时从 SQL 的 FROM/JOIN 子句提取（与来源标签行复用同一口径）
+	const tableName = getDbTableName(t);
 
 	return htmlFromTpl('tmpl-source-card', (frag) => {
 		const badgeEl = frag.querySelector('.source-card-badge');
@@ -632,7 +806,8 @@ function buildThinkingAreaHtml(toolTraces) {
 			}
 			frag.querySelector('.tool-call-args').textContent = formatToolArgs(t.tool_args);
 			const resultEl = frag.querySelector('.tool-call-result');
-			resultEl.textContent = t.tool_result || '';
+			// 工具结果按 Markdown 渲染（数据库表格/LLM 输出美化）
+			resultEl.innerHTML = formatToolResult(t.tool_result);
 			resultEl.className = 'tool-call-result ' + (ok ? 'ok' : 'fail');
 		});
 	}).join('');
@@ -748,10 +923,11 @@ async function refreshWorkflowResult(wfId, mid, answerContentEl, answerTextEl) {
 			const latEl = answerContentEl.querySelector('.feedback-latency');
 			if (latEl) latEl.textContent = '已完成';
 		}
-		// 渲染溯源区
+		// 渲染溯源区：citations 为空（如大模型知识直接作答）时 buildSourceHtml
+		// 内部会兜底渲染"🤖 大模型知识"标签行，因此无条件调用
 		const srcArea = answerContentEl && answerContentEl.querySelector('.ai-source-area');
-		if (srcArea && result.citations && result.citations.length) {
-			srcArea.innerHTML = buildSourceHtml(result.citations, undefined, undefined, undefined, result.qa_id);
+		if (srcArea) {
+			srcArea.innerHTML = buildSourceHtml(result.citations, undefined, undefined, undefined, result.qa_id, result.answer_type);
 		}
 		scrollChatBottom();
 	} catch (e) {
@@ -930,6 +1106,8 @@ async function sendChat() {
 		question: text,
 		root_types: rootTypes,
 		node_ids: [...selectedScopeIds].map(Number),
+		// 数据来源开关：doc=内部文档 / db=数据库 / web=联网 / llm=LLM 直接回答
+		sources: currentSourcesList(),
 		use_cache: true,
 		do_task_split: false,
 		mode: currentMode,  // 问答模式：auto / rag / agent
@@ -995,7 +1173,7 @@ async function sendChat() {
 					}
 					const sourceArea = answerFrag.querySelector('.ai-source-area');
 					// Agent 模式下工具尚未执行完，先不渲染"基于模型知识"占位，避免闪烁
-					const sourceHtml = buildSourceHtml(citations, chunk.route_source, undefined, !!chunk.is_agent, 0);
+					const sourceHtml = buildSourceHtml(citations, chunk.route_source, undefined, !!chunk.is_agent, 0, null);
 					if (sourceHtml) sourceArea.innerHTML = sourceHtml;
 					// message_id 此时未知，先用 0 占位，done 时回填
 					answerFrag.querySelector('.feedback-good').setAttribute('onclick', "submitFeedback('" + mid + "', 0, 1)");
@@ -1051,7 +1229,8 @@ async function sendChat() {
 					}
 					const resultEl = cardEl.querySelector('.tool-call-result');
 					const preview = chunk.result_preview || '';
-					resultEl.textContent = preview;
+					// 工具结果按 Markdown 渲染（数据库表格/LLM 输出美化；截断预览按已聚合行渲染）
+					resultEl.innerHTML = formatToolResult(preview);
 					resultEl.className = 'tool-call-result ' + (ok ? 'ok' : 'fail');
 					updateThinkingSummary(thinkingSummaryEl, toolCallCount, null);
 					scrollChatBottom();
@@ -1188,10 +1367,10 @@ async function sendChat() {
 					}
 
 					if (answerContentEl) {
-						// 刷新溯源区
+						// 刷新溯源区（answer_type 用于区分拒答——拒答时不渲染来源标识）
 						const sourceArea = answerContentEl.querySelector('.ai-source-area');
 						if (sourceArea) {
-							const sourceHtml = buildSourceHtml(citations, chunk.route_source, doneToolTraces, undefined, messageId);
+							const sourceHtml = buildSourceHtml(citations, chunk.route_source, doneToolTraces, undefined, messageId, chunk.answer_type);
 							sourceArea.innerHTML = sourceHtml || '';
 						}
 						// 回填真实 message_id 到反馈按钮
@@ -1234,7 +1413,7 @@ async function sendChat() {
 					// 增量更新会话列表（预览+时间+置顶），不重新请求后端
 					if (currentSessionId) {
 						updateSessionInCache(currentSessionId, text.slice(0, 50), text);
-						// 同步更新会话详情缓存：追加本轮 QaRecord
+						// 同步更新会话详情缓存：追加本轮 QaRecord（含 answer_type 供历史来源标识）
 						const newRecord = {
 							id: messageId,
 							question: text,
@@ -1244,6 +1423,7 @@ async function sendChat() {
 							latency_ttfb_ms: ttfbMs,
 							created_at: new Date().toISOString(),
 							tool_traces: doneToolTraces,
+							answer_type: chunk.answer_type,
 						};
 						const cache = getSessionCache(currentSessionId);
 						if (cache && cache.records) {
@@ -1379,6 +1559,40 @@ function renderCiteSup(text, citeIdx) {
 	});
 }
 
+/* 行内 Markdown 渲染（输入须为已转义文本，防止 XSS）：
+ * 支持加粗 **x**、斜体 *x*、行内代码 `x`、链接 [t](url)。
+ * 顺序：先加粗占位 → 斜体 → 行内代码 → 链接 → 还原加粗，
+ * 避免 `**x**` 被斜体规则误伤。链接 href 仅放行 http/https/mailto/#，
+ * 拦截 javascript: 等危险协议。 */
+function renderInline(text) {
+	let s = text;
+	// 加粗占位（占位符为控制字符 + 序号，不会被后续正则匹配）
+	const strongs = [];
+	s = s.replace(/\*\*([^*\n]+)\*\*/g, (m, inner) => {
+		strongs.push(inner);
+		return '\u0000S' + (strongs.length - 1) + '\u0000';
+	});
+	// 斜体：* 包裹，前后为行首/空白/中英文括号/标点（不误伤加粗与乘法）
+	s = s.replace(/(^|[\s(（【《『])[*]([^*\n][^*\n]*?)[*](?=$|[\s,.;:!?！？。，、)）】》』])/g, '$1<em>$2</em>');
+	// 行内代码
+	s = s.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+	// 链接（仅安全协议）
+	s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s()<>]+|mailto:[^\s()<>]+|#[^\s()<>]*)\)/g,
+		'<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+	// 还原加粗
+	strongs.forEach((inner, i) => {
+		s = s.replace('\u0000S' + i + '\u0000', '<strong>' + inner + '</strong>');
+	});
+	return s;
+}
+
+/* 工具结果文本按 Markdown 渲染（表格/加粗/代码等美化），无引用来源。
+ * 流式场景下 result_preview 可能是截断文本，表格按已聚合行渲染即可。 */
+function formatToolResult(text) {
+	if (!text) return '';
+	return formatAnswer(text, []);
+}
+
 function formatAnswer(text, citations) {
 	if (!text) return '<p>暂无回答</p>';
 
@@ -1392,12 +1606,46 @@ function formatAnswer(text, citations) {
 	const result = [];
 	let inCodeBlock = false;
 	let inList = false;
+	let inTable = false;
+	let tableRows = [];
 	let codeLang = '';
+
+	// 表格行判定：以 | 开头且至少含 2 个 |（Markdown 表格，LLM/数据库工具常用）
+	const isTableRow = (line) => /^\s*\|/.test(line) && line.indexOf('|') !== line.lastIndexOf('|');
+	// 表头分隔行判定：整行由 | 与 - / : 组成（如 | --- | :---: |）
+	const isSepRow = (row) => /^[\s|:-]+$/.test(row) && row.includes('-');
+	// 拆分单元格：去掉首尾管道后按 | 切分
+	const splitCells = (row) => row.trim().replace(/^\|/, '').replace(/\|$/, '').split('|');
+	// 行内输出管线：转义 → 行内 Markdown → 引用上标（防 XSS）
+	const inline = (raw) => renderCiteSup(renderInline(escapeHtml(raw.trim())), citeIdx);
+
+	// 聚合的表格行渲染为 <table>：首行为表头（分隔行跳过），其余为数据行
+	const flushTable = () => {
+		if (!tableRows.length) return;
+		const sep = tableRows.length > 1 && isSepRow(tableRows[1]);
+		const headerCells = splitCells(tableRows[0]);
+		const dataRows = sep ? tableRows.slice(2) : tableRows.slice(1);
+		let html = '<div class="md-table-wrap"><table><thead><tr>';
+		html += headerCells.map(c => '<th>' + inline(c) + '</th>').join('');
+		html += '</tr></thead>';
+		if (dataRows.length) {
+			html += '<tbody>';
+			dataRows.forEach(r => {
+				html += '<tr>' + splitCells(r).map(c => '<td>' + inline(c) + '</td>').join('') + '</tr>';
+			});
+			html += '</tbody>';
+		}
+		html += '</table></div>';
+		result.push(html);
+		tableRows = [];
+	};
 
 	for (let i = 0; i < lines.length; i++) {
 		const line = lines[i];
 
 		if (line.startsWith('```')) {
+			if (inTable) { flushTable(); inTable = false; }
+			if (inList) { result.push('</ul>'); inList = false; }
 			if (!inCodeBlock) {
 				codeLang = line.slice(3).trim().replace(/[^a-zA-Z0-9_-]/g, '');
 				result.push('<pre><code class="' + codeLang + '">');
@@ -1415,40 +1663,68 @@ function formatAnswer(text, citations) {
 			continue;
 		}
 
+		// 表格行：连续 | 分隔行聚合；遇到非表格行先 flush
+		if (isTableRow(line)) {
+			if (!inTable) {
+				if (inList) { result.push('</ul>'); inList = false; }
+				inTable = true;
+				tableRows = [];
+			}
+			tableRows.push(line.trim());
+			continue;
+		}
+		if (inTable) {
+			flushTable();
+			inTable = false;
+		}
+
 		if (line.startsWith('### ')) {
 			if (inList) { result.push('</ul>'); inList = false; }
-			result.push('<h5>' + renderCiteSup(escapeHtml(line.slice(4)), citeIdx) + '</h5>');
+			result.push('<h5>' + inline(line.slice(4)) + '</h5>');
 			continue;
 		}
 
 		if (line.startsWith('## ')) {
 			if (inList) { result.push('</ul>'); inList = false; }
-			result.push('<h4>' + renderCiteSup(escapeHtml(line.slice(3)), citeIdx) + '</h4>');
+			result.push('<h4>' + inline(line.slice(3)) + '</h4>');
 			continue;
 		}
 
 		if (line.startsWith('# ')) {
 			if (inList) { result.push('</ul>'); inList = false; }
-			result.push('<h3>' + renderCiteSup(escapeHtml(line.slice(2)), citeIdx) + '</h3>');
+			result.push('<h3>' + inline(line.slice(2)) + '</h3>');
+			continue;
+		}
+
+		// 引用块
+		if (line.startsWith('> ')) {
+			if (inList) { result.push('</ul>'); inList = false; }
+			result.push('<blockquote>' + inline(line.slice(2)) + '</blockquote>');
+			continue;
+		}
+
+		// 分隔线（--- 独立成行）
+		if (/^---+$/.test(line.trim())) {
+			if (inList) { result.push('</ul>'); inList = false; }
+			result.push('<hr>');
 			continue;
 		}
 
 		if (line.startsWith('- ') || line.startsWith('* ') || line.match(/^\d+\./)) {
 			if (!inList) { result.push('<ul>'); inList = true; }
 			const content = line.replace(/^(- |\* |\d+\.\s*)/, '');
-			result.push('<li>' + renderCiteSup(escapeHtml(content), citeIdx) + '</li>');
+			result.push('<li>' + inline(content) + '</li>');
 			continue;
 		}
 
 		if (inList) { result.push('</ul>'); inList = false; }
 
-		if (line.startsWith('`') && line.endsWith('`')) {
-			result.push('<p><code>' + escapeHtml(line.slice(1, -1)) + '</code></p>');
-		} else if (line.trim()) {
-			result.push('<p>' + renderCiteSup(escapeHtml(line), citeIdx) + '</p>');
+		if (line.trim()) {
+			result.push('<p>' + inline(line) + '</p>');
 		}
 	}
 
+	if (inTable) flushTable();
 	if (inList) result.push('</ul>');
 	if (inCodeBlock) result.push('</code></pre>');
 
@@ -1468,7 +1744,7 @@ function renderUserMessageHTML(text, time) {
 	return renderUserMessageElement(text, time).outerHTML;
 }
 
-function renderAIMessageHTML(answer, citations, messageId, stats, toolTraces) {
+function renderAIMessageHTML(answer, citations, messageId, stats, toolTraces, answerType) {
 	return htmlFromTpl('tmpl-ai-msg', (frag) => {
 		// 思考过程区（Agent 模式历史记录，默认折叠）
 		const thinkingHtml = buildThinkingAreaHtml(toolTraces);
@@ -1476,7 +1752,8 @@ function renderAIMessageHTML(answer, citations, messageId, stats, toolTraces) {
 			frag.querySelector('.ai-thinking-area').innerHTML = thinkingHtml;
 		}
 		frag.querySelector('.ai-answer-text').innerHTML = formatAnswer(answer || '', citations);
-		const sourceHtml = buildSourceHtml(citations, undefined, toolTraces);
+		// answer_type 用于区分拒答：拒答的历史记录同样不显示来源标识
+		const sourceHtml = buildSourceHtml(citations, undefined, toolTraces, undefined, undefined, answerType);
 		if (sourceHtml) {
 			frag.querySelector('.ai-source-area').innerHTML = sourceHtml;
 		}
@@ -2035,7 +2312,7 @@ function renderMessagesFromRecords(records) {
 			renderAIMessageHTML(r.answer, r.citations, r.id, {
 				latency_total_ms: r.latency_total_ms,
 				latency_ttfb_ms: r.latency_ttfb_ms
-			}, r.tool_traces);
+			}, r.tool_traces, r.answer_type);
 	}).join('');
 	const wrapper = document.createElement('div');
 	wrapper.appendChild(frag);

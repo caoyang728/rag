@@ -24,6 +24,43 @@ from apps.llm.embedding import EmbeddingException
 from apps.knowledge.access import filter_accessible_doc_ids, build_user_context
 
 
+# 全部数据来源（固定顺序，与聊天页下拉框、CHAT_SOURCE_ENABLED 配置一致）
+_ALL_SOURCES = ('doc', 'db', 'web', 'llm')
+
+
+def _enabled_source_set():
+    """系统配置中开启的数据来源集合（CHAT_SOURCE_ENABLED，逗号分隔）
+
+    返回集合供 _normalize_sources 过滤；配置缺失/为空/读取异常时回退全开，
+    保证未初始化配置或配置被清空的部署不受影响（聊天至少保留一条回答途径）。
+    """
+    try:
+        from apps.system.config_loader import get_config_value
+        raw = get_config_value('CHAT_SOURCE_ENABLED', default='', value_type='string') or ''
+        enabled = {k for k in raw.split(',') if k in _ALL_SOURCES}
+    except Exception:
+        enabled = set()
+    return enabled or set(_ALL_SOURCES)
+
+
+def _normalize_sources(sources):
+    """规范化数据来源开关列表
+
+    允许值：doc=内部文档 / db=数据库 / web=联网 / llm=LLM 直接回答。
+    空值/非法值回退全开（默认行为），保证旧调用方与前端缺省兼容。
+    与系统配置 CHAT_SOURCE_ENABLED 取交集：未开启的来源即使被请求方传入也剔除，
+    避免绕过前端下拉框限制直接调用后端（前端只展示开启项，此处为兜底防御）。
+    返回 set 便于后续成员判断。
+    """
+    if not sources:
+        return set(_ALL_SOURCES)
+    result = {s for s in sources if s in _ALL_SOURCES}
+    if result:
+        # 系统配置未开启的来源一律剔除（前端只渲染开启项，此处是后端兜底）
+        result &= _enabled_source_set()
+    return result or set(_ALL_SOURCES)
+
+
 def _detect_error_type(llm_stats: dict) -> str:
     """根据 LLM 返回的 error 信息推断错误类型
 
@@ -158,11 +195,18 @@ def ask_stream(user, question: str, session: Session,
                do_task_split: bool = False,
                do_workflow: bool = False,
                do_rerank: bool = True,
-               mode: str = 'auto'):
+               mode: str = 'auto',
+               sources: list = None):
     """流式问答主流程，yield SSE 事件 dict
 
     与 ``ask`` 相同的全链路（热点缓存 → 任务拆分 → 混合检索 → 记忆 → LLM 流式生成 → 落库 → 缓存），
     但 LLM 生成阶段改走 Provider.stream，增量输出 answer。
+
+    sources：数据来源开关列表（doc=内部文档 / db=数据库 / web=联网 / llm=LLM 直接回答）。
+    - 关闭 doc：跳过知识库检索（RAG 路由/混合检索），不产生文档引用
+    - 关闭 db/web：Agent 工具列表中移除 text2sql / web_search
+    - 关闭 llm：Agent 提示词禁止模型使用自身知识作答，必须基于工具结果
+    缺省全开，兼容旧客户端。
 
     事件协议（前端按 type 分发）::
         {'type': 'start',       'session_id', 'citations', 'is_hit_cache'}
@@ -177,6 +221,7 @@ def ask_stream(user, question: str, session: Session,
     from apps.agent.task_splitter import maybe_split, execute_split
 
     t0 = time.time()
+    sources = _normalize_sources(sources)
     root_type = root_types[0] if root_types else 'company_doc'
     turn_index = (session.turn_count or 0) + 1
 
@@ -225,6 +270,7 @@ def ask_stream(user, question: str, session: Session,
             'session_id': session.id,
             'citations': [],
             'is_filtered': True,
+            'answer_type': 'refused',
             'stats': {
                 'total_ms': int((time.time() - t0) * 1000),
                 'ttfb_ms': ttfb,
@@ -275,6 +321,7 @@ def ask_stream(user, question: str, session: Session,
                 'session_id': session.id,
                 'citations': cached.get('citations', []),
                 'is_filtered': cache_hit is not None,
+                'answer_type': 'cache',
                 'stats': {
                     'total_ms': int((time.time() - t0) * 1000),
                     'ttfb_ms': ttfb_ms,
@@ -291,17 +338,17 @@ def ask_stream(user, question: str, session: Session,
     if mode in ('auto', 'agent'):
         if do_workflow:
             yield from _ask_stream_via_workflow(user, question, session, root_types,
-                                                node_ids, root_type, turn_index, t0)
+                                                node_ids, root_type, turn_index, t0, sources)
             return
         yield from _ask_stream_via_agent(user, question, session, root_types,
-                                         node_ids, root_type, turn_index, t0)
+                                         node_ids, root_type, turn_index, t0, sources)
         return
 
     # 三层路由分流（wiki / graphrag / rag 走 LLM Wiki → GraphRAG → RAG 兜底）
     # 检索阶段同步完成（orchestrate），LLM 生成阶段流式输出
     if mode in ('wiki', 'graphrag', 'rag'):
         yield from _ask_stream_via_route(user, question, session, root_types,
-                                         root_type, turn_index, t0)
+                                         root_type, turn_index, t0, sources)
         return
 
     # 2. 任务拆分：流式模式下不支持真流式（execute_split 内部走同步 ask），
@@ -335,6 +382,7 @@ def ask_stream(user, question: str, session: Session,
                 'session_id': session.id,
                 'citations': result.get('citations', []),
                 'is_filtered': split_hit is not None,
+                'answer_type': 'split',
                 'stats': {
                     'total_ms': int((time.time() - t0) * 1000),
                     'ttfb_ms': ttfb_ms,
@@ -343,15 +391,20 @@ def ask_stream(user, question: str, session: Session,
             }
             return
 
-    # 3. 混合检索
+    # 3. 混合检索（仅当启用「内部文档」来源；关闭时跳过检索，不产生文档引用）
     try:
-        retrieval = hybrid_search(question, user, root_types=root_types, node_ids=node_ids, do_rerank=do_rerank)
-        chunks = retrieval['chunks']
-        r_stats = retrieval['stats']
-        # 查询改写/分解审计：transform 追踪信息记入 QaRecord.route_trace
-        # 开关关闭时 retrieval 无 'transform' 键，route_trace 保持 None（与现状一致）
-        transform = retrieval.get('transform') or {}
-        transform_route_trace = build_route_trace(transform) or None
+        if 'doc' in sources:
+            retrieval = hybrid_search(question, user, root_types=root_types, node_ids=node_ids, do_rerank=do_rerank)
+            chunks = retrieval['chunks']
+            r_stats = retrieval['stats']
+            # 查询改写/分解审计：transform 追踪信息记入 QaRecord.route_trace
+            # 开关关闭时 retrieval 无 'transform' 键，route_trace 保持 None（与现状一致）
+            transform = retrieval.get('transform') or {}
+            transform_route_trace = build_route_trace(transform) or None
+        else:
+            chunks = []
+            r_stats = {}
+            transform_route_trace = None
     except EmbeddingException as e:
         logger.error(f'[ask_stream] embedding failed during search: {e}')
         answer = '当前向量服务暂时不可用，请稍后重试。'
@@ -380,6 +433,7 @@ def ask_stream(user, question: str, session: Session,
             'message_id': qa.id,
             'session_id': session.id,
             'citations': [],
+            'answer_type': 'refused',
             'stats': {
                 'total_ms': int((time.time() - t0) * 1000),
                 'ttfb_ms': ttfb_ms,
@@ -450,8 +504,13 @@ def ask_stream(user, question: str, session: Session,
     # 内容审查状态：filter_hit 非 None 表示命中 block，用于落库标记 is_filtered
     filter_hit = None
     if not chunks:
-        # 无相关片段：直接吐拒答文案（固定文案不过审，词库不会命中）
-        answer = '当前选择的知识库范围内未找到相关资料。请尝试选择其他知识库节点，或调整搜索关键词。'
+        # 无相关片段：直出拒答文案（固定文案不过审，词库不会命中）
+        if 'doc' not in sources:
+            # 用户关闭了「内部文档」来源：RAG 检索链路无可用输入，
+            # 明确提示原因，避免误导为"知识库内没资料"
+            answer = '已关闭「内部文档」来源，当前检索模式无法获取知识库内容。请开启「内部文档」，或切换到其他问答模式。'
+        else:
+            answer = '当前选择的知识库范围内未找到相关资料。请尝试选择其他知识库节点，或调整搜索关键词。'
         answer_type = 'refused'
         ttfb_ms = int((time.time() - t0) * 1000)
         yield {'type': 'first_token', 'ttfb_ms': ttfb_ms}
@@ -643,6 +702,7 @@ def ask_stream(user, question: str, session: Session,
         'session_id': session.id,
         'citations': citations,
         'is_filtered': filter_hit is not None,
+        'answer_type': answer_type,
         'stats': {
             'total_ms': total_ms,
             'ttfb_ms': ttfb_ms,
@@ -653,19 +713,25 @@ def ask_stream(user, question: str, session: Session,
 
 
 def _ask_stream_via_route(user, question, session, root_types, root_type,
-                          turn_index, t0):
+                          turn_index, t0, sources):
     """三层路由流式问答（wiki / graphrag / rag 模式）
 
     检索阶段（orchestrate）同步完成，LLM 生成阶段流式输出，
     事件协议与 ask_stream 一致：start → first_token → delta* → done。
     输出侧沿用流式敏感词审查（block 中断 / mask 脱敏），
     并在 done 事件中携带 route_source / route_trace 供前端展示路由链路。
+
+    sources 关闭「内部文档」时跳过三层路由检索（不产生文档引用），
+    直接返回"未找到相关资料"的拒答语义。
     """
     from apps.graph.router import orchestrate
     from apps.llm.prompts.qa import QA_USER_TEMPLATE, SYSTEM_PROMPT
 
-    # 1. 三层路由决策（同步检索）
-    route_result = orchestrate(question, user, session)
+    # 1. 三层路由决策（同步检索）——doc 关闭时跳过检索
+    if 'doc' in sources:
+        route_result = orchestrate(question, user, session)
+    else:
+        route_result = {'context': '', 'chunks': [], 'source': 'none', 'route_trace': []}
     context = route_result.get('context', '')
     chunks = route_result.get('chunks', [])
     route_source = route_result.get('source', 'none')
@@ -688,7 +754,11 @@ def _ask_stream_via_route(user, question, session, root_types, root_type,
 
     # 3. 无上下文：拒答（与 ask_stream RAG 分支语义一致）
     if not context:
-        answer = '当前知识范围内未找到相关资料，无法回答该问题。'
+        if 'doc' not in sources:
+            # 用户关闭了「内部文档」来源：路由检索无可用输入，明确提示原因
+            answer = '已关闭「内部文档」来源，当前检索模式无法获取知识库内容。请开启「内部文档」，或切换到其他问答模式。'
+        else:
+            answer = '当前知识范围内未找到相关资料，无法回答该问题。'
         answer_type = 'refused'
         ttfb_ms = int((time.time() - t0) * 1000)
         yield {'type': 'first_token', 'ttfb_ms': ttfb_ms}
@@ -877,6 +947,7 @@ def _ask_stream_via_route(user, question, session, root_types, root_type,
         'session_id': session.id,
         'citations': citations,
         'is_filtered': filter_hit is not None,
+        'answer_type': answer_type,
         'route_source': route_source,
         'route_trace': route_trace,
         'stats': {
@@ -1182,7 +1253,7 @@ def _persist_qa(*, user, session, question, answer, citations,
 
 
 def _ask_stream_via_agent(user, question, session, root_types, node_ids,
-                          root_type, turn_index, t0):
+                          root_type, turn_index, t0, sources):
     """Agent 模式流式问答入口（auto / agent 模式走这里）
 
     转发 agent_ask_stream 的 tool_call/tool_result/first_token/delta 事件，
@@ -1217,7 +1288,8 @@ def _ask_stream_via_agent(user, question, session, root_types, node_ids,
 
     try:
         for event in agent_ask_stream(user, question, session,
-                                       root_types=root_types, node_ids=node_ids):
+                                       root_types=root_types, node_ids=node_ids,
+                                       sources=sources):
             etype = event.get('type')
             if etype == 'delta':
                 answer_parts.append(event.get('delta', ''))
@@ -1362,6 +1434,7 @@ def _ask_stream_via_agent(user, question, session, root_types, node_ids,
         'citations': citations,
         'tool_traces': tool_traces,
         'is_filtered': is_filtered,
+        'answer_type': answer_type,
         'stats': {
             'total_ms': total_ms,
             'ttfb_ms': ttfb_ms,
@@ -1373,7 +1446,7 @@ def _ask_stream_via_agent(user, question, session, root_types, node_ids,
 
 
 def _ask_stream_via_workflow(user, question, session, root_types, node_ids,
-                             root_type, turn_index, t0):
+                             root_type, turn_index, t0, sources):
     """多 Agent 工作流流式问答入口（do_workflow=True 时走这里）
 
     流程：
@@ -1386,6 +1459,8 @@ def _ask_stream_via_workflow(user, question, session, root_types, node_ids,
     审批阻塞时 done 无 message_id（工作流停留 waiting_approval），
     用户审批后由 engine.resume_workflow 同步完成剩余执行，
     前端通过工作流详情 API 轮询最终结果。
+
+    sources 透传给 ReAct 回退链路与工作流引擎，保证数据来源开关全局生效。
     """
     from apps.agent.workflow.planner import maybe_plan
 
@@ -1402,7 +1477,7 @@ def _ask_stream_via_workflow(user, question, session, root_types, node_ids,
     if not plan.get('need_workflow'):
         # 简单问题：不拆分，仍走现有 ReAct 单轮链路
         yield from _ask_stream_via_agent(user, question, session, root_types,
-                                         node_ids, root_type, turn_index, t0)
+                                         node_ids, root_type, turn_index, t0, sources)
         return
 
     # 复杂问题：走多 Agent 工作流（_ask_stream_via_agent 不再发 start，这里补发）
@@ -1418,4 +1493,5 @@ def _ask_stream_via_workflow(user, question, session, root_types, node_ids,
     yield from run_workflow_stream(
         user, session, question, plan,
         root_types=root_types, node_ids=node_ids,
+        sources=sources,
     )

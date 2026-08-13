@@ -60,6 +60,32 @@ class SessionViewSet(viewsets.ModelViewSet):
 
 
 
+class ChatConfigView(APIView):
+    """GET /api/v1/chat/config/  聊天页前端配置
+
+    返回系统配置中开启的知识来源列表（CHAT_SOURCE_ENABLED，逗号分隔）：
+    - doc=内部文档 / db=数据库 / web=联网 / llm=LLM
+    聊天页据此只渲染系统允许的来源开关；配置缺失或全不选时回退全部开启
+    （保证聊天至少有一条回答途径，向后兼容未初始化配置的部署）。
+    """
+    permission_classes = [IsAuthenticated]
+
+    # 固定顺序 + 合法来源集合，与 executor._normalize_sources 保持一致
+    _ALL = ('doc', 'db', 'web', 'llm')
+
+    def get(self, request):
+        from apps.system.config_loader import get_config_value
+        raw = get_config_value('CHAT_SOURCE_ENABLED', default='', value_type='string') or ''
+        # 空值/非法值回退全开，保证聊天页来源开关至少可用
+        enabled = [k for k in raw.split(',') if k in self._ALL]
+        if not enabled:
+            enabled = list(self._ALL)
+        return Response({
+            'sources_enabled': enabled,
+            'all_sources': list(self._ALL),
+        })
+
+
 class ChatAskStreamView(APIView):
     """
     POST /api/v1/chat/ask_stream/  （SSE 流式问答）
@@ -91,6 +117,14 @@ class ChatAskStreamView(APIView):
         use_cache = bool(request.data.get("use_cache", True))
         do_task_split = bool(request.data.get("do_task_split", False))
         do_workflow = bool(request.data.get("do_workflow", False))
+        # 数据来源开关：doc=内部文档 / db=数据库 / web=联网 / llm=LLM 直接回答
+        # 不传或非法值回退全开，保证兼容旧客户端
+        sources = request.data.get("sources")
+        if not isinstance(sources, list) or not sources:
+            sources = ['doc', 'db', 'web', 'llm']
+        else:
+            allowed = {'doc', 'db', 'web', 'llm'}
+            sources = [s for s in sources if s in allowed] or ['doc', 'db', 'web', 'llm']
 
         # 动态获取默认根类型
         if not root_types or not root_types[0]:
@@ -132,6 +166,7 @@ class ChatAskStreamView(APIView):
             do_workflow=do_workflow,
             do_rerank=True,
             mode=mode,
+            sources=sources,
         )
         return stream_response(gen)
 

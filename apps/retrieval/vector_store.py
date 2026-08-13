@@ -113,6 +113,7 @@ def upsert_vector(chunk, embedding: List[float]) -> DocumentVector:
             'has_resource_share': doc.has_resource_share,
             'has_block_user': doc.has_block_user,
             'is_active': doc.is_active,
+            'audit_status': doc.audit_status,
             'chunk_type': chunk.chunk_type,
             'content_preview': (chunk.content or '')[:200],
             'keywords': keywords,

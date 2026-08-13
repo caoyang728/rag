@@ -181,6 +181,8 @@ class SensitiveFilter:
 
     # Redis 版本号 key：用于多 worker 间广播词库变更
     _REDIS_VERSION_KEY = 'sensitive_filter:version'
+    # Redis 命中计数 key：word -> 累计命中次数（管理端展示前 flush 落库）
+    _HIT_STATS_KEY = 'sensitive_filter:hit_count'
 
     # 默认参数（被 settings.SENSITIVE_FILTER_* 覆盖，在 get_instance 时同步）
     CHUNK_SIZE = 32
@@ -527,7 +529,38 @@ class SensitiveFilter:
                     start=m.start(), end=m.end(),
                 ))
 
+        # 命中统计：check/feed/flush 都经由 _scan，在此统一计数，覆盖全部入口
+        self._record_hits(hits)
+
         return hits
+
+    def _record_hits(self, hits: List[HitResult]):
+        """把本次扫描的命中词写入 Redis 哈希（敏感词命中统计）
+
+        命中计数发生在 LLM 流式热路径上，若同步写 DB 会引入每 chunk 一次
+        DB 往返（量级 10 倍于 Redis INCR），故先落 Redis 哈希（word -> 计数），
+        由管理端敏感词列表 GET 时统一 flush 到 SensitiveWord.hit_count。
+        同词命中按词聚合后用 pipeline 一次往返，避免同一 chunk 多次命中
+        触发多条命令。Redis 不可用时静默降级：统计可丢、审查主业务不受影响。
+        """
+        if not hits:
+            return
+        r = self._get_redis()
+        if r is None:
+            return
+        counts = {}
+        for h in hits:
+            if h.word:
+                counts[h.word] = counts.get(h.word, 0) + 1
+        try:
+            pipe = r.pipeline()
+            for word, n in counts.items():
+                pipe.hincrby(self._HIT_STATS_KEY, word, n)
+            pipe.execute()
+        except Exception:
+            # 连接异常：清空客户端并熔断，下次 _get_redis 会重建
+            self._redis_client = None
+            self._redis_unavailable_until = time.time() + 5
 
     def _review_buffer(self, state: Dict, flush: bool) -> Tuple[List[str], Optional[HitResult]]:
         """审查 buffer 并返回可下发的安全文本
@@ -583,3 +616,44 @@ class SensitiveFilter:
 def get_sensitive_filter() -> SensitiveFilter:
     """获取敏感词过滤器单例"""
     return SensitiveFilter.get_instance()
+
+
+def flush_hit_stats_to_db():
+    """将 Redis 中暂存的敏感词命中计数批量回写 DB（SensitiveWord.hit_count）
+
+    命中计数在 LLM 流式热路径上用 Redis 哈希自增（见 _record_hits，避免每次
+    命中同步写库），管理端敏感词列表 GET 时调用本函数统一落库：
+    用 Case/When 单条 UPDATE 完成原子累加（F() + 增量），避免循环 N 条
+    update 的往返开销；落库后删除 Redis 对应字段，防止下次重复累计。
+    Redis 不可用或词已删除时静默降级：统计可丢、审查主业务不受影响。
+    """
+    from django.db.models import Case, F, IntegerField, Value, When
+
+    from apps.security.models import SensitiveWord
+
+    r = SensitiveFilter._get_redis()
+    if r is None:
+        return
+    try:
+        counts = r.hgetall(SensitiveFilter._HIT_STATS_KEY)
+        if not counts:
+            return
+        items = [(w, int(n)) for w, n in counts.items() if w]
+        if not items:
+            return
+        # 分块执行，避免单条 UPDATE 的 When 分支过多触发 SQL 参数上限
+        for chunk in [items[i:i + 500] for i in range(0, len(items), 500)]:
+            words = [w for w, _ in chunk]
+            SensitiveWord.objects.filter(word__in=words).update(
+                hit_count=F('hit_count') + Case(
+                    *[When(word=w, then=Value(n)) for w, n in chunk],
+                    default=Value(0), output_field=IntegerField(),
+                )
+            )
+        # 无论词是否仍存在，都清理已落库的计数，避免下次重复累计
+        r.hdel(SensitiveFilter._HIT_STATS_KEY, *[w for w, _ in items])
+    except Exception:
+        # 连接异常：清空客户端并熔断；保留 Redis 计数等下次重试
+        SensitiveFilter._redis_client = None
+        SensitiveFilter._redis_unavailable_until = time.time() + 5
+        logger.exception('[SensitiveFilter] flush hit stats failed, keep redis counters')

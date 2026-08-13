@@ -102,6 +102,7 @@ class SensitiveWord(models.Model):
     action = models.CharField(max_length=8, choices=ACTION_CHOICES, default='mask')
     is_regex = models.BooleanField(default=False, help_text='是否作为正则处理')
     is_enabled = models.BooleanField(default=True)
+    hit_count = models.IntegerField(default=0, help_text='累计命中次数（审查器 Redis 计数落库，管理端展示）')
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

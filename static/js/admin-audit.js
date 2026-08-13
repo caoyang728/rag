@@ -28,6 +28,8 @@ let _loginFilter = {
 	ip: '',
 	result: ''
 };
+let _auditReqSeq = 0;   // 审计日志翻页请求序号守卫：快速连续翻页时丢弃旧响应
+let _loginReqSeq = 0;   // 登录记录翻页请求序号守卫：快速连续翻页时丢弃旧响应
 
 document.addEventListener('DOMContentLoaded', () => {
 	initAuditPage();
@@ -70,11 +72,13 @@ async function setAuditTab(tab) {
 					pageSize: tabPgnData.pageSize,
 					align: 'center',
 					onPageChange: (p) => {
-						if (tab === 'audit') { auditFilter.page = p; setAuditTab('audit'); }
+						// 审计/登录 tab 翻页只刷新表格行 + 分页状态，不重建筛选栏与分页器；
+						// 其余 tab 数据量小（前端分页），直接整体重渲染
+						if (tab === 'audit') { auditFilter.page = p; loadAuditPage(p); }
 						else if (tab === 'white') { _whitePage = p; setAuditTab('white'); }
 						else if (tab === 'black') { _blackPage = p; setAuditTab('black'); }
 						else if (tab === 'sensitive') { _sensitivePage = p; setAuditTab('sensitive'); }
-						else if (tab === 'login') { _loginPage = p; setAuditTab('login'); }
+						else if (tab === 'login') { _loginPage = p; loadLoginPage(p); }
 					}
 				});
 			}
@@ -120,23 +124,8 @@ async function renderAuditTab(tab) {
 			frag.querySelector('.audit-btn-query').onclick = loadAuditLogs;
 			frag.querySelector('.audit-btn-reset').onclick = resetAuditFilter;
 
-			// 渲染表格行
-			const tbody = frag.querySelector('.audit-tbody');
-			if (logs.length === 0) {
-				tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:30px;color:var(--text-sub)">暂无审计日志</td></tr>';
-			} else {
-				tbody.innerHTML = logs.map((l, i) => `
-					<tr>
-						<td class="text-sub">${formatDate(l.created_at)}</td>
-						<td class="fw-500">${escapeHtml(l.actor_username || '-')}</td>
-						<td>${opTag(l.action)}</td>
-						<td>${formatResource(l.target_type, l.target_id)}</td>
-						<td><code style="background:var(--hover);padding:1px 5px;border-radius:3px;font-size:12px">${escapeHtml(l.ip_address || '-')}</code></td>
-						<td>${resultTag(l.result)}</td>
-						<td><button class="btn-link btn-sm" onclick="showAuditDetail(${i})">展开 ›</button></td>
-					</tr>
-				`).join('');
-			}
+			// 渲染表格行（与翻页 loadAuditPage 共用渲染逻辑，保证展示一致）
+			_renderAuditRows(frag.querySelector('.audit-tbody'), logs);
 
 			// 存储分页数据，供 setAuditTab 中 Pagination.render 使用（fragment 挂载后渲染）
 			_auditPgnData = {
@@ -272,7 +261,7 @@ async function renderAuditTab(tab) {
 
 			const tbody = frag.querySelector('.sensitive-tbody');
 			if (pageItems.length === 0) {
-				tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:20px;color:var(--text-sub)">暂无敏感词，点击右上角新增</td></tr>';
+				tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;padding:20px;color:var(--text-sub)">暂无敏感词，点击右上角新增</td></tr>';
 			} else {
 				tbody.innerHTML = pageItems.map((x, i) => {
 					const globalIdx = start + i;
@@ -281,6 +270,7 @@ async function renderAuditTab(tab) {
 						<td><code style="background:var(--hover);padding:2px 6px;border-radius:3px">${escapeHtml(x.word)}</code></td>
 						<td>${categoryTag(x.category)}</td>
 						<td>${actionTag(x.action)}</td>
+						<td><span class="text-sub fw-500" style="color:var(--text)">${x.hit_count || 0}</span></td>
 						<td>${x.is_regex ? '<span class="tag tag-primary">是</span>' : '<span class="tag tag-default">否</span>'}</td>
 						<td>${x.is_enabled ? '<span class="tag tag-success">启用</span>' : '<span class="tag tag-default">禁用</span>'}</td>
 						<td class="text-sub">${formatDate(x.created_at)}</td>
@@ -320,22 +310,8 @@ async function renderAuditTab(tab) {
 			frag.querySelector('.login-filter-ip').value = _loginFilter.ip;
 			frag.querySelector('.login-filter-result').value = _loginFilter.result;
 
-			// Generate table rows
-			const tbody = frag.querySelector('.login-tbody');
-			if (items.length === 0) {
-				tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:20px;color:var(--text-sub)">暂无登录记录</td></tr>';
-			} else {
-				tbody.innerHTML = items.map(x => `
-					<tr>
-						<td class="text-sub">${formatDate(x.created_at)}</td>
-						<td class="fw-500">${escapeHtml(x.username || '-')}</td>
-						<td><code style="background:var(--hover);padding:2px 6px;border-radius:3px">${escapeHtml(x.ip)}</code></td>
-						<td class="text-sub text-sm" style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(x.user_agent || '-')}</td>
-						<td>${x.result === 'success' ? '<span class="tag tag-success">✓ 成功</span>' : '<span class="tag tag-danger">✕ 失败</span>'}</td>
-						<td class="text-sub">${escapeHtml(x.result === 'wrong_password' ? '密码错误' : (x.result === 'user_not_found' ? '用户不存在' : (x.result === 'locked' ? '账户锁定' : '-')))}</td>
-					</tr>
-				`).join('');
-			}
+			// 生成表格行（与翻页 loadLoginPage 共用渲染逻辑，保证展示一致）
+			_renderLoginRows(frag.querySelector('.login-tbody'), items);
 
 			// 存储分页数据，供 setAuditTab 中 Pagination.render 使用
 			const total = data.total || 0;
@@ -356,6 +332,111 @@ async function renderAuditTab(tab) {
 
 	const div = document.createElement('div');
 	return div;
+}
+
+/* ---- 表格行渲染辅助（初始渲染与翻页共用，保证两种路径展示一致） ---- */
+
+function _renderAuditRows(tbody, logs) {
+	// 审计日志行渲染；i 为当前页内下标，与 _auditDetailCache 对齐供 showAuditDetail 取记录
+	if (logs.length === 0) {
+		tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:30px;color:var(--text-sub)">暂无审计日志</td></tr>';
+	} else {
+		tbody.innerHTML = logs.map((l, i) => `
+			<tr>
+				<td class="text-sub">${formatDate(l.created_at)}</td>
+				<td class="fw-500">${escapeHtml(l.actor_username || '-')}</td>
+				<td>${opTag(l.action)}</td>
+				<td>${formatResource(l.target_type, l.target_id)}</td>
+				<td><code style="background:var(--hover);padding:1px 5px;border-radius:3px;font-size:12px">${escapeHtml(l.ip_address || '-')}</code></td>
+				<td>${resultTag(l.result)}</td>
+				<td><button class="btn-link btn-sm" onclick="showAuditDetail(${i})">展开 ›</button></td>
+			</tr>
+		`).join('');
+	}
+}
+
+function _renderLoginRows(tbody, items) {
+	// 登录尝试行渲染
+	if (items.length === 0) {
+		tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:20px;color:var(--text-sub)">暂无登录记录</td></tr>';
+	} else {
+		tbody.innerHTML = items.map(x => `
+			<tr>
+				<td class="text-sub">${formatDate(x.created_at)}</td>
+				<td class="fw-500">${escapeHtml(x.username || '-')}</td>
+				<td><code style="background:var(--hover);padding:2px 6px;border-radius:3px">${escapeHtml(x.ip)}</code></td>
+				<td class="text-sub text-sm" style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(x.user_agent || '-')}</td>
+				<td>${x.result === 'success' ? '<span class="tag tag-success">✓ 成功</span>' : '<span class="tag tag-danger">✕ 失败</span>'}</td>
+				<td class="text-sub">${escapeHtml(x.result === 'wrong_password' ? '密码错误' : (x.result === 'user_not_found' ? '用户不存在' : (x.result === 'locked' ? '账户锁定' : '-')))}</td>
+			</tr>
+		`).join('');
+	}
+}
+
+/* ---- 审计日志 tab：翻页只刷新表格行 + 分页状态，不重建筛选栏与分页器 ---- */
+
+async function loadAuditPage(page) {
+	const seq = ++_auditReqSeq;
+	try {
+		let url = '/api/v1/audit/logs/';
+		let params = [];
+		if (auditFilter.username) params.push(`q=${encodeURIComponent(auditFilter.username)}`);
+		if (auditFilter.action) params.push(`action=${encodeURIComponent(auditFilter.action)}`);
+		if (auditFilter.ip) params.push(`ip=${encodeURIComponent(auditFilter.ip)}`);
+		if (auditFilter.startDate) params.push(`start_date=${auditFilter.startDate}`);
+		if (auditFilter.endDate) params.push(`end_date=${auditFilter.endDate}`);
+		params.push(`page=${page}`);
+		params.push(`page_size=20`);
+		url += '?' + params.join('&');
+
+		const data = await api.getJson(url);
+		// 请求序号守卫：快速连续翻页时丢弃旧响应，避免旧数据覆盖新状态
+		if (seq !== _auditReqSeq) return;
+		const logs = data.rows || [];
+		_auditDetailCache = logs;
+
+		// 已切换到其他 tab（auditBody 被整体替换）时放弃更新
+		const tbody = $('#auditBody .audit-tbody');
+		if (!tbody) return;
+		_renderAuditRows(tbody, logs);
+
+		const total = data.total || 0;
+		const totalPages = Math.max(1, data.total_pages || 1);
+		const curPage = Math.min(page, totalPages);
+		_auditPgnData = { page: curPage, totalPages, total, pageSize: data.page_size || _TAB_PAGE_SIZE };
+		Pagination.update({ page: curPage, totalPages, total });
+	} catch (e) {
+		console.error('load audit page failed:', e);
+	}
+}
+
+/* ---- 登录记录 tab：翻页只刷新表格行 + 分页状态，不重建筛选栏与分页器 ---- */
+
+async function loadLoginPage(page) {
+	const seq = ++_loginReqSeq;
+	try {
+		const params = new URLSearchParams({ page, page_size: _TAB_PAGE_SIZE });
+		if (_loginFilter.username) params.set('username', _loginFilter.username);
+		if (_loginFilter.ip) params.set('ip', _loginFilter.ip);
+		if (_loginFilter.result) params.set('result', _loginFilter.result);
+		const data = await api.getJson('/api/v1/security/login-attempts/?' + params.toString());
+		// 请求序号守卫：快速连续翻页时丢弃旧响应，避免旧数据覆盖新状态
+		if (seq !== _loginReqSeq) return;
+		const items = data.rows || [];
+
+		// 已切换到其他 tab（auditBody 被整体替换）时放弃更新
+		const tbody = $('#auditBody .login-tbody');
+		if (!tbody) return;
+		_renderLoginRows(tbody, items);
+
+		const total = data.total || 0;
+		const totalPages = Math.max(1, Math.ceil(total / _TAB_PAGE_SIZE));
+		const curPage = Math.min(page, totalPages);
+		_loginPgnData = { page: curPage, totalPages, total, pageSize: _TAB_PAGE_SIZE };
+		Pagination.update({ page: curPage, totalPages, total });
+	} catch (e) {
+		console.error('load login page failed:', e);
+	}
 }
 
 const _OP_TAG_MAP = { 'login': 'info', 'upload_document': 'primary', 'delete_document': 'danger', 'update_user': 'warning', 'toggle_user_status': 'warning', 'export': 'success', 'create_node': 'default', 'chat_ask': 'default', 'manage_whitelist': 'default', 'manage_blacklist': 'danger', 'manage_sensitive_word': 'warning', 'logout': 'info', 'reset_password': 'warning', 'feedback': 'default', 'admin_users': 'warning', 'update_node': 'default', 'token_refresh': 'info' };

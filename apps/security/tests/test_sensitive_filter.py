@@ -61,7 +61,11 @@ def _build_filter(words_spec):
     with patch('apps.security.models.SensitiveWord.objects') as mock_manager, \
          patch.object(SensitiveFilter, '_get_redis', return_value=None):
         mock_manager.filter.return_value.iterator.return_value = mock_words
-        return SensitiveFilter.get_instance()
+        sf = SensitiveFilter.get_instance()
+        # 让返回实例后续的 check/feed 命中统计走熔断短路（_get_redis 返回 None），
+        # 保持"纯单元测试、不依赖 Redis"——命中计数只在管理端 GET 时才落库
+        SensitiveFilter._redis_unavailable_until = time_mod.time() + 300
+        return sf
 
 
 @pytest.fixture(autouse=True)
@@ -649,3 +653,87 @@ class TestGetSensitiveFilter:
         """get_sensitive_filter 返回 SensitiveFilter 实例"""
         sf = get_sensitive_filter()
         assert isinstance(sf, SensitiveFilter)
+
+
+# ============================================================================
+# 敏感词命中统计 —— _record_hits / flush_hit_stats_to_db
+# ============================================================================
+class TestSensitiveHitStats:
+    """命中计数：_scan 记录到 Redis 哈希，管理端 flush 落库到 SensitiveWord.hit_count"""
+
+    @pytest.mark.unit
+    @patch.object(SensitiveFilter, '_is_enabled', return_value=True)
+    def test_record_hits_aggregates_by_word(self, _mock_enabled):
+        """同词多次命中按词聚合后通过 pipeline 一次写入 Redis"""
+        mock_pipe = MagicMock()
+        mock_r = MagicMock()
+        mock_r.pipeline.return_value = mock_pipe
+        with patch.object(SensitiveFilter, '_get_redis', return_value=mock_r):
+            sf = _build_filter([('违规', 'other', 'block', False)])
+            hits = sf.check('违规违规，这里又违规')
+            assert len(hits) == 3
+        # 聚合后仅一条 hincrby 命令：词 -> 3
+        mock_pipe.hincrby.assert_called_once_with(
+            SensitiveFilter._HIT_STATS_KEY, '违规', 3)
+        mock_pipe.execute.assert_called_once()
+
+    @pytest.mark.unit
+    @patch.object(SensitiveFilter, '_is_enabled', return_value=True)
+    def test_record_hits_skipped_when_redis_unavailable(self, _mock_enabled):
+        """Redis 不可用（_get_redis 返回 None）时命中计数静默降级，不抛异常"""
+        with patch.object(SensitiveFilter, '_get_redis', return_value=None):
+            sf = _build_filter([('违规', 'other', 'block', False)])
+            hits = sf.check('包含违规词')
+        assert len(hits) == 1  # 审查结果不受统计降级影响
+
+    @pytest.mark.unit
+    @patch.object(SensitiveFilter, '_is_enabled', return_value=True)
+    def test_record_hits_pipeline_exception_swallowed(self, _mock_enabled):
+        """Redis 执行异常时计数丢弃并熔断，审查主流程不受影响"""
+        mock_r = MagicMock()
+        mock_r.pipeline.return_value.execute.side_effect = ConnectionError('redis down')
+        with patch.object(SensitiveFilter, '_get_redis', return_value=mock_r):
+            sf = _build_filter([('违规', 'other', 'block', False)])
+            hits = sf.check('包含违规词')
+        assert len(hits) == 1
+        assert SensitiveFilter._redis_client is None
+
+    @pytest.mark.integration
+    @pytest.mark.django_db
+    def test_flush_hit_stats_to_db_accumulates_and_cleans(self):
+        """flush 将 Redis 计数原子累加到 DB hit_count，并清理已落库的 Redis 字段"""
+        from apps.security.models import SensitiveWord
+        from apps.security.sensitive_filter import flush_hit_stats_to_db
+
+        sw = SensitiveWord.objects.create(
+            word='统计词', category='other', action='mask', hit_count=2)
+
+        mock_r = MagicMock()
+        # 已删除的词也会出现在计数里：不落库但需清理，防止字段残留
+        mock_r.hgetall.return_value = {'统计词': '3', '已删除词': '5'}
+        with patch.object(SensitiveFilter, '_get_redis', return_value=mock_r):
+            flush_hit_stats_to_db()
+
+        sw.refresh_from_db()
+        assert sw.hit_count == 5  # 2 + 3
+        mock_r.hdel.assert_called_once_with(
+            SensitiveFilter._HIT_STATS_KEY, '统计词', '已删除词')
+
+    @pytest.mark.integration
+    @pytest.mark.django_db
+    def test_flush_hit_stats_noop_when_redis_empty(self):
+        """Redis 无计数时 flush 直接返回，不产生 DB 写入"""
+        from apps.security.models import SensitiveWord
+        from apps.security.sensitive_filter import flush_hit_stats_to_db
+
+        sw = SensitiveWord.objects.create(
+            word='无命中词', category='other', action='mask', hit_count=1)
+
+        mock_r = MagicMock()
+        mock_r.hgetall.return_value = {}
+        with patch.object(SensitiveFilter, '_get_redis', return_value=mock_r):
+            flush_hit_stats_to_db()
+
+        sw.refresh_from_db()
+        assert sw.hit_count == 1
+        mock_r.hdel.assert_not_called()

@@ -451,9 +451,12 @@ class SensitiveWordView(APIView):
     permission_classes = [IsAdminUser]
 
     def get(self, request):
+        # 先把 Redis 中暂存的命中计数落库，保证返回的 hit_count 实时准确
+        from apps.security.sensitive_filter import flush_hit_stats_to_db
+        flush_hit_stats_to_db()
         qs = SensitiveWord.objects.filter(is_enabled=True).order_by('-created_at')
         rows = list(qs.values(
-            "id", "word", "category", "action", "is_regex", "is_enabled", "created_at"
+            "id", "word", "category", "action", "is_regex", "is_enabled", "hit_count", "created_at"
         ))
         return Response({"rows": rows, "count": len(rows)})
 

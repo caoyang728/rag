@@ -142,7 +142,7 @@
 		<div class="flex justify-between items-center shrink-0">
 			<div class="tab-info-bar">
 				<span class="tab-info-icon">🛡️</span>
-				<span>LLM 输出实时审查词库 — 命中 <span class="badge badge-danger" style="font-size:11px">block</span> 立即中断流式，<span class="badge badge-warn" style="font-size:11px">mask</span> 脱敏后下发，<span class="badge badge-info" style="font-size:11px">warn</span> 仅记录告警</span>
+				<span>LLM 输出实时审查词库 — 命中 <span class="badge badge-danger" style="font-size:11px">block</span> 立即中断流式，<span class="badge badge-warn" style="font-size:11px">mask</span> 脱敏后下发，<span class="badge badge-info" style="font-size:11px">warn</span> 仅记录告警；命中次数为累计命中统计</span>
 			</div>
 			<button class="btn btn-primary btn-sm" onclick="showAddSensitive()" style="margin-right:8px">＋ 新增敏感词</button>
 		</div>
@@ -153,6 +153,7 @@
 						<th>敏感词</th>
 						<th>分类</th>
 						<th>动作</th>
+						<th>命中次数</th>
 						<th>正则</th>
 						<th>启用</th>
 						<th>添加时间</th>

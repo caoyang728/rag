@@ -131,6 +131,17 @@ class TestSensitiveWordCRUD(SecurityAPITestBase):
         assert any(r['word'] == '测试词' for r in data['rows'])
 
     @pytest.mark.integration
+    def test_list_includes_hit_count(self):
+        """敏感词列表返回 hit_count 命中统计字段（默认 0，flush 后累加）"""
+        from apps.security.sensitive_filter import SensitiveFilter
+        SensitiveWord.objects.create(word='命中词', category='other', action='mask', hit_count=7)
+        with patch.object(SensitiveFilter, '_get_redis', return_value=None):
+            resp = self.client.get('/api/v1/security/sensitive-words/', **self.admin_headers)
+        assert resp.status_code == 200
+        row = next(r for r in resp.json()['rows'] if r['word'] == '命中词')
+        assert row['hit_count'] == 7
+
+    @pytest.mark.integration
     def test_list_anonymous_401(self):
         """匿名用户访问敏感词列表应 401（IsAdminUser 拦截）"""
         resp = self.client.get('/api/v1/security/sensitive-words/', **self.anon_headers)

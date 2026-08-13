@@ -45,8 +45,29 @@ _ACTION_MAP = [
 
 _AUDIT_METHODS = {'POST', 'PUT', 'PATCH', 'DELETE'}
 
+# 需要从请求体提取用户名的动作（无 JWT 场景，如登录）。
+# 这些请求体是 JSON，体积小，可在 process_request 阶段提前读取缓存，
+# 避免 DRF 解析消费请求流后 process_response 阶段访问 request.body 抛 RawPostDataException。
+_BODY_USERNAME_ACTIONS = {'login'}
+
 
 class AuditMiddleware(MiddlewareMixin):
+    def process_request(self, request):
+        try:
+            if request.method not in _AUDIT_METHODS:
+                return
+            if not request.path.startswith('/api/v1/'):
+                return
+            action, _, _, _ = self._match_action(request.path)
+            if action not in _BODY_USERNAME_ACTIONS:
+                return
+            # 提前读取并缓存用户名；此时请求流尚未被 DRF 消费，body 仍可读
+            username = _get_username_from_body(request) or ''
+            if username:
+                request._audit_username = username
+        except Exception:
+            logger.exception('AuditMiddleware process_request error')
+
     def process_response(self, request, response):
         try:
             if request.method not in _AUDIT_METHODS:
@@ -61,9 +82,10 @@ class AuditMiddleware(MiddlewareMixin):
 
             actor_id, username = _get_user_from_jwt(request)
 
-            # 登录/登出/改密等接口：请求时无 JWT，从 request body 提取用户名
+            # 登录等无 JWT 接口：优先用 process_request 阶段缓存（body 已被 DRF 消费后仍可取），
+            # 再兜底从 request body 提取用户名（未消费 body 的场景，如直接调用）
             if not username:
-                username = _get_username_from_body(request) or ''
+                username = getattr(request, '_audit_username', '') or _get_username_from_body(request) or ''
 
             result = 'success' if response.status_code < 400 else 'failed'
             if response.status_code == 403:

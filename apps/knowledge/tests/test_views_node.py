@@ -296,32 +296,52 @@ class TestNodeCreate(KnowledgeViewsExtraBase):
             **_auth_headers(self.super_admin))
         assert resp.status_code == 400
 
+    @pytest.mark.integration
+    def test_create_subfolder_with_visibility_denied(self):
+        """子文件夹（父节点也是文件夹）指定可见范围 → 400（权限继承主文件夹）"""
+        resp = self.client.post(
+            '/api/v1/knowledge/nodes/',
+            data=json.dumps({'parent': self.category_node.id, 'name': '深层分类',
+                             'node_type': 'folder', 'visibility_level': 'PUBLIC'}),
+            content_type='application/json',
+            **_auth_headers(self.super_admin))
+        assert resp.status_code == 400
+        assert '子文件夹仅做分类' in resp.json()['details']['visibility_level']
+
 class TestNodeUpdate(KnowledgeViewsExtraBase):
     """KnowledgeNodeViewSet.update 测试"""
 
     @pytest.mark.integration
-    def test_admin_update_category_200(self):
-        """超管修改业务分类节点名称 → 200"""
+    def test_admin_rename_category_creates_ticket(self):
+        """超管修改业务分类节点名称 → 403 且自动创建名称变更工单，节点名称不变"""
         resp = self.client.patch(
             f'/api/v1/knowledge/nodes/{self.category_node.id}/',
             data=json.dumps({'name': '改名分类'}),
             content_type='application/json',
             **_auth_headers(self.super_admin))
-        assert resp.status_code == 200
+        assert resp.status_code == 403
+        assert '名称' in resp.json()['details']['detail']
+        ticket = TicketList.objects.filter(
+            permission_detail__reason__startswith=f'[node:{self.category_node.id}:node_name_change]',
+            status=TicketStatus.PENDING,
+        ).first()
+        assert ticket is not None
+        assert '目标名:改名分类' in ticket.reason
+        # 名称未直接变更（待审批后写回）
         self.category_node.refresh_from_db()
-        assert self.category_node.name == '改名分类'
+        assert self.category_node.name == '业务分类'
 
     @pytest.mark.integration
-    def test_update_protected_level_denied(self):
-        """修改 Level 3 团队节点 → 400 层级保护"""
+    def test_update_protected_level_name_denied(self):
+        """修改 Level 3 团队节点名称 → 400（系统节点名称由组织架构同步维护）"""
         resp = self.client.patch(
             f'/api/v1/knowledge/nodes/{self.team_node.id}/',
             data=json.dumps({'name': 'x'}),
             content_type='application/json',
             **_auth_headers(self.super_admin))
         assert resp.status_code == 400
-        # 自定义异常处理器将字段错误放在 details 内
-        assert '不支持直接操作' in resp.json()['details']['detail']
+        # 自定义异常处理器将字段错误放在 details 内（视图抛出的字段错误为字符串）
+        assert '系统节点名称由组织架构同步维护' in resp.json()['details']['name']
 
     @pytest.mark.integration
     def test_update_visibility_creates_ticket(self):
@@ -345,16 +365,18 @@ class TestNodeUpdate(KnowledgeViewsExtraBase):
         assert self.category_node.visibility_level is None
 
     @pytest.mark.integration
-    def test_update_visibility_same_value_no_ticket(self):
-        """可见范围未变化时正常保存，不创建工单"""
+    def test_update_description_no_ticket(self):
+        """修改描述（非敏感字段）直接生效，不创建工单"""
         resp = self.client.patch(
             f'/api/v1/knowledge/nodes/{self.category_node.id}/',
-            data=json.dumps({'name': '改名'}),
+            data=json.dumps({'description': '新描述'}),
             content_type='application/json',
             **_auth_headers(self.super_admin))
         assert resp.status_code == 200
+        self.category_node.refresh_from_db()
+        assert self.category_node.description == '新描述'
         assert TicketList.objects.filter(
-            permission_detail__reason__startswith=f'[node:{self.category_node.id}:visibility_change]',
+            permission_detail__reason__startswith=f'[node:{self.category_node.id}:',
         ).count() == 0
 
     def _make_dept_manager(self):
@@ -489,6 +511,43 @@ class TestNodeUpdate(KnowledgeViewsExtraBase):
         assert resp.status_code == 200, resp.content
         self.category_node.refresh_from_db()
         assert self.category_node.visibility_level == VisibilityLevel.PUBLIC
+
+    @pytest.mark.integration
+    def test_approve_name_ticket_writes_name(self):
+        """名称变更工单审批通过 → 节点名称回写生效（单层审批直接写回）"""
+        # 团队组长发起改名（分级审批链：部门经理单审）
+        self.client.patch(
+            f'/api/v1/knowledge/nodes/{self.category_node.id}/',
+            data=json.dumps({'name': '改名分类'}),
+            content_type='application/json',
+            **_auth_headers(self.team_leader))
+        ticket = TicketList.objects.filter(
+            permission_detail__reason__startswith=f'[node:{self.category_node.id}:node_name_change]',
+            status=TicketStatus.PENDING,
+        ).first()
+        assert ticket is not None
+        mgr = self._make_dept_manager()
+        resp = self.client.post(
+            '/api/v1/knowledge/documents/approve_access_request/',
+            data=json.dumps({'request_id': ticket.id, 'comment': '同意'}),
+            content_type='application/json',
+            **_auth_headers(mgr))
+        assert resp.status_code == 200, resp.content
+        self.category_node.refresh_from_db()
+        assert self.category_node.name == '改名分类'
+
+    @pytest.mark.integration
+    def test_update_subfolder_visibility_denied(self):
+        """子文件夹（父节点也是文件夹）修改可见范围 → 400（权限继承主文件夹）"""
+        sub = self._create_node(
+            '子分类', 'folder', node_level=5, parent=self.category_node)
+        resp = self.client.patch(
+            f'/api/v1/knowledge/nodes/{sub.id}/',
+            data=json.dumps({'visibility_level': 'PUBLIC'}),
+            content_type='application/json',
+            **_auth_headers(self.super_admin))
+        assert resp.status_code == 400
+        assert '子文件夹仅做分类' in resp.json()['details']['visibility_level']
 
 class TestNodeDestroy(KnowledgeViewsExtraBase):
     """KnowledgeNodeViewSet.destroy 测试"""

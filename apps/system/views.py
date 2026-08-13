@@ -561,15 +561,16 @@ class SystemConfigView(APIView):
     def _get_business_tables(self):
         """从业务数据库读取 public schema 的表名列表
 
-        优先用 BUSINESS_DB_DSN 直连（psycopg2），未配置时回退到 django 默认数据库。
+        优先用 BUSINESS_DB_DSN 直连（psycopg3，与项目依赖一致），
+        未配置时回退到 django 默认数据库。
         读取失败时返回空列表（前端降级为自由输入）。
         """
         from django.conf import settings
         try:
             dsn = getattr(settings, 'BUSINESS_DB_DSN', '') or ''
             if dsn:
-                import psycopg2
-                conn = psycopg2.connect(dsn)
+                import psycopg
+                conn = psycopg.connect(dsn)
                 try:
                     cursor = conn.cursor()
                     cursor.execute(

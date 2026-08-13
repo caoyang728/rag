@@ -64,15 +64,18 @@
 	color: var(--text)
 }
 
-.badge-dot {
+/* 顶栏铃铛待办角标：红底白字数量徽章（复用 common.css 的 .badge.badge-danger），
+   固定于按钮右上角，默认隐藏，有待审批工单时显示数量 */
+#ticketReminderDot {
 	position: absolute;
-	top: 6px;
-	right: 6px;
-	width: 8px;
-	height: 8px;
-	border-radius: 50%;
-	background: var(--danger);
-	border: 2px solid var(--white);
+	top: 2px;
+	right: 2px;
+	min-width: 16px;
+	height: 16px;
+	line-height: 16px;
+	padding: 0 4px;
+	font-size: 10px;
+	border: 1px solid var(--white);
 }
 
 .topnav-user {

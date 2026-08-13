@@ -46,6 +46,17 @@ document.addEventListener('DOMContentLoaded', () => {
 	} else {
 		loadList();
 	}
+	// 10 分钟自动轮询：页面可见时定时刷新列表与红点；切到后台暂停，回到前台立即刷新并恢复。
+	// MPA 整页跳转时页面卸载，定时器随之销毁，无需额外处理"切页"场景。
+	startTicketPolling();
+	document.addEventListener('visibilitychange', () => {
+		if (document.hidden) {
+			stopTicketPolling();
+		} else {
+			_pollRefresh();
+			startTicketPolling();
+		}
+	});
 });
 
 /* ============================================================================
@@ -77,10 +88,12 @@ let _requestSeq = 0;
 /* ============================================================================
  * 统一工单列表加载（全类型）
  * ============================================================================ */
-function loadList() {
+function loadList(opts) {
+	// 静默刷新（自动轮询）：不显示"加载中"占位，保留旧数据直至新数据返回，避免列表闪烁
+	const silent = !!(opts && opts.silent);
 	const seq = ++_requestSeq;
 	const tbody = $('#ticketTable');
-	tbody.innerHTML = _loadingRow(9);
+	if (!silent) tbody.innerHTML = _loadingRow(9);
 
 	// 组装查询参数：视角 + 类型 + 状态 + 搜索 + 分页
 	const params = new URLSearchParams();
@@ -113,6 +126,8 @@ function loadList() {
 		})
 		.catch(err => {
 			if (seq !== _requestSeq) return;
+			// 静默刷新失败：保留现有列表与红点，仅告警日志，不打扰用户
+			if (silent) { console.warn('工单轮询刷新失败:', err); return; }
 			_setBadge('pending', 0);
 			_renderPagination(0);
 			_renderTableError('加载工单失败');
@@ -792,4 +807,36 @@ function _setBadge(type, count) {
 	} else {
 		el.classList.add('hidden');
 	}
+}
+
+/* ============================================================================
+ * 自动轮询刷新
+ * ============================================================================ */
+
+// 统一轮询间隔：10 分钟（需求要求固定间隔，不做角色区分）
+const _TICKET_POLL_INTERVAL = 10 * 60 * 1000;
+let _pollTimer = null;
+
+function startTicketPolling() {
+	stopTicketPolling();
+	_pollTimer = setInterval(_pollRefresh, _TICKET_POLL_INTERVAL);
+}
+
+function stopTicketPolling() {
+	if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
+}
+
+// 轮询刷新：静默刷新当前列表（不闪"加载中"）；非待办视角下额外轻量刷新待办红点，
+// 保证切到"我已审批/我的工单/全部"视角时红点仍能随轮询自动更新
+function _pollRefresh() {
+	loadList({ silent: true });
+	if (_currentView !== 'pending') _refreshPendingBadge();
+}
+
+// 轻量获取待办数：view=pending + page_size=1 仅取 count（1 条返回体），不扰动当前列表
+function _refreshPendingBadge() {
+	const params = new URLSearchParams({ view: 'pending', page: '1', page_size: '1' });
+	api.getJson(_TICKET_API + '?' + params.toString())
+		.then(res => _setBadge('pending', res?.count || 0))
+		.catch(err => console.warn('待办红点刷新失败:', err));
 }

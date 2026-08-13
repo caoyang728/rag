@@ -22,7 +22,7 @@ apps.system.views 补充测试 —— 覆盖 test_views*.py 未触及的异常/�
 - _TicketMixin._check_model_dependency 模型不存在（1137）、_write_audit 异常（1125-1127）
 - TaskLogView page 非法参数降级（2018-2019）、TaskRetryView 无权限（2111）
 
-Mock 策略与既有测试一致：外部依赖（Redis/psycopg2/审计写库/缓存失效）用
+Mock 策略与既有测试一致：外部依赖（Redis/psycopg/审计写库/缓存失效）用
 unittest.mock 隔离；审批状态机走真实 DB 保证契约正确。
 """
 import json
@@ -263,10 +263,10 @@ class TestSystemConfigViewEdge(SystemAPITestBase):
         fake_cursor.fetchall.return_value = [('tab_a',), ('tab_b',)]
         fake_conn = MagicMock()
         fake_conn.cursor.return_value = fake_cursor
-        fake_psycopg2 = SimpleNamespace(connect=MagicMock(return_value=fake_conn))
-        monkeypatch.setitem(sys.modules, 'psycopg2', fake_psycopg2)
+        fake_psycopg = SimpleNamespace(connect=MagicMock(return_value=fake_conn))
+        monkeypatch.setitem(sys.modules, 'psycopg', fake_psycopg)
         result = SystemConfigView()._get_business_tables()
-        fake_psycopg2.connect.assert_called_once_with('postgres://u:p@biz-host/biz_db')
+        fake_psycopg.connect.assert_called_once_with('postgres://u:p@biz-host/biz_db')
         assert result == [{'value': 'tab_a', 'label': 'tab_a'},
                           {'value': 'tab_b', 'label': 'tab_b'}]
 
@@ -274,9 +274,9 @@ class TestSystemConfigViewEdge(SystemAPITestBase):
     def test_get_business_tables_connection_error_returns_empty(self, settings, monkeypatch):
         """业务库连接失败时返回空列表，前端降级为自由输入"""
         settings.BUSINESS_DB_DSN = 'postgres://u:p@biz-host/biz_db'
-        fake_psycopg2 = SimpleNamespace(
+        fake_psycopg = SimpleNamespace(
             connect=MagicMock(side_effect=Exception('conn refused')))
-        monkeypatch.setitem(sys.modules, 'psycopg2', fake_psycopg2)
+        monkeypatch.setitem(sys.modules, 'psycopg', fake_psycopg)
         result = SystemConfigView()._get_business_tables()
         assert result == []
 

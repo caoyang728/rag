@@ -14,12 +14,109 @@
 
 ---
 
-## 项目截图
+## 目录
 
-> 共 18 张截图，存放于 `demo_file/screenshot/`，点击下方标题展开查看。
+- [问答流程总览](#问答流程总览)
+- [一、项目特性](#一项目特性)
+- [二、功能预览](#二功能预览)
+- [三、快速启动](#三快速启动)
+- [四、目录结构](#四目录结构)
+- [五、核心 API 概览](#五核心-api-概览)
+- [六、技术栈](#六技术栈)
+- [七、数据库表概览](#七数据库表概览)
+- [八、权限系统规则](#八权限系统规则)
+- [九、文档存储架构](#九文档存储架构)
+- [十、Celery 定时任务（Beat）](#十celery-定时任务beat)
+- [十一、RAG 质量评估中心](#十一rag-质量评估中心)
+- [十二、系统监控](#十二系统监控)
+- [十三、批量导入](#十三批量导入)
+- [十四、环境变量配置](#十四环境变量配置)
+- [十五、测试](#十五测试)
+- [十六、二次开发建议](#十六二次开发建议)
+
+---
+
+## 问答流程总览
+
+> 从用户 Query 到最终结果的完整链路：**输入审查 → 热点缓存 → 检索核心 → LLM 流式生成 → SSE 输出 → 落库与评估**：
+> - `wiki / graphrag / rag`：三层路由，预检索注入 context；
+> - `auto / agent`（默认）：Agentic RAG，LLM 自主决策调用工具，`do_workflow=true` 可升级为多 Agent 工作流。
+
+```mermaid
+flowchart TD
+    Q["用户 Query<br/>POST /api/v1/chat/ask_stream/"] --> IN{"输入侧敏感词审查<br/>block 命中直接拒答"}
+    IN -->|"拦截"| F["content_filtered 拒答"]
+    IN -->|"通过"| CACHE{"热点缓存命中？<br/>HotQaCache 组织分组 + 文档兜底"}
+    CACHE -->|"命中：直接返回<br/>（仍过内容审查 + 引用权限校验）"| DONE["返回答案"]
+    CACHE -->|"未命中"| MODE{"mode 分流"}
+
+    MODE -->|"wiki / graphrag / rag"| ROUTE["三层路由编排<br/>Wiki 命中 → GraphRAG → RAG 兜底"]
+    MODE -->|"auto / agent（默认）"| REACT["Agentic RAG · ReAct 循环<br/>（≤5 轮，LLM 自主决策是否调用工具）"]
+    REACT -->|"do_workflow=true 且<br/>planner 判定复杂"| WF["多 Agent 工作流<br/>research/tool/approval 节点 DAG<br/>+ HITL 人工确认"]
+    REACT --> TOOLS["工具注册表（5 个）<br/>knowledge_search / web_search / text2sql<br/>wiki_search / graph_search"]
+    WF --> TOOLS
+
+    ROUTE -.->|"RAG 兜底层"| CORE["检索核心 _search_core（hybrid_search）<br/>向量 + BM25 + RRF 融合<br/>+ Rerank 重排 + 二次权限过滤"]
+    TOOLS -.->|"knowledge_search 工具复用"| CORE
+    CORE --> GEN["LLM 流式生成<br/>逐段敏感词审查（block/mask）"]
+    ROUTE --> GEN
+    TOOLS --> GEN
+    GEN --> SSE["SSE 事件输出<br/>tool_call / tool_result / first_token<br/>/ delta / done"]
+    SSE --> PERSIST["落库<br/>QaRecord + AgentTrace<br/>+ 热点缓存 + 记忆 + 12 维评估"]
+    PERSIST --> DONE
+    F --> DONE
+```
+
+**链路说明**：
+
+| 环节 | 说明 |
+|---|---|
+| 输入侧敏感词审查 | block 命中直接拒答（content_filtered），不浪费 LLM 算力 |
+| 热点缓存 | HotQaCache 组织分组（public/org_…）+ 文档级兜底校验（Deny Override）；命中仍过内容审查 + 引用权限校验 |
+| 检索核心 `_search_core` | 向量 pgvector + BM25 + RRF 融合 + Rerank 重排 + 检索级权限过滤；查询改写/分解（`QUERY_TRANSFORM_ENABLED`，默认关闭）是透明增强层，失败恒降级为原 Query |
+| LLM 流式生成 | 逐段敏感词审查（block 中断 / mask 脱敏） |
+| SSE 输出 | `start → (tool_call/tool_result)* → first_token → delta* → done`（或 `content_filtered` / `error`） |
+| 落库 | QaRecord（answer_type：rag / agent / general / refused）+ AgentTrace（工具调用链）+ 热点缓存 + 记忆 + 12 维评估 |
+
+**三层路由（wiki/graphrag/rag）**：按置信度逐层降级——LLM Wiki 命中（≥ 0.68）→ GraphRAG（≥ 0.45）→ RAG 兜底；每层置信度与耗时记入 `route_trace`，由 RouteAnalysis 持续评估各层命中率与回答质量。
+
+**Agentic RAG（auto/agent）**：不预检索注入 context，LLM 在 ReAct 循环中自主决策是否调用工具（≤ 5 轮，末轮强制成文，达上限强制总结）。5 个内置工具：
+
+- `knowledge_search`：复用混合检索全链路 + 二次权限过滤
+- `web_search`：Tavily，未配置降级 DuckDuckGo
+- `text2sql`：业务库，白名单限定
+- `wiki_search`：Wiki 知识页搜索
+- `graph_search`：知识图谱实体关系检索
+
+统一返回 `{result, ok, meta, latency_ms}` 回填 messages，工具调用链落库 AgentTrace。`do_workflow=true` 时由 planner 判定，复杂问题产出节点 DAG（research / tool / approval）走多 Agent 工作流：拓扑序执行、无依赖节点并行（≤ 4）、失败自动重试（≤ 2），`web_search` / `text2sql` 敏感工具及 approval 节点隐式人工确认（HITL，在聊天对话框内嵌「确认/拒绝」按钮，不再创建工单），确认通过 `resume_workflow` 继续 / 拒绝降级回答；节点轨迹落 WorkflowNodeRun。
+
+---
+
+## 一、项目特性
+
+- **三层混合架构（LLM Wiki + GraphRAG + RAG）**：问答按置信度逐层路由——Wiki 页面直接命中 → 图谱实体/关系与社区摘要 → 混合检索兜底，各层命中率与回答质量持续评估
+- **混合检索 + Rerank**：pgvector 向量检索 + BM25 关键词检索 + RRF 融合 + BGE-Reranker 重排序，二次权限过滤保证安全
+- **Agentic RAG（ReAct Agent）**：不预检索注入 context，LLM 自主决策调用 5 种工具（知识检索/联网/Text2SQL/Wiki/图谱），多轮 ReAct 循环 + 工具调用链落库；复杂问题可叠加多 Agent 工作流（节点 DAG + 并行执行 + 人工确认 HITL）
+- **流式问答**：SSE 流式响应，TTFB/总延迟展示，AbortController 终止，断线自动保存部分回答；Agent 模式实时下发 `tool_call/tool_result`「思考过程」事件
+- **四层记忆**：short/session/user/global 记忆分层管理，每晚提炼稳定用户偏好
+- **文档全生命周期**：多格式解析（PDF/DOCX/Markdown/代码/表格/PPT）→ 语义感知切分 → 数据脱敏 → 向量化 → 版本管理 + 软删除；PDF 深度解析支持 PyMuPDF `find_tables()` 表格提取、跨页合并与图片提取（base64 + OSS 双存储）
+- **知识图谱（Graph RAG）**：LLM 实体/关系抽取 + Louvain 社区检测与摘要，图谱增量同步 + 向量检索召回
+- **LLM Wiki**：基于知识节点文档或图谱社区摘要自动生成 Wiki 页面，文档变更后增量刷新
+- **五层权限模型**：可见范围（TEAM_ONLY/DEPT_ONLY/PUBLIC）+ 主动共享（部门/团队/个人统一表）+ 黑名单（Deny Override 铁律）+ 双审流程 + 权限申请工单双轨制
+- **权限缓存分层**：L1~L5 五层缓存（功能权限/部门范围/团队范围/数据等级/资源临时授权）+ 延迟双删防并发脏写
+- **审计可追溯**：哈希链防篡改审计日志、权限审计日志（只追加不删）、文档操作日志（15 种 action）、敏感词过滤、IP 黑白名单、登录锁定
+- **系统配置工单化**：SystemConfig KV 存储 + LLMModel 模型管理 + 配置/模型变更工单（高风险项超管复核）+ 风险等级分级
+- **系统监控**：P50/P95/P99 延迟百分位（预计算 + 直方图）、Celery 队列深度快照、组织使用报表、实时指标（Redis 5 分钟刷新）
+- **RAG 质量评估中心**：黄金测试集 + DeepEval 12 维 LLM-as-Judge + 生产对话自动评估（采样 + 分层限速）+ 低分回归测试集 + 低分对话归因分析 + 离线检索评估（Recall@K/MRR/NDCG）+ 文档质量量化 + 知识库覆盖率 + Ragas 部署前评估 + 反馈闭环
+
+---
+
+## 二、功能预览
+
+> 共 18 张功能页面预览图，存放于 `demo_file/screenshot/`，点击下方标题展开查看。
 
 <details>
-<summary>展开查看全部截图（18 张）</summary>
+<summary>展开查看全部预览（18 张）</summary>
 
 ![对话](demo_file/screenshot/%E5%AF%B9%E8%AF%9D.png)
 
@@ -59,76 +156,9 @@
 
 </details>
 
-
-
-## 问答流程总览
-
-> 从用户 Query 到最终结果的完整链路：**输入审查 → 热点缓存 → 检索核心 → LLM 流式生成 → SSE 输出 → 落库与评估**：
-> - `wiki / graphrag / rag`：三层路由，预检索注入 context；
-> - `auto / agent`（默认）：Agentic RAG，LLM 自主决策调用工具，`do_workflow=true` 可升级为多 Agent 工作流。
-
-```mermaid
-flowchart TD
-    Q["用户 Query<br/>POST /api/v1/chat/ask_stream/"] --> IN{"输入侧敏感词审查<br/>block 命中直接拒答"}
-    IN -->|"拦截"| F["content_filtered 拒答"]
-    IN -->|"通过"| CACHE{"热点缓存命中？<br/>HotQaCache 组织分组 + 文档兜底"}
-    CACHE -->|"命中：直接返回<br/>（仍过内容审查 + 引用权限校验）"| DONE["返回答案"]
-    CACHE -->|"未命中"| MODE{"mode 分流"}
-
-    MODE -->|"wiki / graphrag / rag"| ROUTE["三层路由编排<br/>Wiki 命中 → GraphRAG → RAG 兜底"]
-    MODE -->|"auto / agent（默认）"| REACT["Agentic RAG · ReAct 循环<br/>（≤5 轮，LLM 自主决策是否调用工具）"]
-    REACT -->|"do_workflow=true 且<br/>planner 判定复杂"| WF["多 Agent 工作流<br/>research/tool/approval 节点 DAG<br/>+ HITL 人工确认"]
-    REACT --> TOOLS["工具注册表（6 个）<br/>knowledge_search / web_search / calculator<br/>text2sql / wiki_search / graph_search"]
-    WF --> TOOLS
-
-    ROUTE -.->|"RAG 兜底层"| CORE["检索核心 _search_core（hybrid_search）<br/>向量 + BM25 + RRF 融合<br/>+ Rerank 重排 + 二次权限过滤"]
-    TOOLS -.->|"knowledge_search 工具复用"| CORE
-    CORE --> GEN["LLM 流式生成<br/>逐段敏感词审查（block/mask）"]
-    ROUTE --> GEN
-    TOOLS --> GEN
-    GEN --> SSE["SSE 事件输出<br/>tool_call / tool_result / first_token<br/>/ delta / done"]
-    SSE --> PERSIST["落库<br/>QaRecord + AgentTrace<br/>+ 热点缓存 + 记忆 + 12 维评估"]
-    PERSIST --> DONE
-    F --> DONE
-```
-
-**链路说明**：
-
-| 环节 | 说明 |
-|---|---|
-| 输入侧敏感词审查 | block 命中直接拒答（content_filtered），不浪费 LLM 算力 |
-| 热点缓存 | HotQaCache 组织分组（public/org_…）+ 文档级兜底校验（Deny Override）；命中仍过内容审查 + 引用权限校验 |
-| 检索核心 `_search_core` | 向量 pgvector + BM25 + RRF 融合 + Rerank 重排 + 检索级权限过滤；查询改写/分解（`QUERY_TRANSFORM_ENABLED`，默认关闭）是透明增强层，失败恒降级为原 Query |
-| LLM 流式生成 | 逐段敏感词审查（block 中断 / mask 脱敏） |
-| SSE 输出 | `start → (tool_call/tool_result)* → first_token → delta* → done`（或 `content_filtered` / `error`） |
-| 落库 | QaRecord（answer_type：rag / agent / general / refused）+ AgentTrace（工具调用链）+ 热点缓存 + 记忆 + 12 维评估 |
-
-**三层路由（wiki/graphrag/rag）**：按置信度逐层降级——LLM Wiki 命中（≥ 0.68）→ GraphRAG（≥ 0.45）→ RAG 兜底；每层置信度与耗时记入 `route_trace`，由 RouteAnalysis 持续评估各层命中率与回答质量。
-
-**Agentic RAG（auto/agent）**：不预检索注入 context，LLM 在 ReAct 循环中自主决策是否调用工具（≤ 5 轮，末轮强制成文，达上限强制总结）。6 个工具：`knowledge_search`（复用混合检索全链路 + 二次权限过滤）/ `web_search`（Tavily，未配置降级 DuckDuckGo）/ `calculator` / `text2sql`（业务库，白名单限定）/ `wiki_search` / `graph_search`，统一返回 `{result, ok, meta, latency_ms}` 回填 messages，工具调用链落库 AgentTrace。`do_workflow=true` 时由 planner 判定，复杂问题产出节点 DAG（research / tool / approval）走多 Agent 工作流：拓扑序执行、无依赖节点并行（≤ 4）、失败自动重试（≤ 2），`web_search` / `text2sql` 敏感工具隐式人工确认（HITL），审批通过 `resume_workflow` 继续 / 驳回降级回答；节点轨迹落 WorkflowNodeRun。
-
 ---
 
-## 一、项目特性
-
-- **三层混合架构（LLM Wiki + GraphRAG + RAG）**：问答按置信度逐层路由——Wiki 页面直接命中 → 图谱实体/关系与社区摘要 → 混合检索兜底，各层命中率与回答质量持续评估
-- **混合检索 + Rerank**：pgvector 向量检索 + BM25 关键词检索 + RRF 融合 + BGE-Reranker 重排序，二次权限过滤保证安全
-- **Agentic RAG（ReAct Agent）**：不预检索注入 context，LLM 自主决策调用 6 种工具（知识检索/联网/计算器/Text2SQL/Wiki/图谱），多轮 ReAct 循环 + 工具调用链落库；复杂问题可叠加多 Agent 工作流（节点 DAG + 并行执行 + 人工确认 HITL）
-- **流式问答**：SSE 流式响应，TTFB/总延迟展示，AbortController 终止，断线自动保存部分回答；Agent 模式实时下发 `tool_call/tool_result`「思考过程」事件
-- **四层记忆**：short/session/user/global 记忆分层管理，每晚提炼稳定用户偏好
-- **文档全生命周期**：多格式解析（PDF/DOCX/Markdown/代码/表格/PPT）→ 语义感知切分 → 数据脱敏 → 向量化 → 版本管理 + 软删除；PDF 深度解析支持 PyMuPDF `find_tables()` 表格提取、跨页合并与图片提取（base64 + OSS 双存储）
-- **知识图谱（Graph RAG）**：LLM 实体/关系抽取 + Louvain 社区检测与摘要，图谱增量同步 + 向量检索召回
-- **LLM Wiki**：基于知识节点文档或图谱社区摘要自动生成 Wiki 页面，文档变更后增量刷新
-- **五层权限模型**：可见范围（TEAM_ONLY/DEPT_ONLY/PUBLIC）+ 主动共享（部门/团队/个人统一表）+ 黑名单（Deny Override 铁律）+ 双审流程 + 权限申请工单双轨制
-- **权限缓存分层**：L1~L5 五层缓存（功能权限/部门范围/团队范围/数据等级/资源临时授权）+ 延迟双删防并发脏写
-- **审计可追溯**：哈希链防篡改审计日志、权限审计日志（只追加不删）、文档操作日志（15 种 action）、敏感词过滤、IP 黑白名单、登录锁定
-- **系统配置工单化**：SystemConfig KV 存储 + LLMModel 模型管理 + 配置/模型变更工单（高风险项超管复核）+ 风险等级分级
-- **系统监控**：P50/P95/P99 延迟百分位（预计算 + 直方图）、Celery 队列深度快照、组织使用报表、实时指标（Redis 5 分钟刷新）
-- **RAG 质量评估中心**：黄金测试集 + DeepEval 12 维 LLM-as-Judge + 生产对话自动评估（采样 + 分层限速）+ 低分回归测试集 + 低分对话归因分析 + 离线检索评估（Recall@K/MRR/NDCG）+ 文档质量量化 + 知识库覆盖率 + Ragas 部署前评估 + 反馈闭环
-
----
-
-## 二、快速启动
+## 三、快速启动
 
 ```bash
 cd rag
@@ -159,7 +189,7 @@ docker compose exec django python manage.py init_system
 
 ---
 
-## 三、目录结构
+## 四、目录结构
 
 ```
 rag/
@@ -197,7 +227,7 @@ rag/
 │   │   ├── react.py            # ReAct Agent 循环（Agentic RAG 核心：同步/流式 + 工具调用链）
 │   │   ├── task_splitter.py    # 复杂任务拆分
 │   │   ├── streamer.py         # SSE 流式输出
-│   │   ├── tools/              # Agent 工具（知识检索/图谱/Wiki/联网/Text2SQL/计算器）
+│   │   ├── tools/              # Agent 工具（知识检索/图谱/Wiki/联网/Text2SQL）
 │   │   └── workflow/           # 多 Agent 工作流（planner 编排 DAG + engine 并行执行 + HITL 人工确认）
 │   ├── chat/                   # 会话 / QA 记录（含 TTFB/Token 速率/错误类型） / 反馈 / 热点缓存
 │   ├── audit/                  # 审计日志（sha256 哈希链防篡改）
@@ -318,7 +348,7 @@ rag/
 
 ---
 
-## 四、核心 API 概览
+## 五、核心 API 概览
 
 <details>
 <summary>展开查看完整 API 列表</summary>
@@ -387,6 +417,7 @@ rag/
 | POST | `/api/v1/agent/task/run/` | 拆分并执行 |
 | GET | `/api/v1/agent/workflows/` | 工作流列表（`?status=running` 过滤） |
 | GET | `/api/v1/agent/workflows/{id}/` | 工作流详情（含节点执行轨迹，发起人或超管可见） |
+| POST | `/api/v1/agent/workflows/{id}/approve/` | 对话框内嵌确认（Body: `{"node_id", "approved"}`，通过继续执行 / 拒绝降级） |
 | POST | `/api/v1/retrieval/search/` | 检索调试接口 |
 
 ### 记忆（memory）
@@ -495,7 +526,7 @@ rag/
 
 ---
 
-## 五、技术栈
+## 六、技术栈
 
 | 层 | 选型 | 理由 |
 |-----|------|------|
@@ -515,7 +546,7 @@ rag/
 
 ---
 
-## 六、数据库表概览
+## 七、数据库表概览
 
 <details>
 <summary>展开查看全部数据库表</summary>
@@ -656,15 +687,15 @@ rag/
 |------|------|------|
 | AgentTrace | `agent_trace` | Agent 工具调用链记录（每轮工具名/参数/结果/耗时，供「思考过程」展示与端到端 Tracing） |
 | AgentWorkflow | `agent_workflow` | 多 Agent 工作流执行实例（节点 DAG + 状态机 planning→running→succeeded/failed/degraded/waiting_approval） |
-| WorkflowNodeRun | `agent_workflow_node` | 工作流节点执行轨迹（research/tool/approval/finalize 的输入/输出/耗时/错误，审批节点关联工单 ID） |
+| WorkflowNodeRun | `agent_workflow_node` | 工作流节点执行轨迹（research/tool/approval/finalize 的输入/输出/耗时/错误，审批节点等待对话框内嵌确认，不创建工单） |
 
 </details>
 
 ---
 
-## 七、权限系统规则
+## 八、权限系统规则
 
-### 7.1 角色体系（9 种）
+### 8.1 角色体系（9 种）
 
 | 角色编码 | 角色名称 | 角色类型 | 核心职责 |
 |---------|---------|---------|---------|
@@ -681,7 +712,7 @@ rag/
 > 内置角色 code 不可修改：前端编辑时 readOnly，后端 update 接口拦截。
 > role_type 决定授权时是否需绑定管辖 Scope：GLOBAL 无需 / DEPT_SCOPE 绑部门 / TEAM_SCOPE 绑团队 / NORMAL_USER 随人事归属。
 
-### 7.2 节点结构（固定 4 层 + 自定义分类）
+### 8.2 节点结构（固定 4 层 + 自定义分类）
 
 ```
 一级：知识库根节点 (kb root)
@@ -694,7 +725,7 @@ rag/
 - Level 4+（业务分类）：通过节点 API 自由创建/修改/删除（删除时需节点下无文档）
 - 文档挂载在业务分类节点下；部门/团队归属由 `dept_node_id`/`team_node_id` 自动填充
 
-### 7.3 文档可见范围（三档）
+### 8.3 文档可见范围（三档）
 
 | visibility_level | 含义 | 默认访问者 |
 |---------|------|-----------|
@@ -702,7 +733,7 @@ rag/
 | DEPT_ONLY | 归属全部门（含下属团队） | 同部门所有成员 + 所有者 + 管理员 |
 | PUBLIC | 全公司公开 | 所有登录用户 |
 
-### 7.4 文档双层审核流程
+### 8.4 文档双层审核流程
 
 ```
 上传 → 系统预检 → 待团队组长审核 (pending_team)
@@ -714,7 +745,7 @@ rag/
 
 super_admin 可绕过双审直接发布。
 
-### 7.5 访问权限判定（Deny Override 铁律 + 优先级判定）
+### 8.5 访问权限判定（Deny Override 铁律 + 优先级判定）
 
 权限判定遵循 **Deny > Allow** 不可变原则，优先级从高到低（[apps/knowledge/access.py](apps/knowledge/access.py) `resolve_doc_access`）：
 
@@ -731,7 +762,7 @@ super_admin 可绕过双审直接发布。
 
 > 设计要点：黑名单是 Deny Override 铁律，对超管也生效，只有 Owner 绕过（所有权原则）。ResourceShare 单表 + 枚举（部门/团队/个人统一），覆盖索引 0 回表；节点级继承通过 KnowledgeNode.path 前缀匹配（LIKE '/1/5/12/%'）一次搞定，无需递归。ResourceBlockList 独立表独立鉴权优先级，绝不和 Allow 混表，避免 SQL 逻辑判断顺序出错导致 Deny 被覆盖。
 
-### 7.6 权限申请双轨制
+### 8.6 权限申请双轨制
 
 - **轨道 1（申请拉取）**：用户提交 TicketList（权限类型）→ 共享审批池顺序审批 → 写入 ResourceShare
 - **轨道 2（授权推送）**：组长/管理员直接操作 ResourceShare 表授予
@@ -743,7 +774,7 @@ super_admin 可绕过双审直接发布。
 - 降级/撤销：团队组长可直接执行，无需审批（但记审计）
 - 审批工单永不删除，只改状态
 
-### 7.7 部门/团队删除保护
+### 8.7 部门/团队删除保护
 
 - **删除团队**：团队下无成员 AND 团队节点及子树下无文档 → 允许；否则提示具体数字
 - **删除部门**：部门下无用户 AND 无团队 → 允许；否则提示具体数字
@@ -751,15 +782,15 @@ super_admin 可绕过双审直接发布。
 
 ---
 
-## 八、文档存储架构
+## 九、文档存储架构
 
-### 8.1 存储模式
+### 9.1 存储模式
 
 通过环境变量 `DOCUMENT_STORAGE_MODE` 切换：
 - `local`：本地文件系统（默认）
 - `oss`：云 OSS / MinIO
 
-### 8.2 按节点路径存储
+### 9.2 按节点路径存储
 
 ```
 media/documents/
@@ -768,14 +799,14 @@ media/documents/
         └── {uuid}_{filename}  # 文档文件
 ```
 
-### 8.3 安全措施
+### 9.3 安全措施
 
 - MIME 类型验证（python-magic 库，防止文件类型绕过）
 - 文件名净化（django.utils.text.get_valid_filename，去除路径分隔符和控制字符）
 - sha256 文件哈希去重，防止重复上传
 - raw_content 预览 50MB 限制 + 分页（默认 5000 字符/页，可在 1000-20000 调整）
 
-### 8.4 文档版本管理
+### 9.4 文档版本管理
 
 - 软删除（`is_deleted=True`）替代物理删除
 - `(node, file_name, version_tag)` 组合对未删除记录唯一
@@ -784,7 +815,7 @@ media/documents/
 
 ---
 
-## 九、Celery 定时任务（Beat）
+## 十、Celery 定时任务（Beat）
 
 | 任务 | 调度 | 说明 |
 |------|------|------|
@@ -823,25 +854,25 @@ celery -A rag_project worker -l info -Q analytics
 
 ---
 
-## 十、RAG 质量评估中心
+## 十一、RAG 质量评估中心
 
 > 入口：侧边栏「质量评估」→ `admin-eval.html`。多 Tab 页 + KPI 卡片 + 数据可视化 + 报告表格，支持手动触发与定时自动执行。
 >
 > 评估体系分两条线：**部署前评估**（Ragas，有 reference，指标更全）和**生产评估**（DeepEval，无 reference，采样+限速）。两者互补，Ragas 不在生产链路中调用。
 
-### 10.1 黄金测试集
+### 11.1 黄金测试集
 - 创建/编辑/删除测试集（含版本管理）
 - 批量导入/导出测试问题（JSON 格式）
 - 每个问题标注：相关文档（high/medium/low）+ 参考答案 + 关键点
 - 推荐规模：200-500 个典型业务问题
 
-### 10.2 离线检索评估
+### 11.2 离线检索评估
 - 指标：Recall@5/10/20、MRR、NDCG@5/10
 - 各阶段增益分析：纯向量 / 纯 BM25 / 混合 RRF / Rerank
 - 评估时配置快照（top_k / rrf_k / chunk_size 等）
 - 检索漏召分析：未命中任何相关文档的问题统计
 
-### 10.3 多维度回答质量评估（DeepEval 12 维）
+### 11.3 多维度回答质量评估（DeepEval 12 维）
 LLM-as-Judge，12 维度评分（0-1），分四大类：
 
 | 类别 | 维度 | 含义 |
@@ -869,7 +900,7 @@ LLM-as-Judge，12 维度评分（0-1），分四大类：
 > 2. **GraphRAG 回答质量评估**：对图谱路由（graphrag_local / graphrag_global）命中的回答采用与 RAG 同口径的 12 维评分；
 > 3. **分层质量对比看板**：基于 RouteAnalysis 输出 wiki / graphrag_local / graphrag_global / rag 四层命中率 + 各维度均分对比，用于路由阈值调优。
 
-### 10.4 生产对话自动评估
+### 11.4 生产对话自动评估
 对话结束后按"分层限速 → 采样 → 日预算"策略异步触发 DeepEval 12 维评估，四重成本保护：
 
 **流程顺序**（先限速保护接口，再采样控量）：
@@ -897,7 +928,7 @@ LLM-as-Judge，12 维度评分（0-1），分四大类：
 - 可通过 `EVAL_DISPLAY_DIMENSIONS` 选择性启用维度进一步降本（评估=展示强绑定）
 - Redis 故障时保守跳过（宁可少评估也不打爆 LLM 评估接口）
 
-### 10.5 低分回归测试集
+### 11.5 低分回归测试集
 从生产低分对话沉淀，防止已知 bad case 在迭代中退化：
 
 - **沉淀**：从 MultiDimensionScore 聚合 QA 均分，取低分 top N，按 root_type 分流到对应回归测试集
@@ -906,7 +937,7 @@ LLM-as-Judge，12 维度评分（0-1），分四大类：
 - 沉淀来源是 QaRecord（生产低分对话），不是 GoldenQuestion
 - 同一 QA 不重复沉淀（source_qa_record_id 查重）
 
-### 10.6 低分对话归因分析
+### 11.6 低分对话归因分析
 对低分 QA 自动归因 + 给出优化建议，分层触发控成本：
 
 - **规则归因为主**（零 LLM 成本、可解释、可审计），基于 12 维分数 + retrieval_scores
@@ -916,7 +947,7 @@ LLM-as-Judge，12 维度评分（0-1），分四大类：
 
 归因分类（11 类）：检索召回不足 / 检索排序失效 / 知识盲区 / 内容质量差 / 生成幻觉 / 生成跑题 / 生成不完整 / 生成表达差 / 安全问题 / 问题侧 / 无法归因
 
-### 10.7 Ragas 部署前评估流水线
+### 11.7 Ragas 部署前评估流水线
 零标注全自动评估，部署前对黄金测试集做完整 RAG 评估：
 
 - **零标注**：直接复用知识库现有 DocumentChunk 作为语料，Ragas 自动合成测试集
@@ -925,20 +956,20 @@ LLM-as-Judge，12 维度评分（0-1），分四大类：
 - 自托管数据不出域，符合企业内网审计要求
 - 入口：`docker compose exec django python manage.py ragas_eval`
 
-### 10.8 文档质量评估
+### 11.8 文档质量评估
 - 解析质量：文本提取率、表格保留率、图片提取率
 - 切分质量：chunk 数量、平均大小、标准差、分布均匀性
 - 向量化质量：embedding 成功率、失败 chunk 数
 - 综合评分 0-100（解析 0.4 + 切分 0.3 + 向量化 0.3）
 - 问题诊断：自动列出 warning 级别问题清单
 
-### 10.9 知识库覆盖率
+### 11.9 知识库覆盖率
 - 热门问题覆盖率（Top 100 查询命中率）
 - 知识空白检测（某领域查询长期无命中）
 - 重复切片检测
 - 领域覆盖分析：按部门 → 团队层级分组，统计文档数 / 切片数 / 占比 / 查询命中率
 
-### 10.10 反馈闭环自动化
+### 11.10 反馈闭环自动化
 - 差评自动关联到命中的 chunk
 - 智能生成处理建议（重新切分 / 重新入库 / 补充文档）
 - 反馈处理追踪（resolved 状态）
@@ -946,33 +977,33 @@ LLM-as-Judge，12 维度评分（0-1），分四大类：
 
 ---
 
-## 十一、系统监控
+## 十二、系统监控
 
-### 11.1 性能指标
+### 12.1 性能指标
 - 延迟百分位：P50/P95/P99（端到端 / LLM / 检索 / TTFB）
 - 缓存命中请求与正常请求分别统计，避免亚毫秒延迟稀释百分位
 - 延迟直方图（按 100ms 分桶）
 - Token 生成速率（tokens_per_second）
 - 错误分布（timeout / rate_limit / network 等分类）
 
-### 11.2 实时指标
+### 12.2 实时指标
 - Redis 原子 INCR + 5 分钟刷新
 - 独立 DB（默认 DB 3）避免与 broker/result_backend 冲突
 - 包含：总 QA / 缓存命中 / LLM 错误 / 成本估算 / last_flush_at
 
-### 11.3 队列深度
+### 12.3 队列深度
 - Redis LLEN 实时查询（O(1)）+ PostgreSQL 历史存储（保留 90 天，供趋势分析）
 - 同时记录 Worker 数量与任务类型
 - 同一队列同一分钟唯一约束，防止 Beat 重入产生重复数据
 
-### 11.4 组织使用报表
+### 12.4 组织使用报表
 - 部门级汇总（team_id=-1 哨兵值）+ 团队明细两种粒度
 - UPSERT 保证重复执行不产生重复数据
 - 指标：QA 次数 / 活跃用户 / Token / 费用 / 平均延迟 / P95 / 好评率 / 缓存命中率
 
 ---
 
-## 十二、批量导入
+## 十三、批量导入
 
 ```bash
 # 默认：private（归一化为 TEAM_ONLY），超级管理员上传
@@ -995,7 +1026,7 @@ docker compose exec django python scripts/batch_import_docs.py --list-department
 
 ---
 
-## 十三、环境变量配置
+## 十四、环境变量配置
 
 > 配置分两类：**启动期必填 + 敏感凭证**保留在 `.env`（连 DB 前就要用 / 不进数据库），**业务参数**迁移到 `SystemConfig` 数据库表（运行时可改、走工单审批、支持风险等级分级）。
 
@@ -1062,7 +1093,7 @@ EMAIL_HOST_PASSWORD=your-smtp-password
 
 ---
 
-## 十四、测试
+## 十五、测试
 
 ```bash
 # 运行测试（统一使用 pytest，DJANGO_SETTINGS_MODULE 由 pytest.ini 指向 rag_project.test_settings）
@@ -1081,7 +1112,7 @@ docker compose exec django pytest --cov=apps --cov-report=html          # 生成
 
 ---
 
-## 十五、二次开发建议
+## 十六、二次开发建议
 
 > **适用范围**：本项目仅适用于研究学习使用，不建议直接部署用于生产环境。以下建议供二次开发时参考。
 

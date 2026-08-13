@@ -45,7 +45,17 @@
 	flex-shrink: 0
 }
 
-/* 弹窗：敏感词检测 TODO 占位（后期接入自动检测后替换为检测结果） */
+/* 弹窗：敏感内容检测结果区 */
+.doc-scan-loading {
+	display: flex;
+	align-items: center;
+	flex-direction: column;
+	gap: 8px;
+	font-size: 13px;
+	color: var(--text-sub);
+	padding: 2px 0
+}
+/* 检测失败占位（接口异常/无权限时展示，不影响审核操作） */
 .doc-scan-todo {
 	display: flex;
 	align-items: center;
@@ -53,12 +63,119 @@
 	background: var(--bg);
 	border: 1px dashed var(--border-strong);
 	border-radius: var(--radius-lg);
-	padding: 14px 16px;
+	padding: 12px 14px;
 	font-size: 13px;
 	color: var(--text-sub)
 }
 .doc-scan-todo-icon {
 	font-size: 14px
+}
+
+/* 有命中：统计（上方）与详细片段（下方）上下排列 */
+.doc-scan-summary {
+	background: rgba(239,68,68,.08);
+	border: 1px solid rgba(239,68,68,.25);
+	border-radius: var(--radius-lg);
+	padding: 12px 14px;
+	/* 块级占满弹窗 body 内容区宽度，避免被 flex 容器挤压变窄 */
+	width: 100%
+}
+.doc-scan-summary-title {
+	font-size: 13px;
+	font-weight: 600;
+	color: #dc2626;
+	margin-bottom: 8px
+}
+.doc-scan-stats-list {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 6px
+}
+.doc-scan-stats-item {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	font-size: 12px;
+	color: var(--text)
+}
+.doc-scan-stats-item .doc-scan-stats-count {
+	color: #dc2626;
+	font-weight: 600
+}
+.doc-scan-detail {
+	margin-top: 10px
+}
+.doc-scan-detail-title {
+	font-size: 12px;
+	color: var(--text-sub);
+	margin-bottom: 8px
+}
+
+/* 无命中：绿色提示 */
+.doc-scan-clean {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	background: rgba(16,185,129,.08);
+	border: 1px solid rgba(16,185,129,.25);
+	border-radius: var(--radius-lg);
+	padding: 12px 14px;
+	font-size: 13px;
+	color: var(--success)
+}
+.doc-scan-clean-icon {
+	font-size: 14px;
+	font-weight: 700
+}
+
+/* 命中片段列表 */
+.doc-scan-frags {
+	/* 与弹窗 body 内容区同宽，左右各收 10px，与整体左右留白协调 */
+	/* margin: 0 10px; */
+	display: flex;
+	flex-direction: column;
+	gap: 8px
+}
+.doc-scan-frag {
+	border: 1px solid var(--border);
+	border-radius: var(--radius-lg);
+	padding: 10px 12px;
+	background: var(--bg)
+}
+.doc-scan-frag-head {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin-bottom: 6px
+}
+.doc-scan-cat {
+	flex-shrink: 0;
+	font-size: 12px;
+	color: #fff;
+	background: var(--danger);
+	border-radius: 4px;
+	padding: 1px 6px
+}
+.doc-scan-frag-count {
+	font-size: 12px;
+	color: var(--text-sub)
+}
+.doc-scan-frag-ctx {
+	font-size: 12px;
+	line-height: 1.7;
+	color: var(--text);
+	word-break: break-word;
+	/* 保留原文换行与空格，便于对照原文定位命中位置 */
+	white-space: pre-wrap
+}
+.doc-scan-mark {
+	background: #ffe08a;
+	color: #8a5a00;
+	border-radius: 2px;
+	padding: 0 1px
 }
 
 /* 弹窗底部按钮优化 */

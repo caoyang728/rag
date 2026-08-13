@@ -465,6 +465,29 @@ class TestSensitiveFilterCheck:
         sf = _build_filter([('违规词', 'other', 'block', False)])
         assert sf.check('') == []
 
+    @pytest.mark.unit
+    @patch.object(SensitiveFilter, '_is_enabled', return_value=True)
+    def test_check_record_false_skips_hit_stats(self, _mock_enabled):
+        """check(text, record=False) 不累计命中统计（文档审核批量扫描场景）
+
+        文档审核会一次性扫描整篇文档，若计入 hit_count 会污染 LLM 流式命中统计。
+        """
+        sf = _build_filter([('脱敏词', 'other', 'mask', False)])
+        with patch.object(SensitiveFilter, '_record_hits') as mock_record:
+            hits = sf.check('这里有一个脱敏词', record=False)
+        assert len(hits) == 1
+        mock_record.assert_not_called()
+
+    @pytest.mark.unit
+    @patch.object(SensitiveFilter, '_is_enabled', return_value=True)
+    def test_check_record_default_counts_hits(self, _mock_enabled):
+        """check 默认 record=True 仍累计命中统计（LLM 流式热路径行为不变）"""
+        sf = _build_filter([('脱敏词', 'other', 'mask', False)])
+        with patch.object(SensitiveFilter, '_record_hits') as mock_record:
+            hits = sf.check('这里有一个脱敏词')
+        assert len(hits) == 1
+        mock_record.assert_called_once()
+
 
 # ============================================================================
 # SensitiveFilter.feed / flush —— 流式增量审查

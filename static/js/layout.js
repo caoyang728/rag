@@ -21,7 +21,7 @@ function renderTopNav(active) {
     </div>
     <div class="topnav-right">
       <button class="topnav-icon-btn" title="通知" onclick="loadNotifications()">
-        <span id="notificationSummary" style="font-size:12px;margin-right:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:80px"></span>🔔<span class="badge-dot"></span>
+        <span id="notificationSummary" style="font-size:12px;margin-right:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:80px"></span>🔔<span id="ticketReminderDot" class="badge badge-danger hidden">0</span>
       </button>
       <div class="dropdown">
         <div class="topnav-user" onclick="toggleUserMenu(event)">
@@ -69,11 +69,30 @@ function doLogout() {
 
 async function loadNotifications() {
 	try {
+		// 工单审批提醒优先：有待审批工单时弹窗引导前往工单中心，同时刷新铃铛角标
+		const pending = await api.getJson('/api/v1/auth/tickets/?view=pending&page=1&page_size=1');
+		const pendingCount = pending.count || 0;
+		_setTicketReminderBadge(pendingCount);
+		if (pendingCount > 0) {
+			showConfirmDialog({
+				title: '工单审批提醒',
+				bannerType: 'warn',
+				bannerIcon: '🎫',
+				bannerText: `有 ${pendingCount} 条工单待你审批，是否前往工单中心处理？`,
+				buttons: [
+					{ text: '取消', type: 'cancel', onClick: ctx => ctx.close() },
+					{ text: '去处理', type: 'primary', onClick: ctx => { ctx.close(); goto('ticket'); } },
+				],
+			});
+			return;
+		}
+
 		const data = await api.getJson('/api/v1/notification/send-logs/');
 		const logs = data.rows || [];
 
 		if (logs.length === 0) {
-			toast('暂无通知', '');
+			// info 类型自动消除时长 3s，空 type 不会自动消除（无待办也无邮件通知时）
+			toast('暂无通知', 'info');
 			return;
 		}
 
@@ -93,6 +112,48 @@ async function loadNotifications() {
 		console.error('load notifications failed:', e);
 		toast('加载通知失败', 'error');
 	}
+}
+
+/* ============ 全局工单审批提醒（铃铛角标 + 轮询） ============ */
+// 有审批身份的角色才轮询待办（普通员工后端短路待办恒为空，无需请求）
+const _TICKET_APPROVE_ROLES = ['super_admin', 'user_admin', 'kb_admin', 'compliance_admin', 'system_maintainer', 'dept_manager', 'team_leader'];
+// 轮询间隔：团队组长 2 小时，部门经理与其他管理员 1 小时
+const _TICKET_REMINDER_INTERVAL_LEADER = 2 * 60 * 60 * 1000;
+const _TICKET_REMINDER_INTERVAL_ADMIN = 1 * 60 * 60 * 1000;
+let _ticketReminderTimer = null;
+
+function startTicketReminderPolling() {
+	stopTicketReminderPolling();
+	// 无审批身份的角色不参与轮询，避免空耗请求
+	if (!_TICKET_APPROVE_ROLES.some(r => hasAnyRole(r))) return;
+	// 启动即刷新一次，随后按角色间隔定时刷新
+	_refreshTicketReminder();
+	_ticketReminderTimer = setInterval(_refreshTicketReminder, _ticketReminderInterval());
+}
+
+function stopTicketReminderPolling() {
+	if (_ticketReminderTimer) { clearInterval(_ticketReminderTimer); _ticketReminderTimer = null; }
+}
+
+// 按角色返回轮询间隔：团队组长 2 小时，其余审批角色 1 小时
+function _ticketReminderInterval() {
+	return hasAnyRole('team_leader') ? _TICKET_REMINDER_INTERVAL_LEADER : _TICKET_REMINDER_INTERVAL_ADMIN;
+}
+
+// 轻量查询待审批数量（view=pending + page_size=1 仅取 count），刷新铃铛角标；
+// 轮询失败静默，角标维持现状，不打扰用户
+function _refreshTicketReminder() {
+	api.getJson('/api/v1/auth/tickets/?view=pending&page=1&page_size=1')
+		.then(res => _setTicketReminderBadge(res?.count || 0))
+		.catch(() => { /* 静默 */ });
+}
+
+// 更新铃铛待办角标：数量为 0 时隐藏，大于 0 时显示数量（默认状态无角标，与有待办区分）
+function _setTicketReminderBadge(count) {
+	const el = $('#ticketReminderDot');
+	if (!el) return;
+	el.textContent = count;
+	el.classList.toggle('hidden', !(count > 0));
 }
 
 /* ============ 布局：侧边导航（管理页） ============ */
@@ -261,4 +322,16 @@ document.addEventListener('DOMContentLoaded', () => {
 		// 恢复侧栏折叠状态（刷新后保持）
 		if (isSidebarCollapsed()) document.body.classList.add('sidebar-collapsed');
 	}
+
+	// 全局工单审批提醒轮询：按角色间隔刷新铃铛红点；
+	// 页面切到后台暂停，回到前台立即刷新并恢复
+	startTicketReminderPolling();
+	document.addEventListener('visibilitychange', () => {
+		if (document.hidden) {
+			stopTicketReminderPolling();
+		} else {
+			_refreshTicketReminder();
+			startTicketReminderPolling();
+		}
+	});
 });

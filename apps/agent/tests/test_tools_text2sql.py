@@ -16,8 +16,8 @@ Mock 说明：
 - _load_schema / _generate_sql 内部通过函数内 import 引用
   apps.system.config_loader.get_config_value 与 apps.llm.factory.get_llm，
   按定义处 patch 即可生效。
-- 本环境未安装 psycopg2（仅 psycopg3），测试 DSN 直连分支时向 sys.modules
-  注入一个假的 psycopg2 模块，仅验证连接串传递逻辑。
+- 测试 DSN 直连分支时向 sys.modules 注入一个假的 psycopg 模块，
+  仅验证连接串传递逻辑。
 """
 import sys
 import types
@@ -366,18 +366,18 @@ class TestText2SqlConnection:
     """_get_connection / _release_connection：DSN 直连与 Django 连接回退"""
 
     def test_connect_when_dsn_then_direct_connection(self):
-        """配置了 BUSINESS_DB_DSN：走 psycopg2.connect（本环境注入假模块验证）"""
+        """配置了 BUSINESS_DB_DSN：走 psycopg.connect（本环境注入假模块验证）"""
         from django.conf import settings
-        fake = types.ModuleType('psycopg2')
+        fake = types.ModuleType('psycopg')
         fake.connect = MagicMock(return_value='dsn_conn')
-        sys.modules['psycopg2'] = fake
+        sys.modules['psycopg'] = fake
         try:
             with patch.object(settings, 'BUSINESS_DB_DSN',
                               'postgresql://u:p@h:5432/db', create=True):
                 tool = Text2SqlTool()
                 conn = tool._get_connection()
         finally:
-            del sys.modules['psycopg2']
+            del sys.modules['psycopg']
         fake.connect.assert_called_once_with('postgresql://u:p@h:5432/db')
         assert conn == 'dsn_conn'
 
@@ -398,7 +398,7 @@ class TestText2SqlConnection:
         mock_django_conn.close.assert_not_called()
 
     def test_release_connection_when_psycopg_then_closes(self):
-        """psycopg2 直连连接需要手动 close"""
+        """psycopg3 直连连接需要手动 close"""
         tool = Text2SqlTool()
         conn = MagicMock()
         with patch('django.db.connection', MagicMock()):

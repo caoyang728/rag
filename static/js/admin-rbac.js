@@ -14,6 +14,12 @@ const MODULE_LABELS = {
 	audit: '审计',
 };
 
+// 角色变更提交成功后统一提示：走工单审批，审批通过后生效
+function _roleTicketToast(resp, actionLabel) {
+	const risk = resp.risk_level === 'high' ? '（高风险，需双审）' : '';
+	toast(`${actionLabel}已提交工单 ${resp.ticket_no}${risk}，审批通过后生效`, 'success');
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
 	// RBAC 权限配置页：超级管理员可访问（持有 '*' 全权限）
 	if (!hasAnyRole('super_admin')) {
@@ -115,20 +121,20 @@ function renderPermissionPanel(checkedIds) {
 }
 
 // ====================== 保存权限 ======================
+// 权限分配走工单审批：提交后仅提示工单号，权限不立即生效，
+// 本地角色数据与勾选状态保持不变（审批通过后由审批人刷新页面查看）
 async function saveRolePermissions() {
 	if (!_selectedRoleId || _savingPerms) return;
 	const btn = document.getElementById('btnSavePerms');
 	_savingPerms = true;
 	btn.disabled = true;
-	btn.textContent = '保存中...';
+	btn.textContent = '提交中...';
 	const checkboxes = document.querySelectorAll('#permPanel input[type="checkbox"]');
 	const permIds = Array.from(checkboxes).filter(cb => cb.checked).map(cb => parseInt(cb.value));
 	try {
-		await api.postJson(`${API_BASE}/roles/${_selectedRoleId}/assign-permissions/`, { permission_ids: permIds });
-		const role = allRoles.find(r => r.id === _selectedRoleId);
-		if (role) role.permission_ids = permIds;
-		toast('权限已更新', 'success');
-	} catch (e) { toast('保存失败: ' + e.message, 'error'); }
+		const resp = await api.postJson(`${API_BASE}/roles/${_selectedRoleId}/assign-permissions/`, { permission_ids: permIds });
+		_roleTicketToast(resp, '权限分配');
+	} catch (e) { toast('提交失败: ' + e.message, 'error'); }
 	finally {
 		_savingPerms = false;
 		btn.disabled = false;
@@ -177,27 +183,29 @@ async function saveRole() {
 	const btn = document.getElementById('btnSaveRole');
 	_savingRole = true;
 	btn.disabled = true;
-	btn.textContent = '保存中...';
+	btn.textContent = '提交中...';
 	try {
 		const body = { name, description: desc };
+		let resp;
 		if (id) {
 			// 编辑时：内置角色不提交 code（后端也会拦截）
 			const r = allRoles.find(x => x.id === parseInt(id));
 			if (!r || !r.is_builtin) {
 				body.code = code;
 			}
-			await api.patchJson(`${API_BASE}/roles/${id}/`, body);
-			toast('角色已更新', 'success');
+			resp = await api.patchJson(`${API_BASE}/roles/${id}/`, body);
 		} else {
 			body.code = code;
-			await api.postJson(`${API_BASE}/roles/`, body);
-			toast('角色已添加', 'success');
+			resp = await api.postJson(`${API_BASE}/roles/`, body);
 		}
+		// 角色增改走工单审批：审批通过后生效，提交成功仅提示工单号
+		_roleTicketToast(resp, id ? '角色编辑' : '角色新增');
 		closeModal('roleModal');
+		// 重新拉取角色列表（审批通过前列表不变，保持与服务端一致）
 		const data = await api.getJson(`${API_BASE}/roles/`);
 		allRoles = Array.isArray(data) ? data : (data.results || []);
 		renderRoles();
-	} catch (e) { toast('保存失败: ' + e.message, 'error'); }
+	} catch (e) { toast('提交失败: ' + e.message, 'error'); }
 	finally {
 		_savingRole = false;
 		btn.disabled = false;
@@ -205,19 +213,29 @@ async function saveRole() {
 	}
 }
 
-async function deleteRole(id, name) {
-	if (!confirm(`确认删除角色"${name}"？内置角色不可删除。`)) return;
-	try {
-		await api.deleteJson(`${API_BASE}/roles/${id}/`);
-		toast('角色已删除', 'success');
-		if (_selectedRoleId === id) {
-			_selectedRoleId = null;
-			document.getElementById('currentRoleName').textContent = '';
-			document.getElementById('permPanel').innerHTML = '<div class="empty"><div class="empty-icon">👈</div><div class="empty-text">请从左侧选择一个角色</div></div>';
-			document.getElementById('btnSavePerms').disabled = true;
-		}
-		const data = await api.getJson(`${API_BASE}/roles/`);
-		allRoles = Array.isArray(data) ? data : (data.results || []);
-		renderRoles();
-	} catch (e) { toast('删除失败: ' + e.message, 'error'); }
+// 删除角色走工单审批（高风险双审）：确认后提交删除工单，审批通过后软删
+function deleteRole(id, name) {
+	showConfirmDialog({
+		title: '删除角色',
+		bannerText: `删除角色"${escapeHtml(name)}"为高风险操作，需双审，审批通过后生效`,
+		bannerType: 'danger',
+		bannerIcon: '⚠',
+		buttons: [
+			{ text: '取消', type: 'cancel' },
+			{
+				text: '提交删除工单',
+				type: 'danger',
+				onClick: async (ctx) => {
+					try {
+						const resp = await api.deleteJson(`${API_BASE}/roles/${id}/`);
+						ctx.close();
+						_roleTicketToast(resp, '角色删除');
+						const data = await api.getJson(`${API_BASE}/roles/`);
+						allRoles = Array.isArray(data) ? data : (data.results || []);
+						renderRoles();
+					} catch (e) { ctx.setError('提交失败: ' + e.message); }
+				}
+			}
+		]
+	});
 }

@@ -38,7 +38,7 @@ from apps.users.ticket_service import (
     _detect_team_role_in_service, _detect_dept_role_in_service,
     _resolve_team_leader, _build_grant_chain_for_team_role,
     _build_revoke_chain_for_team_role,
-    _gen_ticket_no, _resolve_dept_leader,
+    _gen_ticket_no, _create_ticket_with_retry, _resolve_dept_leader,
     ApproverRole, GLOBAL_HIGH_PRIVILEGE_KEYS, TEAM_ROLE_KEYS,
 )
 
@@ -1526,6 +1526,70 @@ class TestGenTicketNo(TicketTestBase):
         _make_pending_ticket(self.sa1, self.target_user, self.viewer, [],
                              ticket_no='QX202601010001')
         assert _gen_ticket_no(TicketBizType.PERMISSION) == f'QX{today}0001'
+
+    @pytest.mark.integration
+    def test_seq_takes_numeric_max_not_string_max(self):
+        """跨前缀取序号数字最大值而非 ticket_no 字符串最大值（ZZ…0002 字符串大于 JS…0003）"""
+        from django.utils import timezone as _tz
+        today = _tz.localtime().strftime('%Y%m%d')
+        # 字符串最大行序号为 2（ZZ 前缀），数字最大行序号为 3（JS 前缀）
+        _make_pending_ticket(self.sa1, self.target_user, self.viewer, [],
+                             ticket_no=f'ZZ{today}0002')
+        _make_pending_ticket(self.sa1, self.target_user, self.viewer, [],
+                             ticket_no=f'JS{today}0003')
+        # 若按字符串最大（ZZ…0002）会算出 JS…0003 → 与已存在行冲突；
+        # 正确实现按数字最大（3）算出下一号 4
+        assert _gen_ticket_no(TicketBizType.ROLE) == f'JS{today}0004'
+
+
+# ============================================================================
+# 工单号并发冲突重试_create_ticket_with_retry
+# ============================================================================
+class TestCreateTicketWithRetry(TicketTestBase):
+    """_create_ticket_with_retry：工单号唯一冲突自动重试 / 其他唯一冲突直接上抛"""
+
+    @pytest.mark.integration
+    def test_retry_when_ticket_no_collides(self):
+        """首先生成的工单号与已有工单冲突 → 自动重试生成新号建单成功"""
+        from unittest.mock import patch as _patch
+        from django.utils import timezone as _tz
+        today = _tz.localtime().strftime('%Y%m%d')
+        taken_no = f'QX{today}0009'
+        # 预置一个占用该工单号的行，模拟并发下另一请求已建单
+        _make_pending_ticket(self.sa1, self.target_user, self.viewer, [],
+                             ticket_no=taken_no)
+
+        seq = iter([taken_no, f'QX{today}0010'])
+        with _patch('apps.users.services.ticket_base._gen_ticket_no', side_effect=seq):
+            ticket = _create_ticket_with_retry(
+                TicketBizType.PERMISSION,
+                lambda no: _make_pending_ticket(
+                    self.sa1, self.target_user, self.viewer, [], ticket_no=no),
+            )
+        # 重试后使用了新生成的工单号
+        assert ticket.ticket_no == f'QX{today}0010'
+        # 两行均已存在（预置行 + 重试成功行），无重复工单号
+        assert TicketList.objects.filter(ticket_no=taken_no).count() == 1
+        assert TicketList.objects.filter(ticket_no=f'QX{today}0010').count() == 1
+
+    @pytest.mark.integration
+    def test_other_integrity_error_not_retried(self):
+        """非工单号唯一冲突（如业务唯一键）→ 原样上抛，不重试"""
+        from unittest.mock import patch as _patch
+        from django.db import IntegrityError
+
+        calls = {'n': 0}
+
+        def build(no):
+            calls['n'] += 1
+            raise IntegrityError('duplicate key value violates unique constraint '
+                                 '"unified_ticket_title_key"')
+
+        with _patch('apps.users.services.ticket_base._gen_ticket_no', return_value='QX202608130001'):
+            with pytest.raises(IntegrityError):
+                _create_ticket_with_retry(TicketBizType.PERMISSION, build)
+        # 仅尝试一次即上抛（未把其他唯一冲突误判为工单号冲突）
+        assert calls['n'] == 1
 
 
 # ============================================================================

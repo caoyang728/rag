@@ -8,7 +8,9 @@ from apps.users.models import (
     TicketList, TicketOrgDetail, User, Department, Team,
     TicketStatus, TicketBizType, OrgChangeType, OrgOperation,
 )
-from apps.users.services.ticket_base import ApproverRole, AuditAction, _gen_ticket_no, _log_flow, _write_audit
+from apps.users.services.ticket_base import (
+    ApproverRole, AuditAction, _create_ticket_with_retry, _log_flow, _write_audit,
+)
 from apps.users.services.approval_chain import _build_chain_node, _build_user_admin_then_super_chain
 
 
@@ -72,28 +74,33 @@ def create_org_ticket(
     op_label = dict(OrgOperation.choices).get(operation, operation)
     title = f'组织变更: {op_label}{type_label} {name}'.strip()
 
-    ticket = TicketList.objects.create(
-        ticket_no=_gen_ticket_no(TicketBizType.ORG),
-        title=title,
-        biz_type=TicketBizType.ORG,
-        status=TicketStatus.PENDING,
-        risk_level=risk_level,
-        applicant=actor,
-        approval_chain=approval_chain,
-        current_step=0,
-        operation=operation,
-    )
-    TicketOrgDetail.objects.create(
-        ticket=ticket,
-        org_type=org_type,
-        operation=operation,
-        target_data=target_data,
-        old_data=old_data,
-        new_data=new_data,
-        reason=reason,
-    )
-    _write_audit(ticket, actor, AuditAction.TICKET_CREATE, ip_address, user_agent)
-    _log_flow(ticket, 'SUBMIT', actor=actor)
+    def build(no):
+        ticket = TicketList.objects.create(
+            ticket_no=no,
+            title=title,
+            biz_type=TicketBizType.ORG,
+            status=TicketStatus.PENDING,
+            risk_level=risk_level,
+            applicant=actor,
+            approval_chain=approval_chain,
+            current_step=0,
+            operation=operation,
+        )
+        TicketOrgDetail.objects.create(
+            ticket=ticket,
+            org_type=org_type,
+            operation=operation,
+            target_data=target_data,
+            old_data=old_data,
+            new_data=new_data,
+            reason=reason,
+        )
+        _write_audit(ticket, actor, AuditAction.TICKET_CREATE, ip_address, user_agent)
+        _log_flow(ticket, 'SUBMIT', actor=actor)
+        return ticket
+
+    # 唯一工单号并发冲突时自动重试（主表/详情/审计在同一 savepoint 内建，失败整体回滚）
+    ticket = _create_ticket_with_retry(TicketBizType.ORG, build)
     logger.info(f'[OrgTicket] 创建组织变更工单: {org_type}:{operation} '
                 f'risk={risk_level} ticket={ticket.ticket_no} by={actor.id}')
     return ticket

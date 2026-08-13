@@ -30,8 +30,10 @@ apps.users.services.ticket_base - 权限配置审批工单服务 · 公共基座
 工单号生成、流转日志与审计写入等公共能力，供 services 子包其余模块复用。
 """
 import json
-import re
 
+from django.db import IntegrityError, transaction
+from django.db.models import IntegerField, Max
+from django.db.models.functions import Cast, Right
 from django.utils import timezone
 from loguru import logger
 
@@ -44,7 +46,7 @@ from apps.users.models import (
 # ============================================================================
 # 工单号生成（统一格式：类型前缀 + YYYYMMDD + 当日全局 4 位序列）
 # ============================================================================
-# 类型前缀（两字母大写拼音首字母）：权限 QX / 配置 PZ / 定时 DS / 模型 MX / 安全 AQ / 组织 ZZ
+# 类型前缀（两字母大写拼音首字母）：权限 QX / 配置 PZ / 定时 DS / 模型 MX / 安全 AQ / 组织 ZZ / 角色 JS
 # 示例：QX202608080001（当日第 1 单，权限）、ZZ202608080001（当日第 1 单，组织变更）
 TICKET_TYPE_PREFIX = {
     TicketBizType.PERMISSION: 'QX',
@@ -54,10 +56,8 @@ TICKET_TYPE_PREFIX = {
     TicketBizType.AGENT: 'AG',
     TicketBizType.SECURITY: 'AQ',
     TicketBizType.ORG: 'ZZ',
+    TicketBizType.ROLE: 'JS',
 }
-
-# 新格式工单号正则：两字母前缀 + 8 位日期 + 4 位当日序列（用于取当日全局序列）
-_NEW_TICKET_NO_RE = re.compile(r'^[A-Z]{2}(\d{8})(\d{4})$')
 
 
 # ============================================================================
@@ -149,16 +149,44 @@ def _gen_ticket_no(biz_type: str = TicketBizType.PERMISSION) -> str:
     """
     prefix = TICKET_TYPE_PREFIX.get(biz_type, 'QX')
     today = timezone.localtime().strftime('%Y%m%d')
-    # 一次查询取出最新一条新格式工单号（新格式排序即按日期+序号降序）
-    last_no = TicketList.objects.filter(
-        ticket_no__regex=r'^[A-Z]{2}\d{12}$',
-    ).order_by('-ticket_no').values_list('ticket_no', flat=True).first()
-    seq = 1
-    if last_no:
-        m = _NEW_TICKET_NO_RE.match(last_no)
-        if m and m.group(1) == today:
-            seq = int(m.group(2)) + 1
+    # 取当日所有新格式工单序号的最大值（跨类型共享当日序列）
+    # 注意：必须按序号数字排序取最大，不能按 ticket_no 字符串排序取最大——
+    # 不同类型前缀（QX/JS/ZZ…）的字符串序与数字序不一致（如 ZZ…0002 字符串
+    # 大于 JS…0003），取字符串最大会算出已被占用的序号，触发唯一索引冲突。
+    last_seq = TicketList.objects.filter(
+        ticket_no__regex=r'^[A-Z]{2}' + today + r'\d{4}$',
+    ).annotate(
+        seq_num=Cast(Right('ticket_no', 4), IntegerField()),
+    ).aggregate(m=Max('seq_num'))['m']
+    seq = (last_seq or 0) + 1
     return f'{prefix}{today}{seq:04d}'
+
+
+def _create_ticket_with_retry(biz_type: str, build) -> TicketList:
+    """创建工单主记录（唯一工单号自动重试）—— 并发安全
+
+    业务背景：ticket_no 采用"当日最大序号 + 1"的读-算-写模式，并发创建工单时
+    两个请求可能算出同一序号，唯一索引拦截后抛 IntegrityError，此前直接 500
+    （工单号是强唯一业务键，不能被并发击穿）。
+
+    处理：每次尝试在独立 savepoint 内执行 build(no)（build 负责用该工单号创建
+    主表 + 详情 + 日志），仅当 IntegrityError 由 ticket_no 唯一索引引发时重新生成
+    序号再试（最多 5 次）；其他唯一冲突（如业务唯一键）直接上抛，交由上层报错。
+    外层若有事务，冲突仅回滚本 savepoint，不影响外层已做的校验与后续操作。
+
+    :param biz_type: 工单业务类型（决定类型前缀）
+    :param build: 回调 build(ticket_no) -> TicketList，负责用指定工单号完成建单
+    """
+    for attempt in range(1, 6):
+        try:
+            with transaction.atomic():
+                return build(_gen_ticket_no(biz_type))
+        except IntegrityError as exc:
+            # 仅工单号唯一冲突才重试，其他 IntegrityError 原样抛出
+            if 'ticket_no' not in str(exc):
+                raise
+            logger.warning(f'[TicketNo] 工单号并发冲突，第 {attempt} 次重试: {exc}')
+    raise RuntimeError('工单号生成冲突（并发过高），请稍后重试')
 
 
 def _log_flow(ticket: TicketList, action: str, actor: User = None,

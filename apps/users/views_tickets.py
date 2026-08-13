@@ -17,7 +17,7 @@ from rest_framework.views import APIView
 from apps.users.models import (
     Department, Team,
     TicketList, TicketStatus, TicketBizType, TicketChangeType, ScopeType,
-    SecurityConfigType, SecurityOperation, OrgChangeType, OrgOperation,
+    SecurityConfigType, SecurityOperation, OrgChangeType, OrgOperation, RoleOperation,
     UserRoleRel, GrantStatus, has_permission,
 )
 from apps.users.ticket_service import cancel_ticket, _can_approve_for_role, parse_change_summary
@@ -166,10 +166,11 @@ def _ticket_visible_scope(user):
     q = models.Q(applicant=user)
 
     # user_admin：用户角色授权/变更类权限工单（详情子表 role 非空）
-    # 组织变更工单（部门/团队增删改）也归用户管理员管辖，与角色工单同视角
+    # 组织变更工单（部门/团队增删改）与角色变更工单（RBAC 定义层）也归用户管理员管辖
     if has_permission(user, 'user.manage_all') or has_permission(user, 'user.manage'):
         q |= models.Q(biz_type=TicketBizType.PERMISSION, permission_detail__role__isnull=False)
         q |= models.Q(biz_type=TicketBizType.ORG)
+        q |= models.Q(biz_type=TicketBizType.ROLE)
 
     # maintain_admin：配置/定时任务/模型变更工单
     if has_permission(user, 'system.config.write'):
@@ -335,6 +336,8 @@ def _serialize_center_ticket(t, config_map=None, model_map=None, dept_map=None, 
         'org_name': '',
         'old_data': None,
         'new_data': None,
+        # role 特有字段占位（role_name/role_key 复用 permission 的占位字段）
+        'permission_ids': [],
     }
 
     # --- permission：详情子表（change_type/role/scope 等） ---
@@ -436,6 +439,26 @@ def _serialize_center_ticket(t, config_map=None, model_map=None, dept_map=None, 
                     'new_data': od.new_data,
                     'changed_fields': sorted(set((od.old_data or {}).keys()) | set((od.new_data or {}).keys())),
                 })
+        # --- role：角色变更（TicketRoleDetail），old/new 直接读子表 JSON ---
+        elif t.biz_type == TicketBizType.ROLE:
+            rd = getattr(t, 'role_detail', None)
+            row['reason'] = rd.reason if rd and rd.reason else (row.get('reason') or '')
+            if rd:
+                role_op_labels = dict(RoleOperation.choices)
+                target_role = rd.target_role
+                # 新增场景目标角色尚未落库，展示快照中的名称/编码
+                row.update({
+                    'operation': rd.operation,
+                    'operation_display': role_op_labels.get(rd.operation, rd.operation),
+                    'role_name': (target_role.name if target_role
+                                  else (rd.new_data or {}).get('name', '')),
+                    'role_key': (target_role.role_key if target_role
+                                 else (rd.new_data or {}).get('code', '')),
+                    'old_data': rd.old_data,
+                    'new_data': rd.new_data,
+                    'permission_ids': rd.permission_ids or [],
+                    'changed_fields': sorted(set((rd.old_data or {}).keys()) | set((rd.new_data or {}).keys())),
+                })
     return row
 
 
@@ -502,7 +525,7 @@ class TicketCenterView(APIView):
             'applicant', 'permission_detail__target_user',
             'permission_detail__role', 'permission_detail__previous_role',
             'config_detail', 'schedule_detail', 'model_detail',
-            'org_detail', 'security_detail',
+            'org_detail', 'security_detail', 'role_detail',
         )
         if type_list:
             qs = qs.filter(biz_type__in=type_list)
@@ -606,9 +629,10 @@ class TicketCenterApproveView(APIView):
         ticket = TicketList.objects.filter(pk=pk).first()
         if not ticket:
             return Response({"detail": "工单不存在"}, status=404)
-        # 共享审批池类型（权限/组织变更/IP黑白名单）：统一走 ticket_service 审批，
+        # 共享审批池类型（权限/组织变更/角色变更/IP黑白名单）：统一走 ticket_service 审批，
         # 类型无关，回避原则/双人独立性由 _can_approve_for_role 保证，执行由分发函数落地
-        if ticket.biz_type in (TicketBizType.PERMISSION, TicketBizType.ORG, TicketBizType.SECURITY):
+        if ticket.biz_type in (TicketBizType.PERMISSION, TicketBizType.ORG, TicketBizType.SECURITY,
+                               TicketBizType.ROLE):
             return TicketApproveView().post(request, pk)
         # 系统域工单：委托 system 侧审批视图（内部含权限校验/依赖检查/执行生效）
         from apps.system.views import ApproveTicketView
@@ -626,7 +650,8 @@ class TicketCenterRejectView(APIView):
         ticket = TicketList.objects.filter(pk=pk).first()
         if not ticket:
             return Response({"detail": "工单不存在"}, status=404)
-        if ticket.biz_type in (TicketBizType.PERMISSION, TicketBizType.ORG, TicketBizType.SECURITY):
+        if ticket.biz_type in (TicketBizType.PERMISSION, TicketBizType.ORG, TicketBizType.SECURITY,
+                               TicketBizType.ROLE):
             return TicketRejectView().post(request, pk)
         from apps.system.views import RejectTicketView
         return RejectTicketView().post(request, pk)
@@ -644,7 +669,8 @@ class TicketCenterWithdrawView(APIView):
         ticket = TicketList.objects.filter(pk=pk).first()
         if not ticket:
             return Response({"detail": "工单不存在"}, status=404)
-        if ticket.biz_type in (TicketBizType.PERMISSION, TicketBizType.ORG, TicketBizType.SECURITY):
+        if ticket.biz_type in (TicketBizType.PERMISSION, TicketBizType.ORG, TicketBizType.SECURITY,
+                               TicketBizType.ROLE):
             # 与 AccessApplicationWithdrawView 一致：仅创建人 + PENDING
             if ticket.applicant_id != request.user.id:
                 return Response({"detail": "仅创建人可撤回工单"}, status=403)

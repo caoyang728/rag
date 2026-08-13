@@ -16,7 +16,7 @@ from apps.users.models import (
 )
 from apps.users.services.ticket_base import (
     ApproveStepStatus, AuditAction, TEAM_ROLE_KEYS,
-    _gen_ticket_no, _log_flow, _write_audit,
+    _create_ticket_with_retry, _log_flow, _write_audit,
 )
 from apps.users.services.approval_chain import (
     _can_approve_for_role, _check_sod_conflict, _check_super_admin_quota,
@@ -24,6 +24,7 @@ from apps.users.services.approval_chain import (
 )
 from apps.users.services.ticket_security import _execute_security_change
 from apps.users.services.ticket_org import _execute_org_change
+from apps.users.services.ticket_role import _execute_role_change
 
 
 # ============================================================================
@@ -41,32 +42,37 @@ def _create_permission_ticket(applicant, target_user, change_type: str,
     提交动作写一条 SUBMIT 流转日志。title 供工单中心列表展示与模糊搜索。
     """
     role_key = role.role_key if role else ''
-    ticket = TicketList.objects.create(
-        ticket_no=_gen_ticket_no(TicketBizType.PERMISSION),
-        title=f'权限·{change_type} {role_key}'.strip(),
-        biz_type=TicketBizType.PERMISSION,
-        status=status,
-        risk_level='normal',
-        applicant=applicant,
-        approval_chain=chain,
-        current_step=0,
-        approved_at=approved_at,
-        executed_at=executed_at,
-    )
-    TicketPermissionDetail.objects.create(
-        ticket=ticket,
-        target_user=target_user,
-        change_type=change_type,
-        role=role,
-        previous_role=previous_role,
-        scope_type=scope_type,
-        scope_id=scope_id,
-        effective_from=effective_from,
-        expires_at=expires_at,
-        reason=reason,
-    )
-    _log_flow(ticket, 'SUBMIT', actor=applicant)
-    return ticket
+
+    def build(no):
+        ticket = TicketList.objects.create(
+            ticket_no=no,
+            title=f'权限·{change_type} {role_key}'.strip(),
+            biz_type=TicketBizType.PERMISSION,
+            status=status,
+            risk_level='normal',
+            applicant=applicant,
+            approval_chain=chain,
+            current_step=0,
+            approved_at=approved_at,
+            executed_at=executed_at,
+        )
+        TicketPermissionDetail.objects.create(
+            ticket=ticket,
+            target_user=target_user,
+            change_type=change_type,
+            role=role,
+            previous_role=previous_role,
+            scope_type=scope_type,
+            scope_id=scope_id,
+            effective_from=effective_from,
+            expires_at=expires_at,
+            reason=reason,
+        )
+        _log_flow(ticket, 'SUBMIT', actor=applicant)
+        return ticket
+
+    # 唯一工单号并发冲突时自动重试（主表/详情/日志在同一 savepoint 内建，失败整体回滚）
+    return _create_ticket_with_retry(TicketBizType.PERMISSION, build)
 
 
 @transaction.atomic
@@ -355,6 +361,7 @@ def _execute_grant_or_revoke(ticket: TicketList, actor: User):
     - security:执行安全配置变更(_execute_security_change)
       (security 工单创建时低风险直接执行、高风险审批通过后也走此分发,
        修复此前 security 工单审批通过后停在 PENDING 不执行的问题)
+    - role:执行角色增删改/权限分配(_execute_role_change)
 
     幂等:通过 ticket.status=EXECUTED 防重复执行(调用前已置 APPROVED)。
     执行失败抛 ValueError 会回滚审批事务,工单留在 PENDING 可重试。
@@ -363,6 +370,8 @@ def _execute_grant_or_revoke(ticket: TicketList, actor: User):
         return _execute_org_change(ticket, actor)
     if ticket.biz_type == TicketBizType.SECURITY:
         return _execute_security_change(ticket)
+    if ticket.biz_type == TicketBizType.ROLE:
+        return _execute_role_change(ticket, actor)
     if ticket.change_type in (TicketChangeType.GRANT, TicketChangeType.SCOPE_CHANGE):
         _apply_grant(ticket, actor)
     elif ticket.change_type == TicketChangeType.REVOKE:

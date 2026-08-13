@@ -47,14 +47,15 @@ from apps.users.models import (
     AuditTargetType, RoleConflictRule, TicketBizType,
     TicketSecurityDetail, SecurityConfigType, SecurityOperation,
     TicketOrgDetail, OrgChangeType, OrgOperation,
+    TicketRoleDetail, RoleOperation,
 )
 
 from apps.users.services.ticket_base import (
-    TICKET_TYPE_PREFIX, _NEW_TICKET_NO_RE,
+    TICKET_TYPE_PREFIX,
     TEAM_ROLE_RANK, TEAM_ROLE_KEYS,
     ApproverRole, ApproveStepStatus, AuditAction,
     parse_change_summary, get_approved_approver_ids,
-    _gen_ticket_no, _log_flow, _write_audit,
+    _gen_ticket_no, _create_ticket_with_retry, _log_flow, _write_audit,
 )
 from apps.users.services.approval_chain import (
     GLOBAL_HIGH_PRIVILEGE_KEYS,
@@ -79,4 +80,9 @@ from apps.users.services.ticket_org import (
     ORG_RISK_LEVEL, _get_org_risk_level, _build_org_approval_chain, create_org_ticket,
     _execute_org_change, _execute_dept_change, _create_dept, _update_dept, _delete_dept,
     _execute_team_change, _create_team, _update_team, _delete_team,
+)
+from apps.users.services.ticket_role import (
+    ROLE_RISK_LEVEL, _get_role_risk_level, _build_role_approval_chain,
+    create_role_ticket, _execute_role_change,
+    _apply_role_add, _apply_role_edit, _apply_role_delete, _apply_role_assign_perms,
 )

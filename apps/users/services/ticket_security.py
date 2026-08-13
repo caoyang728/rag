@@ -9,7 +9,9 @@ from apps.users.models import (
     TicketList, TicketSecurityDetail, User, TicketStatus, TicketBizType,
     SecurityConfigType, SecurityOperation,
 )
-from apps.users.services.ticket_base import AuditAction, _gen_ticket_no, _log_flow, _write_audit
+from apps.users.services.ticket_base import (
+    AuditAction, _create_ticket_with_retry, _log_flow, _write_audit,
+)
 
 
 # 安全配置风险分级策略：
@@ -86,17 +88,57 @@ def create_security_ticket(
     # 低风险直接执行
     if risk_level == 'low':
         now = timezone.now()
+
+        def build(no):
+            ticket = TicketList.objects.create(
+                ticket_no=no,
+                biz_type=TicketBizType.SECURITY,
+                risk_level='low',
+                applicant=actor,
+                title=f'安全配置: {security_type}:{operation}',
+                status=TicketStatus.EXECUTED,
+                approval_chain=approval_chain,
+                current_step=0,
+                approved_at=now,
+                executed_at=now,
+            )
+            # 创建详情记录
+            TicketSecurityDetail.objects.create(
+                ticket=ticket,
+                security_type=security_type,
+                operation=operation,
+                target_data=target_data,
+                old_data=old_data,
+                new_data=new_data,
+                reason=reason,
+            )
+            # 直接执行变更
+            _execute_security_change(ticket)
+            # 流转日志（与权限/组织工单一致：SUBMIT + EXECUTE，供工单中心时间线渲染）
+            _log_flow(ticket, 'SUBMIT', actor=actor)
+            _log_flow(ticket, 'EXECUTE', actor=actor)
+            # 写审计日志
+            _write_audit(ticket, actor, AuditAction.TICKET_CREATE, ip_address, user_agent)
+            _write_audit(ticket, actor, AuditAction.TICKET_EXECUTE, ip_address, user_agent)
+            return ticket
+
+        # 唯一工单号并发冲突时自动重试（建单 + 直接执行同在一个 savepoint，失败整体回滚）
+        ticket = _create_ticket_with_retry(TicketBizType.SECURITY, build)
+        logger.info(f'[SecurityTicket] 低风险直接执行: {security_type}:{operation} '
+                    f'ticket={ticket.ticket_no} by={actor.id}')
+        return ticket
+
+    # 中/高风险走审批
+    def build(no):
         ticket = TicketList.objects.create(
-            ticket_no=_gen_ticket_no(TicketBizType.SECURITY),
+            ticket_no=no,
             biz_type=TicketBizType.SECURITY,
-            risk_level='low',
+            risk_level=risk_level,
             applicant=actor,
             title=f'安全配置: {security_type}:{operation}',
-            status=TicketStatus.EXECUTED,
+            status=TicketStatus.PENDING,
             approval_chain=approval_chain,
             current_step=0,
-            approved_at=now,
-            executed_at=now,
         )
         # 创建详情记录
         TicketSecurityDetail.objects.create(
@@ -108,43 +150,14 @@ def create_security_ticket(
             new_data=new_data,
             reason=reason,
         )
-        # 直接执行变更
-        _execute_security_change(ticket)
-        # 流转日志（与权限/组织工单一致：SUBMIT + EXECUTE，供工单中心时间线渲染）
+        # 写流转日志（与权限/组织工单一致：SUBMIT，供工单中心时间线渲染）
         _log_flow(ticket, 'SUBMIT', actor=actor)
-        _log_flow(ticket, 'EXECUTE', actor=actor)
         # 写审计日志
         _write_audit(ticket, actor, AuditAction.TICKET_CREATE, ip_address, user_agent)
-        _write_audit(ticket, actor, AuditAction.TICKET_EXECUTE, ip_address, user_agent)
-        logger.info(f'[SecurityTicket] 低风险直接执行: {security_type}:{operation} '
-                    f'ticket={ticket.ticket_no} by={actor.id}')
         return ticket
 
-    # 中/高风险走审批
-    ticket = TicketList.objects.create(
-        ticket_no=_gen_ticket_no(TicketBizType.SECURITY),
-        biz_type=TicketBizType.SECURITY,
-        risk_level=risk_level,
-        applicant=actor,
-        title=f'安全配置: {security_type}:{operation}',
-        status=TicketStatus.PENDING,
-        approval_chain=approval_chain,
-        current_step=0,
-    )
-    # 创建详情记录
-    TicketSecurityDetail.objects.create(
-        ticket=ticket,
-        security_type=security_type,
-        operation=operation,
-        target_data=target_data,
-        old_data=old_data,
-        new_data=new_data,
-        reason=reason,
-    )
-    # 写流转日志（与权限/组织工单一致：SUBMIT，供工单中心时间线渲染）
-    _log_flow(ticket, 'SUBMIT', actor=actor)
-    # 写审计日志
-    _write_audit(ticket, actor, AuditAction.TICKET_CREATE, ip_address, user_agent)
+    # 唯一工单号并发冲突时自动重试（主表/详情/日志在同一 savepoint 内建，失败整体回滚）
+    ticket = _create_ticket_with_retry(TicketBizType.SECURITY, build)
     logger.info(f'[SecurityTicket] 创建审批工单: {security_type}:{operation} '
                 f'risk={risk_level} ticket={ticket.ticket_no} by={actor.id}')
     return ticket

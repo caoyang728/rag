@@ -60,6 +60,12 @@ class AuditAction:
     EXPIRE_AUTO = 'EXPIRE_AUTO'
     ROLE_CHANGE = 'ROLE_CHANGE'    # 角色变更（原子撤销旧角色 + 授予新角色）
 
+    # ---- 角色体系配置：角色增删改与权限分配（RBAC 定义层变更，走工单执行时写入）----
+    ROLE_CREATE = 'ROLE_CREATE'
+    ROLE_UPDATE = 'ROLE_UPDATE'
+    ROLE_DELETE = 'ROLE_DELETE'
+    ROLE_PERMS_ASSIGN = 'ROLE_PERMS_ASSIGN'
+
     # ---- 审批流：工单全生命周期（工单本身永不删，状态流转全程留痕）----
     TICKET_CREATE = 'TICKET_CREATE'
     TICKET_APPROVE = 'TICKET_APPROVE'

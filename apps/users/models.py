@@ -101,6 +101,7 @@ class TicketBizType(models.TextChoices):
     - agent：Agent 工作流人工确认（HITL），详情在 TicketAgentApprovalDetail
     - security：安全配置变更（IP 白名单/黑名单/敏感词），详情在 TicketSecurityDetail
     - org：组织架构变更（部门/团队增删改），详情在 TicketOrgDetail
+    - role：角色/权限点配置变更（角色增删改、角色权限分配），详情在 TicketRoleDetail
     """
     PERMISSION = 'permission', _('权限审批')
     CONFIG = 'config', _('配置变更')
@@ -109,6 +110,7 @@ class TicketBizType(models.TextChoices):
     AGENT = 'agent', _('Agent审批')
     SECURITY = 'security', _('安全配置')
     ORG = 'org', _('组织变更')
+    ROLE = 'role', _('角色变更')
 
 
 class UserStatus(models.TextChoices):
@@ -696,6 +698,11 @@ class TicketList(models.Model):
         return getattr(self, 'org_detail', None)
 
     @property
+    def _rd(self):
+        # role 角色变更详情子表（biz_type=role 时有效）
+        return getattr(self, 'role_detail', None)
+
+    @property
     def change_type(self):
         d = self._pd
         return d.change_type if d else None
@@ -1063,6 +1070,62 @@ class TicketOrgDetail(models.Model):
         return f'OrgDetail<{self.ticket_id}> {self.org_type}:{self.operation}'
 
 
+class RoleOperation(models.TextChoices):
+    """角色配置变更操作类型 —— TicketRoleDetail.operation 枚举
+
+    标识本次工单对角色体系的操作类型，用于审批展示与执行时选择对应逻辑。
+    """
+    ADD = 'add', _('新增角色')
+    EDIT = 'edit', _('编辑角色')
+    DELETE = 'delete', _('删除角色')
+    ASSIGN_PERMS = 'assign_perms', _('角色权限分配')
+
+
+class TicketRoleDetail(models.Model):
+    """角色配置变更工单详情 —— 关联统一主表，biz_type=role
+
+    与主表 TicketList 一对一：主表管流程（审批链/状态/时间），本表管业务
+    （对哪个角色做什么操作、变更前后数据快照、目标权限集合）。
+
+    风险分级策略（由创建方在提交时决定 risk_level）：
+    - 普通（单审 SUPER_ADMIN）：角色新增、编辑、权限分配
+    - 高风险（双超管复核）：角色删除（破坏性操作，审批期间可二次拦截）
+
+    执行时机：审批链全部通过后由 _execute_role_change 落库
+    （新增/编辑写 Role，删除软删，权限分配写 RolePermissionRel），
+    创建工单时只做预检不落库。角色体系是 RBAC 核心，一律由超管发起的
+    变更走另一个超管审批，避免单点变更失控。
+    """
+    ticket = models.OneToOneField(TicketList, on_delete=models.CASCADE,
+                                  related_name='role_detail',
+                                  help_text=_('关联统一工单主表'))
+    operation = models.CharField(max_length=16, choices=RoleOperation.choices,
+                                 help_text=_('操作类型（新增/编辑/删除/权限分配）'))
+    # 目标角色：新增时为空（审批通过后才创建），编辑/删除/权限分配时指向现有角色
+    target_role = models.ForeignKey(Role, on_delete=models.SET_NULL, null=True, blank=True,
+                                    related_name='+',
+                                    help_text=_('目标角色（新增时为 None）'))
+    old_data = models.JSONField(null=True, blank=True,
+                                help_text=_('变更前数据（编辑/删除时）'))
+    new_data = models.JSONField(null=True, blank=True,
+                                help_text=_('变更后数据（新增/编辑时）'))
+    # 权限分配的目标权限ID集合（operation=assign_perms 时有效）
+    permission_ids = models.JSONField(default=list, blank=True,
+                                      help_text=_('目标权限ID集合（权限分配时）'))
+    reason = models.TextField(blank=True, default='',
+                              help_text=_('变更原因'))
+
+    class Meta:
+        db_table = 'role_ticket_detail'
+        verbose_name = _('角色变更工单详情')
+        indexes = [
+            models.Index(fields=['operation'], name='idx_role_detail_operation'),
+        ]
+
+    def __str__(self):
+        return f'RoleDetail<{self.ticket_id}> {self.operation}'
+
+
 class TicketFlowLog(models.Model):
     """工单流转日志 —— 审批时间线（关联主表，随工单生命周期）
 
@@ -1147,6 +1210,7 @@ class PermissionAuditLog(models.Model):
     - 组织架构：DEPT_CREATE/UPDATE/DELETE、TEAM_CREATE/UPDATE/DELETE
     - 知识节点：NODE_CREATE/MOVE/RENAME/DELETE
     - 权限配置：ROLE_GRANT/REVOKE、SCOPE_GRANT/REVOKE、EXPIRE_EXTEND/EXPIRE_AUTO
+    - 角色体系：ROLE_CREATE/UPDATE/DELETE、ROLE_PERMS_ASSIGN（角色工单执行时写入）
     - 审批流：TICKET_CREATE/APPROVE/REJECT/CANCEL/EXECUTE
     - 资源授权：DOC/NODE_SHARE_GRANT/REVOKE/EXPIRE
     - 访问黑名单：DOC/NODE_BLOCK_ADD/REMOVE/EXPIRE

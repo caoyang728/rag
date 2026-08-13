@@ -50,7 +50,7 @@ flowchart TD
     CACHE -->|"命中：直接返回<br/>（仍过内容审查 + 引用权限校验）"| DONE["返回答案"]
     CACHE -->|"未命中"| MODE{"mode 分流"}
 
-    MODE -->|"wiki / graphrag / rag"| ROUTE["三层路由编排<br/>Wiki 命中 → GraphRAG → RAG 兜底"]
+    MODE -->|"RAG(wiki / graphrag / rag)"| ROUTE["三层路由编排<br/>Wiki 命中 → GraphRAG → RAG 兜底"]
     MODE -->|"auto / agent（默认）"| REACT["Agentic RAG · ReAct 循环<br/>（≤5 轮，LLM 自主决策是否调用工具）"]
     REACT -->|"do_workflow=true 且<br/>planner 判定复杂"| WF["多 Agent 工作流<br/>research/tool/approval 节点 DAG<br/>+ HITL 人工确认"]
     REACT --> TOOLS["工具注册表（3 个）<br/>按来源过滤可用性：<br/>knowledge_search(doc) / web_search(web) / text2sql(db)"]

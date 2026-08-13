@@ -613,6 +613,10 @@ ol {
 }
 
 /* ==================== Modal（弹窗） ==================== */
+/* z-index 阶梯(层级由 common.js 按弹窗层级动态设置,静态值仅作兜底):
+   - 弹窗层 N(level=N):遮罩 10000+(N-1)*100,弹窗本体再 +1
+   - 二次确认弹窗:永远比当前栈顶弹窗高一层
+   - toast: 20000(高于任何弹窗层) */
 .mask {
 	position: fixed;
 	top: 0;
@@ -628,6 +632,28 @@ ol {
 }
 
 .mask.show {
+	display: block
+}
+
+/* 每层弹窗独立的遮蔽层:全屏 + 半透明 + 模糊背景,层级由 JS 按 level 设置。
+   弹窗本体不迁移 DOM,遮罩与弹窗解耦,只通过 z-index 区间(遮罩 < 弹窗本体 < 上层遮罩)保证层级。 */
+.modal-layer {
+	position: fixed;
+	top: 0;
+	left: 0;
+	right: 0;
+	bottom: 0;
+	background: rgba(0, 0, 0, 0.45);
+	backdrop-filter: blur(4px);
+	-webkit-backdrop-filter: blur(4px);
+	z-index: 10000;
+	display: none;
+	animation: fade 0.15s ease;
+	cursor: default;
+	pointer-events: auto;
+}
+
+.modal-layer.show {
 	display: block
 }
 
@@ -756,7 +782,12 @@ ol {
 /* 使用场景:在普通弹窗之上弹出确认(如审批通过/驳回),需要模糊底层内容 */
 .confirm-overlay {
 	position: fixed;
-	inset: 0;
+	/* 用传统 top/left/right/bottom 而非 inset:0:旧浏览器(Chrome<87)不支持 inset,
+	   会导致遮罩无尺寸不覆盖视口,点击穿透到下方一级弹窗 */
+	top: 0;
+	left: 0;
+	right: 0;
+	bottom: 0;
 	background: rgba(0, 0, 0, 0.35);
 	backdrop-filter: blur(4px);
 	-webkit-backdrop-filter: blur(4px);
@@ -764,6 +795,8 @@ ol {
 	display: none;
 	align-items: center;
 	justify-content: center;
+	/* 显式声明拦截点击:遮罩激活期间不允许点击穿透到一级弹窗 */
+	pointer-events: auto;
 	animation: fade 0.15s ease;
 }
 .confirm-overlay.show {
@@ -932,12 +965,12 @@ ol {
 	gap: 8px
 }
 
-/* Toast */
+/* Toast(20000:高于所有弹窗层,任何层级弹窗打开时提示仍可见) */
 .toast-wrap {
 	position: fixed;
 	top: 20px;
 	right: 20px;
-	z-index: 10020;
+	z-index: 20000;
 	display: flex;
 	flex-direction: column;
 	gap: 8px;

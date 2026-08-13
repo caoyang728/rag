@@ -67,16 +67,7 @@ function findNodeById(id) {
 }
 
 
-function closeModal(id) {
-	var el = document.getElementById(id);
-	if (el) el.classList.remove('show');
-	// 检查是否还有其他弹窗打开
-	var activeModals = document.querySelectorAll('.modal.show');
-	if (activeModals.length === 0) {
-		var mask = document.getElementById('mask');
-		if (mask) mask.classList.remove('show');
-	}
-}
+/* 本页不再自行定义 closeModal,统一使用 common.js 版本(负责弹窗层级栈与独立遮蔽层管理) */
 
 /* ============ 动态加载根类型 ============ */
 function loadRootTypes() {
@@ -222,14 +213,17 @@ function renderNodeDetail(n) {
 	clone.querySelector('.nd-id').textContent = 'node-' + n.id;
 	clone.querySelector('.nd-path').textContent = parentPath;
 
-	// 操作按钮：admin/ops 全可见，团队组长仅本团队范围内可见（仅文件夹可编辑/删除）
+	// 操作按钮：admin/ops 全可见，团队组长仅本团队范围内可见。
+	// 编辑对全部节点开放（名称/可见范围变更走审批，ORG/ROOT 名称不可改）；
+	// 删除仅 FOLDER 文件夹可操作（ROOT/ORG 由系统/组织架构管理）
 	var actionsEl = clone.querySelector('.nd-actions');
-	var showActions = (isAdminOrOps() || (isTeamLeader() && isNodeInTeam(n, getTeamLeaderTeamNodeIds())))
-		&& n.node_kind !== 'ROOT' && n.node_kind !== 'ORG';
-	if (showActions) {
+	var canEdit = (isAdminOrOps() || (isTeamLeader() && isNodeInTeam(n, getTeamLeaderTeamNodeIds())));
+	if (canEdit) {
 		actionsEl.innerHTML =
 			'<button class="btn btn-sm" onclick="editNode(' + n.id + ')">\uD83D\uDCDD 编辑</button>' +
-			'<button class="btn btn-sm btn-danger" onclick="deleteNode(' + n.id + ')">\uD83D\uDDD1 删除文件夹</button>';
+			(n.node_kind === 'FOLDER'
+				? '<button class="btn btn-sm btn-danger" onclick="deleteNode(' + n.id + ')">\uD83D\uDDD1 删除文件夹</button>'
+				: '');
 	}
 
 	// 统计卡片
@@ -270,6 +264,11 @@ function openNodeModal() {
 	document.getElementById('nodeOrder').value = '0';
 	document.getElementById('nodeVisibility').value = '';
 	document.getElementById('nodeModalTitle').textContent = '新增文件夹';
+	// 编辑弹窗会禁用名称/可见范围输入，新增时必须复位
+	document.getElementById('nodeName').disabled = false;
+	document.getElementById('nodeVisibility').disabled = false;
+	document.getElementById('nodeBasicHint').textContent =
+		'数字越小越靠前，同级节点按此值升序排列，默认为 0';
 
 	var isTL = isTeamLeader();
 
@@ -283,25 +282,81 @@ function openNodeModal() {
 
 	// 复用已加载的 nodeTree 构建父节点列表
 	buildParentOptions(null);
+	// 编辑弹窗会禁用上级节点下拉，新增时必须复位为可交互（否则先编辑后新增无法选择父节点）
+	document.getElementById('nodeParent').disabled = false;
+	// 按父节点类型初始化可见范围可用性（子文件夹仅做分类）
+	onNodeParentChange();
 	showModal('nodeModal');
+}
+
+/** 父节点变化时联动可见范围选择：子文件夹（父节点也是文件夹）仅做分类，权限继承主文件夹 */
+function onNodeParentChange() {
+	var parentId = document.getElementById('nodeParent').value;
+	var parentNode = parentId ? findNodeById(parseInt(parentId)) : null;
+	var visSelect = document.getElementById('nodeVisibility');
+	var visHint = document.getElementById('nodeVisHint');
+	var isSubFolder = !!parentNode && parentNode.node_kind === 'FOLDER';
+	if (isSubFolder) {
+		visSelect.disabled = true;
+		visSelect.value = '';
+		visHint.textContent = '子文件夹仅做分类，权限继承主文件夹（' + parentNode.name + '）';
+	} else {
+		visSelect.disabled = false;
+		visHint.textContent = '未设置时继承上级节点可见范围；上传文档未指定可见范围时以此为准';
+	}
 }
 
 /* ============ 编辑节点弹窗 ============ */
 function editNode(id) {
 	api.getJson(NODE_API + '/' + id + '/').then(function (node) {
+		var isSystemNode = node.node_kind !== 'FOLDER';
+		// 子文件夹（父节点也是文件夹）：仅做分类，权限继承主文件夹
+		var parentNode = node.parent_id ? findNodeById(node.parent_id) : null;
+		var isSubFolder = parentNode && parentNode.node_kind === 'FOLDER';
+
 		document.getElementById('nodeId').value = node.id;
 		document.getElementById('nodeName').value = node.name;
 		document.getElementById('nodeDesc').value = node.description || '';
 		document.getElementById('nodeOrder').value = node.order_no || 0;
 		document.getElementById('nodeVisibility').value = node.visibility_level || '';
-		document.getElementById('nodeModalTitle').textContent = '编辑文件夹';
+		document.getElementById('nodeModalTitle').textContent =
+			{ ROOT: '编辑根节点', ORG: '编辑节点', FOLDER: '编辑文件夹' }[node.node_kind] || '编辑节点';
 
 		// 编辑时不允许修改父节点
 		buildParentOptions(node.parent_id);
 		document.getElementById('nodeParent').disabled = true;
 
-		document.getElementById('parentHint').textContent =
-			'修改可见范围需走工单审批，由两位管理员先后审核';
+		// 系统节点（ROOT/ORG）名称由组织架构同步维护，不可修改
+		if (isSystemNode) {
+			document.getElementById('nodeName').disabled = true;
+			document.getElementById('nodeBasicHint').textContent =
+				'系统节点名称由组织架构同步维护，不可修改；显示顺序/描述可直接修改';
+		} else {
+			document.getElementById('nodeName').disabled = false;
+			document.getElementById('nodeBasicHint').textContent =
+				'修改名称/可见范围需走工单审批；显示顺序/描述可直接修改';
+		}
+
+		// 子文件夹：可见范围禁用并清空（权限继承主文件夹，不支持独立设置）
+		if (isSubFolder) {
+			document.getElementById('nodeVisibility').disabled = true;
+			document.getElementById('nodeVisibility').value = '';
+			document.getElementById('nodeVisHint').textContent =
+				'子文件夹仅做分类，权限继承主文件夹（' + parentNode.name + '）';
+		} else {
+			document.getElementById('nodeVisibility').disabled = false;
+			document.getElementById('nodeVisHint').textContent =
+				'未设置时继承上级节点可见范围；上传文档未指定可见范围时以此为准';
+		}
+
+		// 系统节点名称不可修改，提示不能使用"需走工单审批"文案，避免误导用户以为可以走工单改名
+		if (isSystemNode) {
+			document.getElementById('parentHint').textContent =
+				'系统节点名称不可修改；显示顺序/描述可直接修改，无需审批';
+		} else {
+			document.getElementById('parentHint').textContent =
+				'修改名称/可见范围需走工单审批，审批通过后生效';
+		}
 		showModal('nodeModal');
 	}).catch(function (e) {
 		toast('加载节点详情失败: ' + e.message, 'error');
@@ -452,9 +507,9 @@ function saveNode() {
 			'<div style="font-size:48px;margin-bottom:12px">🗂️</div>' +
 			'<div>请在左侧选择或创建一个节点</div></div>';
 	}).catch(function (e) {
-		// 403 + 审批提示 = 可见范围变更已自动提交审批工单（非失败），以成功提示告知用户
+		// 403 + 审批提示 = 名称/可见范围变更已自动提交审批工单（非失败），以成功提示告知用户
 		if (e && e.status === 403 && e.message && e.message.indexOf('已自动提交审批工单') !== -1) {
-			toast('可见范围变更已提交审批，审批通过后生效', 'success');
+			toast('变更已提交审批，审批通过后生效', 'success');
 			return;
 		}
 		toast('保存失败: ' + e.message, 'error');
@@ -524,32 +579,7 @@ function closeDocListModal() {
 	closeModal('docListModal');
 }
 
-/* ---- 模态框 z-index 堆叠管理（防止背景穿透） ---- */
-var _modalZStack = [];
-var _MODAL_Z_BASE = 10000;
-var _origShowModal = showModal;
-var _origCloseModal = closeModal;
-
-window.showModal = function (id) {
-	var idx = _modalZStack.indexOf(id);
-	if (idx !== -1) _modalZStack.splice(idx, 1);
-	_modalZStack.push(id);
-	_origShowModal(id);
-	var m = document.getElementById(id);
-	if (m) m.style.zIndex = _MODAL_Z_BASE + _modalZStack.length;
-	var mask = document.getElementById('mask');
-	if (mask) mask.style.zIndex = _MODAL_Z_BASE + _modalZStack.length - 1;
-};
-
-window.closeModal = function (id) {
-	var idx = _modalZStack.indexOf(id);
-	if (idx !== -1) _modalZStack.splice(idx, 1);
-	_origCloseModal(id);
-	if (_modalZStack.length > 0) {
-		var mask = document.getElementById('mask');
-		if (mask) mask.style.zIndex = _MODAL_Z_BASE + _modalZStack.length - 1;
-	}
-};
+/* 模态框 z-index 堆叠管理已统一由 common.js 按层级(level)动态分配,此处不再覆盖 */
 
 /* ---- 从节点详情页点击"查看本节点文档" ---- */
 function viewNodeDocs(nodeId) {
@@ -745,7 +775,13 @@ function submitShare() {
  * 申请权限弹窗
  * ================================================================ */
 function openReqModal(id) {
+	// 填充文档归属信息卡片，让申请人在提交前确认申请对象
+	var doc = docListCurrentDocs.find(function (d) { return d.id === id; }) || {};
 	document.getElementById('docReqId').value = id;
+	document.getElementById('docReqFileName').textContent = doc.file_name || doc.title || '—';
+	document.getElementById('docReqUploader').textContent = doc.owner_name || '—';
+	document.getElementById('docReqTeam').textContent = getDocTeamName(doc);
+	document.getElementById('docReqCurrentVis').textContent = (SCOPE_LABELS[doc.visible_scope] || doc.visible_scope || '—');
 	document.getElementById('docReqType').value = 'read';
 	document.getElementById('docReqReason').value = '';
 	showModal('docReqModal');

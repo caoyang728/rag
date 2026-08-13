@@ -42,16 +42,21 @@ class TestInvalidateVisibilityCache:
 
     @pytest.mark.unit
     def test_redis_scan_and_delete(self):
-        """Redis 可用时 scan 匹配的 key 与 available_depts_list 全部删除"""
+        """Redis 可用时 scan 匹配的 key 通过 pipeline 批量删除 + available_depts_list"""
         conn = MagicMock()
         conn.scan_iter.return_value = iter(['allowed_visibility_1', 'allowed_visibility_2'])
+        pipe = MagicMock()
+        conn.pipeline.return_value = pipe
         # get_redis_connection 在 signals 内部 import（django_redis），patch 原模块路径
         with patch('django_redis.get_redis_connection', return_value=conn) as mock_get:
             signals._invalidate_visibility_cache()
         mock_get.assert_called_once_with('default')
-        assert conn.delete.call_args_list[0][0] == ('allowed_visibility_1',)
-        assert conn.delete.call_args_list[1][0] == ('allowed_visibility_2',)
-        assert conn.delete.call_args_list[2][0] == ('available_depts_list',)
+        # pipeline 内逐条 delete 可见性 key
+        pipe.delete.assert_any_call('allowed_visibility_1')
+        pipe.delete.assert_any_call('allowed_visibility_2')
+        pipe.execute.assert_called_once()
+        # available_depts_list 走 conn 直接删除（非 pipeline）
+        conn.delete.assert_called_once_with('available_depts_list')
 
     @pytest.mark.unit
     def test_django_redis_unavailable_silent(self):
@@ -60,14 +65,11 @@ class TestInvalidateVisibilityCache:
             signals._invalidate_visibility_cache()  # 不应抛异常
 
     @pytest.mark.unit
-    def test_redis_error_falls_back_to_delete_pattern(self):
-        """Redis 连接异常时回退 cache.delete_pattern 兜底"""
+    def test_redis_error_logs_and_silently_fails(self):
+        """Redis 连接异常时仅记日志，不抛异常"""
         with patch('django_redis.get_redis_connection',
-                   side_effect=RuntimeError('redis down')), \
-                patch('apps.users.signals.cache') as mock_cache:
-            signals._invalidate_visibility_cache()
-        mock_cache.delete_pattern.assert_called_once_with('allowed_visibility_*')
-        mock_cache.delete.assert_called_once_with('available_depts_list')
+                   side_effect=RuntimeError('redis down')):
+            signals._invalidate_visibility_cache()  # 不应抛异常
 
 
 class TestDelayedInvalidateCache:
@@ -179,14 +181,12 @@ class TestVisibilityCacheErrorBranches:
 
     @pytest.mark.unit
     def test_delete_pattern_error_logged(self):
-        """delete_pattern 兜底也失败 → 记录 error 不抛出"""
+        """Redis 异常 → 记 debug 日志不抛出（非 Redis 后端统一降级）"""
         with patch('django_redis.get_redis_connection',
                    side_effect=RuntimeError('redis down')), \
-                patch('apps.users.signals.cache') as mock_cache, \
                 patch('apps.users.signals.logger') as mock_logger:
-            mock_cache.delete_pattern.side_effect = RuntimeError('cache down')
             signals._invalidate_visibility_cache()
-        mock_logger.error.assert_called_once()
+        mock_logger.debug.assert_called_once()
 
 
 class TestDelayedInvalidateThreadFallback:

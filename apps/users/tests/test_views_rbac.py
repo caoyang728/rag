@@ -34,7 +34,9 @@ class TestRoleViewSet(UsersAPIExtraBase):
         """超管查看角色列表 → 200（含 permission_ids）"""
         resp = self.client.get('/api/v1/auth/roles/', **self.admin_headers)
         assert resp.status_code == 200
-        roles = resp.json()
+        data = resp.json()
+        # DRF 全局分页返回 {"count": N, "results": [...]} 格式
+        roles = data.get('results', data) if isinstance(data, dict) else data
         assert any(r['code'] == 'viewer' for r in roles)
 
     @pytest.mark.integration

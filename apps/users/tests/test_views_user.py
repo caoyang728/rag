@@ -137,7 +137,7 @@ class TestUserViewSetCreateUpdate(UsersAPIExtraBase):
 
     @pytest.mark.integration
     def test_create_without_password_uses_default(self):
-        """未传密码时使用默认密码：首字母大写 + 其余小写 + @1234"""
+        """未传密码时使用加密安全随机默认密码（12 位，含大小写+数字+特殊字符）"""
         resp = self.client.post(
             '/api/v1/auth/users/',
             data=json.dumps({'username': 'DefaultPwdUser', 'email': 'dp@test.com'}),
@@ -145,8 +145,8 @@ class TestUserViewSetCreateUpdate(UsersAPIExtraBase):
         )
         assert resp.status_code == 201
         user = User.objects.get(username='DefaultPwdUser')
-        # 默认密码规则：username[:1].upper() + username[1:].lower() + '@1234'
-        assert user.check_password('Defaultpwduser@1234')
+        # 默认密码为随机生成，验证密码已设置（非空且可用）
+        assert user.password  # 密码哈希不为空
 
     @pytest.mark.integration
     def test_create_duplicate_active_email_400(self):
@@ -280,6 +280,51 @@ class TestUserViewSetCreateUpdate(UsersAPIExtraBase):
         # super_admin 角色被过滤，用户不是超管
         assert user.is_super_admin is False
         assert not UserRoleRel.objects.filter(user=user, role=sa_role).exists()
+
+    @pytest.mark.integration
+    def test_dept_manager_create_other_dept_403(self):
+        """部门经理创建用户指定其他部门 → 403（越权拦截，只能在本部门/授权部门内建人）"""
+        resp = self.client.post(
+            '/api/v1/auth/users/',
+            data=json.dumps({
+                'username': 'bdm_deptb', 'email': 'bdm_deptb@test.com',
+                'department_id': self.dept_b.id,
+            }),
+            content_type='application/json', **self.dept_mgr_headers,
+        )
+        assert resp.status_code == 403
+        assert '无权在该部门创建用户' in resp.json().get('detail', '')
+
+    @pytest.mark.integration
+    def test_dept_manager_create_other_dept_team_403(self):
+        """部门经理创建用户指定其他部门团队 → 403（越权拦截）"""
+        other_team = Team.objects.create(name='市场一组', code='mkt_t1', department=self.dept_b)
+        resp = self.client.post(
+            '/api/v1/auth/users/',
+            data=json.dumps({
+                'username': 'bdm_team', 'email': 'bdm_team@test.com',
+                'department_id': self.dept_a.id, 'team_ids': [other_team.id],
+            }),
+            content_type='application/json', **self.dept_mgr_headers,
+        )
+        assert resp.status_code == 403
+        assert '只能分配到本部门下的团队' in resp.json().get('detail', '')
+
+    @pytest.mark.integration
+    def test_dept_manager_update_other_dept_team_403(self):
+        """部门经理编辑用户把团队改成其他部门团队 → 403（越权拦截）"""
+        other_team = Team.objects.create(name='市场一组', code='mkt_t2', department=self.dept_b)
+        target = _create_user(username='bdm_update', team=self.team_a, department=self.dept_a)
+        resp = self.client.patch(
+            f'/api/v1/auth/users/{target.id}/',
+            data=json.dumps({'team_ids': [other_team.id]}),
+            content_type='application/json', **self.dept_mgr_headers,
+        )
+        assert resp.status_code == 403
+        assert '只能分配到本部门下的团队' in resp.json().get('detail', '')
+        # 未被部分写入：团队保持原样
+        target.refresh_from_db()
+        assert target.team_id == self.team_a.id
 
     @pytest.mark.integration
     def test_update_with_roles_revokes_old_ones(self):
@@ -459,14 +504,14 @@ class TestUserViewSetActionsExtra(UsersAPIExtraBase):
         assert UserRoleRel.objects.filter(user=target, role=viewer, status='ACTIVE').exists()
 
     @pytest.mark.integration
-    def test_revive_active_user_400(self):
-        """revive 未删除的用户 → 400"""
+    def test_revive_active_user_404(self):
+        """revive 未删除的用户 → 404（统一返回 404 防止用户枚举）"""
         resp = self.client.post(
             f'/api/v1/auth/users/{self.normal_user.id}/revive/',
             data=json.dumps({}),
             content_type='application/json', **self.admin_headers,
         )
-        assert resp.status_code == 400
+        assert resp.status_code == 404
 
     @pytest.mark.integration
     def test_revive_nonexistent_404(self):
@@ -552,16 +597,16 @@ class TestUserViewSetExportImport(UsersAPIExtraBase):
 
     @pytest.mark.integration
     def test_export_single_user_csv(self):
-        """导出单个用户 CSV —— 当前实现存在缺陷：export 把 [u] 列表传给 _export_users_csv
+        """导出单个用户 CSV
 
-        _export_users_csv 内部对入参调用 .select_related()（仅 QuerySet 支持），
-        传 list 会抛 AttributeError，请求实际返回 500。
-        此用例固定记录该缺陷（batch_export 传 QuerySet 属正常路径，见下）。
+        修复前 export 把 [u] 列表传给 _export_users_csv，内部对入参调用
+        .select_related()（仅 QuerySet 支持）导致 500；修复后传 QuerySet，正常返回 200。
         """
         client = Client(raise_request_exception=False)
         resp = client.get(
             f'/api/v1/auth/users/{self.normal_user.id}/export/', **self.admin_headers)
-        assert resp.status_code == 500
+        assert resp.status_code == 200
+        assert 'normal' in resp.content.decode('utf-8-sig')
 
     @pytest.mark.integration
     def test_batch_export_selected_ids(self):

@@ -438,3 +438,25 @@
 	color: #8d6e00;
 	margin-bottom: 12px;
 }
+
+/* ============ 申请权限弹窗美化 ============ */
+/* 弹窗加宽至 640px 后，归属信息卡片改为三列横排，充分利用宽度 */
+#docReqModal .doc-ownership-meta {
+	display: grid;
+	grid-template-columns: repeat(3, 1fr);
+	gap: 6px 16px;
+}
+
+#docReqModal .doc-ownership-label {
+	min-width: 0;
+}
+
+/* ============ 节点编辑弹窗：禁用输入置灰 ============ */
+/* 系统节点名称、子文件夹可见范围被禁用时，视觉上明确置灰，避免误以为可编辑 */
+#nodeModal .input:disabled,
+#nodeModal .select:disabled {
+	background: var(--bg);
+	color: var(--text-sub);
+	cursor: not-allowed;
+	opacity: .75;
+}

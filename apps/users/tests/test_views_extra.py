@@ -35,10 +35,14 @@ from apps.users.serializers import (
     ProfileUpdateSerializer,
 )
 from apps.users.ticket_service import _gen_ticket_no
-from apps.users.views import (
-    _ensure_unique_code, _client_ip, _can_user_approve_ticket, _notify_workflow_resolved,
-    UserViewSet, DepartmentViewSet, TeamViewSet,
+from apps.users.services.org_service import _ensure_unique_code
+from apps.users.services.user_service import (
+    check_user_manage, check_can_manage_user, get_manageable_user_ids, filter_role_ids,
 )
+from apps.users.utils import _client_ip
+from apps.users.views_tickets import _can_user_approve_ticket, _notify_workflow_resolved
+from apps.users.views_users import UserViewSet
+from apps.users.views_org import DepartmentViewSet, TeamViewSet
 from apps.users.tests.test_views_base import (
     UsersAPIExtraBase, _get_or_create_role, _create_user, _grant_permission,
     _grant_global_role, _auth_headers, FakeRedis,
@@ -158,138 +162,125 @@ class TestHelperFunctions(UsersAPIExtraBase):
 
 
 # ============================================================================
-# UserViewSet 权限判定各分支（直测辅助方法）
+# UserViewSet 权限判定各分支（直测 user_service 纯函数）
 # ============================================================================
 class TestUserManageScopeChecks(UsersAPIExtraBase):
-    """_check_user_manage / _check_can_manage_user / _get_manageable_user_ids 分支"""
+    """check_user_manage / check_can_manage_user / get_manageable_user_ids 分支"""
 
     def test_check_user_manage_manage_all_true(self):
-        """user.manage_all 快路径放行（覆盖 385-386）"""
+        """user.manage_all 快路径放行"""
         gadmin = _make_custom_role_user('gadmin1', 'gadmin_role', 'user.manage_all')
-        view = _make_view(UserViewSet, gadmin)
-        assert view._check_user_manage(self.normal_user) is True
+        assert check_user_manage(gadmin, self.normal_user) is True
 
     def test_check_user_manage_dept_ok(self):
-        """部门级：目标在本部门（覆盖 389-395）"""
-        view = _make_view(UserViewSet, self.dept_mgr)
-        assert view._check_user_manage(self.normal_user) is True
+        """部门级：目标在本部门"""
+        assert check_user_manage(self.dept_mgr, self.normal_user) is True
 
     def test_check_user_manage_dept_miss(self):
-        """部门级：目标不在管辖部门 → False（覆盖 401-402）"""
+        """部门级：目标不在管辖部门 → False"""
         other = _create_user('other_deptb', department=self.dept_b)
-        view = _make_view(UserViewSet, self.dept_mgr)
-        assert view._check_user_manage(other) is False
+        assert check_user_manage(self.dept_mgr, other) is False
 
     def test_check_user_manage_team_ok(self):
-        """团队级：目标在本团队（覆盖 397-400）"""
-        view = _make_view(UserViewSet, self.team_leader)
-        assert view._check_user_manage(self.normal_user) is True
+        """团队级：目标在本团队"""
+        assert check_user_manage(self.team_leader, self.normal_user) is True
 
     def test_check_user_manage_team_miss(self):
-        """团队级：目标不在管辖团队 → False（覆盖 401-402）"""
+        """团队级：目标不在管辖团队 → False"""
         other = _create_user('other_teamb', team=self.team_b, department=self.dept_a)
-        view = _make_view(UserViewSet, self.team_leader)
-        assert view._check_user_manage(other) is False
+        assert check_user_manage(self.team_leader, other) is False
 
     def test_check_can_manage_no_perm(self):
-        """无任何用户管理权限 → 没有禁用权限（覆盖 415-416）"""
-        view = _make_view(UserViewSet, self.normal_user)
-        ok, msg = view._check_can_manage_user(self.team_leader)
+        """无任何用户管理权限 → 没有禁用权限"""
+        ok, msg = check_can_manage_user(self.normal_user, self.team_leader)
         assert ok is False and msg == '没有禁用权限'
 
     def test_check_can_manage_super_admin_target(self):
-        """目标为超级管理员 → 不可禁用（覆盖 423-424）"""
-        view = _make_view(UserViewSet, self.dept_mgr)
-        ok, msg = view._check_can_manage_user(self.super_admin)
+        """目标为超级管理员 → 不可禁用"""
+        ok, msg = check_can_manage_user(self.dept_mgr, self.super_admin)
         assert ok is False and msg == '超级管理员不能被禁用'
 
     def test_check_can_manage_global_ok(self):
-        """GLOBAL 范围 + 目标无同级权限 → 可禁用（覆盖 434-437）"""
+        """GLOBAL 范围 + 目标无同级权限 → 可禁用"""
         gadmin = _make_custom_role_user('gadmin2', 'gadmin_role', 'user.manage_all')
-        view = _make_view(UserViewSet, gadmin)
-        ok, msg = view._check_can_manage_user(self.normal_user)
+        ok, msg = check_can_manage_user(gadmin, self.normal_user)
         assert ok is True and msg == ''
 
     def test_check_can_manage_global_peer(self):
-        """GLOBAL 范围 + 目标同为 manage_all 持有者 → 不可禁用（覆盖 435-436）"""
+        """GLOBAL 范围 + 目标同为 manage_all 持有者 → 不可禁用"""
         gadmin = _make_custom_role_user('gadmin3', 'gadmin_role', 'user.manage_all')
         gadmin2 = _make_custom_role_user('gadmin4', 'gadmin_role', 'user.manage_all')
-        view = _make_view(UserViewSet, gadmin)
-        ok, msg = view._check_can_manage_user(gadmin2)
+        ok, msg = check_can_manage_user(gadmin, gadmin2)
         assert ok is False and msg == '不能禁用同级用户管理员'
 
     def test_check_can_manage_dept_out_of_dept(self):
-        """DEPT 范围 + 目标不在管辖部门（覆盖 441-443）"""
+        """DEPT 范围 + 目标不在管辖部门"""
         other = _create_user('other_deptb2', department=self.dept_b)
-        view = _make_view(UserViewSet, self.dept_mgr)
-        ok, msg = view._check_can_manage_user(other)
+        ok, msg = check_can_manage_user(self.dept_mgr, other)
         assert ok is False and msg == '只能禁用本部门员工'
 
     def test_check_can_manage_dept_peer(self):
-        """DEPT 范围 + 目标为同级管理者（覆盖 444-446）"""
+        """DEPT 范围 + 目标为同级管理者"""
         tl2 = _create_user('leader2', team=self.team_a, department=self.dept_a)
         team_leader_role = _get_or_create_role('team_leader')
         UserTeamScopeRel.objects.create(
             user=tl2, role=team_leader_role, team=self.team_a, status=GrantStatus.ACTIVE)
-        view = _make_view(UserViewSet, self.dept_mgr)
-        ok, msg = view._check_can_manage_user(tl2)
+        ok, msg = check_can_manage_user(self.dept_mgr, tl2)
         assert ok is False and msg == '不能禁用同级部门经理'
 
     def test_check_can_manage_dept_ok(self):
-        """DEPT 范围 + 目标为本部门普通员工 → 可禁用（覆盖 447）"""
-        view = _make_view(UserViewSet, self.dept_mgr)
-        ok, msg = view._check_can_manage_user(self.normal_user)
+        """DEPT 范围 + 目标为本部门普通员工 → 可禁用"""
+        ok, msg = check_can_manage_user(self.dept_mgr, self.normal_user)
         assert ok is True and msg == ''
 
     def test_check_can_manage_team_out_of_team(self):
-        """TEAM 范围 + 目标不在管辖团队（覆盖 450-453）"""
+        """TEAM 范围 + 目标不在管辖团队"""
         other = _create_user('other_teamb2', team=self.team_b, department=self.dept_a)
-        view = _make_view(UserViewSet, self.team_leader)
-        ok, msg = view._check_can_manage_user(other)
+        ok, msg = check_can_manage_user(self.team_leader, other)
         assert ok is False and msg == '只能禁用本组员工'
 
     def test_check_can_manage_team_peer(self):
-        """TEAM 范围 + 目标为同级管理者（覆盖 454-456）"""
+        """TEAM 范围 + 目标为同级管理者"""
         tl2 = _create_user('leader3', team=self.team_a, department=self.dept_a)
         team_leader_role = _get_or_create_role('team_leader')
         UserTeamScopeRel.objects.create(
             user=tl2, role=team_leader_role, team=self.team_a, status=GrantStatus.ACTIVE)
-        view = _make_view(UserViewSet, self.team_leader)
-        ok, msg = view._check_can_manage_user(tl2)
+        ok, msg = check_can_manage_user(self.team_leader, tl2)
         assert ok is False and msg == '不能禁用同级团队组长'
 
     def test_check_can_manage_team_ok(self):
-        """TEAM 范围 + 目标为本团队普通员工 → 可禁用（覆盖 457）"""
-        view = _make_view(UserViewSet, self.team_leader)
-        ok, msg = view._check_can_manage_user(self.normal_user)
+        """TEAM 范围 + 目标为本团队普通员工 → 可禁用"""
+        ok, msg = check_can_manage_user(self.team_leader, self.normal_user)
         assert ok is True and msg == ''
 
     def test_manageable_ids_global_none(self):
-        """manage_all → 返回 None（覆盖 468-469）"""
+        """manage_all → 返回 None（全部可管理）"""
         gadmin = _make_custom_role_user('gadmin5', 'gadmin_role', 'user.manage_all')
-        view = _make_view(UserViewSet, gadmin)
-        assert view._get_manageable_user_ids() is None
+        assert get_manageable_user_ids(gadmin) is None
 
     def test_manageable_ids_dept(self):
-        """部门级 → 管辖部门用户 ID 集合（覆盖 474-476）"""
+        """部门级 → 管辖部门用户 ID 集合"""
         other = _create_user('other_deptb3', department=self.dept_b)
-        view = _make_view(UserViewSet, self.dept_mgr)
-        ids = view._get_manageable_user_ids()
+        ids = get_manageable_user_ids(self.dept_mgr)
         assert self.normal_user.id in ids
         assert other.id not in ids
 
     def test_manageable_ids_team(self):
-        """团队级 → 管辖团队用户 ID 集合（覆盖 478-480）"""
+        """团队级 → 管辖团队用户 ID 集合"""
         other = _create_user('other_teamb3', team=self.team_b, department=self.dept_a)
-        view = _make_view(UserViewSet, self.team_leader)
-        ids = view._get_manageable_user_ids()
+        ids = get_manageable_user_ids(self.team_leader)
         assert self.normal_user.id in ids
         assert other.id not in ids
 
     def test_manageable_ids_self(self):
-        """普通用户只能管理自己（覆盖 481-482）"""
-        view = _make_view(UserViewSet, self.normal_user)
-        assert view._get_manageable_user_ids() == {self.normal_user.id}
+        """普通用户只能管理自己"""
+        assert get_manageable_user_ids(self.normal_user) == {self.normal_user.id}
+
+    def test_filter_role_ids_restricted_raise(self):
+        """非超管分配受限角色（super_admin 角色）→ PermissionDenied"""
+        sa_role = _get_or_create_role('super_admin')
+        with pytest.raises(PermissionDenied):
+            filter_role_ids(self.dept_mgr, [sa_role.id])
 
     def test_get_queryset_no_perm_only_self(self):
         """无 user.manage 权限 → 只能看到自己（覆盖 584-586）"""
@@ -317,13 +308,6 @@ class TestUserManageScopeChecks(UsersAPIExtraBase):
         view.action = 'retrieve'
         from apps.users.serializers import UserSerializer
         assert view.get_serializer_class() is UserSerializer
-
-    def test_filter_role_ids_restricted_raise(self):
-        """非超管分配受限角色（super_admin 角色）→ PermissionDenied（覆盖 511-516）"""
-        sa_role = _get_or_create_role('super_admin')
-        view = _make_view(UserViewSet, self.dept_mgr)
-        with pytest.raises(PermissionDenied):
-            view._filter_role_ids([sa_role.id])
 
 
 # ============================================================================
@@ -716,7 +700,7 @@ class TestBatchImportEdge(UsersAPIExtraBase):
         ]
         f = SimpleUploadedFile('users.csv', '\n'.join(lines).encode('utf-8'),
                                content_type='text/csv')
-        with patch('apps.users.views.User.objects.create',
+        with patch('apps.users.views_users.User.objects.create',
                    side_effect=Exception('disk full')):
             resp = self.client.post('/api/v1/auth/users/batch_import/', {'file': f},
                                     **self.admin_headers)
@@ -914,46 +898,67 @@ class TestOrgViewSetEdge(UsersAPIExtraBase):
         view.action = 'list'
         assert view.get_serializer_class() is DepartmentSerializer
 
+    def _org_ua_headers(self, username='org_ua'):
+        """构造 user_admin 审批人 header（org 工单单审节点审批者）"""
+        ua = _create_user(username)
+        _grant_global_role(ua, 'user_admin')
+        return _auth_headers(ua)
+
+    def _approve(self, ticket, headers):
+        """审批工单当前节点（HTTP 统一审批入口）"""
+        return self.client.post(
+            f'/api/v1/auth/tickets/{ticket.id}/approve/',
+            data=json.dumps({'comment': '同意'}),
+            content_type='application/json', **headers)
+
     @pytest.mark.integration
-    def test_department_restore_integrity_error_400(self):
-        """恢复已删部门时编码冲突 → 400（覆盖 1407-1410）"""
+    def test_department_restore_execute_integrity_error_rollback(self):
+        """恢复已删部门时执行层落库冲突 → 审批返回 400，工单留 PENDING 可重试
+
+        软删恢复语义已移至工单执行层(_execute_org_change)，落库冲突抛 ValueError
+        回滚审批事务，不再由创建接口兜底。
+        """
         from django.db import IntegrityError
         dept = Department.objects.create(name='旧部门R', code='oldr')
         dept.is_deleted = True
         dept.save()
+        resp = self.client.post(
+            '/api/v1/auth/departments/',
+            data=json.dumps({'name': '旧部门R'}),
+            content_type='application/json', **self.admin_headers)
+        assert resp.status_code == 201
+        ticket = TicketList.objects.get(ticket_no=resp.json()['ticket_no'])
         with patch.object(Department, 'save', side_effect=IntegrityError('dup')):
-            resp = self.client.post(
-                '/api/v1/auth/departments/',
-                data=json.dumps({'name': '旧部门R'}),
-                content_type='application/json', **self.admin_headers)
-        assert resp.status_code == 400
-        assert resp.json()['detail'] == '部门“旧部门R”已存在'
+            aresp = self._approve(ticket, self._org_ua_headers())
+        assert aresp.status_code == 400
+        ticket.refresh_from_db()
+        assert ticket.status == TicketStatus.PENDING
+        dept.refresh_from_db()
+        assert dept.is_deleted is True  # 事务回滚,未被误恢复
 
     @pytest.mark.integration
-    def test_department_create_integrity_error_400(self):
-        """新建部门落库冲突 → 400（覆盖 1416-1419）"""
-        from django.db import IntegrityError
-        with patch('apps.users.serializers.DepartmentWriteSerializer.save',
-                   side_effect=IntegrityError('dup')):
-            resp = self.client.post(
-                '/api/v1/auth/departments/',
-                data=json.dumps({'name': '新部门Z'}),
-                content_type='application/json', **self.admin_headers)
-        assert resp.status_code == 400
-        assert resp.json()['detail'] == '部门“新部门Z”已存在'
+    def test_department_create_returns_ticket(self):
+        """新建部门 → 201 工单（不直接落库，唯一性由创建时预检保证）"""
+        resp = self.client.post(
+            '/api/v1/auth/departments/',
+            data=json.dumps({'name': '新部门Z'}),
+            content_type='application/json', **self.admin_headers)
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data['ticket_no'].startswith('ZZ')
+        assert not Department.objects.filter(name='新部门Z', is_deleted=False).exists()
 
     @pytest.mark.integration
-    def test_department_update_integrity_error_400(self):
-        """更新部门编码冲突 → 400（覆盖 1429-1432）"""
-        from django.db import IntegrityError
-        with patch('apps.users.serializers.DepartmentWriteSerializer.save',
-                   side_effect=IntegrityError('dup')):
-            resp = self.client.patch(
-                f'/api/v1/auth/departments/{self.dept_a.id}/',
-                data=json.dumps({'name': '研发部X'}),
-                content_type='application/json', **self.admin_headers)
-        assert resp.status_code == 400
-        assert resp.json()['detail'] == '部门编码冲突'
+    def test_department_update_returns_ticket(self):
+        """更新部门 → 200 工单（DB 不变，审批后生效）"""
+        resp = self.client.patch(
+            f'/api/v1/auth/departments/{self.dept_a.id}/',
+            data=json.dumps({'name': '研发部X'}),
+            content_type='application/json', **self.admin_headers)
+        assert resp.status_code == 200
+        assert resp.json()['ticket_no'].startswith('ZZ')
+        self.dept_a.refresh_from_db()
+        assert self.dept_a.name == '研发部'
 
     @pytest.mark.integration
     def test_team_list_bad_dept_filter_ignored(self):
@@ -963,14 +968,15 @@ class TestOrgViewSetEdge(UsersAPIExtraBase):
 
     @pytest.mark.integration
     def test_dept_mgr_update_own_dept_team_200(self):
-        """部门经理可操作本部门团队（覆盖 1643-1650）"""
+        """部门经理可操作本部门团队 → 200 工单（组织变更走审批,不直接落库）"""
         resp = self.client.patch(
             f'/api/v1/auth/teams/{self.team_a.id}/',
             data=json.dumps({'description': '部门经理改'}),
             content_type='application/json', **self.dept_mgr_headers)
         assert resp.status_code == 200
+        assert resp.json()['ticket_no'].startswith('ZZ')
         self.team_a.refresh_from_db()
-        assert self.team_a.description == '部门经理改'
+        assert self.team_a.description is None  # 审批前不生效
 
     @pytest.mark.integration
     def test_team_get_serializer_class(self):
@@ -983,65 +989,59 @@ class TestOrgViewSetEdge(UsersAPIExtraBase):
 
     @pytest.mark.integration
     def test_team_create_dept_id_as_list(self):
-        """department_id 传数组 → 取首元素（覆盖 1673-1674）"""
+        """department_id 传数组 → 取首元素写入工单目标数据（覆盖取首元素分支）"""
         resp = self.client.post(
             '/api/v1/auth/teams/',
             data=json.dumps({'name': '列表部门团队', 'department_id': [self.dept_b.id]}),
             content_type='application/json', **self.admin_headers)
         assert resp.status_code == 201
-        team = Team.objects.get(name='列表部门团队')
-        assert team.department_id == self.dept_b.id
+        ticket = TicketList.objects.get(ticket_no=resp.json()['ticket_no'])
+        assert ticket.org_detail.target_data['department_id'] == self.dept_b.id
+        assert not Team.objects.filter(name='列表部门团队').exists()
 
     @pytest.mark.integration
-    def test_team_restore_integrity_error_400(self):
-        """恢复已删团队时落库冲突 → 400（覆盖 1705-1708）"""
+    def test_team_restore_execute_integrity_error_rollback(self):
+        """恢复已删团队时执行层落库冲突 → 审批返回 400，工单留 PENDING"""
         from django.db import IntegrityError
         team = Team.objects.create(name='旧团队R', code='oldtr', department=self.dept_a)
         team.is_deleted = True
         team.save()
+        resp = self.client.post(
+            '/api/v1/auth/teams/',
+            data=json.dumps({'name': '旧团队R', 'department_id': self.dept_a.id}),
+            content_type='application/json', **self.admin_headers)
+        assert resp.status_code == 201
+        ticket = TicketList.objects.get(ticket_no=resp.json()['ticket_no'])
         with patch.object(Team, 'save', side_effect=IntegrityError('dup')):
-            resp = self.client.post(
-                '/api/v1/auth/teams/',
-                data=json.dumps({'name': '旧团队R', 'department_id': self.dept_a.id}),
-                content_type='application/json', **self.admin_headers)
-        assert resp.status_code == 400
-        assert resp.json()['detail'] == '部门“研发部”下已存在团队“旧团队R”'
+            aresp = self._approve(ticket, self._org_ua_headers())
+        assert aresp.status_code == 400
+        ticket.refresh_from_db()
+        assert ticket.status == TicketStatus.PENDING
+        team.refresh_from_db()
+        assert team.is_deleted is True
 
     @pytest.mark.integration
-    def test_team_create_integrity_error_400(self):
-        """新建团队落库冲突 → 400（覆盖 1713-1723）"""
-        from django.db import IntegrityError
-        with patch.object(Team.objects, 'create', side_effect=IntegrityError('dup')):
-            resp = self.client.post(
-                '/api/v1/auth/teams/',
-                data=json.dumps({'name': '新团队Z', 'department_id': self.dept_a.id}),
-                content_type='application/json', **self.admin_headers)
-        assert resp.status_code == 400
-        assert resp.json()['detail'] == '部门“研发部”下已存在团队“新团队Z”'
+    def test_team_create_returns_ticket(self):
+        """新建团队 → 201 工单（不直接落库，唯一性由创建时预检保证）"""
+        resp = self.client.post(
+            '/api/v1/auth/teams/',
+            data=json.dumps({'name': '新团队Z', 'department_id': self.dept_a.id}),
+            content_type='application/json', **self.admin_headers)
+        assert resp.status_code == 201
+        assert resp.json()['ticket_no'].startswith('ZZ')
+        assert not Team.objects.filter(name='新团队Z', department=self.dept_a).exists()
 
     @pytest.mark.integration
-    def test_team_create_unexpected_error_500(self):
-        """新建团队未知异常 → 500（覆盖 1724-1726）"""
-        client = Client(raise_request_exception=False)
-        with patch.object(Team.objects, 'create', side_effect=RuntimeError('boom')):
-            resp = client.post(
-                '/api/v1/auth/teams/',
-                data=json.dumps({'name': '新团队Y', 'department_id': self.dept_a.id}),
-                content_type='application/json', **self.admin_headers)
-        assert resp.status_code == 500
-
-    @pytest.mark.integration
-    def test_team_update_integrity_error_400(self):
-        """更新团队编码冲突 → 400（覆盖 1735-1738）"""
-        from django.db import IntegrityError
-        with patch('apps.users.serializers.TeamWriteSerializer.save',
-                   side_effect=IntegrityError('dup')):
-            resp = self.client.patch(
-                f'/api/v1/auth/teams/{self.team_a.id}/',
-                data=json.dumps({'description': 'x'}),
-                content_type='application/json', **self.admin_headers)
-        assert resp.status_code == 400
-        assert resp.json()['detail'] == '团队编码冲突'
+    def test_team_update_returns_ticket(self):
+        """更新团队 → 200 工单（DB 不变，审批后生效）"""
+        resp = self.client.patch(
+            f'/api/v1/auth/teams/{self.team_a.id}/',
+            data=json.dumps({'description': 'x'}),
+            content_type='application/json', **self.admin_headers)
+        assert resp.status_code == 200
+        assert resp.json()['ticket_no'].startswith('ZZ')
+        self.team_a.refresh_from_db()
+        assert self.team_a.description is None
 
     @pytest.mark.integration
     def test_team_destroy_with_docs_400(self):

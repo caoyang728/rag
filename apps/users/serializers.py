@@ -4,11 +4,27 @@ from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from apps.users.models import (
     Department, Team, Role, Permission,
-    UserRoleRel, get_user_permissions,
+    get_user_permissions,
     get_user_managed_depts, get_user_managed_teams,
+    ScopeType, TicketChangeType,
 )
 
 User = get_user_model()
+
+
+def _get_viewer_role():
+    """获取 viewer 角色（内置角色，数据运行期不变，使用 Django cache 缓存）
+
+    使用 cache.get_or_set 保证线程安全：同一进程内多个线程并发调用时，
+    只有一个线程执行 DB 查询，其余线程等待缓存结果。
+    """
+    from django.core.cache import cache
+    key = 'users:viewer_role_info'
+    return cache.get_or_set(
+        key,
+        lambda: Role.objects.filter(role_key="viewer").values("id", "role_key", "name").first(),
+        timeout=3600,
+    )
 
 
 class DepartmentSerializer(serializers.ModelSerializer):
@@ -34,9 +50,12 @@ class DepartmentSerializer(serializers.ModelSerializer):
 
     def get_teams(self, obj):
         # 使用 related manager 以利用 prefetch_related 优化，避免 N+1 查询
+        # user_count 优先读取 ViewSet Prefetch 中的 annotate 值，未预加载时回退实时统计
         return [{"id": t.id, "name": t.name, "code": t.code,
                  "leader_id": t.leader_id,
-                 "leader_name": (t.leader.real_name or t.leader.username) if t.leader else None}
+                 "leader_name": (t.leader.real_name or t.leader.username) if t.leader else None,
+                 "user_count": t.user_count if hasattr(t, 'user_count')
+                 else User.objects.filter(team=t, is_deleted=False).count()}
                 for t in obj.teams.all() if not t.is_deleted]
 
 
@@ -56,7 +75,9 @@ class TeamSerializer(serializers.ModelSerializer):
         return None
 
     def get_user_count(self, obj):
-        # 单团队 FK：直接统计 User.team 指向该团队的活跃用户
+        # 优先读取 ViewSet 中的 annotate 值，避免 N+1
+        if hasattr(obj, 'user_count'):
+            return obj.user_count
         return User.objects.filter(team=obj, is_deleted=False).count()
 
 
@@ -139,41 +160,44 @@ class UserSerializer(serializers.ModelSerializer):
 
     def get_roles(self, obj):
         # related_name='user_role_rels'；响应字段名保持 code（前端兼容），内部取 role__role_key
-        rels = [
-            {"id": r["role__id"], "code": r["role__role_key"], "name": r["role__name"]}
-            for r in obj.user_role_rels.select_related("role").values(
-                "role__id", "role__role_key", "role__name"
-            )
-        ]
+        # 优先使用 prefetch_related 预加载的数据（ViewSet get_queryset 已配置），
+        # 避免对每个用户触发额外 DB 查询（N+1 问题）
+        rels = []
+        for r in obj.user_role_rels.all():
+            rels.append({
+                "id": r.role_id,
+                "code": r.role.role_key,
+                "name": r.role.name,
+            })
         codes = {r["code"] for r in rels}
         # dept_manager 存储在 UserDeptScopeRel（部门管辖绑定表），补入角色列表
+        # 使用 .all() + Python 过滤利用 prefetch 缓存，避免额外 DB 查询
         if "dept_manager" not in codes:
-            dept_rel = obj.dept_scope_rels.filter(
-                status="ACTIVE"
-            ).select_related("role").values("role__id", "role__role_key", "role__name").first()
-            if dept_rel:
-                rels.append({
-                    "id": dept_rel["role__id"],
-                    "code": dept_rel["role__role_key"],
-                    "name": dept_rel["role__name"],
-                })
-                codes.add("dept_manager")
+            for dr in obj.dept_scope_rels.all():
+                if dr.status == "ACTIVE" and dr.role:
+                    rels.append({
+                        "id": dr.role_id,
+                        "code": dr.role.role_key,
+                        "name": dr.role.name,
+                    })
+                    codes.add("dept_manager")
+                    break
         # team_leader 存储在 UserTeamScopeRel（团队管辖绑定表），补入角色列表
         if "team_leader" not in codes:
-            team_rel = obj.team_scope_rels.filter(
-                status="ACTIVE"
-            ).select_related("role").values("role__id", "role__role_key", "role__name").first()
-            if team_rel:
-                rels.append({
-                    "id": team_rel["role__id"],
-                    "code": team_rel["role__role_key"],
-                    "name": team_rel["role__name"],
-                })
-                codes.add("team_leader")
+            for tr in obj.team_scope_rels.all():
+                if tr.status == "ACTIVE" and tr.role:
+                    rels.append({
+                        "id": tr.role_id,
+                        "code": tr.role.role_key,
+                        "name": tr.role.name,
+                    })
+                    codes.add("team_leader")
+                    break
         # viewer 兜底展示：与 get_user_permissions 保持一致
         # 无 contributor + 无 super_admin → 补 viewer 作为人事归属的只读基础角色
+        # 使用模块级缓存避免每次都查询 DB（角色数据在运行期不会变化）
         if "contributor" not in codes and "super_admin" not in codes and "viewer" not in codes:
-            viewer = Role.objects.filter(role_key="viewer").values("id", "role_key", "name").first()
+            viewer = _get_viewer_role()
             if viewer:
                 rels.append({"id": viewer["id"], "code": viewer["role_key"], "name": viewer["name"]})
         return rels
@@ -246,6 +270,8 @@ class UserCreateSerializer(serializers.ModelSerializer):
     role_ids = serializers.ListField(child=serializers.IntegerField(), required=False, default=list)
     team_ids = serializers.ListField(child=serializers.IntegerField(), required=False, default=list)
     department_id = serializers.IntegerField(required=False, allow_null=True)
+    # 使用 URLField 限制 avatar_url 只允许合法 URL，防止 javascript: 等恶意 URI
+    avatar_url = serializers.URLField(max_length=512, required=False, allow_blank=True)
 
     class Meta:
         model = User
@@ -258,6 +284,8 @@ class UserUpdateSerializer(serializers.ModelSerializer):
     role_ids = serializers.ListField(child=serializers.IntegerField(), required=False)
     team_ids = serializers.ListField(child=serializers.IntegerField(), required=False, default=list)
     department_id = serializers.IntegerField(required=False, allow_null=True)
+    # 使用 URLField 限制 avatar_url 只允许合法 URL，防止 javascript: 等恶意 URI
+    avatar_url = serializers.URLField(max_length=512, required=False, allow_blank=True)
 
     class Meta:
         model = User
@@ -272,5 +300,115 @@ class UserUpdateSerializer(serializers.ModelSerializer):
 
 class ProfileUpdateSerializer(serializers.Serializer):
     real_name = serializers.CharField(max_length=64, required=False, trim_whitespace=True)
-    avatar_url = serializers.CharField(max_length=512, required=False, allow_blank=True)
+    avatar_url = serializers.URLField(max_length=512, required=False, allow_blank=True)
     phone = serializers.CharField(max_length=32, required=False, allow_blank=True, trim_whitespace=True)
+
+    def validate_avatar_url(self, value):
+        """限制 avatar_url 只允许 http/https 协议，防止 javascript: 等恶意 URI"""
+        if value and not value.startswith(('http://', 'https://')):
+            raise serializers.ValidationError("头像地址必须以 http:// 或 https:// 开头")
+        return value
+
+
+class AccessApplicationSerializer(serializers.Serializer):
+    """权限申请 POST 请求体校验（协议层：类型/枚举/必填/参数间约束）
+
+    业务校验（角色存在性、管理岗任命权限、资源所有者判定、previous_role 解析、
+    SoD 互斥等）留在视图/服务层处理；此处只做协议层校验，
+    错误文案与手写校验保持一致，避免前端契约变化。
+    """
+    role_key = serializers.CharField(
+        required=True,
+        error_messages={'required': 'role_key 必填(角色标识)'},
+    )
+    scope_type = serializers.ChoiceField(
+        choices=[ScopeType.TEAM, ScopeType.DEPT, ScopeType.NONE, ScopeType.GLOBAL],
+        default=ScopeType.NONE,
+        allow_blank=True,
+        error_messages={'invalid_choice': 'scope_type 取值应为 TEAM/DEPT/NONE'},
+    )
+    scope_id = serializers.IntegerField(
+        required=False, allow_null=True,
+        error_messages={'invalid': 'scope_id 应为整数'},
+    )
+    change_type = serializers.ChoiceField(
+        choices=[TicketChangeType.GRANT, TicketChangeType.REVOKE, TicketChangeType.ROLE_CHANGE],
+        default=TicketChangeType.GRANT,
+        allow_blank=True,
+        error_messages={'invalid_choice': 'change_type 取值应为 GRANT/REVOKE/ROLE_CHANGE'},
+    )
+    previous_role_id = serializers.IntegerField(
+        required=False, allow_null=True,
+        error_messages={'invalid': 'previous_role_id 应为整数'},
+    )
+    reason = serializers.CharField(
+        required=True,
+        allow_blank=True,
+        error_messages={'required': '请填写申请理由'},
+    )
+    effective_from = serializers.DateTimeField(required=False, allow_null=True)
+    expires_at = serializers.DateTimeField(required=False, allow_null=True)
+    # target_user_id 用 CharField：非数字字符串转 None，与旧手写 int() 强转语义一致
+    # （'abc' 不会被 400 拦截，而是走业务分支兜底 403 —— 管理岗/协作角色均提示指定被授权人）
+    target_user_id = serializers.CharField(
+        required=False, allow_null=True, allow_blank=True,
+        error_messages={'invalid': 'target_user_id 应为整数'},
+    )
+
+    def validate_scope_type(self, value):
+        # 空串兜底为 NONE（兼容前端未传/传空，与手写校验行为一致）
+        return value or ScopeType.NONE
+
+    def validate_change_type(self, value):
+        # 空串兜底为 GRANT，与手写校验行为一致
+        return value or TicketChangeType.GRANT
+
+    def validate_reason(self, value):
+        reason = (value or '').strip()
+        if not reason:
+            raise serializers.ValidationError('请填写申请理由')
+        return reason
+
+    def validate_target_user_id(self, value):
+        # 空值/非数字统一返回 None，由视图业务分支判定（与旧 int() 强转失败置 None 一致）
+        if value in (None, ''):
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    def validate(self, attrs):
+        # scope_id 必填校验:TEAM/DEPT 必须指定具体组织
+        if attrs.get('scope_type') in (ScopeType.TEAM, ScopeType.DEPT) and not attrs.get('scope_id'):
+            raise serializers.ValidationError(f"scope_type={attrs['scope_type']} 时 scope_id 必填")
+        return attrs
+
+
+class AssignPermissionsSerializer(serializers.Serializer):
+    """角色权限分配请求体校验：permission_ids 必须为数组，元素须为合法正整数（自动去重保序）
+
+    不传时按空数组处理（清空角色全部权限，与原手写校验语义一致）。
+    逐项 int() 强转以兼容字符串数字（如 "5"），非数字/非正整数返回原错误文案。
+    """
+    permission_ids = serializers.ListField(
+        required=False,
+        default=list,
+        error_messages={'not_a_list': 'permission_ids 必须是数组'},
+    )
+
+    def validate_permission_ids(self, value):
+        # 逐项校验为正整数并去重保序，避免重复 ID 触发唯一约束冲突
+        seen = set()
+        unique = []
+        for pid in value:
+            try:
+                pid_int = int(pid)
+            except (TypeError, ValueError):
+                raise serializers.ValidationError(f'无效的权限ID: {pid}')
+            if pid_int <= 0:
+                raise serializers.ValidationError(f'无效的权限ID: {pid}')
+            if pid_int not in seen:
+                seen.add(pid_int)
+                unique.append(pid_int)
+        return unique

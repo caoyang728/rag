@@ -1057,17 +1057,9 @@ class KnowledgeNodeViewSet(viewsets.ModelViewSet):
             return [IsAuthenticated()]
         return [IsAdminOrOps()]
 
-    # ── 节点保护：ROOT/ORG 节点禁止通过节点 API 直接 CRUD ────────────
-    # 根节点与组织节点（部门/团队）由系统自动创建，只有手动创建的文件夹（FOLDER）可被 CRUD
+    # ── 节点保护说明：ROOT/ORG 名称由组织架构同步管理，禁止直接改名；
+    #    可见范围/描述/顺序可编辑（可见范围走工单）；删除仍仅限 FOLDER ────────────
     _MANAGED_LABELS = {'ROOT': '根节点', 'ORG': '组织节点'}
-
-    def _check_node_not_managed(self, node):
-        """ROOT/ORG 节点由系统/组织架构同步管理，禁止通过节点 API 直接增删改"""
-        if node.node_kind and node.node_kind != 'FOLDER':
-            label = self._MANAGED_LABELS.get(node.node_kind, '系统节点')
-            raise ValidationError(
-                {'detail': f'{label}不支持直接操作，请通过部门/团队管理功能操作'}
-            )
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -1110,6 +1102,12 @@ class KnowledgeNodeViewSet(viewsets.ModelViewSet):
             self._check_team_node_write(parent, user)
         else:
             raise PermissionDenied("您没有创建文件夹的权限")
+
+        # 子文件夹（父节点也是文件夹）仅做分类，权限继承主文件夹，不支持独立设置可见范围
+        visibility_level = serializer.validated_data.get('visibility_level')
+        if visibility_level is not None and parent.node_kind == 'FOLDER':
+            raise ValidationError(
+                {'visibility_level': '子文件夹仅做分类，权限继承主文件夹，不支持独立设置可见范围'})
 
         root_type = parent.root_type
         depth = parent.depth + 1
@@ -1175,28 +1173,49 @@ class KnowledgeNodeViewSet(viewsets.ModelViewSet):
 
     def perform_update(self, serializer):
         old_obj = self.get_object()
+        user = self.request.user
 
-        # ROOT/ORG 节点禁止修改（由部门/团队生命周期管理）
-        self._check_node_not_managed(old_obj)
-
-        # 非管理员：只能编辑自己领地内的文件夹
-        if not self._is_admin_user(self.request.user):
-            role, _dept_id, _team_ids = _get_user_role(self.request.user)
+        # 非管理员：只能编辑自己领地内的节点
+        if not self._is_admin_user(user):
+            role, _dept_id, _team_ids = _get_user_role(user)
             if role == 'dept_manager':
-                self._check_dept_node_write(old_obj, self.request.user)
+                self._check_dept_node_write(old_obj, user)
             elif role == 'team_leader':
-                self._check_team_node_write(old_obj, self.request.user)
+                self._check_team_node_write(old_obj, user)
             else:
                 raise PermissionDenied("您没有修改文件夹的权限")
 
+        data = serializer.validated_data
+        tickets = []  # 本次请求已提交的审批工单类型列表（存在则拒绝直接写入，待审批后生效）
+
+        # 名称变更：ROOT/ORG 系统节点名称由组织架构同步维护，禁止直接改名；
+        # FOLDER 名称变更走分级审批工单，审批通过后由 approve_access_request 解析写回
+        new_name = data.get('name', old_obj.name)
+        if new_name != old_obj.name:
+            if old_obj.node_kind != 'FOLDER':
+                raise ValidationError(
+                    {'name': '系统节点名称由组织架构同步维护，不支持直接修改'})
+            _create_doc_ticket(
+                user, user, TicketChangeType.SCOPE_CHANGE,
+                _encode_ticket_reason(
+                    'node', old_obj.id, 'node_name_change',
+                    f"申请将节点名称从「{old_obj.name}」调整为「{new_name}」 目标名:{new_name}"
+                ),
+                # 审批链按发起人角色动态指派：团队级=部门经理，部门级=文档管理员/超管，
+                # 超管/文档管理员=双管理员复核（与可见范围变更同一分级审批链）
+                _build_visibility_chain(user, old_obj),
+            )
+            tickets.append('名称')
+
         # 可见范围变更（visibility_level）必须走工单审批，不能直接修改
-        new_visibility_level = serializer.validated_data.get(
-            'visibility_level', old_obj.visibility_level
-        )
+        new_visibility_level = data.get('visibility_level', old_obj.visibility_level)
         if new_visibility_level != old_obj.visibility_level:
-            user = self.request.user
             if new_visibility_level is not None and new_visibility_level not in VisibilityLevel.values:
                 raise ValidationError({'visibility_level': '可见范围必须是 TEAM_ONLY/DEPT_ONLY/PUBLIC 之一'})
+            # 子文件夹（父节点也是文件夹）仅做分类，权限继承主文件夹，不支持独立设置可见范围
+            if old_obj.parent_id and old_obj.parent.node_kind == 'FOLDER':
+                raise ValidationError(
+                    {'visibility_level': '子文件夹仅做分类，权限继承主文件夹，不支持独立设置可见范围'})
             # 目标可见范围编码在 reason 的"目标值:"标记中，审批通过后由 approve_access_request 解析写回
             old_desc = dict(VisibilityLevel.choices).get(old_obj.visibility_level, '继承父级')
             new_desc = dict(VisibilityLevel.choices).get(
@@ -1212,10 +1231,15 @@ class KnowledgeNodeViewSet(viewsets.ModelViewSet):
                 # 超管/文档管理员=双管理员复核（_build_visibility_chain）
                 _build_visibility_chain(user, old_obj),
             )
+            tickets.append('可见范围')
+
+        if tickets:
+            # 名称/可见范围等敏感字段变更需审批：工单已自动创建，本次直接拒绝写入，审批通过后生效
             raise PermissionDenied(
-                "修改节点可见范围需要审批，已自动提交审批工单，审批通过后可见范围生效"
+                f"节点{'、'.join(tickets)}变更需要审批，已自动提交审批工单，审批通过后生效"
             )
 
+        # 其余字段（描述/显示顺序）直接生效，并记录变更日志
         old_data = {
             'name': old_obj.name,
             'description': old_obj.description,
@@ -2366,6 +2390,18 @@ class DocumentViewSet(viewsets.ModelViewSet):
                     _log_operation(request, 'doc_visibility_change', document=doc,
                                    detail={'ticket_id': ticket.id, 'applicant': ticket.applicant.username,
                                            'new_visibility_level': new_level})
+            elif action == 'node_name_change' and node:
+                # 节点名称变更工单：从 user_reason 解析目标名称（创建工单时编码在"目标名:"标记中）并写回
+                m = re.search(r'目标名:(.+)', user_reason or '', re.DOTALL)
+                if m:
+                    new_name = m.group(1).strip()
+                    if new_name:
+                        node.name = new_name
+                        node.save(update_fields=['name', 'updated_at'])
+                        _log_operation(request, 'node_name_change', node=node,
+                                       detail={'ticket_id': ticket.id,
+                                               'applicant': ticket.applicant.username,
+                                               'new_name': new_name})
             elif target_id and doc:
                 # 文档访问申请：创建 ResourceShare 个人级共享
                 ResourceShare.objects.get_or_create(

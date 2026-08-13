@@ -76,20 +76,6 @@ class CanManageUsers(BasePermission):
                 or has_permission(u, 'user.manage'))
 
 
-class CanReadAudit(BasePermission):
-    """审计日志读取权限 —— permission_key: audit.log.read
-
-    任何登录用户可查自己权限范围内的审计记录；查全量需 audit.log.read 权限。
-    """
-    def has_permission(self, request, view):
-        u = request.user
-        if not u or not u.is_authenticated:
-            return False
-        if u.is_super_admin:
-            return True
-        return has_permission(u, 'audit.log.read')
-
-
 class RequireKnowledgePerm(BasePermission):
     """知识库操作权限 —— 视图设置 required_perm（permission_key）
 

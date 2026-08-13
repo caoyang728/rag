@@ -4,7 +4,7 @@ apps.users.permissions 测试 —— DRF RBAC 权限类
 覆盖范围：
 - RequirePerm：未认证拒绝 / 超管快路径 / view.required_perm 优先 / 类属性 perm_key / 未配置默认拒绝
 - perm_class：工厂动态生成权限类
-- IsSuperAdmin / CanManageUsers / CanReadAudit / RequireKnowledgePerm /
+- IsSuperAdmin / CanManageUsers / RequireKnowledgePerm /
   IsAdminOrOps / CanViewAnalytics：各权限点判定与默认值
 
 采用 mock：
@@ -19,7 +19,6 @@ from apps.users.permissions import (
     perm_class,
     IsSuperAdmin,
     CanManageUsers,
-    CanReadAudit,
     RequireKnowledgePerm,
     IsAdminOrOps,
     CanViewAnalytics,
@@ -151,22 +150,6 @@ class TestCanManageUsers:
             assert CanManageUsers().has_permission(_req(), _view()) is True
         assert mock_hp.call_args_list[0][0][1] == 'user.manage_all'
         assert mock_hp.call_args_list[1][0][1] == 'user.manage'
-
-
-@pytest.mark.unit
-class TestCanReadAudit:
-    """CanReadAudit audit.log.read"""
-
-    def test_super_admin_allowed(self):
-        assert CanReadAudit().has_permission(_req(super_admin=True), _view()) is True
-
-    def test_permission_allowed(self):
-        with patch('apps.users.permissions.has_permission', return_value=True):
-            assert CanReadAudit().has_permission(_req(), _view()) is True
-
-    def test_permission_denied(self):
-        with patch('apps.users.permissions.has_permission', return_value=False):
-            assert CanReadAudit().has_permission(_req(), _view()) is False
 
 
 @pytest.mark.unit

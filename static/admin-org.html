@@ -163,35 +163,11 @@
 		<div class="team-card" id="teamCard-__TEAM_ID__">
 			<div class="team-card-info">
 				<span class="team-card-name">__NAME__</span>
+				<span class="text-sub text-sm">__USER_COUNT__ 人</span>
 				<span class="team-card-leader">__LEADER__</span>
 			</div>
 			<div class="team-card-actions">
 				__ACTIONS__
-			</div>
-		</div>
-		<div id="teamForm-__TEAM_ID__" class="team-form hidden">
-			<div class="team-form-editing">
-				<div class="flex items-center justify-between mb-12">
-					<div class="text-sm font-medium">编辑团队：<span id="teamFormTitle-__TEAM_ID__"></span></div>
-					<button class="btn btn-sm btn-ghost" onclick="cancelTeamEdit()" style="font-size:18px">&times;</button>
-				</div>
-				<input type="hidden" class="team-form-id">
-				<div class="form-item">
-					<label class="form-label">团队名称 <span class="required">*</span></label>
-					<input class="team-form-name input" placeholder="如: AI 平台组">
-				</div>
-				<div class="form-item">
-					<label class="form-label">编码 <span class="form-hint">（留空自动生成，含部门前缀）</span></label>
-					<input class="team-form-code input" placeholder="如: yfzx_aiptz">
-				</div>
-				<div class="form-item">
-					<label class="form-label">描述</label>
-					<input class="team-form-desc input" placeholder="团队描述">
-				</div>
-				<div class="flex justify-end gap-8 mt-16">
-					<button class="btn btn-sm btn-outline" onclick="cancelTeamEdit()">取消</button>
-					<button class="btn btn-sm btn-primary" onclick="saveTeam(__TEAM_ID__)">保存</button>
-				</div>
 			</div>
 		</div>
 	</template>

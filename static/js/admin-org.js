@@ -372,6 +372,8 @@ function openDeptModal(id) {
 	showModal('deptModal');
 }
 
+// 部门增删改统一走组织变更工单:提交后由后端 create_org_ticket 创建审批工单,
+// 审批通过后工单执行层落库(删除为高风险双审,增改为单审),页面仅提示工单号
 async function saveDept() {
 	if (_saving) return;
 	const id = document.getElementById('deptId').value;
@@ -381,26 +383,42 @@ async function saveDept() {
 	const body = { name, code: code || undefined };
 	_saving = true;
 	try {
+		let resp;
 		if (id) {
-			await api.patchJson(`${API_BASE}/departments/${id}/`, body);
-			toast('部门已更新', 'success');
+			resp = await api.patchJson(`${API_BASE}/departments/${id}/`, body);
 		} else {
-			await api.postJson(`${API_BASE}/departments/`, body);
-			toast('部门已添加', 'success');
+			resp = await api.postJson(`${API_BASE}/departments/`, body);
 		}
+		toast(`已创建审批工单 ${resp.ticket_no}，审批通过后生效`, 'info');
 		closeModal('deptModal');
 		await loadDepts();
-	} catch (e) { toast('保存失败: ' + escapeHtml(e.message), 'error'); }
+	} catch (e) { toast('提交失败: ' + escapeHtml(e.message), 'error'); }
 	finally { _saving = false; }
 }
 
-async function deleteDept(id, name) {
-	if (!confirm(`确认删除部门"${name}"？仅当该部门下无用户且无团队时才能删除。`)) return;
-	try {
-		await api.deleteJson(`${API_BASE}/departments/${id}/`);
-		toast('部门已删除', 'success');
-		await loadDepts();
-	} catch (e) { toast('删除失败: ' + escapeHtml(e.message), 'error'); }
+// 部门删除:自定义二次确认弹窗(common.js showConfirmDialog,层级高于普通弹窗),
+// 确认后提交删除工单(高风险,需双审后生效)
+function deleteDept(id, name) {
+	showConfirmDialog({
+		title: '删除部门',
+		bannerText: `删除部门"${escapeHtml(name)}"需双审，审批通过后生效`,
+		bannerType: 'danger',
+		bannerIcon: '⚠',
+		buttons: [
+			{ text: '取消', type: 'cancel' },
+			{
+				text: '确认删除', type: 'danger',
+				onClick: async (ctx) => {
+					try {
+						const res = await api.deleteJson(`${API_BASE}/departments/${id}/`);
+						ctx.close();
+						toast(`已创建审批工单 ${res.ticket_no}，需双审后生效`, 'info');
+						await loadDepts();
+					} catch (e) { ctx.setError(e.message || '删除失败'); }
+				}
+			}
+		]
+	});
 }
 
 // ====================== 团队管理 ======================
@@ -408,7 +426,6 @@ function openTeamManageModal(deptId) {
 	_currentManageDeptId = deptId;
 	const dept = allDepts.find(d => d.id === deptId);
 	document.getElementById('teamManageModalTitle').textContent = `管理团队 - ${dept ? dept.name : ''}`;
-	cancelTeamEdit();
 	renderTeamManageList(dept);
 	showModal('teamManageModal');
 }
@@ -425,6 +442,8 @@ function renderTeamManageList(dept) {
 		const tLeader = t.leader_name ? `<span>TL: ${escapeHtml(t.leader_name)}</span>` : '';
 		return tmpl
 			.replace(/__NAME__/g, escapeHtml(t.name))
+			// 团队名后的成员数量(user_count 由后端 Prefetch annotate 提供)
+			.replace(/__USER_COUNT__/g, t.user_count || 0)
 			.replace(/__LEADER__/g, tLeader)
 			.replace(/__TEAM_ID__/g, t.id)
 			.replace(/__NAME_ESC__/g, escapeQuote(t.name))
@@ -432,154 +451,104 @@ function renderTeamManageList(dept) {
 	}).join('');
 }
 
-function cancelTeamEdit() {
-	const allForms = document.querySelectorAll('.team-form');
-	allForms.forEach(f => {
-		f.classList.add('hidden');
-		const idInput = f.querySelector('.team-form-id');
-		const nameInput = f.querySelector('.team-form-name');
-		const codeInput = f.querySelector('.team-form-code');
-		const descInput = f.querySelector('.team-form-desc');
-		if (idInput) idInput.value = '';
-		if (nameInput) nameInput.value = '';
-		if (codeInput) codeInput.value = '';
-		if (descInput) descInput.value = '';
-	});
-	const addForm = document.getElementById('teamAddForm');
-	if (addForm) {
-		addForm.remove();
-	}
-	const listDiv = document.getElementById('teamManageList');
-	if (listDiv) {
-		listDiv.classList.remove('team-manage-editing');
-	}
-	const allCards = document.querySelectorAll('.team-card');
-	allCards.forEach(c => c.classList.remove('team-card-editing'));
-}
-
+// 团队新增/编辑二级弹窗(showConfirmDialog 层级高于团队管理弹窗):
+// 表单内联在确认弹窗 body,提交即创建组织变更工单,审批通过后生效
 function openTeamForm(teamId) {
-	cancelTeamEdit();
-
-	if (teamId) {
-		editTeam(teamId);
-	} else {
-		const list = document.getElementById('teamManageList');
-		if (list) {
-			list.classList.add('team-manage-editing');
-		}
-		const addForm = document.createElement('div');
-		addForm.id = 'teamAddForm';
-		addForm.className = 'team-form';
-		addForm.innerHTML = `
-			<div class="team-form-editing">
-				<div class="flex items-center justify-between mb-12">
-					<div class="text-sm font-medium">新增团队</div>
-					<button class="btn btn-sm btn-ghost" onclick="cancelTeamEdit()" style="font-size:18px">&times;</button>
-				</div>
-				<input type="hidden" class="team-form-id">
-				<div class="form-item">
-					<label class="form-label">团队名称 <span class="required">*</span></label>
-					<input class="team-form-name input" placeholder="如: AI 平台组">
-				</div>
-				<div class="form-item">
-					<label class="form-label">编码 <span class="form-hint">（留空自动生成，含部门前缀）</span></label>
-					<input class="team-form-code input" placeholder="如: yfzx_aiptz">
-				</div>
-				<div class="form-item">
-				<label class="form-label">描述</label>
-				<input class="team-form-desc input" placeholder="团队描述">
-			</div>
-			<div class="flex justify-end gap-8 mt-16">
-				<button class="btn btn-sm btn-outline" onclick="cancelTeamEdit()">取消</button>
-				<button class="btn btn-sm btn-primary" onclick="saveTeam()">保存</button>
-			</div>
-		</div>
-	`;
-		list.appendChild(addForm);
-	}
-}
-
-function editTeam(teamId) {
-	cancelTeamEdit();
-	const formDiv = document.getElementById(`teamForm-${teamId}`);
-	if (!formDiv) return;
-
 	const dept = allDepts.find(d => d.id === _currentManageDeptId);
-	const team = dept ? (dept.teams || []).find(t => t.id === teamId) : null;
-	if (!team) return;
-
-	const listDiv = document.getElementById('teamManageList');
-	if (listDiv) {
-		listDiv.classList.add('team-manage-editing');
-	}
-
-	const cardDiv = document.getElementById(`teamCard-${teamId}`);
-	if (cardDiv) {
-		cardDiv.classList.add('team-card-editing');
-	}
-
-	const titleSpan = document.getElementById(`teamFormTitle-${teamId}`);
-	if (titleSpan) {
-		titleSpan.textContent = team.name;
-	}
-
-	formDiv.classList.remove('hidden');
-	formDiv.querySelector('.team-form-id').value = team.id;
-	formDiv.querySelector('.team-form-name').value = team.name;
-	formDiv.querySelector('.team-form-code').value = team.code || '';
-	formDiv.querySelector('.team-form-desc').value = team.description || '';
-}
-
-async function saveTeam(teamId) {
-	if (_saving) return;
-
-	let form;
-	if (teamId) {
-		form = document.getElementById(`teamForm-${teamId}`);
-	} else {
-		form = document.getElementById('teamAddForm');
-	}
-
-	if (!form) return;
-
-	const id = form.querySelector('.team-form-id').value;
-	const deptId = _currentManageDeptId;
-	const name = form.querySelector('.team-form-name').value.trim();
-	const code = form.querySelector('.team-form-code').value.trim();
-	const desc = form.querySelector('.team-form-desc').value.trim();
-
-	if (!name) { toast('请输入团队名称', 'warning'); return; }
-	if (!deptId) { toast('请先选择所属部门', 'warning'); return; }
-	const deptIdNum = parseInt(deptId);
-	if (isNaN(deptIdNum)) { toast('部门ID无效', 'warning'); return; }
-
-	// 团队组长通过"任命组长"发起工单设置,不随组织基本信息一起提交
-	const body = { name, code: code || undefined, description: desc || undefined, department_id: deptIdNum };
-
-	_saving = true;
-	try {
-		if (id) {
-			await api.patchJson(`${API_BASE}/teams/${id}/`, body);
-			toast('团队已更新', 'success');
-		} else {
-			await api.postJson(`${API_BASE}/teams/`, body);
-			toast('团队已添加', 'success');
+	if (!dept) return;
+	const isEdit = !!teamId;
+	const team = isEdit ? (dept.teams || []).find(t => t.id === teamId) : null;
+	if (isEdit && !team) return;
+	showConfirmDialog({
+		title: isEdit ? '编辑团队' : '新增团队',
+		bannerText: isEdit
+			? `编辑团队"${escapeHtml(team.name)}"需审批，审批通过后生效`
+			: '团队新增需审批，审批通过后生效',
+		bannerType: 'info',
+		bannerIcon: '✏️',
+		bodyHtml:
+			'<div class="form-item">' +
+			'  <label class="form-label">团队名称 <span class="required">*</span></label>' +
+			'  <input class="input" id="dlg-team-name" style="width:100%" placeholder="如: AI 平台组" value="' + escapeHtml(team ? team.name : '') + '">' +
+			'</div>' +
+			'<div class="form-item">' +
+			'  <label class="form-label">编码 <span class="form-hint">（留空自动生成，含部门前缀）</span></label>' +
+			'  <input class="input" id="dlg-team-code" style="width:100%" placeholder="如: yfzx_aiptz" value="' + escapeHtml(team ? (team.code || '') : '') + '">' +
+			'</div>' +
+			'<div class="form-item" style="margin-bottom:0">' +
+			'  <label class="form-label">描述</label>' +
+			'  <input class="input" id="dlg-team-desc" style="width:100%" placeholder="团队描述" value="' + escapeHtml(team ? (team.description || '') : '') + '">' +
+			'</div>',
+		buttons: [
+			{ text: '取消', type: 'cancel' },
+			{
+				text: isEdit ? '提交修改' : '提交新增', type: 'primary',
+				onClick: async (ctx) => {
+					if (_saving) return;
+					const name = document.getElementById('dlg-team-name').value.trim();
+					const code = document.getElementById('dlg-team-code').value.trim();
+					const desc = document.getElementById('dlg-team-desc').value.trim();
+					if (!name) { ctx.setError('请输入团队名称'); return; }
+					// 团队组长通过"任命组长"发起工单设置,不随组织基本信息一起提交
+					const body = { name, code: code || undefined, description: desc || undefined, department_id: _currentManageDeptId };
+					_saving = true;
+					try {
+						let resp;
+						if (isEdit) {
+							resp = await api.patchJson(`${API_BASE}/teams/${teamId}/`, body);
+						} else {
+							resp = await api.postJson(`${API_BASE}/teams/`, body);
+						}
+						ctx.close();
+						toast(`已创建审批工单 ${resp.ticket_no}，审批通过后生效`, 'info');
+						await loadDepts();
+						const d = allDepts.find(x => x.id === _currentManageDeptId);
+						renderTeamManageList(d);
+					} catch (e) { ctx.setError(e.message || '提交失败'); }
+					finally { _saving = false; }
+				}
+			}
+		],
+		onShow: (ctx) => {
+			document.getElementById('dlg-team-name').focus();
+			// Enter 快捷键等同于点击主按钮(primary 按钮 class 为 btn-save)
+			ctx.el.addEventListener('keydown', (ev) => {
+				if (ev.key === 'Enter') {
+					ev.preventDefault();
+					ctx.el.querySelector('.btn-save')?.click();
+				}
+			});
 		}
-		cancelTeamEdit();
-		await loadDepts();
-		const dept = allDepts.find(d => d.id === _currentManageDeptId);
-		renderTeamManageList(dept);
-	} catch (e) { toast('保存失败: ' + escapeHtml(e.message), 'error'); }
-	finally { _saving = false; }
+	});
 }
 
-async function deleteTeam(id, name) {
-	if (!confirm(`确认删除团队"${name}"？仅当该团队下无用户时才能删除。`)) return;
-	try {
-		await api.deleteJson(`${API_BASE}/teams/${id}/`);
-		toast('团队已删除', 'success');
-		await loadDepts();
-		const dept = allDepts.find(d => d.id === _currentManageDeptId);
-		renderTeamManageList(dept);
-	} catch (e) { toast('删除失败: ' + escapeHtml(e.message), 'error'); }
+// 编辑入口:复用 openTeamForm 二级弹窗(isEdit 模式预填当前团队信息)
+function editTeam(teamId) {
+	openTeamForm(teamId);
+}
+
+// 团队删除:二级确认弹窗 → 提交删除工单(高风险,需双审后生效)
+function deleteTeam(id, name) {
+	showConfirmDialog({
+		title: '删除团队',
+		bannerText: `删除团队"${escapeHtml(name)}"需双审，审批通过后生效`,
+		bannerType: 'danger',
+		bannerIcon: '⚠',
+		buttons: [
+			{ text: '取消', type: 'cancel' },
+			{
+				text: '确认删除', type: 'danger',
+				onClick: async (ctx) => {
+					try {
+						const res = await api.deleteJson(`${API_BASE}/teams/${id}/`);
+						ctx.close();
+						toast(`已创建审批工单 ${res.ticket_no}，需双审后生效`, 'info');
+						await loadDepts();
+						const dept = allDepts.find(d => d.id === _currentManageDeptId);
+						renderTeamManageList(dept);
+					} catch (e) { ctx.setError(e.message || '删除失败'); }
+				}
+			}
+		]
+	});
 }

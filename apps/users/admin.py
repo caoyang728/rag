@@ -111,9 +111,24 @@ class TicketModelDetailAdmin(admin.ModelAdmin):
 
 @admin.register(PermissionAuditLog)
 class PermissionAuditLogAdmin(admin.ModelAdmin):
-    """统一审计日志（只读，永不删）"""
+    """统一审计日志（只读，永不删）
+
+    审计日志合规铁律：只 INSERT 不删，admin 侧通过权限方法禁止修改/删除。
+    正常写入由 audit_service.write_audit 通过 ORM create 完成，不经过 admin。
+    """
     list_display = ("log_id", "actor", "action", "target_type", "target_id", "result", "created_at")
     list_filter = ("action", "target_type", "result")
     search_fields = ("actor__username", "target_id")
-    # 审计日志只允许查看，不允许在 admin 中增删改
     readonly_fields = [f.name for f in PermissionAuditLog._meta.fields]
+
+    def has_add_permission(self, request):
+        # 审计日志不允许通过 admin 新增（审计写入仅由 audit_service 完成）
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        # 审计日志不允许修改（合规留痕不可篡改）
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        # 审计日志不允许删除（合规铁律：永不删）
+        return False

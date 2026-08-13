@@ -100,6 +100,7 @@ class TicketBizType(models.TextChoices):
     - schedule：定时任务变更，业务字段在主表 detail JSON
     - agent：Agent 工作流人工确认（HITL），详情在 TicketAgentApprovalDetail
     - security：安全配置变更（IP 白名单/黑名单/敏感词），详情在 TicketSecurityDetail
+    - org：组织架构变更（部门/团队增删改），详情在 TicketOrgDetail
     """
     PERMISSION = 'permission', _('权限审批')
     CONFIG = 'config', _('配置变更')
@@ -107,6 +108,7 @@ class TicketBizType(models.TextChoices):
     SCHEDULE = 'schedule', _('定时任务')
     AGENT = 'agent', _('Agent审批')
     SECURITY = 'security', _('安全配置')
+    ORG = 'org', _('组织变更')
 
 
 class UserStatus(models.TextChoices):
@@ -270,8 +272,12 @@ class User(AbstractBaseUser):
         return f'{self.username}({self.real_name})'
 
     def save(self, *args, **kwargs):
-        """保存拦截 —— super_admin 不可被禁用/删除（防止误操作锁死系统）"""
-        if self.pk:
+        """保存拦截 —— super_admin 不可被禁用/删除（防止误操作锁死系统）
+
+        仅在 status 或 is_deleted 字段可能发生变化时才检查，避免每次 save
+        （如更新 last_login_at / password）都触发额外 DB 查询。
+        """
+        if self.pk and self._is_protected_field_change(kwargs.get('update_fields')):
             try:
                 old = User.objects.get(pk=self.pk)
                 # super_admin 是系统级快路径角色，禁用/删除会导致管理入口锁死
@@ -287,6 +293,19 @@ class User(AbstractBaseUser):
             except User.DoesNotExist:
                 pass
         super().save(*args, **kwargs)
+
+    def _is_protected_field_change(self, update_fields):
+        """判断本次 save 是否可能涉及 status 或 is_deleted 字段变更
+
+        update_fields 存在时仅在包含相关字段时返回 True；
+        update_fields 不存在（全量 save）时保守返回 True。
+        """
+        if update_fields is None:
+            # 全量 save，保守返回 True
+            return True
+        # 仅当 update_fields 包含受保护字段时才需要检查
+        protected = {'status', 'is_deleted'}
+        return bool(protected & set(update_fields))
 
     # ------------------------------------------------------------------
     # 状态属性
@@ -322,11 +341,19 @@ class User(AbstractBaseUser):
         判定逻辑：检查 role_key='super_admin'，绕过所有 permission_key 判定。
         这是唯一保留 role_key 判定的地方，因为超管需要绕过所有
         permission_key 检查以避免循环查询；其他角色一律走 permission_key。
+
+        实例级缓存：单次请求内多次调用（权限类/视图/服务层）不再重复查库，
+        通过 _is_super_admin_cache 属性标记是否已缓存，避免 hasattr 开销。
         """
-        return UserRoleRel.objects.filter(
+        # 实例级缓存：首次查询后挂载到实例，后续调用直接返回
+        if hasattr(self, '_is_super_admin_cached'):
+            return self._is_super_admin_cached
+        result = UserRoleRel.objects.filter(
             user=self, role__role_key='super_admin',
             status=GrantStatus.ACTIVE,
         ).exists()
+        self._is_super_admin_cached = result
+        return result
 
     @property
     def is_kb_admin(self):
@@ -340,11 +367,12 @@ class User(AbstractBaseUser):
 
     @property
     def is_compliance_admin(self):
-        """是否合规管理员 —— 审计视角角色，可查看全部工单（只读）"""
-        return self.is_super_admin or UserRoleRel.objects.filter(
-            user=self, role__role_key='compliance_admin',
-            status=GrantStatus.ACTIVE,
-        ).exists()
+        """是否合规管理员 —— 审计视角角色，可查看全部工单（只读）
+
+        基于 permission_key 判定（与 RBAC 设计一致：代码只判断 permission_key，
+        永不判断 role_key）。compliance_admin 角色持有 compliance.audit 权限点。
+        """
+        return self.is_super_admin or has_permission(self, 'compliance.audit')
 
     # ------------------------------------------------------------------
     # Django auth 兼容方法
@@ -663,6 +691,11 @@ class TicketList(models.Model):
         return getattr(self, 'agent_approval_detail', None)
 
     @property
+    def _od(self):
+        # org 组织变更详情子表（biz_type=org 时有效）
+        return getattr(self, 'org_detail', None)
+
+    @property
     def change_type(self):
         d = self._pd
         return d.change_type if d else None
@@ -720,7 +753,7 @@ class TicketList(models.Model):
     @property
     def reason(self):
         # 统一 reason 代理：各类型详情子表各自存储申请/变更原因，按类型依次取
-        for d in (self._pd, self._cd, self._sd, self._md, self._ad):
+        for d in (self._pd, self._cd, self._sd, self._md, self._ad, self._od):
             if d:
                 return d.reason
         return ''
@@ -972,6 +1005,64 @@ class TicketSecurityDetail(models.Model):
         return f'SecurityDetail<{self.ticket_id}> {self.security_type}:{self.operation}'
 
 
+class OrgChangeType(models.TextChoices):
+    """组织变更目标类型 —— TicketOrgDetail.org_type 枚举
+
+    标识本次工单变更的是部门还是团队，用于审批展示与执行时路由到对应逻辑。
+    """
+    DEPT = 'dept', _('部门')
+    TEAM = 'team', _('团队')
+
+
+class OrgOperation(models.TextChoices):
+    """组织变更操作类型 —— TicketOrgDetail.operation 枚举
+
+    标识本次工单对目标组织的操作类型，用于审批展示与执行时选择对应逻辑。
+    """
+    ADD = 'add', _('新增')
+    EDIT = 'edit', _('编辑')
+    DELETE = 'delete', _('删除')
+
+
+class TicketOrgDetail(models.Model):
+    """组织架构变更工单详情 —— 关联统一主表，biz_type=org
+
+    与主表 TicketList 一对一：主表管流程（审批链/状态/时间），本表管业务
+    （部门还是团队、什么操作、变更前后数据快照）。
+
+    风险分级策略（由创建方在提交时决定 risk_level）：
+    - 普通（单审 USER_ADMIN）：部门/团队新增、编辑
+    - 高风险（双审 USER_ADMIN + SUPER_ADMIN）：部门/团队删除（破坏性操作）
+
+    执行时机：审批链全部通过后由 _execute_org_change 落库（Department/Team 的
+    post_save 信号会自动同步知识节点树），创建工单时只做预检不落库。
+    """
+    ticket = models.OneToOneField(TicketList, on_delete=models.CASCADE,
+                                  related_name='org_detail',
+                                  help_text=_('关联统一工单主表'))
+    org_type = models.CharField(max_length=16, choices=OrgChangeType.choices,
+                                help_text=_('组织类型（部门/团队）'))
+    operation = models.CharField(max_length=16, choices=OrgOperation.choices,
+                                 help_text=_('操作类型'))
+    target_data = models.JSONField(help_text=_('目标数据快照（如 id/name/code/description/department_id 等）'))
+    old_data = models.JSONField(null=True, blank=True,
+                                help_text=_('变更前数据（编辑/删除时）'))
+    new_data = models.JSONField(null=True, blank=True,
+                                help_text=_('变更后数据（新增/编辑时）'))
+    reason = models.TextField(blank=True, default='',
+                              help_text=_('变更原因'))
+
+    class Meta:
+        db_table = 'org_ticket_detail'
+        verbose_name = _('组织变更工单详情')
+        indexes = [
+            models.Index(fields=['org_type'], name='idx_org_detail_type'),
+        ]
+
+    def __str__(self):
+        return f'OrgDetail<{self.ticket_id}> {self.org_type}:{self.operation}'
+
+
 class TicketFlowLog(models.Model):
     """工单流转日志 —— 审批时间线（关联主表，随工单生命周期）
 
@@ -1053,7 +1144,7 @@ class PermissionAuditLog(models.Model):
     """权限操作审计日志 —— 同步写、只追加、永不删
 
     覆盖 action 清单：
-    - 组织架构：DEPT_CREATE/UPDATE/DELETE、TEAM_CREATE/UPDATE/DELETE、USER_INVITE/TRANSFER/LEAVE
+    - 组织架构：DEPT_CREATE/UPDATE/DELETE、TEAM_CREATE/UPDATE/DELETE
     - 知识节点：NODE_CREATE/MOVE/RENAME/DELETE
     - 权限配置：ROLE_GRANT/REVOKE、SCOPE_GRANT/REVOKE、EXPIRE_EXTEND/EXPIRE_AUTO
     - 审批流：TICKET_CREATE/APPROVE/REJECT/CANCEL/EXECUTE
@@ -1224,9 +1315,15 @@ def get_user_data_scope_level(user) -> str:
     if user is None or not getattr(user, 'is_authenticated', False):
         return DataScope.TEAM
 
-    # super_admin 直接全局级
+    # super_admin 直接全局级（不走缓存：见 perm_cache._is_cacheable）
     if user.is_super_admin:
         return DataScope.GLOBAL
+
+    # L4 缓存预取：命中直接返回，未命中回源计算后回填
+    from apps.users.perm_cache import get_scope_level, set_scope_level
+    cached = get_scope_level(user)
+    if cached is not None:
+        return cached
 
     # 收集所有有效角色的 data_scope
     scopes = []
@@ -1239,15 +1336,25 @@ def get_user_data_scope_level(user) -> str:
 
     # viewer 兜底（无 contributor 时 viewer 作为基础数据范围）；
     # contributor 已显式授权时其 data_scope 已在上方 scopes 中，无需重复追加
-    viewer_scope = Role.objects.filter(role_key='viewer').values_list('data_scope', flat=True).first()
+    # 内置角色 data_scope 运行期不变，缓存 1 小时避免检索高频路径未命中 L4 时重复查 DB
+    from django.core.cache import cache
+    viewer_scope = cache.get_or_set(
+        'users:viewer_data_scope',
+        lambda: Role.objects.filter(role_key='viewer').values_list('data_scope', flat=True).first(),
+        timeout=3600,
+    )
     if viewer_scope:
         scopes.append(viewer_scope)
 
     if DataScope.GLOBAL in scopes:
-        return DataScope.GLOBAL
-    if DataScope.DEPT in scopes:
-        return DataScope.DEPT
-    return DataScope.TEAM
+        level = DataScope.GLOBAL
+    elif DataScope.DEPT in scopes:
+        level = DataScope.DEPT
+    else:
+        level = DataScope.TEAM
+    # 回填 L4（super_admin 已在 get_scope_level 内部被拦截 no-op）
+    set_scope_level(user, level)
+    return level
 
 
 def get_user_managed_depts(user) -> set:
@@ -1259,6 +1366,12 @@ def get_user_managed_depts(user) -> set:
     if user is None or not getattr(user, 'is_authenticated', False):
         return set()
 
+    # L2 缓存预取：命中直接返回，未命中回源计算后回填
+    from apps.users.perm_cache import get_scope_dept, set_scope_dept
+    cached = get_scope_dept(user)
+    if cached is not None:
+        return cached
+
     managed = set(
         UserDeptScopeRel.objects.filter(
             _active_grant_filter(), user=user,
@@ -1266,6 +1379,7 @@ def get_user_managed_depts(user) -> set:
     )
     if user.department_id:
         managed.add(user.department_id)
+    set_scope_dept(user, managed)
     return managed
 
 
@@ -1282,6 +1396,12 @@ def get_user_managed_teams(user) -> set:
     """
     if user is None or not getattr(user, 'is_authenticated', False):
         return set()
+
+    # L3 缓存预取：命中直接返回，未命中回源计算后回填
+    from apps.users.perm_cache import get_scope_team, set_scope_team
+    cached = get_scope_team(user)
+    if cached is not None:
+        return cached
 
     managed = set(
         UserTeamScopeRel.objects.filter(
@@ -1303,6 +1423,7 @@ def get_user_managed_teams(user) -> set:
         )
     if user.team_id:
         managed.add(user.team_id)
+    set_scope_team(user, managed)
     return managed
 
 

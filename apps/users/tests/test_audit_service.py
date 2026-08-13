@@ -1,5 +1,5 @@
 """
-apps.users.audit_service 单元/集成测试 —— 统一权限审计日志写入服务
+apps.users.services.audit_service 单元/集成测试 —— 统一权限审计日志写入服务
 
 覆盖范围：
 - write_audit：只 INSERT 不删、写入失败不阻断主业务（审计可丢、业务不可丢）
@@ -15,8 +15,8 @@ apps.users.audit_service 单元/集成测试 —— 统一权限审计日志写�
 import pytest
 from unittest.mock import patch, MagicMock
 
-from apps.users import audit_service
-from apps.users.audit_service import (
+from apps.users.services import audit_service
+from apps.users.services.audit_service import (
     write_audit, audit_action, AuditContext, AuditAction,
     extract_request_meta, _safe_snapshot,
 )

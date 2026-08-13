@@ -27,7 +27,7 @@ def check_super_admin_count(app_configs, **kwargs):
             role__role_key='super_admin',
             status=GrantStatus.ACTIVE,
         ).values_list('user_id', flat=True).distinct().count()
-    except Exception as e:
+    except Exception:
         # 表未迁移/数据库未就绪时跳过(开发期首次 migrate 会触发)
         return errors
 

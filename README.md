@@ -122,7 +122,7 @@ rag/
 │   │   ├── signals.py          # 部门/团队变更 → 自动同步 KnowledgeNode 树 + 缓存失效
 │   │   ├── views.py            # 部门/团队 CRUD（含删除保护：有成员/有文档→禁止删除）
 │   │   ├── perm_cache.py       # RBAC 权限分层缓存 L1~L5 + 延迟双删（super_admin 不走缓存）
-│   │   ├── audit_service.py    # 统一权限审计日志写入服务（只 INSERT 不删，失败不阻断主业务）
+│   │   ├── services/           # 业务服务层（工单/审批链/用户/组织/审计等，audit_service.py 统一权限审计日志写入服务，只 INSERT 不删，失败不阻断主业务）
 │   │   ├── ticket_service.py   # 权限配置审批工单服务（共享审批池 + 顺序执行 + 状态机）
 │   │   ├── permissions.py      # DRF 自定义权限类
 │   │   └── management/commands/ # grant_superadmin / seed_permissions 管理命令

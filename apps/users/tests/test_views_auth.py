@@ -99,13 +99,13 @@ class TestProfileExtra(UsersAPIExtraBase):
         """用户可更新自己的头像与手机号（ProfileUpdateSerializer 允许字段）"""
         resp = self.client.patch(
             '/api/v1/auth/profile/',
-            data=json.dumps({'avatar_url': 'http://x/avatar.png', 'phone': '13800138000'}),
+            data=json.dumps({'avatar_url': 'https://example.com/avatar.png', 'phone': '13800138000'}),
             content_type='application/json',
             **self.normal_headers,
         )
         assert resp.status_code == 200
         self.normal_user.refresh_from_db()
-        assert self.normal_user.avatar_url == 'http://x/avatar.png'
+        assert self.normal_user.avatar_url == 'https://example.com/avatar.png'
         assert self.normal_user.phone == '13800138000'
 
 

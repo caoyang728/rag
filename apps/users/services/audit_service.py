@@ -1,5 +1,5 @@
 """
-apps.users.audit_service - 统一权限审计日志写入服务
+apps.users.services.audit_service - 统一权限审计日志写入服务
 
 业务背景：
     所有权限相关操作（组织架构变更、知识节点操作、角色/范围授予与撤销、
@@ -44,9 +44,6 @@ class AuditAction:
     TEAM_CREATE = 'TEAM_CREATE'
     TEAM_UPDATE = 'TEAM_UPDATE'
     TEAM_DELETE = 'TEAM_DELETE'
-    USER_INVITE = 'USER_INVITE'
-    USER_TRANSFER = 'USER_TRANSFER'
-    USER_LEAVE = 'USER_LEAVE'
 
     # ---- 知识节点：节点树结构变更（节点树前 3 层自动同步，此处记录业务层操作）----
     NODE_CREATE = 'NODE_CREATE'
@@ -61,6 +58,7 @@ class AuditAction:
     SCOPE_REVOKE = 'SCOPE_REVOKE'
     EXPIRE_EXTEND = 'EXPIRE_EXTEND'
     EXPIRE_AUTO = 'EXPIRE_AUTO'
+    ROLE_CHANGE = 'ROLE_CHANGE'    # 角色变更（原子撤销旧角色 + 授予新角色）
 
     # ---- 审批流：工单全生命周期（工单本身永不删，状态流转全程留痕）----
     TICKET_CREATE = 'TICKET_CREATE'
@@ -152,10 +150,9 @@ def write_audit(actor, action, target_type, target_id=None, target_user=None,
         # 审计写入失败不得阻断主业务：仅记日志便于运维排查，不向上抛出。
         # 常见失败原因：DB 连接抖动、IP/UA 格式异常、字段超长；均不应影响业务事务。
         logger.error(
-            '[Audit] write_audit failed (不阻断主业务): action={} target_type={} '
-            'target_id={} actor={} result={} err={}',
-            action, target_type, target_id,
-            getattr(actor, 'id', None), result, exc,
+            f'[Audit] write_audit failed (不阻断主业务): action={action} '
+            f'target_type={target_type} target_id={target_id} '
+            f'actor={getattr(actor, "id", None)} result={result} err={exc}'
         )
         return None
 
@@ -257,7 +254,7 @@ def _safe_snapshot(fn, args, kwargs):
         snapshot = fn(args, kwargs)
         return snapshot if isinstance(snapshot, dict) else None
     except Exception as exc:  # noqa: BLE001 —— 快照回调兜底
-        logger.warning('[Audit] snapshot fn failed (忽略，快照置空): err={}', exc)
+        logger.warning(f'[Audit] snapshot fn failed (忽略，快照置空): err={exc}')
         return None
 
 
@@ -340,31 +337,10 @@ class AuditContext:
 def extract_request_meta(request):
     """从 DRF/Django request 提取 (ip_address, user_agent)
 
-    功能：
-        统一解析客户端 IP 与 UA，供 write_audit/audit_action 使用，避免各视图
-        重复实现且口径不一致。
-
-    IP 解析规则：
-        优先取 X-Forwarded-For 第一个值（反向代理场景下的真实客户端 IP）；
-        无则回退到 REMOTE_ADDR。取不到返回 None（适配 GenericIPAddressField 可空）。
-
-    UA 解析规则：
-        取 HTTP_USER_AGENT 并截断至 512 字符（对齐 PermissionAuditLog.user_agent
-        字段 max_length=512，防止超长 UA 写入失败）。
+    复用 apps.users.utils._client_ip / _client_ua，保证 IP/UA 解析口径一致。
 
     输入：DRF Request 或 Django HttpRequest。
-
-    输出：元组 (ip_address, user_agent)；ip_address 为 None 或合法 IP 串，
-          user_agent 为 str（可能为空串）。
+    输出：元组 (ip_address, user_agent)。
     """
-    # X-Forwarded-For 形如 "client, proxy1, proxy2"，取首个即最原始客户端。
-    xff = request.META.get('HTTP_X_FORWARDED_FOR', '')
-    if xff:
-        ip = xff.split(',')[0].strip()
-    else:
-        ip = request.META.get('REMOTE_ADDR', '')
-    # 空串归一为 None，避免 GenericIPAddressField 校验失败。
-    ip = ip or None
-
-    user_agent = request.META.get('HTTP_USER_AGENT', '')[:512]
-    return ip, user_agent
+    from apps.users.utils import _client_ip, _client_ua
+    return _client_ip(request), _client_ua(request)

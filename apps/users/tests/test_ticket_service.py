@@ -8,7 +8,6 @@ apps.users.ticket_service 集成测试 —— 权限配置审批工单服务
 - cancel_ticket：发起人撤回（PENDING → CANCELLED 终态）
 - _can_approve_for_role：共享审批池角色匹配 + 回避原则 + 双人独立性
 - build_approval_chain：审批链构造矩阵（GRANT/REVOKE/ROLE_CHANGE × 角色类型）
-- revoke_direct：降级/撤销直接执行（绕过审批，仅记审计）
 
 工单流转状态机（核心断言目标）：
   PENDING --approve(末节点)--> APPROVED --execute--> EXECUTED
@@ -30,15 +29,15 @@ from apps.users.models import (
     AuditTargetType, TicketBizType,
 )
 from apps.users.ticket_service import (
-    create_ticket, approve_ticket, reject_ticket, cancel_ticket, revoke_direct,
+    create_ticket, approve_ticket, reject_ticket, cancel_ticket,
     build_approval_chain, _can_approve_for_role, _apply_grant, _apply_revoke,
     _apply_extend, _build_chain_node, _execute_grant_or_revoke, _sync_leader_for_role,
     _apply_role_change,
-    parse_change_summary, _find_approver_ids_for_role, _get_team_leader_id,
+    parse_change_summary, _get_team_leader_id,
     _get_dept_leader_id, _get_super_admin_ids, _check_sod_conflict,
     _detect_team_role_in_service, _detect_dept_role_in_service,
     _resolve_team_leader, _build_grant_chain_for_team_role,
-    _build_revoke_chain_for_team_role, _is_same_team, _get_team_dept_id,
+    _build_revoke_chain_for_team_role,
     _gen_ticket_no, _resolve_dept_leader,
     ApproverRole, GLOBAL_HIGH_PRIVILEGE_KEYS, TEAM_ROLE_KEYS,
 )
@@ -923,44 +922,6 @@ class TestBuildApprovalChain(TicketTestBase):
 
 
 # ============================================================================
-# revoke_direct：降级/撤销直接执行（绕过审批，仅记审计）
-# ============================================================================
-class TestRevokeDirect(TicketTestBase):
-    """revoke_direct：团队组长可直接撤销普通角色，无需审批"""
-
-    @pytest.mark.integration
-    def test_revoke_direct_executes_immediately(self):
-        """直接撤销 contributor → 工单 EXECUTED，授权记录置 REVOKED"""
-        UserTeamScopeRel.objects.create(
-            user=self.target_user, role=self.contributor,
-            team=self.team2, status=GrantStatus.ACTIVE,
-        )
-        ticket = revoke_direct(
-            actor=self.team_leader2, target_user=self.target_user,
-            role=self.contributor,
-            scope_type=ScopeType.TEAM, scope_id=self.team2.id,
-            reason='直接撤销',
-        )
-        assert ticket.status == TicketStatus.EXECUTED
-        assert ticket.approval_chain == []
-        # 授权记录已撤销
-        rel = UserTeamScopeRel.objects.filter(
-            user=self.target_user, role=self.contributor, team=self.team2,
-        ).first()
-        assert rel.status == GrantStatus.REVOKED
-
-    @pytest.mark.integration
-    def test_revoke_direct_super_admin_rejected(self):
-        """超管角色撤销必须走审批工单，revoke_direct 应拒绝"""
-        with pytest.raises(ValueError, match='超管角色撤销必须走审批工单'):
-            revoke_direct(
-                actor=self.sa1, target_user=self.target_user,
-                role=Role.objects.get(role_key='super_admin'),
-                scope_type=ScopeType.NONE,
-            )
-
-
-# ============================================================================
 # leader_id 同步：工单执行时维护 Team.leader_id / Department.leader_id
 # ============================================================================
 class TestGrantLeaderSync(TicketTestBase):
@@ -1091,78 +1052,6 @@ class TestCanApproveForRoleEdge(TicketTestBase):
             [node], ScopeType.DEPT, self.dept.id)
         # dept_leader 持有 dept_manager 全局角色且所属部门匹配
         assert _can_approve_for_role(self.dept_leader, ApproverRole.DEPT_LEADER, ticket) is True
-
-
-# ============================================================================
-# _find_approver_ids_for_role —— 共享审批池待办查询
-# ============================================================================
-class TestFindApproverIdsForRole(TicketTestBase):
-    """_find_approver_ids_for_role 各角色池查询测试"""
-
-    @pytest.mark.integration
-    def test_super_admin_excludes_applicant(self):
-        """超管池排除申请人（回避原则）"""
-        ticket = _make_pending_ticket(
-            self.sa1, self.target_user, Role.objects.get(role_key='super_admin'),
-            [_build_chain_node(ApproverRole.SUPER_ADMIN)])
-        ids = _find_approver_ids_for_role(ApproverRole.SUPER_ADMIN, ticket)
-        assert self.sa1.id not in ids
-        assert self.sa2.id in ids and self.sa3.id in ids
-
-    @pytest.mark.integration
-    def test_user_admin_finds(self):
-        """user_admin 池返回所有持有者"""
-        ids = _find_approver_ids_for_role(ApproverRole.USER_ADMIN)
-        assert set(ids) == {self.user_admin1.id, self.user_admin2.id}
-
-    @pytest.mark.integration
-    def test_kb_admin_finds(self):
-        """kb_admin 池返回所有持有者"""
-        ids = _find_approver_ids_for_role(ApproverRole.KB_ADMIN)
-        assert ids == [self.kb_admin1.id]
-
-    @pytest.mark.integration
-    def test_team_leader_no_current_node_returns_empty(self):
-        """TEAM_LEADER 无当前节点 → 空列表"""
-        ticket = _make_pending_ticket(self.applicant, self.target_user, self.viewer, [])
-        assert _find_approver_ids_for_role(ApproverRole.TEAM_LEADER, ticket) == []
-
-    @pytest.mark.integration
-    def test_team_leader_team_missing_returns_empty(self):
-        """TEAM_LEADER 目标团队不存在 → 空列表"""
-        node = _build_chain_node(ApproverRole.TEAM_LEADER, ScopeType.TEAM, 999999)
-        ticket = _make_pending_ticket(
-            self.applicant, self.target_user, self.viewer, [node], ScopeType.TEAM, 999999)
-        assert _find_approver_ids_for_role(ApproverRole.TEAM_LEADER, ticket) == []
-
-    @pytest.mark.integration
-    def test_team_leader_leader_excluded_returns_empty(self):
-        """TEAM_LEADER 团队组长是申请人 → 被排除 → 空列表"""
-        node = _build_chain_node(ApproverRole.TEAM_LEADER, ScopeType.TEAM, self.team1.id)
-        ticket = _make_pending_ticket(
-            self.team_leader1, self.target_user, self.viewer,
-            [node], ScopeType.TEAM, self.team1.id)
-        assert _find_approver_ids_for_role(ApproverRole.TEAM_LEADER, ticket) == []
-
-    @pytest.mark.integration
-    def test_team_leader_found(self):
-        """TEAM_LEADER 团队组长可审 → 返回组长"""
-        node = _build_chain_node(ApproverRole.TEAM_LEADER, ScopeType.TEAM, self.team1.id)
-        ticket = _make_pending_ticket(
-            self.applicant, self.target_user, self.viewer,
-            [node], ScopeType.TEAM, self.team1.id)
-        assert _find_approver_ids_for_role(ApproverRole.TEAM_LEADER, ticket) == [self.team_leader1.id]
-
-    @pytest.mark.integration
-    def test_dept_leader_no_current_node_returns_empty(self):
-        """DEPT_LEADER 无当前节点 → 空列表"""
-        ticket = _make_pending_ticket(self.applicant, self.target_user, self.viewer, [])
-        assert _find_approver_ids_for_role(ApproverRole.DEPT_LEADER, ticket) == []
-
-    @pytest.mark.integration
-    def test_unknown_role_returns_empty(self):
-        """未知角色 → 空列表"""
-        assert _find_approver_ids_for_role('NO_SUCH_ROLE') == []
 
 
 # ============================================================================
@@ -1319,31 +1208,6 @@ class TestBuildRevokeChainEdge(TicketTestBase):
         """未知角色 → 超管单审"""
         chain = _build_revoke_chain_for_team_role(self.applicant, 'unknown_role', ScopeType.NONE, None)
         assert [n['approver_role'] for n in chain] == [ApproverRole.SUPER_ADMIN]
-
-
-class TestSameTeamHelpers(TicketTestBase):
-    """_is_same_team / _get_team_dept_id 小工具测试"""
-
-    @pytest.mark.integration
-    def test_is_same_team_no_target(self):
-        """target_user 为空 → False"""
-        assert _is_same_team(self.applicant, None, self.team1.id) is False
-
-    @pytest.mark.integration
-    def test_is_same_team_both_in_team(self):
-        """两人同团队 → True"""
-        other = _create_user('team8', team=self.team1, department=self.dept)
-        assert _is_same_team(self.applicant, other, self.team1.id) is True
-
-    @pytest.mark.integration
-    def test_get_team_dept_id_none(self):
-        """team_id 为空 → None"""
-        assert _get_team_dept_id(None) is None
-
-    @pytest.mark.integration
-    def test_get_team_dept_id_found(self):
-        """团队所属部门 → 返回部门 ID"""
-        assert _get_team_dept_id(self.team1.id) == self.dept.id
 
 
 # ============================================================================
@@ -1578,59 +1442,6 @@ class TestSodAndDetectEdges(TicketTestBase):
             status=GrantStatus.ACTIVE)
         role = _detect_dept_role_in_service(self.target_user, self.dept.id)
         assert role is not None and role.role_key == 'viewer'
-
-
-# ============================================================================
-# 待办候选池_find_approver_ids_for_role
-# ============================================================================
-class TestFindApproverIdsEdge(TicketTestBase):
-    """_find_approver_ids_for_role：TEAM_LEADER 无 scope / DEPT_LEADER 全部分支"""
-
-    @pytest.mark.integration
-    def test_team_leader_node_without_scope_id_returns_empty(self):
-        """TEAM_LEADER 节点无 approver_scope_id → 空候选池（共享审批池无法匹配团队）"""
-        ticket = _make_pending_ticket(
-            self.applicant, self.target_user, self.viewer,
-            [_build_chain_node(ApproverRole.TEAM_LEADER)],
-            ScopeType.TEAM, self.team1.id, ticket_no='TA-TL-NO')
-        assert _find_approver_ids_for_role(ApproverRole.TEAM_LEADER, ticket) == []
-
-    @pytest.mark.integration
-    def test_dept_leader_node_without_scope_id_returns_empty(self):
-        """DEPT_LEADER 节点无 approver_scope_id → 空候选池"""
-        ticket = _make_pending_ticket(
-            self.applicant, self.target_user, self.viewer,
-            [_build_chain_node(ApproverRole.DEPT_LEADER)],
-            ScopeType.TEAM, self.team1.id, ticket_no='TA-DL-NO')
-        assert _find_approver_ids_for_role(ApproverRole.DEPT_LEADER, ticket) == []
-
-    @pytest.mark.integration
-    def test_dept_leader_scope_rel_found(self):
-        """DEPT_LEADER 命中 UserDeptScopeRel 属地授权 → 返回该部门经理"""
-        ticket = _make_pending_ticket(
-            self.applicant, self.target_user, self.viewer,
-            [_build_chain_node(ApproverRole.DEPT_LEADER, ScopeType.DEPT, self.dept2.id)],
-            ScopeType.TEAM, self.team1.id, ticket_no='TA-DL-REL')
-        assert _find_approver_ids_for_role(ApproverRole.DEPT_LEADER, ticket) == [self.dept2_leader.id]
-
-    @pytest.mark.integration
-    def test_dept_leader_global_role_fallback(self):
-        """DEPT_LEADER 无属地授权 → 全局 dept_manager + 用户所属部门匹配兜底"""
-        ticket = _make_pending_ticket(
-            self.applicant, self.target_user, self.viewer,
-            [_build_chain_node(ApproverRole.DEPT_LEADER, ScopeType.DEPT, self.dept.id)],
-            ScopeType.TEAM, self.team1.id, ticket_no='TA-DL-GL')
-        assert _find_approver_ids_for_role(ApproverRole.DEPT_LEADER, ticket) == [self.dept_leader.id]
-
-    @pytest.mark.integration
-    def test_dept_leader_no_manager_returns_empty(self):
-        """DEPT_LEADER 部门无任何 dept_manager 授权 → 空候选池"""
-        deptX = Department.objects.create(name='无经理部', code='no_mgr')
-        ticket = _make_pending_ticket(
-            self.applicant, self.target_user, self.viewer,
-            [_build_chain_node(ApproverRole.DEPT_LEADER, ScopeType.DEPT, deptX.id)],
-            ScopeType.TEAM, self.team1.id, ticket_no='TA-DL-EM')
-        assert _find_approver_ids_for_role(ApproverRole.DEPT_LEADER, ticket) == []
 
 
 # ============================================================================

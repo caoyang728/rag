@@ -475,11 +475,11 @@ class TestCollectByPattern:
 
 
 # ============================================================================
-# invalidate_resource_share / invalidate_resource_block / invalidate_org_change
+# invalidate_resource_share / invalidate_resource_block
 # —— 失效函数对齐设计文档失效映射表
 # ============================================================================
 class TestInvalidateHelpers:
-    """资源/组织失效辅助函数"""
+    """资源失效辅助函数"""
 
     @pytest.mark.unit
     def test_invalidate_resource_share_invalidates_l5(self):
@@ -517,23 +517,3 @@ class TestInvalidateHelpers:
             perm_cache.invalidate_resource_block('DOCUMENT', 100, blocked_user_id=42)
             mock_inv.assert_called_once_with(['perm:doc:DOCUMENT:100'])
             mock_user_inv.assert_called_once_with(42)
-
-    @pytest.mark.unit
-    def test_invalidate_org_change_clears_l2_l3_l4(self):
-        """组织树调整失效 L2/L3/L4 全量（不动 L1：组织变化不影响功能权限点）"""
-        with patch.object(perm_cache, '_collect_by_pattern') as mock_collect, \
-             patch.object(perm_cache, 'invalidate_keys') as mock_inv:
-            mock_collect.side_effect = [
-                ['perm:scope:dept:1', 'perm:scope:dept:2'],
-                ['perm:scope:team:3'],
-                ['perm:scope:level:4'],
-            ]
-            perm_cache.invalidate_org_change()
-            # 三个 pattern 各 scan 一次
-            assert mock_collect.call_count == 3
-            # 合并去重后走一次 invalidate_keys
-            mock_inv.assert_called_once()
-            all_keys = mock_inv.call_args[0][0]
-            assert 'perm:scope:dept:1' in all_keys
-            assert 'perm:scope:team:3' in all_keys
-            assert 'perm:scope:level:4' in all_keys

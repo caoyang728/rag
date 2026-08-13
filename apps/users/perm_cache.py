@@ -323,8 +323,7 @@ def invalidate_role_perms(role_id):
         UserDeptScopeRel.objects.filter(role_id=role_id).values_list('user_id', flat=True),
         UserTeamScopeRel.objects.filter(role_id=role_id).values_list('user_id', flat=True),
     ):
-        for uid in qs:
-            keys.append(_key_l1(uid))
+        keys.extend(_key_l1(uid) for uid in qs)
     if keys:
         invalidate_keys(keys)
 
@@ -367,20 +366,16 @@ def invalidate_resource_block(res_type, res_id, blocked_user_id=None):
         invalidate_user_perms(blocked_user_id)
 
 
-def invalidate_org_change():
-    """失效 L2/L3/L4 全量（部门/团队树调整/软删）
+def invalidate_all_scope():
+    """全量失效 L2/L3/L4（组织树调整 / 角色 data_scope 变化时调用）
 
-    场景：部门或团队的增删改、树形结构调整、软删 —— 影响所有用户的可见 dept/team 集合
-    与最高数据范围等级，但无法精确定位受影响用户，按前缀 scan 批量清。
-    不动 L1：组织树变化不改变角色权限点（功能权限），L1 无需失效。
-    LocMem 后端 scan 降级为无操作（开发环境可接受，生产用 Redis）。
+    场景（无法精确定位受影响用户时的保守过失效，权限安全优先）：
+    - Team 新增/删除/启停：影响"授权部门下的活跃团队"集合（L3），
+      持有该部门授权（UserDeptScopeRel）的用户可见团队都可能变化
+    - Role.data_scope 变化：影响持有该角色的用户最高数据范围等级（L4）
+    - 团队/角色变更低频，全量 scan 的成本可接受（与知识模块 allowed_visibility
+      全量清策略一致）；下次请求回源重算即恢复精确。
     """
-    keys = []
-    for pattern in (
-        'perm:scope:dept:*',
-        'perm:scope:team:*',
-        'perm:scope:level:*',
-    ):
-        keys.extend(_collect_by_pattern(pattern))
+    keys = _collect_by_pattern('perm:scope:*')
     if keys:
         invalidate_keys(keys)

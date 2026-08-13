@@ -80,7 +80,7 @@ def _auth_headers(user):
 class FakeRedis:
     """内存版 Redis 客户端 —— 密码重置/图形验证码等依赖 Redis 的接口测试用
 
-    支持 setex/get/delete 三个实际调用点，.data 暴露底层字典供断言读取。
+    支持 setex/get/delete/incr/expire 等实际调用点，.data 暴露底层字典供断言读取。
     初始数据通过构造参数注入（如 {'pwd_reset:normal@test.com': '123456'}）。
     """
 
@@ -102,6 +102,20 @@ class FakeRedis:
     def ttl(self, key):
         # 密码重置防刷依赖 ttl 判断距上次发送时间(300s 过期,>240s 视为 1 分钟内)
         return 300 if key in self.data else -2
+
+    def incr(self, key):
+        """递增计数器（防暴力破解用）"""
+        val = self.data.get(key, 0)
+        try:
+            val = int(val) + 1
+        except (TypeError, ValueError):
+            val = 1
+        self.data[key] = val
+        return val
+
+    def expire(self, key, ttl):
+        """设置过期时间（内存版仅作标记，不做实际过期清理）"""
+        pass
 
 
 class UsersAPIExtraBase(UsersAPITestBase):

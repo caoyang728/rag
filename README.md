@@ -14,6 +14,53 @@
 
 ---
 
+## 项目截图
+
+> 共 18 张截图，存放于 `demo_file/screenshot/`，点击下方标题展开查看。
+
+<details>
+<summary>展开查看全部截图（18 张）</summary>
+
+![对话](demo_file/screenshot/%E5%AF%B9%E8%AF%9D.png)
+
+![对话引用预览](demo_file/screenshot/%E5%AF%B9%E8%AF%9D%E5%BC%95%E7%94%A8%E9%A2%84%E8%A7%88.png)
+
+![任务看板](demo_file/screenshot/%E4%BB%BB%E5%8A%A1%E7%9C%8B%E6%9D%BF.png)
+
+![知识库](demo_file/screenshot/%E7%9F%A5%E8%AF%86%E5%BA%93.png)
+
+![文档上传](demo_file/screenshot/%E6%96%87%E6%A1%A3%E4%B8%8A%E4%BC%A0.png)
+
+![文档审核](demo_file/screenshot/%E6%96%87%E6%A1%A3%E5%AE%A1%E6%A0%B8.png)
+
+![wiki知识库](demo_file/screenshot/wiki%E7%9F%A5%E8%AF%86%E5%BA%93.png)
+
+![知识图谱](demo_file/screenshot/%E7%9F%A5%E8%AF%86%E5%9B%BE%E8%B0%B1.png)
+
+![组织架构](demo_file/screenshot/%E7%BB%84%E7%BB%87%E6%9E%B6%E6%9E%84.png)
+
+![角色管理](demo_file/screenshot/%E8%A7%92%E8%89%B2%E7%AE%A1%E7%90%86.png)
+
+![权限配置](demo_file/screenshot/%E6%9D%83%E9%99%90%E9%85%8D%E7%BD%AE.png)
+
+![工单中心](demo_file/screenshot/%E5%B7%A5%E5%8D%95%E4%B8%AD%E5%BF%83.png)
+
+![质量评估](demo_file/screenshot/%E8%B4%A8%E9%87%8F%E8%AF%84%E4%BC%B0.png)
+
+![反馈与报表](demo_file/screenshot/%E5%8F%8D%E9%A6%88%E4%B8%8E%E6%8A%A5%E8%A1%A8.png)
+
+![系统配置](demo_file/screenshot/%E7%B3%BB%E7%BB%9F%E9%85%8D%E7%BD%AE.png)
+
+![定时任务](demo_file/screenshot/%E5%AE%9A%E6%97%B6%E4%BB%BB%E5%8A%A1.png)
+
+![审计与安全](demo_file/screenshot/%E5%AE%A1%E8%AE%A1%E4%B8%8E%E5%AE%89%E5%85%A8.png)
+
+![个人中心](demo_file/screenshot/%E4%B8%AA%E4%BA%BA%E4%B8%AD%E5%BF%83.png)
+
+</details>
+
+
+
 ## 问答流程总览
 
 > 从用户 Query 到最终结果的完整链路：**输入审查 → 热点缓存 → 检索核心 → LLM 流式生成 → SSE 输出 → 落库与评估**：

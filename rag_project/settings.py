@@ -344,6 +344,9 @@ OSS_REGION = os.getenv('OSS_REGION', '')
 # --- 检索参数（可被 system_config 覆盖）---
 RETRIEVAL_TOP_K = int(os.getenv('RETRIEVAL_TOP_K', '20'))
 RETRIEVAL_RERANK_TOP_K = int(os.getenv('RETRIEVAL_RERANK_TOP_K', '5'))
+# 相关性阈值：rerank 分数低于该值的片段视为不相关直接丢弃（0 表示关闭过滤）。
+# BGE-reranker-v2-m3 分数范围约 0~1，0.3 为"弱相关"底线，可避免把无关文档作为引用返回
+RETRIEVAL_MIN_RERANK_SCORE = float(os.getenv('RETRIEVAL_MIN_RERANK_SCORE', '0.3'))
 HNSW_EF_SEARCH = int(os.getenv('HNSW_EF_SEARCH', '40'))
 BM25_TOP_K = int(os.getenv('BM25_TOP_K', '30'))
 VECTOR_TOP_K = int(os.getenv('VECTOR_TOP_K', '30'))

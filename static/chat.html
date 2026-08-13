@@ -14,14 +14,22 @@
 <body>
 	<div id="topnav-container"></div>
 
-	<!-- 知识库范围下拉面板（固定定位，在导航栏下方） -->
+	<!-- 知识来源下拉面板（固定定位，在导航栏下方）
+	     顶层为 4 类数据来源开关（内部文档/数据库/联网/LLM，仅渲染系统配置开启的来源）；
+	     勾选「内部文档」时才展示知识库节点树（仅显示当前用户有权限的节点） -->
 	<div class="scope-dropdown" id="scopeDropdown">
-		<div class="scope-hint">💡 选择对应的范围，可以更精准的查询</div>
-		<div class="scope-quick-actions">
-			<button class="btn btn-sm" onclick="selectAllScopes()">全选</button>
-			<button class="btn btn-sm" onclick="clearAllScopes()">清空</button>
+		<div class="scope-hint">💡 选择数据来源与知识范围，可更精准地查询</div>
+		<!-- 来源开关由 chat.js 按 /api/v1/chat/config/ 返回的 sources_enabled 动态渲染 -->
+		<div class="source-switches" id="sourceSwitches"></div>
+		<!-- 内部文档节点树（勾选「内部文档」时展示，数据来自 permission_only 接口） -->
+		<div class="doc-scope-wrap" id="docScopeWrap">
+			<div class="scope-hint doc-scope-title">📚 知识范围（内部文档）</div>
+			<div class="scope-quick-actions">
+				<button class="btn btn-sm" onclick="selectAllScopes()">全选</button>
+				<button class="btn btn-sm" onclick="clearAllScopes()">清空</button>
+			</div>
+			<div class="scope-list" id="scopeList"></div>
 		</div>
-		<div class="scope-list" id="scopeList"></div>
 	</div>
 
 	<div class="layout">
@@ -86,7 +94,7 @@
 				<div style="text-align:center;padding:60px 20px">
 					<div style="font-size:48px;margin-bottom:16px">💬</div>
 					<div style="font-size:18px;font-weight:600;margin-bottom:8px">欢迎使用智能聊天</div>
-					<div style="color:var(--text-sub);font-size:14px">选择知识库范围，开始提问吧</div>
+					<div style="color:var(--text-sub);font-size:14px">选择知识来源，开始提问吧</div>
 				</div>
 			</div>
 		</div>
@@ -129,10 +137,10 @@
 		</div>
 	</template>
 
-	<!-- 4c. 无引用提示（基于模型知识回答） -->
-	<template id="tmpl-source-llm">
-		<div class="source-block source-llm-hint">
-			<div class="source-header">💡 基于模型知识回答，无引用来源</div>
+	<!-- 4d. 来源标签行（仅标签，无详细溯源卡片；如"🤖 大模型知识 · 仅供参考"） -->
+	<template id="tmpl-source-tags-only">
+		<div class="source-block">
+			<div class="answer-source-tags"></div>
 		</div>
 	</template>
 

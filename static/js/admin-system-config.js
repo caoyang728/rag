@@ -46,9 +46,10 @@ const CONFIG_METADATA = {
 	HNSW_EF_SEARCH: { label: 'HNSW 向量搜索 ef 参数', description: 'HNSW 索引搜索时的 ef 参数，值越大召回越准但速度越慢，需权衡平衡', sortOrder: 3 },
 	BM25_TOP_K: { label: 'BM25 召回 top K', description: 'BM25 关键词检索召回的候选文档数量，与向量召回合并后进入 Rerank', sortOrder: 4 },
 	VECTOR_TOP_K: { label: '向量召回 top K', description: '向量相似度检索召回的候选文档数量，与 BM25 召回合并后进入 Rerank', sortOrder: 5 },
-	QUERY_TRANSFORM_ENABLED: { label: '查询改写/分解开关', description: '开启后，检索前先对用户 Query 做 LLM 改写/同义词扩展，改写后置信度不足时再拆分为多个子查询分别召回后合并；关闭时行为与现状一致', sortOrder: 6 },
-	QUERY_DECOMPOSE_THRESHOLD: { label: '改写后置信度阈值', description: '改写后检索结果的置信度低于该值时触发查询分解（0-1），越低越容易触发分解；0.35 大致对应改写后无命中片段', sortOrder: 7 },
-	QUERY_DECOMPOSE_MAX_SUB: { label: '最大子查询数', description: '查询分解时最多生成的子查询数量（1-5），防止过度拆分导致检索延迟过高', sortOrder: 8 },
+	RETRIEVAL_MIN_RERANK_SCORE: { label: 'Rerank 相关性阈值', description: 'Rerank 重排序后，分数低于该值（0-1）的片段视为与问题无关直接丢弃，防止无关文档作为引用返回；0=不过滤。向量与 BM25 召回的最终相关性统一由该阈值把关', sortOrder: 6 },
+	QUERY_TRANSFORM_ENABLED: { label: '查询改写/分解开关', description: '开启后，检索前先对用户 Query 做 LLM 改写/同义词扩展，改写后置信度不足时再拆分为多个子查询分别召回后合并；关闭时行为与现状一致', sortOrder: 7 },
+	QUERY_DECOMPOSE_THRESHOLD: { label: '改写后置信度阈值', description: '改写后检索结果的置信度低于该值时触发查询分解（0-1），越低越容易触发分解；0.35 大致对应改写后无命中片段', sortOrder: 8 },
+	QUERY_DECOMPOSE_MAX_SUB: { label: '最大子查询数', description: '查询分解时最多生成的子查询数量（1-5），防止过度拆分导致检索延迟过高', sortOrder: 9 },
 
 	// ===== 存储 =====
 	IMAGE_STORAGE_MODE: { label: '图片存储模式', description: '图片的存储方式：转换 base64 存入数据库或对象存储', sortOrder: 1 },
@@ -76,6 +77,11 @@ const CONFIG_METADATA = {
 	BUSINESS_DB_TABLES: {
 		label: 'Text2SQL 白名单', description: '多选，空=不允许任何表查询（Text2SQL 不生效）；需主动勾选表后才生效', sortOrder: 2,
 		multiSelect: { emptyText: '未选择任何表（Text2SQL 不生效）', searchPlaceholder: '搜索表名...' },
+	},
+	// 聊天数据来源：多选且来源只有 4 项，无需搜索框（showSearch: false 隐藏）
+	CHAT_SOURCE_ENABLED: {
+		label: '聊天数据来源', description: '多选，聊天页「知识来源」下拉框仅展示勾选的来源；全不选时回退为全部开启', sortOrder: 3,
+		multiSelect: { emptyText: '未选择任何来源（聊天页回退为全部开启）', showSearch: false },
 	},
 
 	// ===== 安全 =====
@@ -382,6 +388,8 @@ function renderMultiSelect(c) {
 	const meta = (CONFIG_METADATA[c.key] || {}).multiSelect || {};
 	const emptyText = meta.emptyText || '未选择任何项';
 	const searchPlaceholder = meta.searchPlaceholder || '搜索...';
+	// showSearch: false 时隐藏搜索框（如选项数固定且较少的多选场景）
+	const showSearch = meta.showSearch !== false;
 	// 紧凑显示：选中数量或提示文案
 	const displayText = selectedVals.length === 0
 		? emptyText
@@ -396,10 +404,11 @@ function renderMultiSelect(c) {
 				<span class="multi-select-arrow">▾</span>
 			</div>
 			<div class="multi-select-dropdown" id="ms-dropdown-${c.key}" style="display:none">
+				${showSearch ? `
 				<div class="multi-select-search">
 					<input type="text" class="input" placeholder="${escapeHtml(searchPlaceholder)}"
 						   id="ms-search-${c.key}" oninput="filterMultiSelect('${c.key}')">
-				</div>
+				</div>` : ''}
 				<div class="multi-select-actions">
 					<button type="button" onclick="selectAllMulti('${c.key}', true)">全选</button>
 					<button type="button" onclick="selectAllMulti('${c.key}', false)">清空</button>
@@ -419,7 +428,7 @@ function toggleMultiSelect(key) {
 	if (!dropdown) return;
 	if (dropdown.style.display === 'none') {
 		dropdown.style.display = 'block';
-		// 聚焦搜索框
+		// 聚焦搜索框（无搜索框的配置项跳过）
 		setTimeout(() => {
 			const search = $(`#ms-search-${key}`);
 			if (search) search.focus();

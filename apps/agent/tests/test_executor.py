@@ -720,3 +720,60 @@ class TestUpdateCache:
         from apps.agent.executor import _should_update_cache
         assert not _should_update_cache('rag', True)
         assert not _should_update_cache('general', True)
+
+
+# ---------------------------------------------------------------------------
+# _normalize_sources / _enabled_source_set
+# ---------------------------------------------------------------------------
+
+class TestNormalizeSources:
+    """_normalize_sources 来源规范化与系统配置过滤测试
+    （对应 CHAT_SOURCE_ENABLED：前端只展示开启的来源，后端兜底剔除未开启来源）"""
+
+    def test_normalize_when_sources_none_or_empty_then_all(self):
+        from apps.agent.executor import _normalize_sources
+        assert _normalize_sources(None) == {'doc', 'db', 'web', 'llm'}
+        assert _normalize_sources([]) == {'doc', 'db', 'web', 'llm'}
+
+    def test_normalize_when_all_invalid_then_fallback_all(self):
+        """全部为非法值时回退全开（默认行为），避免旧调用方/前端缺省被拒绝"""
+        from apps.agent.executor import _normalize_sources
+        assert _normalize_sources(['foo', 'bar']) == {'doc', 'db', 'web', 'llm'}
+        # 合法值保留，非法值剔除；非空结果不回退全开
+        assert _normalize_sources(['doc', 'foo']) == {'doc'}
+
+    @patch('apps.system.config_loader.get_config_value')
+    def test_normalize_when_config_only_doc_db_then_filters_disabled(self, mock_cfg):
+        """系统配置只开启 doc/db 时，请求中的 web/llm 被剔除（后端兜底防御）"""
+        mock_cfg.return_value = 'doc,db'
+        from apps.agent.executor import _normalize_sources
+        assert _normalize_sources(['doc', 'db', 'web', 'llm']) == {'doc', 'db'}
+
+    @patch('apps.system.config_loader.get_config_value')
+    def test_normalize_when_config_empty_then_fallback_all(self, mock_cfg):
+        """配置为空（未初始化/被清空）时视为全开，请求的来源全部保留"""
+        mock_cfg.return_value = ''
+        from apps.agent.executor import _normalize_sources
+        assert _normalize_sources(['doc']) == {'doc'}
+        assert _normalize_sources(['doc', 'db', 'web', 'llm']) == {'doc', 'db', 'web', 'llm'}
+
+    @patch('apps.system.config_loader.get_config_value')
+    def test_normalize_when_config_read_exception_then_fallback_all(self, mock_cfg):
+        """配置读取异常（如 Redis 不可用）时视为全开，不阻断主流程"""
+        mock_cfg.side_effect = Exception('redis down')
+        from apps.agent.executor import _normalize_sources
+        assert _normalize_sources(['doc', 'db']) == {'doc', 'db'}
+
+    @patch('apps.system.config_loader.get_config_value')
+    def test_normalize_when_config_has_invalid_keys_then_ignored(self, mock_cfg):
+        """配置中含非法来源 key 时忽略，不影响合法来源"""
+        mock_cfg.return_value = 'doc,foo,llm'
+        from apps.agent.executor import _normalize_sources
+        assert _normalize_sources(['doc', 'db', 'llm']) == {'doc', 'llm'}
+
+    @patch('apps.system.config_loader.get_config_value')
+    def test_enabled_source_set_when_config_unavailable_then_all(self, mock_cfg):
+        """_enabled_source_set 配置缺失时返回全开集合"""
+        mock_cfg.return_value = ''
+        from apps.agent.executor import _enabled_source_set
+        assert _enabled_source_set() == {'doc', 'db', 'web', 'llm'}

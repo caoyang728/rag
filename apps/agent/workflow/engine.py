@@ -55,12 +55,16 @@ class WorkflowRunner:
     """
 
     def __init__(self, workflow: AgentWorkflow, user, session,
-                 root_types: list = None, node_ids: list = None):
+                 root_types: list = None, node_ids: list = None,
+                 sources: list = None):
         self.workflow = workflow
         self.user = user
         self.session = session
         self.root_types = root_types
         self.node_ids = node_ids
+        # 数据来源开关（doc/db/web/llm），规范化后供工具节点过滤使用
+        from apps.agent.executor import _normalize_sources
+        self.sources = _normalize_sources(sources)
         self.node_map = {n['id']: n for n in (workflow.definition or [])}
         self.node_runs = {r.node_id: r for r in workflow.node_runs.all()}
         self.ctx = ToolContext(user=user, session=session, root_types=root_types,
@@ -169,7 +173,8 @@ class WorkflowRunner:
         """research 节点：子 Agent 独立检索 + 推理（复用现有 ReAct 同步链路）"""
         from apps.agent.react import agent_ask
         result = agent_ask(self.user, node['question'], self.session,
-                           root_types=self.root_types, node_ids=self.node_ids)
+                           root_types=self.root_types, node_ids=self.node_ids,
+                           sources=list(self.sources))
         answer = result.get('answer') or ''
         return {
             'output': answer,
@@ -200,6 +205,28 @@ class WorkflowRunner:
             },
             'latency_ms': ret.get('latency_ms', 0),
         }
+
+    def _tool_disabled_reason(self, node: dict) -> str:
+        """数据来源开关禁用工具时返回禁用原因（未禁用返回空字符串）
+
+        来源开关（doc/db/web/llm）来自聊天页"知识来源"选择器：
+        - doc=内部文档 → knowledge_search（内部按 Wiki → 图谱 → 文档 三层路由）
+        - db=数据库 → text2sql
+        - web=联网 → web_search
+        被禁用的工具节点在执行前直接标记 skipped，不进入执行与审批流程。
+        """
+        if node.get('type') != 'tool':
+            return ''
+        src_map = {
+            'knowledge_search': 'doc',
+            'text2sql': 'db',
+            'web_search': 'web',
+        }
+        src = src_map.get(node.get('tool_name'))
+        if src and src not in self.sources:
+            name_map = {'doc': '内部文档', 'db': '数据库', 'web': '联网'}
+            return f'数据来源「{name_map[src]}」未开启，工具 {node.get("tool_name")} 已跳过'
+        return ''
 
     # ------------------------------------------------------------------
     # 人工确认节点处理
@@ -319,6 +346,30 @@ class WorkflowRunner:
                 self.degraded_reasons.append('依赖未满足，后续节点已跳过')
                 break
 
+            # 2.5 数据来源开关：被禁用的工具节点直接跳过（不执行、不审批）
+            enabled_ready = []
+            for nid in ready:
+                reason = self._tool_disabled_reason(self.node_map[nid])
+                if reason:
+                    self._mark_node(nid, 'skipped', emit=True,
+                                    output={'output': reason, 'ok': False, 'meta': {}},
+                                    error=reason)
+                    self.skipped.add(nid)
+                    self.degraded = True
+                    self.degraded_reasons.append(reason)
+                    if nid in remaining:
+                        remaining.remove(nid)
+                else:
+                    enabled_ready.append(nid)
+            ready = enabled_ready
+            if not ready:
+                # 本批节点全部被来源开关禁用：下游依赖不满足，剩余节点跳过，降级
+                for nid in remaining:
+                    self._mark_node(nid, 'skipped', emit=True)
+                self.degraded = True
+                self.degraded_reasons.append('依赖未满足，后续节点已跳过')
+                break
+
             # 3. 人工确认节点先处理（可能阻塞整个工作流）
             approval_ids = [nid for nid in ready if _needs_approval(self.node_map[nid])]
             normal_ids = [nid for nid in ready if nid not in approval_ids]
@@ -395,10 +446,12 @@ class WorkflowRunner:
 @transaction.atomic
 def _create_workflow(user, session, question: str, plan: dict,
                      max_nodes: int, max_duration_sec: int,
-                     root_type: str, turn_index: int) -> AgentWorkflow:
+                     root_type: str, turn_index: int,
+                     sources: list = None) -> AgentWorkflow:
     """创建工作流实例 + 节点执行记录（definition 追加 finalize 汇总节点）
 
     finalize 节点依赖所有编排节点，保证汇总在全部节点（含降级跳过）之后执行。
+    sources 快照到 result，供审批恢复段 resume_workflow 重建来源开关。
     """
     nodes = plan.get('nodes') or []
     finalize = {
@@ -412,7 +465,8 @@ def _create_workflow(user, session, question: str, plan: dict,
         max_nodes=max_nodes, max_duration_sec=max_duration_sec,
         started_at=timezone.now(),
         # 元信息快照（审批恢复段落库需要）
-        result={'root_type': root_type, 'turn_index': turn_index},
+        result={'root_type': root_type, 'turn_index': turn_index,
+                'sources': sources or []},
     )
     runs = [WorkflowNodeRun(
         workflow=workflow, node_id=n['id'], node_name=n.get('name', ''),
@@ -507,6 +561,7 @@ def _persist_workflow_result(workflow: AgentWorkflow, answer: str,
         'llm_stats': llm_stats,
         'root_type': root_type,
         'turn_index': turn_index,
+        'sources': meta.get('sources') or [],
         'degraded_reasons': _degraded_reasons_of(workflow),
         'qa_id': qa.id,
         'filtered': filter_hit is not None,
@@ -526,6 +581,7 @@ def _degraded_reasons_of(workflow: AgentWorkflow) -> list:
 
 def run_workflow_stream(user, session, question: str, plan: dict,
                         root_types: list = None, node_ids: list = None,
+                        sources: list = None,
                         max_nodes: int = 10, max_duration_sec: int = 300):
     """流式执行工作流，yield SSE 事件
 
@@ -538,13 +594,19 @@ def run_workflow_stream(user, session, question: str, plan: dict,
         content_filtered        （答案命中 block 时）
         done                    {message_id, workflow_id, status, citations, stats}
 
+    sources：数据来源开关（doc/db/web/llm），被禁用的工具节点直接跳过；
+    快照到工作流 result，供审批恢复段 resume_workflow 重建。
+
     审批阻塞时 done 无 message_id（workflow 停留 waiting_approval），
     用户审批后由 resume_workflow 同步完成剩余执行，前端轮询详情获取结果。
     """
+    from apps.agent.executor import _normalize_sources
+    sources = _normalize_sources(sources)
     root_type = root_types[0] if root_types else 'company_doc'
     turn_index = (session.turn_count or 0) + 1
     workflow = _create_workflow(user, session, question, plan,
-                                max_nodes, max_duration_sec, root_type, turn_index)
+                                max_nodes, max_duration_sec, root_type, turn_index,
+                                sources=sorted(sources))
 
     yield {
         'type': 'workflow_start',
@@ -553,7 +615,8 @@ def run_workflow_stream(user, session, question: str, plan: dict,
         'status': 'running',
     }
 
-    runner = WorkflowRunner(workflow, user, session, root_types, node_ids)
+    runner = WorkflowRunner(workflow, user, session, root_types, node_ids,
+                            sources=sources)
     events = runner.execute()
     yield from events
 
@@ -568,6 +631,7 @@ def run_workflow_stream(user, session, question: str, plan: dict,
             'status': 'waiting_approval',
             'citations': [],
             'is_workflow': True,
+            'answer_type': 'blocked',
             'stats': {'waiting_approval': True},
         }
         return
@@ -600,6 +664,7 @@ def run_workflow_stream(user, session, question: str, plan: dict,
         'citations': workflow.result.get('citations', []),
         'is_workflow': True,
         'is_filtered': filter_hit is not None,
+        'answer_type': 'agent',
         'stats': {
             'total_ms': int((timezone.now() - workflow.started_at).total_seconds() * 1000)
             if workflow.started_at else 0,
@@ -642,7 +707,10 @@ def resume_workflow(workflow: AgentWorkflow, node_id: str, approved: bool):
 
     user, session = workflow.user, workflow.session
     root_types = None
-    runner = WorkflowRunner(workflow, user, session, root_types, None)
+    # 恢复段重建数据来源开关（首次流式执行时已快照到 workflow.result）
+    sources = (workflow.result or {}).get('sources')
+    runner = WorkflowRunner(workflow, user, session, root_types, None,
+                            sources=sources)
     runner.restore_completed()
     runner.execute()
 

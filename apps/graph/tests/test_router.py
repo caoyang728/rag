@@ -183,5 +183,5 @@ class TestOrchestrate:
         from apps.graph.router import orchestrate
         user = MagicMock()
         result = orchestrate('q', user)
-        mock_decide.assert_called_once_with('q', user)
+        mock_decide.assert_called_once_with('q', user, node_ids=None, root_types=None)
         assert result['source'] == 'wiki'

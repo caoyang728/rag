@@ -25,6 +25,15 @@ from apps.agent.tools import get_default_registry
 # 合法节点类型
 VALID_NODE_TYPES = {'research', 'tool', 'approval'}
 
+# 内部知识检索统一入口映射：wiki_search/graph_search 已并入 knowledge_search
+# （knowledge_search 内部按 Wiki → 图谱 → 文档 三层固定顺序检索）。
+# 编排器若偶发生成独立的 wiki/graph 工具节点，直接改写为统一入口，
+# 防止 LLM 乱序调用破坏固定检索顺序（提示词约束 + 此处归一化双保险）。
+_DOC_UNIFIED_TOOLS = {
+    'wiki_search': 'knowledge_search',
+    'graph_search': 'knowledge_search',
+}
+
 
 def _safe_json_loads(raw: str) -> dict:
     """容错解析 LLM 输出的 JSON（兼容 ```json 包裹 / 首尾杂散字符）
@@ -173,6 +182,11 @@ def maybe_plan(question: str, max_nodes: int = 10) -> Dict[str, Any]:
     nodes = data.get('nodes') or []
     # 节点数上限由 LLM 侧约束 + 引擎侧硬校验双保险，这里按 max_nodes 截断
     nodes = nodes[:max_nodes]
+    # 内部知识检索工具归一化：wiki_search/graph_search → knowledge_search
+    # （knowledge_search 内部按 Wiki → 图谱 → 文档 三层固定顺序检索）
+    for n in nodes:
+        if n.get('type') == 'tool' and n.get('tool_name') in _DOC_UNIFIED_TOOLS:
+            n['tool_name'] = _DOC_UNIFIED_TOOLS[n['tool_name']]
     ok, errors = validate_dag(nodes, max_nodes=max_nodes)
     if not ok:
         # 校验失败（如编排器幻觉出不存在的工具）：拒绝进入工作流，降级走现有链路

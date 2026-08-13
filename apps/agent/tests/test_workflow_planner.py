@@ -62,7 +62,7 @@ class TestValidateDag:
 
     def test_validate_dag_when_unknown_dependency_then_error(self):
         nodes = _valid_nodes() + [{'id': 't1', 'name': '工具', 'type': 'tool',
-                                   'tool_name': 'calculator', 'params': {'expr': '1+1'},
+                                   'tool_name': 'knowledge_search', 'params': {'query': 'q'},
                                    'depends_on': ['ghost']}]
         ok, errors = planner.validate_dag(nodes)
         assert ok is False
@@ -79,9 +79,9 @@ class TestValidateDag:
         assert any('循环' in e for e in errors)
 
     def test_validate_dag_when_tool_valid_then_ok(self):
-        """calculator 是注册表内工具，应通过校验"""
-        nodes = [{'id': 't1', 'name': '计算', 'type': 'tool',
-                  'tool_name': 'calculator', 'params': {'expr': '1+1'}, 'depends_on': []}]
+        """knowledge_search 是注册表内工具，应通过校验"""
+        nodes = [{'id': 't1', 'name': '检索', 'type': 'tool',
+                  'tool_name': 'knowledge_search', 'params': {'query': 'q'}, 'depends_on': []}]
         ok, errors = planner.validate_dag(nodes)
         assert ok is True
 
@@ -164,6 +164,28 @@ class TestMaybePlan:
             p.stop()
         assert data['need_workflow'] is False
         assert data['reason'].startswith('dag invalid')
+
+    def test_maybe_plan_when_legacy_doc_tools_then_unified(self):
+        """编排器偶发产出 wiki_search/graph_search 工具节点时归一化为 knowledge_search
+        （knowledge_search 内部按 Wiki → 图谱 → 文档 固定顺序检索，防止乱序）"""
+        import json as _json
+        nodes = [
+            {'id': 'r1', 'name': '检索', 'type': 'research',
+             'question': '子问题', 'depends_on': []},
+            {'id': 't1', 'name': 'Wiki', 'type': 'tool',
+             'tool_name': 'wiki_search', 'params': {'query': 'x'}, 'depends_on': []},
+            {'id': 't2', 'name': '图谱', 'type': 'tool',
+             'tool_name': 'graph_search', 'params': {'query': 'y'}, 'depends_on': []},
+        ]
+        p, _ = self._patch_llm(_json.dumps(
+            {'need_workflow': True, 'reason': 'r', 'nodes': nodes}, ensure_ascii=False))
+        try:
+            data = planner.maybe_plan('问题')
+        finally:
+            p.stop()
+        assert data['need_workflow'] is True
+        tool_names = {n['tool_name'] for n in data['nodes'] if n['type'] == 'tool'}
+        assert tool_names == {'knowledge_search'}
 
     def test_maybe_plan_then_uses_workflow_prompt(self):
         """验证编排器使用工作流专用 system 提示词与稳定采样参数"""

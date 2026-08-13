@@ -40,7 +40,7 @@ class AgentTrace(models.Model):
 
     # 工具调用轮次（从 1 开始，同一轮可能调用多个工具）
     tool_round = models.IntegerField(default=1, verbose_name='调用轮次')
-    # 工具名称（knowledge_search / web_search / calculator / text2sql）
+    # 工具名称（knowledge_search / web_search / text2sql）
     tool_name = models.CharField(max_length=50, db_index=True, verbose_name='工具名称')
     # 工具参数（LLM 生成的 arguments，JSON 格式）
     tool_args = models.JSONField(default=dict, blank=True, verbose_name='工具参数')

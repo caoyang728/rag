@@ -634,6 +634,15 @@ system_configs:
     is_secret: false
     is_readonly: false
 
+  - key: RETRIEVAL_MIN_RERANK_SCORE
+    value: 0.3
+    value_type: float
+    category: retrieval
+    label: "Rerank 相关性阈值"
+    description: "Rerank 重排序后，分数低于该值（0-1）的片段视为与问题无关直接丢弃，防止无关文档作为引用返回；0=不过滤。向量与 BM25 召回的最终相关性统一由该阈值把关"
+    is_secret: false
+    is_readonly: false
+
   - key: QUERY_TRANSFORM_ENABLED
     value: false
     value_type: bool
@@ -870,6 +879,24 @@ system_configs:
     category: agent
     label: "Text2SQL 白名单"
     description: "多选，空=不允许任何表查询（Text2SQL 不生效）；需主动勾选表后才生效"
+    is_secret: false
+    is_readonly: false
+
+  - key: CHAT_SOURCE_ENABLED
+    value: "doc,db,web,llm"
+    value_type: string
+    category: agent
+    label: "聊天数据来源"
+    description: "多选，聊天页「知识来源」下拉框仅展示勾选的来源；全不选时回退为全部开启"
+    options:
+      - value: "doc"
+        label: "内部文档"
+      - value: "db"
+        label: "数据库"
+      - value: "web"
+        label: "联网"
+      - value: "llm"
+        label: "LLM"
     is_secret: false
     is_readonly: false
 

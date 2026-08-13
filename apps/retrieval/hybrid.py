@@ -18,6 +18,7 @@ from .vector_store import vector_search
 from .bm25 import bm25_search
 from .rerank import rerank_docs
 from apps.llm.embedding import get_embedding_client, EmbeddingException
+from apps.system.config_loader import get_config_value
 
 
 RRF_K = 60
@@ -101,8 +102,10 @@ def _search_core(query: str,
     }
     """
     t_total = time.time()
-    vector_top_k = vector_top_k or settings.VECTOR_TOP_K
-    bm25_top_k = bm25_top_k or settings.BM25_TOP_K
+    # 召回阈值优先读 SystemConfig（检索参数分类，运营可后台调整），
+    # 未配置或读取失败时回退 settings（.env），保证与旧部署行为一致
+    vector_top_k = vector_top_k or get_config_value('VECTOR_TOP_K', default=settings.VECTOR_TOP_K, value_type='int') or settings.VECTOR_TOP_K
+    bm25_top_k = bm25_top_k or get_config_value('BM25_TOP_K', default=settings.BM25_TOP_K, value_type='int') or settings.BM25_TOP_K
     rerank_top_k = rerank_top_k or settings.RETRIEVAL_RERANK_TOP_K
 
     # 1. 生成 query 向量
@@ -150,6 +153,19 @@ def _search_core(query: str,
         t4 = time.time()
         final = rerank_docs(query, rrf_res, top_k=rerank_top_k)
         stats['rerank_ms'] = int((time.time() - t4) * 1000)
+        # 相关性阈值过滤：rerank 分数低于阈值的片段视为与问题无关，直接丢弃，
+        # 避免把无关联的文档（如法规类）当作引用返回给用户
+        # 仅过滤带 rerank_score 的结果（rerank 失败回退时无分数，保持原行为不过滤）
+        # 阈值优先读 SystemConfig（检索参数分类，运营可后台调整），
+        # 未配置/非法值回退 settings（.env），0 表示不过滤（用 None 判断以兼容 0）
+        cfg_threshold = get_config_value('RETRIEVAL_MIN_RERANK_SCORE', default=None, value_type='float')
+        min_rerank_score = cfg_threshold if cfg_threshold is not None else settings.RETRIEVAL_MIN_RERANK_SCORE
+        if min_rerank_score > 0:
+            final = [c for c in final
+                     if 'rerank_score' not in c or c['rerank_score'] >= min_rerank_score]
+            if len(final) < len(rrf_res[:rerank_top_k]):
+                logger.info(f'[Hybrid] rerank threshold {min_rerank_score} '
+                            f'filtered {len(rrf_res[:rerank_top_k]) - len(final)} chunks')
     else:
         stats['rerank_ms'] = 0
 

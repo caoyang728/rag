@@ -22,7 +22,7 @@ from typing import Any, Dict, Iterator, List
 from loguru import logger
 
 from apps.llm.factory import get_llm
-from apps.llm.prompts.agent import build_agent_messages
+from apps.llm.prompts.agent import AGENT_SYSTEM_PROMPT, build_agent_messages
 from apps.memory.manager import MemoryManager
 
 from .tools import ToolContext, get_default_registry, parse_tool_arguments
@@ -32,6 +32,57 @@ from .tools import ToolContext, get_default_registry, parse_tool_arguments
 MAX_TOOL_ROUNDS = 5
 # 单个工具结果回填给 LLM 的最大长度（防止 context 爆炸）
 MAX_TOOL_RESULT_CHARS = 4000
+
+# 数据来源开关 → 工具映射（未列出的工具不归属任何来源）
+# 内部知识工具 knowledge_search 归 doc 来源（内部按 Wiki → 图谱 → 文档 三层路由），
+# 已统一为单一入口，不再单独暴露 wiki/graph 检索工具
+TOOL_SOURCE_MAP = {
+    'knowledge_search': 'doc',
+    'text2sql': 'db',
+    'web_search': 'web',
+}
+# 数据来源中文名（用于提示文案）
+SOURCE_NAMES = {'doc': '内部文档', 'db': '数据库', 'web': '联网', 'llm': 'LLM'}
+# doc 来源实际暴露给 LLM 的工具：仅统一检索入口（内部已按 Wiki→图谱→文档顺序）
+DOC_AGENT_TOOLS = ['knowledge_search']
+
+
+def _build_tool_config(sources, tool_registry):
+    """按数据来源开关过滤工具并生成 system prompt
+
+    来源开关（doc/db/web/llm）来自聊天页"知识来源"选择器：
+    - doc=内部文档 → knowledge_search（内部已按 Wiki→图谱→文档三层顺序检索）
+    - db=数据库 → text2sql
+    - web=联网 → web_search
+    - llm=LLM 直接回答 → 无对应工具，仅控制是否允许模型用自身知识直接作答
+
+    Args:
+        sources: 数据来源开关列表（非法值回退全开，由 _normalize_sources 保证）
+        tool_registry: 工具注册表
+
+    Returns:
+        (openai_tools, system_prompt)
+        - openai_tools: 过滤后的 OpenAI tools schema 列表
+        - system_prompt: None 表示用默认 AGENT_SYSTEM_PROMPT；
+          未开启 llm 来源时返回"禁止用自身知识直接作答"的加强提示
+    """
+    from apps.agent.executor import _normalize_sources
+    src_set = _normalize_sources(sources)
+    # 按来源过滤工具；doc 来源用统一入口 knowledge_search（内部三层路由），
+    # 不再单独暴露 wiki/graph 检索
+    names = [n for n in TOOL_SOURCE_MAP.items()
+             if n[1] in src_set and tool_registry.get(n[0]) and n[0] in DOC_AGENT_TOOLS]
+    names = [n[0] for n in names]
+    system_prompt = None
+    if 'llm' not in src_set:
+        # 关闭 LLM 来源：禁止模型凭自身知识作答，必须通过工具获取信息
+        system_prompt = (
+            AGENT_SYSTEM_PROMPT +
+            '\n\n（数据来源限制）当前未开启「LLM」来源，禁止使用自身知识直接回答；'
+            '必须调用工具获取信息后再回答。若所有可用工具均无法获取信息，'
+            '请如实回答"根据现有资料，暂无法回答该问题"。'
+        )
+    return tool_registry.to_openai_tools(names), system_prompt
 
 
 def _make_filtered_event(hit) -> Dict[str, Any]:
@@ -172,7 +223,7 @@ def _execute_tool_calls(tool_calls: List[Dict], ctx: ToolContext,
 
 
 def agent_ask(user, question: str, session, root_types: list = None,
-              node_ids: list = None) -> Dict[str, Any]:
+              node_ids: list = None, sources: list = None) -> Dict[str, Any]:
     """同步 ReAct Agent 问答
 
     流程：
@@ -182,6 +233,9 @@ def agent_ask(user, question: str, session, root_types: list = None,
     4. 最终 LLM 返回纯文本答案
     5. 收集引用 + 工具调用链
 
+    sources：数据来源开关（doc/db/web/llm），按开关过滤可用工具；
+    关闭 llm 时禁止模型凭自身知识直接作答。
+
     注意：本函数不落 QaRecord、不更新缓存，由 executor.ask_stream 统一处理。
 
     Returns:
@@ -190,7 +244,7 @@ def agent_ask(user, question: str, session, root_types: list = None,
     """
     t0 = time.time()
     tool_registry = get_default_registry()
-    openai_tools = tool_registry.to_openai_tools()
+    openai_tools, system_prompt = _build_tool_config(sources, tool_registry)
     ctx = ToolContext(user=user, session=session, root_types=root_types,
                       node_ids=node_ids, llm=get_llm())
 
@@ -198,7 +252,8 @@ def agent_ask(user, question: str, session, root_types: list = None,
     mm = MemoryManager()
     root_type = root_types[0] if root_types else 'company_doc'
     mem_ctx = mm.load_context(user, session, question, root_type=root_type)
-    messages = build_agent_messages(question, memory_block=mem_ctx['memory_block'])
+    messages = build_agent_messages(question, memory_block=mem_ctx['memory_block'],
+                                    system_prompt=system_prompt)
 
     llm = get_llm()
     tool_traces: List[Dict] = []
@@ -270,13 +325,16 @@ def agent_ask(user, question: str, session, root_types: list = None,
 
 
 def agent_ask_stream(user, question: str, session, root_types: list = None,
-                     node_ids: list = None) -> Iterator[Dict[str, Any]]:
+                     node_ids: list = None, sources: list = None) -> Iterator[Dict[str, Any]]:
     """流式 ReAct Agent 问答
 
     yield SSE 事件：
     - tool_call / tool_result：工具调用过程（前端渲染"思考过程"区）
     - first_token / delta：最终答案的流式文本
     - done：结束（含 citations / tool_traces / stats）
+
+    sources：数据来源开关（doc/db/web/llm），按开关过滤可用工具；
+    关闭 llm 时禁止模型凭自身知识直接作答。
 
     与 agent_ask 的区别：
     - 工具调用阶段不产生文本 delta
@@ -324,7 +382,7 @@ def agent_ask_stream(user, question: str, session, root_types: list = None,
         return
 
     tool_registry = get_default_registry()
-    openai_tools = tool_registry.to_openai_tools()
+    openai_tools, system_prompt = _build_tool_config(sources, tool_registry)
     ctx = ToolContext(user=user, session=session, root_types=root_types,
                       node_ids=node_ids, llm=get_llm())
 
@@ -332,7 +390,8 @@ def agent_ask_stream(user, question: str, session, root_types: list = None,
     mm = MemoryManager()
     root_type = root_types[0] if root_types else 'company_doc'
     mem_ctx = mm.load_context(user, session, question, root_type=root_type)
-    messages = build_agent_messages(question, memory_block=mem_ctx['memory_block'])
+    messages = build_agent_messages(question, memory_block=mem_ctx['memory_block'],
+                                    system_prompt=system_prompt)
 
     llm = get_llm()
     tool_traces: List[Dict] = []

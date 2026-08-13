@@ -514,7 +514,8 @@ class TestAskStreamViaRoute:
                       return_value=MagicMock(id=1)) as mock_persist, \
                 patch('apps.agent.executor._update_cache') as mock_update_cache:
             events = list(_ask_stream_via_route(None, '问题', self._session(),
-                                                ['company_doc'], 'company_doc', 1, 0))
+                                                ['company_doc'], 'company_doc', 1, 0,
+                                                ['doc', 'db', 'web', 'llm']))
         assert events[0]['type'] == 'start'
         assert events[0]['route_source'] == 'wiki'
         deltas = [e['delta'] for e in events if e['type'] == 'delta']
@@ -544,7 +545,8 @@ class TestAskStreamViaRoute:
                       return_value=MagicMock(id=1)) as mock_persist, \
                 patch('apps.agent.executor._update_cache') as mock_update_cache:
             events = list(_ask_stream_via_route(None, '问题', self._session(),
-                                                ['company_doc'], 'company_doc', 1, 0))
+                                                ['company_doc'], 'company_doc', 1, 0,
+                                                ['doc', 'db', 'web', 'llm']))
         deltas = [e['delta'] for e in events if e['type'] == 'delta']
         assert '未找到相关资料' in deltas[0]
         kw = mock_persist.call_args.kwargs
@@ -606,7 +608,8 @@ class TestAskStreamViaAgent:
         ])
         with stack:
             events = list(_ask_stream_via_agent(None, '问题', self._session(),
-                                                ['company_doc'], None, 'company_doc', 1, 0))
+                                                ['company_doc'], None, 'company_doc', 1, 0,
+                                                ['doc', 'db', 'web', 'llm']))
         types = [e['type'] for e in events]
         assert types[0] == 'start'
         assert 'tool_call' in types
@@ -634,7 +637,8 @@ class TestAskStreamViaAgent:
         ])
         with stack:
             events = list(_ask_stream_via_agent(None, '问题', self._session(),
-                                                ['company_doc'], None, 'company_doc', 1, 0))
+                                                ['company_doc'], None, 'company_doc', 1, 0,
+                                                ['doc', 'db', 'web', 'llm']))
         types = [e['type'] for e in events]
         assert 'content_filtered' in types
         assert events[-1]['is_filtered'] is True
@@ -658,7 +662,8 @@ class TestAskStreamViaAgent:
         ])
         with stack:
             events = list(_ask_stream_via_agent(None, '问题', self._session(),
-                                                ['company_doc'], None, 'company_doc', 1, 0))
+                                                ['company_doc'], None, 'company_doc', 1, 0,
+                                                ['doc', 'db', 'web', 'llm']))
         assert events[0]['type'] == 'start'
         assert events[1]['type'] == 'error'
         kw = m['persist'].call_args.kwargs
@@ -675,7 +680,8 @@ class TestAskStreamViaAgent:
         ])
         with stack:
             events = list(_ask_stream_via_agent(None, '问题', self._session(),
-                                                ['company_doc'], None, 'company_doc', 1, 0))
+                                                ['company_doc'], None, 'company_doc', 1, 0,
+                                                ['doc', 'db', 'web', 'llm']))
         kw = m['persist'].call_args.kwargs
         assert kw['answer'] == '[未生成内容]'
         assert kw['answer_type'] == 'refused'
@@ -691,7 +697,8 @@ class TestAskStreamViaAgent:
         ])
         with stack:
             events = list(_ask_stream_via_agent(None, '问题', self._session(),
-                                                ['company_doc'], None, 'company_doc', 1, 0))
+                                                ['company_doc'], None, 'company_doc', 1, 0,
+                                                ['doc', 'db', 'web', 'llm']))
         kw = m['persist'].call_args.kwargs
         assert kw['error_type'] == 'rate_limit'
         assert kw['is_success'] is False
@@ -705,7 +712,8 @@ class TestAskStreamViaAgent:
         ])
         with stack:
             gen = _ask_stream_via_agent(None, '问题', self._session(),
-                                        ['company_doc'], None, 'company_doc', 1, 0)
+                                        ['company_doc'], None, 'company_doc', 1, 0,
+                                        ['doc', 'db', 'web', 'llm'])
             ev = next(gen)  # start
             assert ev['type'] == 'start'
             ev = next(gen)  # delta
@@ -725,5 +733,6 @@ class TestAskStreamViaAgent:
                        side_effect=Exception('trace write failed')):
                 events = list(_ask_stream_via_agent(None, '问题', self._session(),
                                                     ['company_doc'], None, 'company_doc',
-                                                    1, 0))
+                                                    1, 0,
+                                                    ['doc', 'db', 'web', 'llm']))
         assert events[-1]['type'] == 'done'

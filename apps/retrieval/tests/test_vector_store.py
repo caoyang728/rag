@@ -49,13 +49,17 @@ def _make_node(name='测试节点', root_type='company_doc'):
 
 
 def _make_doc(node, owner, title='测试文档'):
-    """创建文档（绕过上传管线）"""
+    """创建文档（绕过上传管线）
+
+    audit_status 置为 'passed'（双审通过）：检索层 build_permission_q
+    只召回双审通过的文档，测试文档需模拟已过审才能被 vector_search 命中。
+    """
     return Document.objects.create(
         node=node, title=title, file_name=f'{title}.txt', file_type='txt',
         file_size=100, file_hash=uuid.uuid4().hex, file_path='/tmp/fake.txt',
         mime_type='text/plain', owner=owner, dept_id=None, team_id=None,
         visibility_level=VisibilityLevel.PUBLIC, root_type=node.root_type,
-        status='done')
+        status='done', audit_status='passed')
 
 
 def _make_chunk(doc, content='测试切片内容', index=0):

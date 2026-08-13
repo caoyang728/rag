@@ -316,15 +316,15 @@ class Text2SqlTool(BaseTool):
     def _get_connection(self):
         """获取业务数据库连接
 
-        优先使用 BUSINESS_DB_DSN 直连（psycopg2），
+        优先使用 BUSINESS_DB_DSN 直连,
         未配置时回退到 django 默认数据库连接。
         """
         from django.conf import settings
 
         dsn = getattr(settings, 'BUSINESS_DB_DSN', '') or ''
         if dsn:
-            import psycopg2
-            return psycopg2.connect(dsn)
+            import psycopg
+            return psycopg.connect(dsn)
         # 回退到 django 默认数据库
         from django.db import connection
         return connection
@@ -332,7 +332,7 @@ class Text2SqlTool(BaseTool):
     def _release_connection(self, conn):
         """释放数据库连接
 
-        psycopg2 直连的连接需要手动关闭；
+        psycopg3 直连的连接需要手动关闭；
         django 的连接由框架管理，不能关闭（只 commit）。
         """
         from django.db import connection as django_conn

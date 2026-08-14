@@ -71,7 +71,7 @@
 .panel-body .chart-container {
 	flex: 1;
 	min-height: 0;
-	height: auto;  /* 覆盖 common.css 的 height:280px，防止溢出 */
+	height: auto;  /* 覆盖文件末尾 .chart-container 的 height:280px，让图表随 panel-body 自适应高度 */
 }
 
 /* 概览面板：KPI 区与趋势图合并为一张卡片，内部用分隔线间隔，
@@ -136,9 +136,10 @@
 	background: #f9fafb;
 }
 
-/* 减小 card-title 下方间距（common.css 默认 margin-bottom:16px → 10px） */
-.card-title {
-	margin-bottom: 0 !important;
+/* 减小 card-title 下方间距（common.css 默认 margin-bottom:16px → 0）
+   页面级标题下方均已有区块内边距兜底,作用域限定避免全局 !important */
+.analytics-content .card-title {
+	margin-bottom: 0;
 }
 
 /* 日报趋势区头部：标题左 / 天数选择器右 */
@@ -226,20 +227,6 @@
 .card .select,
 .card .input {
 	vertical-align: middle;
-}
-
-/* --- KPI 卡片网格最小列宽调优（analytics 页更紧凑） --- */
-.tab-panel .kpi-grid {
-	grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-	gap: 12px;
-}
-
-.tab-panel .kpi-card {
-	padding: 16px;
-}
-
-.tab-panel .kpi-value {
-	font-size: 24px;
 }
 
 /* --- 系统指标页卡片内表格的响应式容器：横向可滚动 --- */
@@ -369,6 +356,20 @@
 	background: #f8fafc;
 	padding: 12px 14px;
 	min-width: 0;
+}
+
+/* 分布子面板内小标题（延迟分布/错误分布）：比 .card-title 更轻的层级 */
+.system-card .sub-panel-title {
+	font-size: 13px;
+	font-weight: 600;
+	color: var(--text-sub);
+	margin-bottom: 8px;
+}
+
+/* 延迟直方图柱状图容器：固定高度避免撑高页面，宽度自适应面板 */
+.system-card .hist-chart {
+	height: 260px;
+	width: 100%;
 }
 
 /* 分位数延迟：每维度一列（总延迟/LLM/检索/TTFB/缓存命中），列内上下展示 P50/P95/P99；
@@ -642,7 +643,6 @@
 /* --- KPI 动态色值显示 ---
  * .kpi-value-dynamic 用于 KPI 卡片：字号 22px，颜色由 --kpi-color 控制（默认深灰）
  *   用法：<div class="kpi-value kpi-value-dynamic" style="--kpi-color:#059669">
- *   注意：用 .kpi-value.kpi-value-dynamic 提升优先级，覆盖 .tab-panel .kpi-value 的 24px
  */
 .kpi-value.kpi-value-dynamic { font-size: 22px; color: var(--kpi-color, #1f2937); }
 

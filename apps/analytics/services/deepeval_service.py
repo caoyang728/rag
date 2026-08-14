@@ -244,12 +244,18 @@ def evaluate_with_deepeval(
             if dim_name in INVERTED_DIMS:
                 score = 1.0 - score
             reason = str(metric.reason or '')
+            # 原生模型(DeepEvalBaseLLM 子类)measure 后会在 metric 上回填实际
+            # input/output tokens,据此估算成本落库,让日预算的成本上限真正生效
+            in_tokens = getattr(metric, 'input_tokens', None) or 0
+            out_tokens = getattr(metric, 'output_tokens', None) or 0
             results.append({
                 'dimension': dim_name,
                 'score': round(score, 4),
                 'reason': reason,
                 'latency_ms': int((time.time() - t0) * 1000),
-                'tokens_used': 0,  # DeepEval 不直接暴露单指标 token,成本靠日限控制
+                'tokens_used': in_tokens + out_tokens,
+                'input_tokens': in_tokens,
+                'output_tokens': out_tokens,
             })
         except Exception as e:
             logger.warning(f'[DeepEval] 维度 {dim_name} 评估失败: {e}')
@@ -259,6 +265,8 @@ def evaluate_with_deepeval(
                 'reason': f'评估失败: {str(e)[:100]}',
                 'latency_ms': int((time.time() - t0) * 1000),
                 'tokens_used': 0,
+                'input_tokens': 0,
+                'output_tokens': 0,
             })
 
     return results

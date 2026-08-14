@@ -1,5 +1,5 @@
 """
-apps.analytics.wiki_eval 测试 —— Wiki 页面质量评估（LLM-as-Judge）
+apps.analytics.services.wiki_eval_service 测试 —— Wiki 页面质量评估（LLM-as-Judge）
 
 覆盖范围：
 - build_wiki_source_chunks：node 挂载型收集源切片（截断/上限）、community 型返回空
@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from apps.analytics.models import WikiPageQualityScore
-from apps.analytics.wiki_eval import (
+from apps.analytics.services.wiki_eval_service import (
     build_wiki_source_chunks, evaluate_wiki_page, MAX_SOURCE_CHUNKS, MAX_CHUNK_CHARS,
 )
 from apps.knowledge.models import KnowledgeNode, Document, DocumentChunk
@@ -130,7 +130,7 @@ class TestEvaluateWikiPage:
     def _deepeval(self, monkeypatch):
         """注入 fake deepeval 模块并 patch 模型接入"""
         self._metrics_mod = _install_deepeval(monkeypatch)
-        monkeypatch.setattr('apps.analytics.deepeval_metrics.get_deepeval_model',
+        monkeypatch.setattr('apps.analytics.services.deepeval_service.get_deepeval_model',
                             MagicMock(return_value=MagicMock()))
         monkeypatch.setattr('rag_project.config.AnalyticsConfig.eval_model',
                             classmethod(lambda cls: 'test-model'))
@@ -200,7 +200,7 @@ class TestEvaluateWikiPage:
         self._metrics_mod.FaithfulnessMetric.return_value = fm
         self._metrics_mod.GEval.return_value = gm
 
-        with patch('apps.analytics.wiki_eval.logger'):
+        with patch('apps.analytics.services.wiki_eval_service.logger'):
             result = evaluate_wiki_page(page.id)
 
         assert result['ok'] is False

@@ -155,7 +155,7 @@ class TestTaskStatsViewAPI(SystemAPITestBase):
     def test_stats_queues_from_snapshot(self):
         """队列深度复用 analytics 快照，mock 掉 Redis 依赖"""
         fake_snapshot = {'default': {'size': 5}, 'parse': {'size': 0}}
-        with patch('apps.analytics.realtime.get_queue_depth_snapshot',
+        with patch('apps.analytics.services.realtime_service.get_queue_depth_snapshot',
                    return_value=fake_snapshot):
             resp = self.client.get(STATS_URL, **self.admin_a_headers)
         assert resp.json()['queues'] == fake_snapshot
@@ -163,7 +163,7 @@ class TestTaskStatsViewAPI(SystemAPITestBase):
     @pytest.mark.integration
     def test_stats_when_snapshot_fails_then_queues_empty(self):
         """Redis 不可用时 queues 降级为空 dict，接口仍返回 200"""
-        with patch('apps.analytics.realtime.get_queue_depth_snapshot',
+        with patch('apps.analytics.services.realtime_service.get_queue_depth_snapshot',
                    side_effect=Exception('redis down')):
             resp = self.client.get(STATS_URL, **self.admin_a_headers)
         assert resp.status_code == 200

@@ -268,12 +268,12 @@ def batch_evaluate_document_quality(
     Returns:
         评估汇总结果
     """
-    from apps.analytics.models import DocumentQualityReport
     from apps.knowledge.models import Document
 
-    since = timezone.now() - timedelta(days=days)
+    # 本地业务日期作窗口起点(与项目 localdate 约定一致),避免 UTC 日期凌晨错位
+    since = timezone.localdate() - timedelta(days=days)
     docs = Document.objects.filter(
-        created_at__date__gte=since.date(),
+        created_at__date__gte=since,
         status='done',
         is_deleted=False,
     )
@@ -349,7 +349,24 @@ def get_document_quality_summary(
         qs = qs.filter(document__dept_id=dept_id)
 
     total = qs.count()
-    scores = list(qs.values_list('quality_score', flat=True))
+    # 一次查询同时取 quality_score 与 quality_issues,避免对全表做两次独立扫描
+    # (原先分别 values_list 两次,大表下 Dashboard 响应慢)
+    rows_iter = qs.values_list('quality_score', 'quality_issues').iterator()
+    scores = []
+    issue_map = {}
+    for score, issues in rows_iter:
+        if score is not None:
+            scores.append(score)
+        for issue in (issues or []):
+            issue_type = issue.get('type', 'unknown')
+            level = issue.get('level', 'warning')
+            if issue_type not in issue_map:
+                issue_map[issue_type] = {'count': 0, 'level': level}
+            issue_map[issue_type]['count'] += 1
+            # error 优先级高于 warning
+            if level == 'error' and issue_map[issue_type]['level'] != 'error':
+                issue_map[issue_type]['level'] = 'error'
+
     avg_score = round(statistics.mean(scores), 1) if scores else 0
 
     # 评分分布
@@ -364,22 +381,8 @@ def get_document_quality_summary(
         else:
             distribution['poor'] += 1
 
-    # 常见问题统计:按 type 聚合计数,同时保留每类问题的最高严重级别
+    # 常见问题统计:issue_map 已在上面合并遍历时聚合完成
     # level(error/warning) 映射为前端 severity(high/mid/low),供图标着色
-    issue_map = {}
-    for report in qs.values_list('quality_issues', flat=True):
-        if report:
-            for issue in report:
-                issue_type = issue.get('type', 'unknown')
-                level = issue.get('level', 'warning')
-                if issue_type not in issue_map:
-                    issue_map[issue_type] = {'count': 0, 'level': level}
-                issue_map[issue_type]['count'] += 1
-                # error 优先级高于 warning
-                if level == 'error' and issue_map[issue_type]['level'] != 'error':
-                    issue_map[issue_type]['level'] = 'error'
-
-    # level → severity 映射,与前端 sevClass 期望值一致
     level_to_severity = {'error': 'high', 'warning': 'mid'}
     common_issues = sorted(
         [

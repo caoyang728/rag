@@ -3,7 +3,7 @@ apps.analytics.models 单元测试
 
 覆盖范围：
 - 关键字段的默认值 / choices / 帮助文案语义
-- 数据库级唯一约束：KeywordWeight(keyword,root_type)、AccuracyReport(report_date)、
+- 数据库级唯一约束：KeywordWeight(keyword,root_type)、
   OrgUsageReport(report_date,department_id,team_id)、QueueDepthLog(queue_name,minute_bucket)、
   MultiDimensionScore(qa_record_id,dimension)、LowScoreAnalysis OneToOne
 - 模型间关联：GoldenDataset→GoldenQuestion→GoldenRelevantDoc/GoldenReferenceAnswer、
@@ -20,7 +20,7 @@ from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from apps.analytics.models import (
-    KeywordWeight, AccuracyReport, SystemMetricsReport, OrgUsageReport,
+    KeywordWeight, SystemMetricsReport, OrgUsageReport,
     QueueDepthLog, GoldenDataset, GoldenQuestion, GoldenRelevantDoc,
     GoldenReferenceAnswer, MultiDimensionScore, DocumentQualityReport,
     RetrievalQualityReport, CoverageReport, LowScoreAnalysis, RouteAnalysis,
@@ -58,27 +58,6 @@ class TestKeywordWeight:
                 KeywordWeight.objects.create(keyword='报销', root_type='all')
         # 不同 root_type 允许共存
         KeywordWeight.objects.create(keyword='报销', root_type='hr')
-
-
-@pytest.mark.django_db
-class TestAccuracyReport:
-    """准确率日报：report_date 全局唯一"""
-
-    @pytest.mark.integration
-    def test_report_date_unique(self):
-        AccuracyReport.objects.create(report_date=datetime(2026, 1, 1).date())
-        with pytest.raises(IntegrityError):
-            with transaction.atomic():
-                AccuracyReport.objects.create(report_date=datetime(2026, 1, 1).date())
-
-    @pytest.mark.integration
-    def test_defaults(self):
-        report = AccuracyReport.objects.create(report_date=datetime(2026, 1, 2).date())
-        assert report.total_qa == 0
-        assert report.accuracy_rate == 0.0
-        assert report.total_tokens == 0
-        assert report.top_bad_tags == []
-        assert report.top_root_types == []
 
 
 @pytest.mark.django_db

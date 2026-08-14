@@ -668,7 +668,7 @@ class TestQueueDepthView(KnowledgeViewsExtraBase):
         self._init_env()
 
     @pytest.mark.integration
-    @patch('apps.analytics.realtime.get_queue_depth_snapshot',
+    @patch('apps.analytics.services.realtime_service.get_queue_depth_snapshot',
            return_value={'parse': {'length': 3, 'active': 1}})
     def test_depth_snapshot_ok(self, mock_snap):
         resp = self.client.get(
@@ -678,7 +678,7 @@ class TestQueueDepthView(KnowledgeViewsExtraBase):
         assert resp.json()['queues']['parse']['length'] == 3
 
     @pytest.mark.integration
-    @patch('apps.analytics.realtime.get_queue_depth_snapshot',
+    @patch('apps.analytics.services.realtime_service.get_queue_depth_snapshot',
            side_effect=RuntimeError('redis down'))
     def test_depth_snapshot_exception_returns_empty(self, mock_snap):
         resp = self.client.get(

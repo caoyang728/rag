@@ -2082,7 +2082,7 @@ class TaskStatsView(APIView):
 
         # 队列深度：复用实时监控快照；Redis 不可用时降级为空 dict，不影响整体接口
         try:
-            from apps.analytics.realtime import get_queue_depth_snapshot
+            from apps.analytics.services.realtime_service import get_queue_depth_snapshot
             queues = get_queue_depth_snapshot()
         except Exception as e:
             logger.warning(f'[TaskBoard] 队列深度获取失败: {e}')

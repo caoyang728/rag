@@ -15,8 +15,6 @@ analytics utils - 统计辅助函数
 - 聚合函数接收 queryset，调用方负责 filter 日期范围
 - 每个函数都有 docstring 说明输入/输出/用途
 """
-import json
-import re
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Optional
@@ -156,26 +154,22 @@ def aggregate_system_metrics(report_date: Optional[date] = None) -> dict:
     cache_hit_qs = qs.filter(is_hit_cache=True)
     normal_qa_qs = qs.filter(is_hit_cache=False)
 
-    # --- 正常请求延迟 ---
-    # .values_list 返回的结果中，未设置的字段会是 None；
-    # calculate_percentile 使用 sorted(values)，混入 None 会触发 TypeError，
-    # 所以必须用 comprehension 过滤掉 None 再计算百分位
-    normal_total_latencies = [
-        v for v in normal_qa_qs.values_list('latency_total_ms', flat=True)
-        if v is not None
-    ]
-    normal_llm_latencies = [
-        v for v in normal_qa_qs.values_list('latency_llm_ms', flat=True)
-        if v is not None
-    ]
-    normal_retrieval_latencies = [
-        v for v in normal_qa_qs.values_list('latency_retrieval_ms', flat=True)
-        if v is not None
-    ]
-    normal_ttfb_latencies = [
-        v for v in normal_qa_qs.values_list('latency_ttfb_ms', flat=True)
-        if v is not None
-    ]
+    # --- 正常请求延迟 / Token 速率 ---
+    # 原先每个字段单独 values_list,同一日期数据被反复全量拉取(4 次延迟 + 1 次速率);
+    # 合并为单次查询取回全部指标列,在 Python 内按字段拆列。
+    # 字段可能为 None(未统计):过滤后再算百分位,否则 calculate_percentiles
+    # 内部 sorted(values) 混入 None 会触发 TypeError。
+    normal_rows = list(
+        normal_qa_qs.values_list(
+            'latency_total_ms', 'latency_llm_ms', 'latency_retrieval_ms',
+            'latency_ttfb_ms', 'tokens_per_second',
+        )
+    )
+    normal_total_latencies = [r[0] for r in normal_rows if r[0] is not None]
+    normal_llm_latencies = [r[1] for r in normal_rows if r[1] is not None]
+    normal_retrieval_latencies = [r[2] for r in normal_rows if r[2] is not None]
+    normal_ttfb_latencies = [r[3] for r in normal_rows if r[3] is not None]
+    tokens_per_sec_values = [r[4] for r in normal_rows if r[4] is not None]
 
     total_percentiles = calculate_percentiles(normal_total_latencies)
     llm_percentiles = calculate_percentiles(normal_llm_latencies)
@@ -208,12 +202,7 @@ def aggregate_system_metrics(report_date: Optional[date] = None) -> dict:
     llm_timeout_rate = timeout_count / max(normal_qa_count, 1)
     embedding_error_rate = embedding_error_count / max(total_qa, 1)
 
-    # Token 生成速率（仅非缓存请求）
-    # 过滤 None：未统计 tokens_per_second 的记录不参与平均，防止 sum(None) TypeError 或拉高 len()
-    tokens_per_sec_values = [
-        v for v in normal_qa_qs.values_list('tokens_per_second', flat=True)
-        if v is not None
-    ]
+    # Token 生成速率（仅非缓存请求）：原始值已在上方 merged 查询中随延迟列一并取回
     avg_tokens_per_second = (
         sum(tokens_per_sec_values) / len(tokens_per_sec_values)
         if tokens_per_sec_values else 0.0
@@ -230,11 +219,13 @@ def aggregate_system_metrics(report_date: Optional[date] = None) -> dict:
     total_cost = float(token_agg['total_cost'] or 0)
 
     # --- 错误分布 ---
-    error_dist = {}
-    error_rows = (qs.exclude(error_type='')
-                   .values_list('error_type', flat=True))
-    for err_type in error_rows:
-        error_dist[err_type] = error_dist.get(err_type, 0) + 1
+    # 用 GROUP BY 一次聚合,避免 values_list 全量拉取后在 Python 计数(大表下内存/耗时均不优)
+    error_dist = dict(
+        qs.exclude(error_type='')
+        .values('error_type')
+        .annotate(cnt=models.Count('id'))
+        .values_list('error_type', 'cnt')
+    )
 
     # --- 延迟直方图（仅非缓存请求）---
     latency_histogram = build_latency_histogram(normal_total_latencies)

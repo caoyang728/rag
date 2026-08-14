@@ -1,5 +1,5 @@
 """
-apps.analytics.ragas_pipeline 单元测试 —— Ragas 部署前评估流水线
+apps.analytics.services.ragas_service 单元测试 —— Ragas 部署前评估流水线
 
 覆盖范围：
 - 模块导入兼容：注入假 langchain_community 树，使顶层 _patch_ragas_langchain_compat 可执行
@@ -21,16 +21,12 @@ sys.modules 注入假模块树（ragas.llms / ragas.metrics / ragas.testset /
 ragas.dataset_schema / langchain_openai / langchain_core.documents /
 langchain_community.*），函数内部局部导入因此可解析；所有外部对象用 MagicMock。
 """
-import math
 import re
 import sys
 import types
-from datetime import datetime, timedelta
 
 import pytest
 from unittest.mock import patch, MagicMock
-
-from django.utils import timezone
 
 from apps.users.models import User
 
@@ -80,7 +76,7 @@ _make_module('ragas.dataset_schema',
 _make_module('ragas.evaluate', evaluate=MagicMock(name='ragas_evaluate'))
 
 # 假模块注入完成后才导入被测试模块（顶层兼容补丁需要上述模块可解析）
-from apps.analytics import ragas_pipeline  # noqa: E402
+from apps.analytics.services import ragas_service  # noqa: E402
 from apps.knowledge.models import KnowledgeNode, Document as KDocument, DocumentChunk  # noqa: E402
 
 TS_ID_RE = re.compile(r'^\d{8}_\d{6}_[0-9a-f]{6}$')
@@ -155,7 +151,7 @@ class TestGetEvaluatorLLM:
         settings.LLM_API_KEY = 'sk-test'
         with patch('apps.system.config_loader.get_config_value', return_value=''):
             with pytest.raises(ValueError, match='LLM_BASE_MODEL'):
-                ragas_pipeline._get_evaluator_llm()
+                ragas_service._get_evaluator_llm()
 
     @pytest.mark.unit
     def test_constructed_with_base_url(self, settings):
@@ -169,7 +165,7 @@ class TestGetEvaluatorLLM:
                    return_value={'base_url': 'http://llm:8000/v1'}), \
              patch('langchain_openai.ChatOpenAI', return_value=fake_chat) as mock_cls, \
              patch('ragas.llms.LangchainLLMWrapper', return_value=fake_wrapper) as mock_wrap:
-            result = ragas_pipeline._get_evaluator_llm()
+            result = ragas_service._get_evaluator_llm()
         assert result is fake_wrapper
         mock_cls.assert_called_once_with(
             api_key='sk-test', base_url='http://llm:8000/v1',
@@ -186,7 +182,7 @@ class TestGetEvaluatorLLM:
              patch('apps.system.config_loader.get_llm_model_config', return_value=None), \
              patch('langchain_openai.ChatOpenAI', return_value=fake_chat) as mock_cls, \
              patch('ragas.llms.LangchainLLMWrapper', return_value=MagicMock()):
-            ragas_pipeline._get_evaluator_llm()
+            ragas_service._get_evaluator_llm()
         _, kwargs = mock_cls.call_args
         assert kwargs['base_url'] == ''
 
@@ -198,7 +194,7 @@ class TestGetEvaluatorLLM:
              patch('apps.system.config_loader.get_llm_model_config', return_value=None), \
              patch('langchain_openai.ChatOpenAI') as mock_cls, \
              patch('ragas.llms.LangchainLLMWrapper', return_value=MagicMock()):
-            ragas_pipeline._get_evaluator_llm(model='custom-model')
+            ragas_service._get_evaluator_llm(model='custom-model')
         mock_cfg.assert_not_called()
         _, kwargs = mock_cls.call_args
         assert kwargs['model'] == 'custom-model'
@@ -216,11 +212,11 @@ class TestGetEvaluatorEmbeddings:
         fake_wrapper = MagicMock(name='emb_wrapper')
         with patch('ragas.embeddings.LangchainEmbeddingsWrapper',
                    return_value=fake_wrapper) as mock_wrap:
-            result = ragas_pipeline._get_evaluator_embeddings()
+            result = ragas_service._get_evaluator_embeddings()
         assert result is fake_wrapper
         # 传入的是 _ProjectEmbeddings 实例（适配层）
         instance = mock_wrap.call_args[0][0]
-        assert isinstance(instance, ragas_pipeline._ProjectEmbeddings)
+        assert isinstance(instance, ragas_service._ProjectEmbeddings)
 
 
 class TestProjectEmbeddings:
@@ -232,7 +228,7 @@ class TestProjectEmbeddings:
         fake_client = MagicMock()
         fake_client.embed.return_value = [[0.1, 0.2]]
         with patch('apps.llm.embedding.get_embedding_client', return_value=fake_client):
-            emb = ragas_pipeline._ProjectEmbeddings()
+            emb = ragas_service._ProjectEmbeddings()
         assert emb.embed_documents(['文本']) == [[0.1, 0.2]]
         fake_client.embed.assert_called_once_with(['文本'])
 
@@ -242,7 +238,7 @@ class TestProjectEmbeddings:
         fake_client = MagicMock()
         fake_client.embed_one.return_value = [0.3, 0.4]
         with patch('apps.llm.embedding.get_embedding_client', return_value=fake_client):
-            emb = ragas_pipeline._ProjectEmbeddings()
+            emb = ragas_service._ProjectEmbeddings()
         assert emb.embed_query('问题') == [0.3, 0.4]
         fake_client.embed_one.assert_called_once_with('问题')
 
@@ -275,13 +271,15 @@ class TestLoadCorpusChunks(RagasDBTestBase):
                     content_length=200)                               # 非 text → 过滤
 
         fake_model = self._fake_doc_model([self.doc.id])
-        with patch('apps.knowledge.models.Document', fake_model):
-            docs = ragas_pipeline.load_corpus_chunks(limit_docs=50, min_chunk_chars=80)
+        with patch('apps.knowledge.models.Document', fake_model), \
+             patch('langchain_core.documents.Document') as mock_lc_doc:
+            docs = ragas_service.load_corpus_chunks(limit_docs=50, min_chunk_chars=80)
 
         assert len(docs) == 1
-        # 本地 Document 名被 apps.knowledge.models.Document 遮蔽 → 返回假模型实例
-        fake_model.assert_called_once()
-        _, kwargs = fake_model.call_args
+        # 语料由 langchain 的 Document 构造(ragas_service 用别名 LangChainDocument
+        # 与 knowledge.Document 区分,避免同名遮蔽),断言其构造参数完整
+        mock_lc_doc.assert_called_once()
+        _, kwargs = mock_lc_doc.call_args
         assert kwargs['page_content'] == ok.content
         assert kwargs['metadata']['doc_id'] == self.doc.id
         assert kwargs['metadata']['filename'] == f'doc_{self.doc.id}_语料文档'
@@ -292,7 +290,7 @@ class TestLoadCorpusChunks(RagasDBTestBase):
         self._chunk('内容' * 50, content_length=200)
         fake_model = self._fake_doc_model([self.doc.id])
         with patch('apps.knowledge.models.Document', fake_model):
-            ragas_pipeline.load_corpus_chunks(root_type='hr', limit_docs=10)
+            ragas_service.load_corpus_chunks(root_type='hr', limit_docs=10)
         fake_model.objects.filter.assert_called_once_with(
             status='done', is_deleted=False)
         fake_model.objects.filter.return_value.order_by.return_value.filter \
@@ -303,7 +301,7 @@ class TestLoadCorpusChunks(RagasDBTestBase):
         fake_model = self._fake_doc_model([])
         with patch('apps.knowledge.models.Document', fake_model):
             with pytest.raises(ValueError, match='status=done'):
-                ragas_pipeline.load_corpus_chunks()
+                ragas_service.load_corpus_chunks()
 
 
 # ============================================================================
@@ -331,12 +329,12 @@ class TestGenerateTestset:
             {'user_input': '无参考', 'reference': '', 'retrieved_contexts': []},
         ]
         gen_cls = self._fake_generator(rows)
-        with patch('apps.analytics.ragas_pipeline._get_evaluator_llm',
+        with patch('apps.analytics.services.ragas_service._get_evaluator_llm',
                    return_value='fake-llm'), \
-             patch('apps.analytics.ragas_pipeline._get_evaluator_embeddings',
+             patch('apps.analytics.services.ragas_service._get_evaluator_embeddings',
                    return_value='fake-emb'), \
              patch('ragas.testset.TestsetGenerator', gen_cls):
-            samples, testset_id = ragas_pipeline.generate_testset(
+            samples, testset_id = ragas_service.generate_testset(
                 corpus_docs=['doc1'], testset_size=3, model='deepseek-chat')
 
         assert len(samples) == 1
@@ -354,10 +352,10 @@ class TestGenerateTestset:
         """老版本列名（question / ground_truth / contexts）兼容"""
         rows = [{'question': '旧列问题', 'ground_truth': '旧列参考', 'contexts': ['c']}]
         gen_cls = self._fake_generator(rows)
-        with patch('apps.analytics.ragas_pipeline._get_evaluator_llm', return_value='llm'), \
-             patch('apps.analytics.ragas_pipeline._get_evaluator_embeddings', return_value='e'), \
+        with patch('apps.analytics.services.ragas_service._get_evaluator_llm', return_value='llm'), \
+             patch('apps.analytics.services.ragas_service._get_evaluator_embeddings', return_value='e'), \
              patch('ragas.testset.TestsetGenerator', gen_cls):
-            samples, _ = ragas_pipeline.generate_testset(corpus_docs=['d'], testset_size=1)
+            samples, _ = ragas_service.generate_testset(corpus_docs=['d'], testset_size=1)
         assert samples[0]['user_input'] == '旧列问题'
         assert samples[0]['reference'] == '旧列参考'
         assert samples[0]['retrieved_contexts'] == ['c']
@@ -373,16 +371,16 @@ class TestSaveLoadTestset:
     def test_save_and_load_roundtrip(self, tmp_path):
         """保存后可从 JSON 完整读回（ensure_ascii=False 保留中文）"""
         samples = [{'user_input': '问题', 'reference': '参考', 'retrieved_contexts': ['c']}]
-        path = ragas_pipeline.save_testset(samples, '20260101_000000_abc123', str(tmp_path))
+        path = ragas_service.save_testset(samples, '20260101_000000_abc123', str(tmp_path))
         assert path == str(tmp_path / 'testset_20260101_000000_abc123.json')
-        loaded = ragas_pipeline.load_testset(path)
+        loaded = ragas_service.load_testset(path)
         assert loaded == samples
 
     @pytest.mark.unit
     def test_save_creates_dir(self, tmp_path):
         """输出目录不存在时自动创建"""
         nested = tmp_path / 'a' / 'b'
-        path = ragas_pipeline.save_testset([], 'ts1', str(nested))
+        path = ragas_service.save_testset([], 'ts1', str(nested))
         assert nested.exists()
         assert path.endswith('testset_ts1.json')
 
@@ -397,7 +395,7 @@ class TestGetEvalUser:
     def test_no_user_raises(self):
         """无 system 用户也无超管 → 抛 ValueError"""
         with pytest.raises(ValueError, match='system'):
-            ragas_pipeline._get_eval_user()
+            ragas_service._get_eval_user()
 
     def test_system_user_preferred(self):
         """username='system' 优先于超管"""
@@ -406,13 +404,13 @@ class TestGetEvalUser:
             username='su_backup', password='pass12345', email='su@test.com')
         sys_user = User.objects.create_user(
             username='system', password='pass12345', email='sys@test.com')
-        assert ragas_pipeline._get_eval_user() == sys_user
+        assert ragas_service._get_eval_user() == sys_user
 
     def test_superuser_fallback(self):
         """无 system 用户 → 回退到超管"""
         su = User.objects.create_superuser(
             username='su_only', password='pass12345', email='su2@test.com')
-        assert ragas_pipeline._get_eval_user() == su
+        assert ragas_service._get_eval_user() == su
 
 
 # ============================================================================
@@ -431,7 +429,7 @@ class TestRunRagForQuestion:
             llm = MagicMock(name='llm')
             llm.chat.return_value = {'content': '回答内容'}
             mock_get.return_value = llm
-            result = ragas_pipeline.run_rag_for_question('问题', user='u')
+            result = ragas_service.run_rag_for_question('问题', user='u')
         assert result['answer'] == '回答内容'
         assert result['error'] is None
         assert result['retrieval_stats'] == {'hits': 2}
@@ -448,7 +446,7 @@ class TestRunRagForQuestion:
         with patch('apps.retrieval.hybrid.hybrid_search',
                    side_effect=RuntimeError('retrieval down')), \
              patch('apps.llm.factory.get_llm') as mock_get:
-            result = ragas_pipeline.run_rag_for_question('问题', user='u')
+            result = ragas_service.run_rag_for_question('问题', user='u')
         assert result['answer'] == ''
         assert result['error'].startswith('retrieval_failed:')
         mock_get.assert_not_called()
@@ -459,7 +457,7 @@ class TestRunRagForQuestion:
         with patch('apps.retrieval.hybrid.hybrid_search',
                    return_value={'chunks': [{'content': ''}]}), \
              patch('apps.llm.factory.get_llm') as mock_get:
-            result = ragas_pipeline.run_rag_for_question('问题', user='u')
+            result = ragas_service.run_rag_for_question('问题', user='u')
         assert result['answer'] == '（检索未返回相关内容，无法回答）'
         assert result['contexts'] == []
         mock_get.assert_not_called()
@@ -473,7 +471,7 @@ class TestRunRagForQuestion:
             llm = MagicMock(name='llm')
             llm.chat.side_effect = RuntimeError('llm down')
             mock_get.return_value = llm
-            result = ragas_pipeline.run_rag_for_question('问题', user='u')
+            result = ragas_service.run_rag_for_question('问题', user='u')
         assert result['error'].startswith('generation_failed:')
         assert result['answer'].startswith('[回答生成失败]')
 
@@ -494,7 +492,7 @@ class TestBuildMetrics:
              patch('ragas.metrics.AnswerCorrectness') as m3, \
              patch('ragas.metrics.LLMContextPrecisionWithReference') as m4, \
              patch('ragas.metrics.LLMContextRecall') as m5:
-            metrics = ragas_pipeline._build_metrics(llm, emb)
+            metrics = ragas_service._build_metrics(llm, emb)
         assert len(metrics) == 5
         m1.assert_called_once_with(llm=llm)
         m2.assert_called_once_with(llm=llm, embeddings=emb)
@@ -517,7 +515,7 @@ class TestBuildMetrics:
                  patch('ragas.metrics.AnswerCorrectness'), \
                  patch('ragas.metrics.ContextPrecision') as m4, \
                  patch('ragas.metrics.ContextRecall') as m5:
-                metrics = ragas_pipeline._build_metrics(llm, emb)
+                metrics = ragas_service._build_metrics(llm, emb)
             assert len(metrics) == 5
             m4.assert_called_once_with(llm=llm)
             m5.assert_called_once_with(llm=llm)
@@ -554,16 +552,16 @@ class TestEvaluateSync:
                   {'faithfulness': 0.7, 'answer_relevancy': 0.6}],
             columns=['faithfulness', 'answer_relevancy'])
 
-        with patch('apps.analytics.ragas_pipeline.run_rag_for_question',
+        with patch('apps.analytics.services.ragas_service.run_rag_for_question',
                    side_effect=rag_results), \
-             patch('apps.analytics.ragas_pipeline._get_eval_user',
+             patch('apps.analytics.services.ragas_service._get_eval_user',
                    return_value='sys_user'), \
-             patch('apps.analytics.ragas_pipeline._build_metrics',
+             patch('apps.analytics.services.ragas_service._build_metrics',
                    return_value=['m1', 'm2']), \
              patch('ragas.dataset_schema.SingleTurnSample') as mock_sample, \
              patch('ragas.dataset_schema.EvaluationDataset') as mock_ds, \
              patch('ragas.evaluate', return_value=eval_result) as mock_eval:
-            enriched = ragas_pipeline._evaluate_sync(self.SAMPLES, 'llm', 'emb')
+            enriched = ragas_service._evaluate_sync(self.SAMPLES, 'llm', 'emb')
 
         assert len(enriched) == 2
         assert enriched[0]['response'] == 'a1'
@@ -585,12 +583,12 @@ class TestEvaluateSync:
              'retrieval_stats': {}},
             {'answer': '', 'contexts': [], 'error': None, 'retrieval_stats': {}},
         ]
-        with patch('apps.analytics.ragas_pipeline.run_rag_for_question',
+        with patch('apps.analytics.services.ragas_service.run_rag_for_question',
                    side_effect=rag_results), \
-             patch('apps.analytics.ragas_pipeline._get_eval_user',
+             patch('apps.analytics.services.ragas_service._get_eval_user',
                    return_value='sys_user'), \
              patch('ragas.evaluate') as mock_eval:
-            enriched = ragas_pipeline._evaluate_sync(self.SAMPLES, 'llm', 'emb')
+            enriched = ragas_service._evaluate_sync(self.SAMPLES, 'llm', 'emb')
         assert len(enriched) == 2
         assert enriched[0]['_rag_error'] == 'retrieval_failed: x'
         assert 'faithfulness' not in enriched[0]
@@ -602,16 +600,16 @@ class TestEvaluateSync:
         rag_results = [self._rag_ok(1)]
         eval_result = MagicMock(name='eval_result')
         eval_result.to_pandas.side_effect = RuntimeError('pandas broken')
-        with patch('apps.analytics.ragas_pipeline.run_rag_for_question',
+        with patch('apps.analytics.services.ragas_service.run_rag_for_question',
                    side_effect=rag_results), \
-             patch('apps.analytics.ragas_pipeline._get_eval_user',
+             patch('apps.analytics.services.ragas_service._get_eval_user',
                    return_value='sys_user'), \
-             patch('apps.analytics.ragas_pipeline._build_metrics',
+             patch('apps.analytics.services.ragas_service._build_metrics',
                    return_value=['m1']), \
              patch('ragas.dataset_schema.SingleTurnSample'), \
              patch('ragas.dataset_schema.EvaluationDataset'), \
              patch('ragas.evaluate', return_value=eval_result) as mock_eval:
-            enriched = ragas_pipeline._evaluate_sync(self.SAMPLES[:1], 'llm', 'emb')
+            enriched = ragas_service._evaluate_sync(self.SAMPLES[:1], 'llm', 'emb')
         assert enriched[0]['response'] == 'a1'
         assert 'faithfulness' not in enriched[0]
         mock_eval.assert_called_once()
@@ -626,20 +624,20 @@ class TestSafeScore:
     @pytest.mark.unit
     def test_values(self):
         """正常值四舍五入到 4 位小数"""
-        assert ragas_pipeline._safe_score(0.81234) == 0.8123
-        assert ragas_pipeline._safe_score(1.0) == 1.0
+        assert ragas_service._safe_score(0.81234) == 0.8123
+        assert ragas_service._safe_score(1.0) == 1.0
 
     @pytest.mark.unit
     def test_none_and_nan(self):
         """None 与 NaN → None（不参与均值计算）"""
-        assert ragas_pipeline._safe_score(None) is None
-        assert ragas_pipeline._safe_score(float('nan')) is None
+        assert ragas_service._safe_score(None) is None
+        assert ragas_service._safe_score(float('nan')) is None
 
     @pytest.mark.unit
     def test_invalid_returns_none(self):
         """非法类型 → None"""
-        assert ragas_pipeline._safe_score('not-a-number') is None
-        assert ragas_pipeline._safe_score(object()) is None
+        assert ragas_service._safe_score('not-a-number') is None
+        assert ragas_service._safe_score(object()) is None
 
 
 # ============================================================================
@@ -664,7 +662,7 @@ class TestGenerateReport:
     def test_generates_json_and_markdown(self, tmp_path):
         """生成 JSON 明细 + Markdown 摘要，低分样本进入人工排查区"""
         import json
-        paths = ragas_pipeline.generate_report(
+        paths = ragas_service.generate_report(
             self._enriched(), 'ts_report', str(tmp_path), meta={'model': 'm'})
         assert paths['json'].endswith('report_ts_report.json')
         assert paths['markdown'].endswith('report_ts_report.md')
@@ -688,7 +686,7 @@ class TestGenerateReport:
     def test_all_metrics_none(self, tmp_path):
         """全部指标为空 → 均值 None，Markdown 显示 N/A，文件仍生成"""
         enriched = [{'user_input': 'q', 'response': 'a', 'reference': 'r'}]
-        paths = ragas_pipeline.generate_report(enriched, 'ts_none', str(tmp_path))
+        paths = ragas_service.generate_report(enriched, 'ts_none', str(tmp_path))
         with open(paths['markdown'], encoding='utf-8') as f:
             md = f.read()
         assert 'N/A' in md
@@ -708,13 +706,13 @@ class TestRunFullPipeline:
     def _mocks(self):
         """全自动模式所需 mock 集合"""
         return [
-            patch('apps.analytics.ragas_pipeline._get_evaluator_llm',
+            patch('apps.analytics.services.ragas_service._get_evaluator_llm',
                   return_value='llm'),
-            patch('apps.analytics.ragas_pipeline._get_evaluator_embeddings',
+            patch('apps.analytics.services.ragas_service._get_evaluator_embeddings',
                   return_value='emb'),
-            patch('apps.analytics.ragas_pipeline._evaluate_sync',
+            patch('apps.analytics.services.ragas_service._evaluate_sync',
                   return_value=self.ENRICHED),
-            patch('apps.analytics.ragas_pipeline.generate_report',
+            patch('apps.analytics.services.ragas_service.generate_report',
                   return_value={'json': 'r.json', 'markdown': 'r.md'}),
         ]
 
@@ -723,13 +721,13 @@ class TestRunFullPipeline:
         """全自动：加载语料 → 生成测试集 → 保存 → 评估 → 报告"""
         mocks = self._mocks()
         with mocks[0], mocks[1], mocks[2], mocks[3], \
-             patch('apps.analytics.ragas_pipeline.load_corpus_chunks',
+             patch('apps.analytics.services.ragas_service.load_corpus_chunks',
                    return_value=['doc1']), \
-             patch('apps.analytics.ragas_pipeline.generate_testset',
+             patch('apps.analytics.services.ragas_service.generate_testset',
                    return_value=(self.SAMPLES, 'ts_auto')), \
-             patch('apps.analytics.ragas_pipeline.save_testset',
+             patch('apps.analytics.services.ragas_service.save_testset',
                    return_value='/tmp/x.json') as mock_save:
-            result = ragas_pipeline.run_full_pipeline(
+            result = ragas_service.run_full_pipeline(
                 testset_size=5, limit_docs=10, root_type='hr', model='m',
                 output_dir=str(tmp_path))
         assert result['testset_id'] == 'ts_auto'
@@ -743,10 +741,10 @@ class TestRunFullPipeline:
         """复用测试集：跳过语料加载 / 生成 / 保存，直接评估"""
         mocks = self._mocks()
         with mocks[0], mocks[1], mocks[2], mocks[3], \
-             patch('apps.analytics.ragas_pipeline.load_corpus_chunks') as mock_load, \
-             patch('apps.analytics.ragas_pipeline.generate_testset') as mock_gen, \
-             patch('apps.analytics.ragas_pipeline.save_testset') as mock_save:
-            result = ragas_pipeline.run_full_pipeline(
+             patch('apps.analytics.services.ragas_service.load_corpus_chunks') as mock_load, \
+             patch('apps.analytics.services.ragas_service.generate_testset') as mock_gen, \
+             patch('apps.analytics.services.ragas_service.save_testset') as mock_save:
+            result = ragas_service.run_full_pipeline(
                 samples=self.SAMPLES, output_dir=str(tmp_path))
         assert '_reuse_' in result['testset_id']
         mock_load.assert_not_called()
@@ -756,7 +754,7 @@ class TestRunFullPipeline:
     @pytest.mark.unit
     def test_empty_corpus_raises(self, tmp_path):
         """语料为空 → 抛 ValueError 中断"""
-        with patch('apps.analytics.ragas_pipeline.load_corpus_chunks',
+        with patch('apps.analytics.services.ragas_service.load_corpus_chunks',
                    return_value=[]):
             with pytest.raises(ValueError, match='语料为空'):
-                ragas_pipeline.run_full_pipeline(output_dir=str(tmp_path))
+                ragas_service.run_full_pipeline(output_dir=str(tmp_path))

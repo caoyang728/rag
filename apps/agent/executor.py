@@ -1234,7 +1234,7 @@ def _persist_qa(*, user, session, question, answer, citations,
 
     # --- 实时指标上报（Redis 原子 INCR，失败不影响主流程）---
     try:
-        from apps.analytics.realtime import increment_realtime_metrics
+        from apps.analytics.services.realtime_service import increment_realtime_metrics
         increment_realtime_metrics(qa)
     except Exception:
         logger.exception('[Executor] Failed to report realtime metrics (non-critical)')
@@ -1244,7 +1244,7 @@ def _persist_qa(*, user, session, question, answer, citations,
     # 派发 Celery 任务做 LLM-as-judge 评估，结果落 MultiDimensionScore。
     # 放在实时指标之后、return 之前；异常不影响主对话流程。
     try:
-        from apps.analytics.production_eval import maybe_dispatch_eval
+        from apps.analytics.services.production_eval_service import maybe_dispatch_eval
         maybe_dispatch_eval(qa)
     except Exception:
         logger.exception('[Executor] Failed to dispatch production eval (non-critical)')

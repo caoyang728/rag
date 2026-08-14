@@ -13,12 +13,12 @@
 设计要点:
 - 沉淀来源是 QaRecord(生产低分对话),不是 GoldenQuestion
 - 同一 qa 不重复沉淀(source_qa_record_id 查重)
-- 评估全链路复用 hybrid_search + _generate_answer + evaluate_with_deepeval
+- 评估全链路复用 hybrid_search + generate_answer + evaluate_with_deepeval
 - pass_count 仅作辅助提示,最终移除决策由人工 review
 """
 from typing import Optional
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Avg, Max
 from django.utils import timezone
 from loguru import logger
@@ -67,7 +67,7 @@ def siphon_low_score_qa_to_regression_set(top_n: Optional[int] = None) -> dict:
         {'siphoned': N, 'by_root': {root_type: count}, 'skipped': N}
     """
     from apps.analytics.models import (
-        GoldenDataset, GoldenQuestion, MultiDimensionScore, QaRecord,
+        GoldenQuestion, MultiDimensionScore, QaRecord,
     )
     from rag_project.config import AnalyticsConfig
 
@@ -137,9 +137,28 @@ def siphon_low_score_qa_to_regression_set(top_n: Optional[int] = None) -> dict:
                 for i, item in enumerate(items)
             ]
             if questions_to_create:
-                GoldenQuestion.objects.bulk_create(questions_to_create)
-                total_siphoned += len(questions_to_create)
-                by_root_count[root_type] = len(questions_to_create)
+                try:
+                    GoldenQuestion.objects.bulk_create(questions_to_create)
+                except IntegrityError:
+                    # 并发场景(批量任务重复调度)下可能被同批其他 worker 抢先沉淀,
+                    # 唯一约束已兜底,这里回退为逐条 get_or_create,跳过已存在的来源 QA
+                    created_now = 0
+                    for gq in questions_to_create:
+                        _, c = GoldenQuestion.objects.get_or_create(
+                            source_qa_record_id=gq.source_qa_record_id,
+                            defaults={
+                                'dataset': gq.dataset,
+                                'question': gq.question,
+                                'order': gq.order,
+                            },
+                        )
+                        if c:
+                            created_now += 1
+                    total_siphoned += created_now
+                    by_root_count[root_type] = by_root_count.get(root_type, 0) + created_now
+                else:
+                    total_siphoned += len(questions_to_create)
+                    by_root_count[root_type] = len(questions_to_create)
 
             # 更新测试集问题计数(冗余字段,前端列表用)
             ds.question_count = GoldenQuestion.objects.filter(dataset=ds).count()
@@ -200,7 +219,7 @@ def run_regression_evaluation(
 ) -> dict:
     """对低分回归测试集执行全链路评估,更新 pass_count
 
-    全链路:检索(hybrid_search) → 生成(_generate_answer) → 12 维评估(evaluate_with_deepeval)
+    全链路:检索(hybrid_search) → 生成(generate_answer) → 12 维评估(evaluate_with_deepeval)
     通过(均分 ≥ threshold): pass_count += 1
     失败(均分 < threshold):  pass_count = 0
     评估异常: 不改动 pass_count(避免临时故障误伤)
@@ -219,8 +238,8 @@ def run_regression_evaluation(
     from apps.analytics.models import GoldenDataset, GoldenQuestion
     from apps.knowledge.models import DocumentChunk
     from apps.retrieval.hybrid import hybrid_search
-    from apps.analytics.deepeval_metrics import evaluate_with_deepeval
-    from apps.analytics.offline_eval import _generate_answer
+    from apps.analytics.services.deepeval_service import evaluate_with_deepeval
+    from apps.analytics.services.offline_eval_service import generate_answer
     from rag_project.config import AnalyticsConfig
 
     threshold = AnalyticsConfig.low_score_regression_pass_threshold()
@@ -268,7 +287,7 @@ def run_regression_evaluation(
 
                 # 2. 生成:复用离线评估的同款 prompt 与模型,保证评估可比性
                 context_str = '\n\n'.join(contexts) if contexts else ''
-                answer = _generate_answer(q.question, context_str, eval_model)
+                answer = generate_answer(q.question, context_str, eval_model)
 
                 # 3. 12 维评估:与生产评估同引擎,结果不落 MultiDimensionScore
                 # (回归评估的对象是 GoldenQuestion 不是 QaRecord,落库无意义)

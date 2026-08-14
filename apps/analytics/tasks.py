@@ -18,7 +18,6 @@ Analytics Celery Tasks - 系统指标 & 组织报表 & 队列监控 & RAG 质量
 - 评估任务有成本控制（.env 可配置），防止高额消费
 """
 from datetime import timedelta
-from decimal import Decimal
 import random
 
 from celery import shared_task
@@ -30,7 +29,7 @@ from rag_project.config import AnalyticsConfig
 # 显式导入 production_eval 中的 Celery 任务,确保 autodiscover_tasks 能注册
 # 原因:Celery 默认只扫描 tasks.py,@shared_task 装饰的任务若定义在其他模块
 # (如 production_eval.py),worker 启动时无法发现,导致 .delay() 派发的任务永远 PENDING
-from apps.analytics.production_eval import evaluate_sampled_qa  # noqa: F401
+from apps.analytics.services.production_eval_service import evaluate_sampled_qa  # noqa: F401
 
 
 # ============================================================================
@@ -47,7 +46,7 @@ def compute_system_metrics_daily():
     - 耗时约 30s（10w+ QaRecord 全量排序），建议在凌晨低峰期执行
     """
     from apps.analytics.models import SystemMetricsReport
-    from apps.analytics.utils import aggregate_system_metrics
+    from apps.analytics.services.aggregation_service import aggregate_system_metrics
 
     # 凌晨 02:00 定时执行：timezone.now().date() 返回 UTC 日期，
     # 与 __date 查询的本地时区转换在凌晨时段相差一天，必须用本地业务日期
@@ -86,7 +85,7 @@ def compute_org_usage_daily():
     - 唯一标识 (report_date, department_id, team_id)，用 sentinel -1 表示部门级
     """
     from apps.analytics.models import OrgUsageReport
-    from apps.analytics.utils import aggregate_org_usage
+    from apps.analytics.services.aggregation_service import aggregate_org_usage
 
     # 凌晨定时执行：用本地业务日期而非 UTC 日期，避免 __date 查询错天（同 SystemMetrics 任务）
     report_date = timezone.localdate() - timedelta(days=1)
@@ -169,7 +168,7 @@ def update_queue_depth_snapshot():
         return {'ok': True, 'skipped': True}
 
     try:
-        from apps.analytics.realtime import update_queue_depth
+        from apps.analytics.services.realtime_service import update_queue_depth
         update_queue_depth()
         return {'ok': True}
     except Exception:
@@ -189,7 +188,7 @@ def flush_realtime_metrics_task():
     - 不移动或删除数据，确保 Dashboard 始终可读取
     """
     try:
-        from apps.analytics.realtime import flush_realtime_metrics
+        from apps.analytics.services.realtime_service import flush_realtime_metrics
         flush_realtime_metrics()
         return {'ok': True}
     except Exception:
@@ -267,7 +266,7 @@ def batch_evaluate_document_quality(days: int = 7):
     目的：发现解析质量问题（如文本提取不全、切片过碎、向量化失败），
     便于运营及时干预。
     """
-    from apps.analytics.doc_quality import batch_evaluate_document_quality as _batch_eval
+    from apps.analytics.services.doc_quality_service import batch_evaluate_document_quality as _batch_eval
     try:
         summary = _batch_eval(days=days)
         logger.info(f'[DocQuality] Batch evaluation completed: {summary}')
@@ -288,7 +287,7 @@ def generate_coverage_report_daily(days: int = 7):
     分析热门问题覆盖率、知识空白、重复切片、领域覆盖情况、反馈闭环。
     是知识库运营的核心参考数据。
     """
-    from apps.analytics.coverage import generate_coverage_report
+    from apps.analytics.services.coverage_service import generate_coverage_report
     try:
         report = generate_coverage_report(days=days)
         logger.info(
@@ -324,11 +323,13 @@ def run_multi_dimension_evaluation(batch_size: int = None):
     2. 不足 batch_size 时扩展到当天更早时段(保证用满预算,覆盖更广)
     3. 随机选取(Python 层 random.sample,避免 DB ORDER BY RANDOM() 性能问题)
 
-    成本控制:复用 production_eval 的 _check_daily_budget,日限/成本限自动拦截。
+    成本控制:复用 production_eval 的 check_daily_budget,日限/成本限自动拦截。
     """
     from apps.analytics.models import QaRecord, MultiDimensionScore
-    from apps.analytics.deepeval_metrics import evaluate_with_deepeval
-    from apps.analytics.production_eval import _build_context_list, _check_daily_budget, _get_redis
+    from apps.analytics.services.deepeval_service import evaluate_with_deepeval
+    from apps.analytics.services.production_eval_service import (
+        build_context_list, check_daily_budget, get_redis, save_eval_results,
+    )
     from rag_project.config import AnalyticsConfig
 
     # 成本检查
@@ -337,8 +338,8 @@ def run_multi_dimension_evaluation(batch_size: int = None):
 
     # 日预算检查(批量回扫前一次性检查,避免逐条检查的开销)
     try:
-        r = _get_redis()
-        passed, reason = _check_daily_budget(r)
+        r = get_redis()
+        passed, reason = check_daily_budget(r)
         if not passed:
             return {'ok': True, 'skipped': True, 'reason': reason}
     except Exception as e:
@@ -350,7 +351,11 @@ def run_multi_dimension_evaluation(batch_size: int = None):
 
     now = timezone.now()
     two_hours_ago = now - timedelta(hours=2)
-    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    # 本地业务日期零点(与 DailyReport/Trend 的 timezone.localdate 约定一致)：
+    # now.replace(hour=0) 按 UTC 零点截断，本地 00:00-08:00 期间会跨到昨天
+    today_start = timezone.make_aware(
+        timezone.datetime.combine(timezone.localdate(), timezone.datetime.min.time())
+    )
 
     # 已评估的 QA ID:最近 24h 内有评估记录的(避免短时间内重复评估)
     since_24h = now - timedelta(hours=24)
@@ -360,12 +365,13 @@ def run_multi_dimension_evaluation(batch_size: int = None):
         ).values_list('qa_record_id', flat=True)
     )
 
+    # 缓存命中对话复用历史回答,评估重复无价值,与即时采样路径 maybe_dispatch_eval 保持一致排除
     # 窗口1:最近 2h 未评估的 QA ID(最相关,刚发生还没被保底/采样覆盖)
     window1_ids = list(
         QaRecord.objects.filter(
             created_at__gte=two_hours_ago,
             is_success=True,
-        ).exclude(id__in=evaluated_qa_ids).exclude(
+        ).exclude(is_hit_cache=True).exclude(id__in=evaluated_qa_ids).exclude(
             answer_type='refused',
         ).values_list('id', flat=True)
     )
@@ -379,7 +385,7 @@ def run_multi_dimension_evaluation(batch_size: int = None):
                 created_at__gte=today_start,
                 created_at__lt=two_hours_ago,
                 is_success=True,
-            ).exclude(id__in=evaluated_qa_ids).exclude(
+            ).exclude(is_hit_cache=True).exclude(id__in=evaluated_qa_ids).exclude(
                 answer_type='refused',
             ).values_list('id', flat=True)
         )
@@ -396,7 +402,7 @@ def run_multi_dimension_evaluation(batch_size: int = None):
     count = 0
     for qa in pending_qa:
         try:
-            contexts = _build_context_list(qa)
+            contexts = build_context_list(qa)
             if not contexts:
                 continue
 
@@ -407,24 +413,9 @@ def run_multi_dimension_evaluation(batch_size: int = None):
                 model=eval_model,
             )
             eval_batch_id = f'batch_{timezone.now().strftime("%Y%m%d%H%M%S")}_{qa.id}'
-            # 显式写入 created_at=now():与 production_eval 保持一致,
-            # auto_now_add 在 UPDATE 分支不生效,需手动覆盖使重新评估的时间
-            # 反映到 created_at,避免看板时间窗口过滤丢掉重评记录
-            now = timezone.now()
-            for res in results:
-                MultiDimensionScore.objects.update_or_create(
-                    qa_record_id=qa.id,
-                    dimension=res['dimension'],
-                    defaults={
-                        'score': res['score'],
-                        'reason': res['reason'],
-                        'eval_model': f'deepeval-{eval_model}',
-                        'eval_latency_ms': res.get('latency_ms', 0),
-                        'eval_batch_id': eval_batch_id,
-                        'status': 'completed',
-                        'created_at': now,
-                    },
-                )
+            # 逐维度幂等落库,与 production_eval 共用 save_eval_results
+            # (created_at 显式覆盖/成本估算逻辑统一,避免两处实现漂移)
+            save_eval_results(qa.id, results, eval_model, eval_batch_id)
             count += 1
         except Exception:
             logger.warning(f'[MultiDimEval] Failed for QA {qa.id}')
@@ -474,7 +465,7 @@ def run_low_score_analysis(
     """
     from decimal import Decimal
     from apps.analytics.models import QaRecord, MultiDimensionScore, LowScoreAnalysis
-    from apps.analytics.low_score_analyzer import (
+    from apps.analytics.services.low_score_service import (
         analyze_low_score_qa, DEFAULT_THRESHOLD,
     )
     from rag_project.config import AnalyticsConfig
@@ -485,7 +476,7 @@ def run_low_score_analysis(
     threshold_val = threshold if threshold is not None else DEFAULT_THRESHOLD
 
     try:
-        qa = QaRecord.objects.get(id=qa_id)
+        QaRecord.objects.get(id=qa_id)
     except QaRecord.DoesNotExist:
         logger.warning(f'[LowScoreAnalysis] QA 不存在 qa_id={qa_id}')
         return {'ok': False, 'reason': 'qa_not_found'}
@@ -567,7 +558,7 @@ def periodic_retrieval_evaluation():
     如果测试集为空则跳过。
     """
     from apps.analytics.models import GoldenDataset
-    from apps.analytics.offline_eval import run_retrieval_evaluation
+    from apps.analytics.services.offline_eval_service import run_retrieval_evaluation
     from apps.users.models import User, GrantStatus
 
     datasets = GoldenDataset.objects.filter(
@@ -622,7 +613,7 @@ def siphon_low_score_regression():
         logger.debug('[RegressionSiphon] 低分回归已关闭,跳过定时沉淀')
         return {'ok': True, 'skipped': True, 'reason': 'disabled'}
 
-    from apps.analytics.regression_eval import siphon_low_score_qa_to_regression_set
+    from apps.analytics.services.regression_service import siphon_low_score_qa_to_regression_set
     try:
         result = siphon_low_score_qa_to_regression_set()
         logger.info(f'[RegressionSiphon] done: {result}')
@@ -647,13 +638,19 @@ def run_regression_evaluation_task(dataset_id: int = None, limit: int = None):
         logger.debug('[RegressionEval] 低分回归已关闭,跳过定时评估')
         return {'ok': True, 'skipped': True, 'reason': 'disabled'}
 
-    from apps.analytics.regression_eval import run_regression_evaluation
+    from apps.analytics.services.regression_service import run_regression_evaluation
     from apps.users.models import User
 
     # 评估需要一个用户做权限过滤,复用 periodic_retrieval_evaluation 的取用户逻辑
     sys_user = User.objects.filter(username='system').first()
     if not sys_user:
-        sys_user = User.objects.filter(is_superuser=True).first()
+        # 项目 User 模型无 is_superuser 字段，超管通过 super_admin 内置角色关联判定
+        # 直接 filter(is_superuser=True) 会抛 FieldError 导致任务失败
+        from apps.users.models import GrantStatus
+        sys_user = User.objects.filter(
+            user_role_rels__role__role_key='super_admin',
+            user_role_rels__status=GrantStatus.ACTIVE,
+        ).first()
     if not sys_user:
         return {'ok': False, 'error': 'no_user_for_eval'}
 
@@ -687,7 +684,7 @@ def aggregate_route_analysis_daily(report_date: str = None):
     Returns:
         {'ok': True, 'report_date': str, 'total': int, 'created': int, 'updated': int}
     """
-    from apps.analytics.utils import aggregate_route_analysis
+    from apps.analytics.services.aggregation_service import aggregate_route_analysis
 
     target = None
     if report_date:
@@ -719,7 +716,7 @@ def batch_evaluate_wiki_quality(days: int = 7, limit: int = None):
         {'ok': True, 'evaluated': int, 'failed': int, 'skipped': int}
     """
     from django.db.models import Q
-    from apps.analytics.wiki_eval import evaluate_wiki_page
+    from apps.analytics.services.wiki_eval_service import evaluate_wiki_page
     from apps.wiki.models import WikiPage
 
     since = timezone.now() - timedelta(days=days)
@@ -778,7 +775,7 @@ def aggregate_keyword_feedback_daily(report_date: str = None):
         logger.debug('[FeedbackLoop] 反馈闭环已关闭，跳过定时聚合')
         return {'ok': True, 'skipped': True, 'reason': 'disabled'}
 
-    from apps.analytics.feedback_loop import run_keyword_feedback_loop
+    from apps.analytics.services.feedback_service import run_keyword_feedback_loop
     try:
         result = run_keyword_feedback_loop(report_date=report_date)
         logger.info(f'[FeedbackLoop] daily done: {result}')

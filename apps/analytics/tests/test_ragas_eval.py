@@ -14,7 +14,6 @@ handle 内部延迟导入 run_full_pipeline/load_testset，直接 patch 模块�
 from io import StringIO
 from unittest.mock import patch
 
-import pytest
 from django.core.management import call_command
 
 
@@ -28,7 +27,7 @@ def _pipeline_result():
     }
 
 
-@patch('apps.analytics.ragas_pipeline.run_full_pipeline')
+@patch('apps.analytics.services.ragas_service.run_full_pipeline')
 def test_handle_success_outputs_summary(mock_pipeline):
     """成功时输出测试集 ID、样本数、指标均值与报告路径"""
     mock_pipeline.return_value = _pipeline_result()
@@ -42,7 +41,8 @@ def test_handle_success_outputs_summary(mock_pipeline):
     assert kwargs['limit_docs'] == 50
     assert kwargs['root_type'] is None
     assert kwargs['model'] is None
-    assert kwargs['output_dir'] == 'eval_reports'
+    # 输出目录默认落在 scripts/tmp/eval_reports(临时产物规范,不散落到项目其他位置)
+    assert kwargs['output_dir'] == 'scripts/tmp/eval_reports'
     assert kwargs['samples'] is None
 
     text = out.getvalue()
@@ -53,7 +53,7 @@ def test_handle_success_outputs_summary(mock_pipeline):
     assert 'eval_reports/report.json' in text
 
 
-@patch('apps.analytics.ragas_pipeline.run_full_pipeline')
+@patch('apps.analytics.services.ragas_service.run_full_pipeline')
 def test_handle_skip_generate_without_testset_reports_error(mock_pipeline):
     """--skip-generate 未带 --testset 时应报错并跳过流水线"""
     out, err = StringIO(), StringIO()
@@ -64,7 +64,7 @@ def test_handle_skip_generate_without_testset_reports_error(mock_pipeline):
     mock_pipeline.assert_not_called()
 
 
-@patch('apps.analytics.ragas_pipeline.run_full_pipeline')
+@patch('apps.analytics.services.ragas_service.run_full_pipeline')
 def test_handle_skip_generate_missing_file_reports_error(mock_pipeline, tmp_path):
     """--skip-generate 指定的测试集文件不存在时应报错"""
     out, err = StringIO(), StringIO()
@@ -77,8 +77,8 @@ def test_handle_skip_generate_missing_file_reports_error(mock_pipeline, tmp_path
     mock_pipeline.assert_not_called()
 
 
-@patch('apps.analytics.ragas_pipeline.load_testset')
-@patch('apps.analytics.ragas_pipeline.run_full_pipeline')
+@patch('apps.analytics.services.ragas_service.load_testset')
+@patch('apps.analytics.services.ragas_service.run_full_pipeline')
 def test_handle_skip_generate_reuses_testset(mock_pipeline, mock_load, tmp_path):
     """--skip-generate 复用已有测试集时 load_testset 并传入 samples"""
     ts_file = tmp_path / 'testset.json'
@@ -95,7 +95,7 @@ def test_handle_skip_generate_reuses_testset(mock_pipeline, mock_load, tmp_path)
     assert '复用测试集' in out.getvalue()
 
 
-@patch('apps.analytics.ragas_pipeline.run_full_pipeline')
+@patch('apps.analytics.services.ragas_service.run_full_pipeline')
 def test_handle_pipeline_exception_reports_error(mock_pipeline):
     """流水线抛异常时应输出错误并返回"""
     mock_pipeline.side_effect = RuntimeError('LLM 超时')

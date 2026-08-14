@@ -449,8 +449,8 @@ class TestPersistQa:
         kwargs.update(overrides)
         return _persist_qa(**kwargs)
 
-    @patch('apps.analytics.realtime.increment_realtime_metrics')
-    @patch('apps.analytics.production_eval.maybe_dispatch_eval')
+    @patch('apps.analytics.services.realtime_service.increment_realtime_metrics')
+    @patch('apps.analytics.services.production_eval_service.maybe_dispatch_eval')
     def test_persist_qa_when_full_fields_then_created(self, mock_eval, mock_metrics):
         """全字段落库 + 实时指标与评估派发各调用一次"""
         qa = self._persist(
@@ -481,32 +481,32 @@ class TestPersistQa:
         mock_metrics.assert_called_once_with(qa)
         mock_eval.assert_called_once_with(qa)
 
-    @patch('apps.analytics.realtime.increment_realtime_metrics')
-    @patch('apps.analytics.production_eval.maybe_dispatch_eval')
+    @patch('apps.analytics.services.realtime_service.increment_realtime_metrics')
+    @patch('apps.analytics.services.production_eval_service.maybe_dispatch_eval')
     def test_persist_qa_when_success_then_tokens_per_second_computed(self, mock_eval, mock_metrics):
         """成功且非缓存的请求按 completion_tokens / llm_耗时 计算速率"""
         qa = self._persist(llm_stats={'latency_llm_ms': 1000, 'tokens_completion': 100,
                                       'tokens_prompt': 1, 'cost': 0})
         assert qa.tokens_per_second == 100.0
 
-    @patch('apps.analytics.realtime.increment_realtime_metrics')
-    @patch('apps.analytics.production_eval.maybe_dispatch_eval')
+    @patch('apps.analytics.services.realtime_service.increment_realtime_metrics')
+    @patch('apps.analytics.services.production_eval_service.maybe_dispatch_eval')
     def test_persist_qa_when_cache_hit_then_no_tps(self, mock_eval, mock_metrics):
         """缓存命中不计算生成速率（tokens 属于历史内容）"""
         qa = self._persist(is_hit_cache=True, llm_stats={'tokens_completion': 100})
         assert qa.tokens_per_second == 0.0
 
-    @patch('apps.analytics.realtime.increment_realtime_metrics',
+    @patch('apps.analytics.services.realtime_service.increment_realtime_metrics',
            side_effect=RuntimeError('redis down'))
-    @patch('apps.analytics.production_eval.maybe_dispatch_eval',
+    @patch('apps.analytics.services.production_eval_service.maybe_dispatch_eval',
            side_effect=RuntimeError('celery down'))
     def test_persist_qa_when_metrics_errors_then_non_fatal(self, mock_eval, mock_metrics):
         """实时指标/评估派发失败不阻断 QaRecord 保存"""
         qa = self._persist()
         assert qa.id is not None
 
-    @patch('apps.analytics.realtime.increment_realtime_metrics')
-    @patch('apps.analytics.production_eval.maybe_dispatch_eval')
+    @patch('apps.analytics.services.realtime_service.increment_realtime_metrics')
+    @patch('apps.analytics.services.production_eval_service.maybe_dispatch_eval')
     def test_persist_qa_when_llm_stats_has_error_then_writes_error_message(self, mock_eval, mock_metrics):
         """llm_stats.error 写入 error_message 字段（audit 用）"""
         qa = self._persist(llm_stats={'error': 'Request timeout'}, error_type='timeout',

@@ -66,7 +66,7 @@ def evaluate_wiki_page(page_id: int, model: Optional[str] = None) -> dict:
         skipped 场景返回 {'ok': False, 'skipped': 原因}
     """
     from apps.analytics.models import WikiPageQualityScore
-    from apps.analytics.deepeval_metrics import get_deepeval_model
+    from apps.analytics.services.deepeval_service import get_deepeval_model
     from apps.wiki.models import WikiPage
     from deepeval.metrics import FaithfulnessMetric, GEval
     from deepeval.test_case import LLMTestCase, SingleTurnParams

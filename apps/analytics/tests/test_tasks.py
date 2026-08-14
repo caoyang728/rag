@@ -15,7 +15,7 @@ apps.analytics.tasks 单元测试 —— 13 个 Celery 定时任务
 - siphon_low_score_regression / run_regression_evaluation_task：开关 / 成功 / 异常
 
 说明：聚合函数与外部评估引擎全部在源模块导入处 mock
-（apps.analytics.utils / doc_quality / coverage / offline_eval / deepeval_metrics /
+（apps.analytics.services.aggregation_service / doc_quality / coverage / offline_eval / deepeval_metrics /
 production_eval / regression_eval），DB 落库用真实 Django 测试库。
 """
 import pytest
@@ -29,7 +29,7 @@ from django.utils import timezone
 from apps.analytics import tasks
 from apps.analytics.models import (
     SystemMetricsReport, OrgUsageReport, QueueDepthLog,
-    GoldenDataset, GoldenQuestion, MultiDimensionScore, LowScoreAnalysis,
+    GoldenDataset, MultiDimensionScore, LowScoreAnalysis,
 )
 from apps.chat.models import QaRecord
 from apps.memory.models import Session
@@ -52,7 +52,7 @@ class TestComputeSystemMetricsDaily:
     @pytest.mark.unit
     def test_creates_report(self):
         """聚合成功 → 创建 SystemMetricsReport 并返回 created=True"""
-        with patch('apps.analytics.utils.aggregate_system_metrics',
+        with patch('apps.analytics.services.aggregation_service.aggregate_system_metrics',
                    return_value={'total_qa': 3, 'cache_hit_count': 1, 'normal_qa_count': 2}):
             result = tasks.compute_system_metrics_daily()
         assert result['ok'] is True
@@ -65,7 +65,7 @@ class TestComputeSystemMetricsDaily:
     def test_update_existing_report(self):
         """重复执行 → update_or_create 更新已有报告（UPSERT 幂等）"""
         SystemMetricsReport.objects.create(report_date=_yesterday(), total_qa=1)
-        with patch('apps.analytics.utils.aggregate_system_metrics',
+        with patch('apps.analytics.services.aggregation_service.aggregate_system_metrics',
                    return_value={'total_qa': 9, 'cache_hit_count': 0, 'normal_qa_count': 9}):
             result = tasks.compute_system_metrics_daily()
         assert result['created'] is False
@@ -75,7 +75,7 @@ class TestComputeSystemMetricsDaily:
     @pytest.mark.unit
     def test_aggregation_exception(self):
         """聚合抛异常 → 返回 {'ok': False}，不中断其他任务"""
-        with patch('apps.analytics.utils.aggregate_system_metrics',
+        with patch('apps.analytics.services.aggregation_service.aggregate_system_metrics',
                    side_effect=RuntimeError('db down')):
             result = tasks.compute_system_metrics_daily()
         assert result == {'ok': False, 'error': 'aggregation_failed'}
@@ -110,7 +110,7 @@ class TestComputeOrgUsageDaily:
     @pytest.mark.unit
     def test_no_data(self):
         """聚合结果为空 → 直接返回不写库"""
-        with patch('apps.analytics.utils.aggregate_org_usage', return_value=[]):
+        with patch('apps.analytics.services.aggregation_service.aggregate_org_usage', return_value=[]):
             result = tasks.compute_org_usage_daily()
         assert result == {'ok': True, 'date': str(_yesterday()), 'created': 0, 'updated': 0}
         assert OrgUsageReport.objects.count() == 0
@@ -118,7 +118,7 @@ class TestComputeOrgUsageDaily:
     @pytest.mark.unit
     def test_create_new(self):
         """有聚合结果且库中无记录 → bulk_create 新建"""
-        with patch('apps.analytics.utils.aggregate_org_usage',
+        with patch('apps.analytics.services.aggregation_service.aggregate_org_usage',
                    return_value=[self._agg_data()]):
             result = tasks.compute_org_usage_daily()
         assert result['ok'] is True
@@ -132,7 +132,7 @@ class TestComputeOrgUsageDaily:
         """已存在同 (date, dept, team) 记录 → bulk_update 更新"""
         OrgUsageReport.objects.create(
             report_date=_yesterday(), department_id=1, team_id=-1, qa_count=1)
-        with patch('apps.analytics.utils.aggregate_org_usage',
+        with patch('apps.analytics.services.aggregation_service.aggregate_org_usage',
                    return_value=[self._agg_data(qa_count=8)]):
             result = tasks.compute_org_usage_daily()
         assert result['updated'] == 1
@@ -142,7 +142,7 @@ class TestComputeOrgUsageDaily:
     @pytest.mark.unit
     def test_exception(self):
         """聚合异常 → 返回 {'ok': False}"""
-        with patch('apps.analytics.utils.aggregate_org_usage',
+        with patch('apps.analytics.services.aggregation_service.aggregate_org_usage',
                    side_effect=RuntimeError('boom')):
             result = tasks.compute_org_usage_daily()
         assert result == {'ok': False, 'error': 'aggregation_failed'}
@@ -158,7 +158,7 @@ class TestQueueAndRealtimeTasks:
     def test_queue_disabled_skips(self):
         """队列监控开关关闭 → 直接跳过"""
         with patch.object(AnalyticsConfig, 'queue_monitor_enabled', return_value=False), \
-             patch('apps.analytics.realtime.update_queue_depth') as mock_fn:
+             patch('apps.analytics.services.realtime_service.update_queue_depth') as mock_fn:
             result = tasks.update_queue_depth_snapshot()
         assert result == {'ok': True, 'skipped': True}
         mock_fn.assert_not_called()
@@ -167,7 +167,7 @@ class TestQueueAndRealtimeTasks:
     def test_queue_success(self):
         """开启 → 调用 realtime.update_queue_depth"""
         with patch.object(AnalyticsConfig, 'queue_monitor_enabled', return_value=True), \
-             patch('apps.analytics.realtime.update_queue_depth') as mock_fn:
+             patch('apps.analytics.services.realtime_service.update_queue_depth') as mock_fn:
             result = tasks.update_queue_depth_snapshot()
         assert result == {'ok': True}
         mock_fn.assert_called_once_with()
@@ -176,7 +176,7 @@ class TestQueueAndRealtimeTasks:
     def test_queue_exception(self):
         """更新失败 → 返回 {'ok': False, 'error': 'update_failed'}"""
         with patch.object(AnalyticsConfig, 'queue_monitor_enabled', return_value=True), \
-             patch('apps.analytics.realtime.update_queue_depth',
+             patch('apps.analytics.services.realtime_service.update_queue_depth',
                    side_effect=RuntimeError('redis down')):
             result = tasks.update_queue_depth_snapshot()
         assert result == {'ok': False, 'error': 'update_failed'}
@@ -184,7 +184,7 @@ class TestQueueAndRealtimeTasks:
     @pytest.mark.unit
     def test_flush_success(self):
         """实时指标刷新成功"""
-        with patch('apps.analytics.realtime.flush_realtime_metrics') as mock_fn:
+        with patch('apps.analytics.services.realtime_service.flush_realtime_metrics') as mock_fn:
             result = tasks.flush_realtime_metrics_task()
         assert result == {'ok': True}
         mock_fn.assert_called_once_with()
@@ -192,7 +192,7 @@ class TestQueueAndRealtimeTasks:
     @pytest.mark.unit
     def test_flush_exception(self):
         """刷新异常 → 返回 {'ok': False, 'error': 'flush_failed'}"""
-        with patch('apps.analytics.realtime.flush_realtime_metrics',
+        with patch('apps.analytics.services.realtime_service.flush_realtime_metrics',
                    side_effect=RuntimeError('redis down')):
             result = tasks.flush_realtime_metrics_task()
         assert result == {'ok': False, 'error': 'flush_failed'}
@@ -260,7 +260,7 @@ class TestBatchEvalAndCoverage:
     def test_doc_quality_success(self):
         """批量文档质量评估成功 → 返回汇总"""
         summary = {'total_documents': 2, 'evaluated': 2, 'failed': 0}
-        with patch('apps.analytics.doc_quality.batch_evaluate_document_quality',
+        with patch('apps.analytics.services.doc_quality_service.batch_evaluate_document_quality',
                    return_value=summary) as mock_fn:
             result = tasks.batch_evaluate_document_quality(days=7)
         assert result == {'ok': True, 'summary': summary}
@@ -269,7 +269,7 @@ class TestBatchEvalAndCoverage:
     @pytest.mark.unit
     def test_doc_quality_exception(self):
         """文档质量评估异常 → {'ok': False, 'error': 'batch_eval_failed'}"""
-        with patch('apps.analytics.doc_quality.batch_evaluate_document_quality',
+        with patch('apps.analytics.services.doc_quality_service.batch_evaluate_document_quality',
                    side_effect=RuntimeError('x')):
             result = tasks.batch_evaluate_document_quality()
         assert result == {'ok': False, 'error': 'batch_eval_failed'}
@@ -280,7 +280,7 @@ class TestBatchEvalAndCoverage:
         report = SimpleNamespace(
             id=1, report_date=_yesterday(),
             hot_query_coverage_rate=0.8, gap_count=2)
-        with patch('apps.analytics.coverage.generate_coverage_report',
+        with patch('apps.analytics.services.coverage_service.generate_coverage_report',
                    return_value=report) as mock_fn:
             result = tasks.generate_coverage_report_daily(days=7)
         assert result == {'ok': True, 'report_id': 1,
@@ -290,7 +290,7 @@ class TestBatchEvalAndCoverage:
     @pytest.mark.unit
     def test_coverage_exception(self):
         """覆盖率报告异常 → {'ok': False, 'error': 'coverage_report_failed'}"""
-        with patch('apps.analytics.coverage.generate_coverage_report',
+        with patch('apps.analytics.services.coverage_service.generate_coverage_report',
                    side_effect=RuntimeError('x')):
             result = tasks.generate_coverage_report_daily()
         assert result == {'ok': False, 'error': 'coverage_report_failed'}
@@ -322,13 +322,13 @@ class TestRunMultiDimensionEvaluation:
         """批量回扫所需的预算与评估 mock（按序展开）"""
         return [
             patch.object(AnalyticsConfig, 'eval_enabled', return_value=True),
-            patch('apps.analytics.production_eval._get_redis',
+            patch('apps.analytics.services.production_eval_service.get_redis',
                   return_value=MagicMock()),
-            patch('apps.analytics.production_eval._check_daily_budget',
+            patch('apps.analytics.services.production_eval_service.check_daily_budget',
                   return_value=(True, '')),
             patch.object(AnalyticsConfig, 'production_eval_batch_size', return_value=10),
             patch.object(AnalyticsConfig, 'eval_model', return_value='test-model'),
-            patch('apps.analytics.production_eval._build_context_list',
+            patch('apps.analytics.services.production_eval_service.build_context_list',
                   return_value=['上下文']),
         ]
 
@@ -342,7 +342,7 @@ class TestRunMultiDimensionEvaluation:
         """日预算超限 → 一次性拦截不评估"""
         mocks = self._budget_mocks()
         with mocks[0], mocks[1], mocks[2], mocks[3], mocks[4], mocks[5]:
-            with patch('apps.analytics.production_eval._check_daily_budget',
+            with patch('apps.analytics.services.production_eval_service.check_daily_budget',
                        return_value=(False, 'cost_limit_exceeded')):
                 result = tasks.run_multi_dimension_evaluation()
         assert result['reason'] == 'cost_limit_exceeded'
@@ -355,9 +355,9 @@ class TestRunMultiDimensionEvaluation:
         eval_result = [{'dimension': 'clarity', 'score': 0.9, 'reason': '清晰',
                         'latency_ms': 3}]
         with mocks[0], mocks[1], mocks[2], mocks[3], mocks[4], mocks[5], \
-             patch('apps.analytics.production_eval._check_daily_budget',
+             patch('apps.analytics.services.production_eval_service.check_daily_budget',
                    side_effect=RuntimeError('redis down')), \
-             patch('apps.analytics.deepeval_metrics.evaluate_with_deepeval',
+             patch('apps.analytics.services.deepeval_service.evaluate_with_deepeval',
                    return_value=eval_result):
             result = tasks.run_multi_dimension_evaluation()
         assert result['ok'] is True
@@ -377,7 +377,7 @@ class TestRunMultiDimensionEvaluation:
         eval_result = [{'dimension': 'clarity', 'score': 0.9, 'reason': '清晰',
                         'latency_ms': 3}]
         with mocks[0], mocks[1], mocks[2], mocks[3], mocks[4], mocks[5], \
-             patch('apps.analytics.deepeval_metrics.evaluate_with_deepeval',
+             patch('apps.analytics.services.deepeval_service.evaluate_with_deepeval',
                    return_value=eval_result):
             result = tasks.run_multi_dimension_evaluation()
         assert result == {'ok': True, 'evaluated': 1}
@@ -394,7 +394,7 @@ class TestRunMultiDimensionEvaluation:
         mocks = self._budget_mocks()
         ok_result = [{'dimension': 'clarity', 'score': 0.8, 'reason': 'ok'}]
         with mocks[0], mocks[1], mocks[2], mocks[3], mocks[4], mocks[5], \
-             patch('apps.analytics.deepeval_metrics.evaluate_with_deepeval',
+             patch('apps.analytics.services.deepeval_service.evaluate_with_deepeval',
                    side_effect=[RuntimeError('llm down'), ok_result]):
             result = tasks.run_multi_dimension_evaluation()
         assert result['evaluated'] == 1
@@ -408,7 +408,7 @@ class TestRunMultiDimensionEvaluation:
             qa_record=qa, dimension='clarity', score=0.9, status='completed')
         mocks = self._budget_mocks()
         with mocks[0], mocks[1], mocks[2], mocks[3], mocks[4], mocks[5], \
-             patch('apps.analytics.deepeval_metrics.evaluate_with_deepeval') as mock_eval:
+             patch('apps.analytics.services.deepeval_service.evaluate_with_deepeval') as mock_eval:
             result = tasks.run_multi_dimension_evaluation()
         assert result['evaluated'] == 0
         mock_eval.assert_not_called()
@@ -418,7 +418,7 @@ class TestRunMultiDimensionEvaluation:
         self._qa(question='拒答', answer_type='refused')
         mocks = self._budget_mocks()
         with mocks[0], mocks[1], mocks[2], mocks[3], mocks[4], mocks[5], \
-             patch('apps.analytics.deepeval_metrics.evaluate_with_deepeval') as mock_eval:
+             patch('apps.analytics.services.deepeval_service.evaluate_with_deepeval') as mock_eval:
             result = tasks.run_multi_dimension_evaluation()
         assert result['evaluated'] == 0
         mock_eval.assert_not_called()
@@ -487,7 +487,7 @@ class TestRunLowScoreAnalysis:
         """均分达标（>= 阈值 0.5）→ 不归因"""
         self._add_scores(score=0.9)
         with patch.object(AnalyticsConfig, 'eval_enabled', return_value=True), \
-             patch('apps.analytics.low_score_analyzer.analyze_low_score_qa') as mock_ana:
+             patch('apps.analytics.services.low_score_service.analyze_low_score_qa') as mock_ana:
             result = tasks.run_low_score_analysis(self.qa.id)
         assert result['ok'] is True
         assert result['skipped'] is True
@@ -498,7 +498,7 @@ class TestRunLowScoreAnalysis:
         """归因成功 → LowScoreAnalysis 落库（update_or_create 覆盖）"""
         self._add_scores(score=0.3)
         with patch.object(AnalyticsConfig, 'eval_enabled', return_value=True), \
-             patch('apps.analytics.low_score_analyzer.analyze_low_score_qa',
+             patch('apps.analytics.services.low_score_service.analyze_low_score_qa',
                    return_value=self._analyze_result()):
             result = tasks.run_low_score_analysis(self.qa.id)
         assert result['ok'] is True
@@ -516,7 +516,7 @@ class TestRunLowScoreAnalysis:
         """归因异常 → 落一条 status=failed 记录并返回失败原因"""
         self._add_scores(score=0.3)
         with patch.object(AnalyticsConfig, 'eval_enabled', return_value=True), \
-             patch('apps.analytics.low_score_analyzer.analyze_low_score_qa',
+             patch('apps.analytics.services.low_score_service.analyze_low_score_qa',
                    side_effect=RuntimeError('llm down')):
             result = tasks.run_low_score_analysis(self.qa.id)
         assert result['ok'] is False
@@ -565,7 +565,7 @@ class TestPeriodicRetrievalEvaluation:
         ds = self._dataset(name='HR')
         User.objects.create_user(
             username='system', password='pass12345', email='sys@test.com')
-        with patch('apps.analytics.offline_eval.run_retrieval_evaluation',
+        with patch('apps.analytics.services.offline_eval_service.run_retrieval_evaluation',
                    return_value=self._report()) as mock_eval:
             result = tasks.periodic_retrieval_evaluation()
         assert result['ok'] is True
@@ -580,7 +580,7 @@ class TestPeriodicRetrievalEvaluation:
         self._dataset(name='B')
         User.objects.create_superuser(
             username='system2', password='pass12345', email='sys2@test.com')
-        with patch('apps.analytics.offline_eval.run_retrieval_evaluation',
+        with patch('apps.analytics.services.offline_eval_service.run_retrieval_evaluation',
                    side_effect=[RuntimeError('boom'), self._report(recall=0.9)]):
             result = tasks.periodic_retrieval_evaluation()
         assert result['evaluated_datasets'] == 1
@@ -598,7 +598,7 @@ class TestRegressionTasks:
         """沉淀开关关闭 → 跳过"""
         with patch.object(AnalyticsConfig, 'low_score_regression_enabled',
                           return_value=False), \
-             patch('apps.analytics.regression_eval.siphon_low_score_qa_to_regression_set') as m:
+             patch('apps.analytics.services.regression_service.siphon_low_score_qa_to_regression_set') as m:
             result = tasks.siphon_low_score_regression()
         assert result == {'ok': True, 'skipped': True, 'reason': 'disabled'}
         m.assert_not_called()
@@ -608,7 +608,7 @@ class TestRegressionTasks:
         summary = {'siphoned': 2, 'by_root': {'hr': 2}, 'skipped': 0}
         with patch.object(AnalyticsConfig, 'low_score_regression_enabled',
                           return_value=True), \
-             patch('apps.analytics.regression_eval.siphon_low_score_qa_to_regression_set',
+             patch('apps.analytics.services.regression_service.siphon_low_score_qa_to_regression_set',
                    return_value=summary) as m:
             result = tasks.siphon_low_score_regression()
         assert result == {'ok': True, 'siphoned': 2, 'by_root': {'hr': 2}, 'skipped': 0}
@@ -618,7 +618,7 @@ class TestRegressionTasks:
         """沉淀异常 → {'ok': False, 'error': 'siphon_failed'}"""
         with patch.object(AnalyticsConfig, 'low_score_regression_enabled',
                           return_value=True), \
-             patch('apps.analytics.regression_eval.siphon_low_score_qa_to_regression_set',
+             patch('apps.analytics.services.regression_service.siphon_low_score_qa_to_regression_set',
                    side_effect=RuntimeError('x')):
             result = tasks.siphon_low_score_regression()
         assert result == {'ok': False, 'error': 'siphon_failed'}
@@ -646,7 +646,7 @@ class TestRegressionTasks:
             username='system', password='pass12345', email='sysreg@test.com')
         with patch.object(AnalyticsConfig, 'low_score_regression_enabled',
                           return_value=True), \
-             patch('apps.analytics.regression_eval.run_regression_evaluation',
+             patch('apps.analytics.services.regression_service.run_regression_evaluation',
                    return_value={'evaluated': 2, 'passed': 1, 'failed': 1,
                                  'results': []}) as m:
             result = tasks.run_regression_evaluation_task(dataset_id=5, limit=3)
@@ -661,7 +661,7 @@ class TestRegressionTasks:
             username='system', password='pass12345', email='sysreg2@test.com')
         with patch.object(AnalyticsConfig, 'low_score_regression_enabled',
                           return_value=True), \
-             patch('apps.analytics.regression_eval.run_regression_evaluation',
+             patch('apps.analytics.services.regression_service.run_regression_evaluation',
                    side_effect=RuntimeError('x')):
             result = tasks.run_regression_evaluation_task()
         assert result == {'ok': False, 'error': 'eval_failed'}
@@ -724,7 +724,7 @@ class TestAggregateRouteAnalysisDaily:
     @pytest.mark.unit
     def test_aggregation_exception(self):
         """聚合异常 → {'ok': False, 'error': 'aggregation_failed'}"""
-        with patch('apps.analytics.utils.aggregate_route_analysis',
+        with patch('apps.analytics.services.aggregation_service.aggregate_route_analysis',
                    side_effect=RuntimeError('db down')):
             result = tasks.aggregate_route_analysis_daily()
         assert result == {'ok': False, 'error': 'aggregation_failed'}
@@ -751,7 +751,7 @@ class TestBatchEvaluateWikiQuality:
         self._make_published_page(node=node)
         self._make_published_page(node=node)
 
-        with patch('apps.analytics.wiki_eval.evaluate_wiki_page',
+        with patch('apps.analytics.services.wiki_eval_service.evaluate_wiki_page',
                    return_value={'ok': True, 'evaluated': ['faithfulness', 'completeness']}):
             result = tasks.batch_evaluate_wiki_quality()
 
@@ -770,7 +770,7 @@ class TestBatchEvaluateWikiQuality:
             name='node2', node_type='folder', root_type='test_root', created_by=user)
         self._make_published_page(title='无源切片页', node=node)
 
-        with patch('apps.analytics.wiki_eval.evaluate_wiki_page',
+        with patch('apps.analytics.services.wiki_eval_service.evaluate_wiki_page',
                    return_value={'ok': False, 'skipped': 'no_source_chunks'}):
             result = tasks.batch_evaluate_wiki_quality()
 
@@ -790,7 +790,7 @@ class TestBatchEvaluateWikiQuality:
         self._make_published_page(title='p1', node=node)
         self._make_published_page(title='p2', node=node)
 
-        with patch('apps.analytics.wiki_eval.evaluate_wiki_page',
+        with patch('apps.analytics.services.wiki_eval_service.evaluate_wiki_page',
                    return_value={'ok': True, 'evaluated': []}):
             result = tasks.batch_evaluate_wiki_quality(limit=1)
 

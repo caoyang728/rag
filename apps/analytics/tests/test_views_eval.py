@@ -29,16 +29,15 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.users.models import (
     User, Role, UserRoleRel, RolePermissionRel, Permission, GrantStatus,
-    Department, Team, UserDeptScopeRel, UserTeamScopeRel,
+    Department, Team,
 )
 from apps.chat.models import QaRecord, QaFeedback
 from apps.memory.models import Session
 from apps.knowledge.models import KnowledgeNode, Document
 from apps.analytics.models import (
-    KeywordWeight, SystemMetricsReport, OrgUsageReport, QueueDepthLog,
     GoldenDataset, GoldenQuestion, GoldenReferenceAnswer,
     MultiDimensionScore, DocumentQualityReport, RetrievalQualityReport,
-    CoverageReport, LowScoreAnalysis,
+    LowScoreAnalysis,
 )
 
 
@@ -256,7 +255,7 @@ class TestGoldenDatasetAPI(AnalyticsViewsBase):
             id=42, name='新数据集', root_type='company_doc',
             status='draft', version='v1',
         )
-        with patch('apps.analytics.offline_eval.create_golden_dataset',
+        with patch('apps.analytics.services.offline_eval_service.create_golden_dataset',
                    return_value=mock_ds) as m:
             resp = self.client.post('/api/v1/analytics/golden-datasets/',
                                     data=json.dumps({'name': '新数据集'}),
@@ -338,7 +337,7 @@ class TestGoldenDatasetAPI(AnalyticsViewsBase):
 
     def test_import_happy_200(self):
         ds = self._make_dataset()
-        with patch('apps.analytics.offline_eval.import_questions_from_json',
+        with patch('apps.analytics.services.offline_eval_service.import_questions_from_json',
                    return_value={'ok': True, 'imported': 1}) as m:
             resp = self.client.post(
                 f'/api/v1/analytics/golden-datasets/{ds.id}/import/',
@@ -350,7 +349,7 @@ class TestGoldenDatasetAPI(AnalyticsViewsBase):
 
     def test_export_happy_200(self):
         ds = self._make_dataset()
-        with patch('apps.analytics.offline_eval.export_dataset_to_json',
+        with patch('apps.analytics.services.offline_eval_service.export_dataset_to_json',
                    return_value=[{'question': 'q1'}]) as m:
             resp = self.client.get(f'/api/v1/analytics/golden-datasets/{ds.id}/export/',
                                    **self.reader_headers)
@@ -361,7 +360,7 @@ class TestGoldenDatasetAPI(AnalyticsViewsBase):
 
     def test_question_post_happy_200(self):
         ds = self._make_dataset()
-        with patch('apps.analytics.offline_eval.import_questions_from_json',
+        with patch('apps.analytics.services.offline_eval_service.import_questions_from_json',
                    return_value={'ok': True, 'imported': 1}):
             resp = self.client.post(f'/api/v1/analytics/golden-datasets/{ds.id}/questions/',
                                     data=json.dumps({'question': 'q1'}),
@@ -405,7 +404,7 @@ class TestSiphonRegressionAPI(AnalyticsViewsBase):
     """SiphonRegressionView 测试"""
 
     def test_post_happy_200(self):
-        with patch('apps.analytics.regression_eval.siphon_low_score_qa_to_regression_set',
+        with patch('apps.analytics.services.regression_service.siphon_low_score_qa_to_regression_set',
                    return_value={'siphoned': 3}) as m:
             resp = self.client.post('/api/v1/analytics/regression/siphon/',
                                     data=json.dumps({'top_n': 5}),
@@ -423,7 +422,7 @@ class TestSiphonRegressionAPI(AnalyticsViewsBase):
 
     def test_post_exception_500(self):
         # 沉淀函数异常 → 500 且包含错误信息
-        with patch('apps.analytics.regression_eval.siphon_low_score_qa_to_regression_set',
+        with patch('apps.analytics.services.regression_service.siphon_low_score_qa_to_regression_set',
                    side_effect=RuntimeError('boom')):
             resp = self.client.post('/api/v1/analytics/regression/siphon/',
                                     data=json.dumps({}), content_type='application/json',
@@ -491,7 +490,7 @@ class TestRunRetrievalEvalAPI(AnalyticsViewsBase):
         mock_report = MagicMock(id=1, recall_at_5=0.5, recall_at_10=0.6,
                                 recall_at_20=0.7, mrr=0.4, ndcg_at_10=0.3,
                                 questions_with_hits=8, questions_without_hits=2)
-        with patch('apps.analytics.offline_eval.run_retrieval_evaluation',
+        with patch('apps.analytics.services.offline_eval_service.run_retrieval_evaluation',
                    return_value=mock_report) as m:
             resp = self.client.post('/api/v1/analytics/eval/retrieval/',
                                     data=json.dumps({'dataset_id': 1}),
@@ -504,7 +503,7 @@ class TestRunRetrievalEvalAPI(AnalyticsViewsBase):
         assert m.call_args[1]['dataset_id'] == 1
 
     def test_exception_500(self):
-        with patch('apps.analytics.offline_eval.run_retrieval_evaluation',
+        with patch('apps.analytics.services.offline_eval_service.run_retrieval_evaluation',
                    side_effect=RuntimeError('eval failed')):
             resp = self.client.post('/api/v1/analytics/eval/retrieval/',
                                     data=json.dumps({'dataset_id': 1}),
@@ -542,7 +541,7 @@ class TestRunAnswerEvalAPI(AnalyticsViewsBase):
     def test_happy_200(self):
         # max_questions 钳位：传 9999 应被钳到 100
         results = [{'question': 'q1', 'score': 0.8}]
-        with patch('apps.analytics.offline_eval.run_answer_quality_evaluation',
+        with patch('apps.analytics.services.offline_eval_service.run_answer_quality_evaluation',
                    return_value=results) as m:
             resp = self.client.post('/api/v1/analytics/eval/answer/',
                                     data=json.dumps({'dataset_id': 1, 'max_questions': 9999}),
@@ -554,7 +553,7 @@ class TestRunAnswerEvalAPI(AnalyticsViewsBase):
         assert m.call_args[1]['max_questions'] == 100
 
     def test_exception_500(self):
-        with patch('apps.analytics.offline_eval.run_answer_quality_evaluation',
+        with patch('apps.analytics.services.offline_eval_service.run_answer_quality_evaluation',
                    side_effect=RuntimeError('eval failed')):
             resp = self.client.post('/api/v1/analytics/eval/answer/',
                                     data=json.dumps({'dataset_id': 1}),
@@ -608,7 +607,7 @@ class TestDocumentQualityAPI(AnalyticsViewsBase):
                    'score_distribution': {'excellent': 1, 'good': 1, 'fair': 0, 'poor': 0},
                    'common_issues': [{'type': 'too_short', 'count': 1}],
                    'recent_reports': []}
-        with patch('apps.analytics.doc_quality.get_document_quality_summary',
+        with patch('apps.analytics.services.doc_quality_service.get_document_quality_summary',
                    return_value=summary) as m:
             resp = self.client.get(
                 f'/api/v1/analytics/doc-quality/?start_date={self.yesterday}&end_date={self.today}',
@@ -640,7 +639,7 @@ class TestRunDocQualityEvalAPI(AnalyticsViewsBase):
 
     def test_document_id_happy_200(self):
         mock_report = MagicMock(id=1, quality_score=90.0)
-        with patch('apps.analytics.doc_quality.evaluate_document_quality',
+        with patch('apps.analytics.services.doc_quality_service.evaluate_document_quality',
                    return_value=mock_report) as m:
             resp = self.client.post('/api/v1/analytics/doc-quality/evaluate/',
                                     data=json.dumps({'document_id': 1}),
@@ -657,7 +656,7 @@ class TestRunDocQualityEvalAPI(AnalyticsViewsBase):
         assert resp.status_code == 400
 
     def test_batch_happy_200(self):
-        with patch('apps.analytics.doc_quality.batch_evaluate_document_quality',
+        with patch('apps.analytics.services.doc_quality_service.batch_evaluate_document_quality',
                    return_value={'evaluated': 3, 'failed': 0}) as m:
             resp = self.client.post('/api/v1/analytics/doc-quality/evaluate/',
                                     data=json.dumps({'days': 3}),
@@ -828,7 +827,7 @@ class TestRunMultiDimEvalAPI(AnalyticsViewsBase):
     def test_no_context_400(self):
         # 无检索上下文：预检拦截，返回 400 不派发任务
         qa = self._make_qa()
-        with patch('apps.analytics.production_eval._build_context_list',
+        with patch('apps.analytics.services.production_eval_service.build_context_list',
                    return_value=[]):
             resp = self.client.post('/api/v1/analytics/multi-dim-eval/',
                                     data=json.dumps({'qa_record_id': qa.id}),
@@ -837,9 +836,9 @@ class TestRunMultiDimEvalAPI(AnalyticsViewsBase):
 
     def test_happy_200(self):
         qa = self._make_qa()
-        with patch('apps.analytics.production_eval._build_context_list',
+        with patch('apps.analytics.services.production_eval_service.build_context_list',
                    return_value=['检索上下文内容']):
-            with patch('apps.analytics.production_eval.evaluate_sampled_qa') as m:
+            with patch('apps.analytics.services.production_eval_service.evaluate_sampled_qa') as m:
                 resp = self.client.post('/api/v1/analytics/multi-dim-eval/',
                                         data=json.dumps({'qa_record_id': qa.id}),
                                         content_type='application/json', **self.writer_headers)

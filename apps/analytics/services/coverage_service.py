@@ -8,13 +8,12 @@
 4. 反馈闭环: 差评自动关联问题 chunk，触发重新入库审核
 5. 领域覆盖分析: 按部门/团队统计知识覆盖情况
 """
-import time
 from datetime import timedelta
 from typing import List, Dict, Any
 
 from loguru import logger
 
-from django.db.models import Count, Q
+from django.db.models import Count
 from django.utils import timezone
 
 
@@ -35,12 +34,14 @@ def analyze_hot_query_coverage(days: int = 7) -> Dict[str, Any]:
     """
     from apps.chat.models import QaRecord
 
-    since = timezone.now() - timedelta(days=days)
+    # 本地业务日期作窗口起点(与项目 DailyReport 的 localdate 约定一致)；
+    # timezone.now().date() 是 UTC 日期,本地 00:00-08:00 期间 __date 过滤会多算一天
+    since = timezone.localdate() - timedelta(days=days)
 
     # 获取高频问题（按 question 去重计数）
     hot_queries = (
         QaRecord.objects
-        .filter(created_at__date__gte=since.date())
+        .filter(created_at__date__gte=since)
         .exclude(is_hit_cache=True)
         .values('question')
         .annotate(query_count=Count('id'))
@@ -58,7 +59,7 @@ def analyze_hot_query_coverage(days: int = 7) -> Dict[str, Any]:
         QaRecord.objects
         .filter(
             question__in=hot_questions,
-            created_at__date__gte=since.date(),
+            created_at__date__gte=since,
             is_hit_cache=False,
         )
         .exclude(retrieval_hits=[])
@@ -110,13 +111,14 @@ def detect_knowledge_gaps(days: int = 7, min_count: int = 3) -> List[Dict[str, A
     """
     from apps.chat.models import QaRecord
 
-    since = timezone.now() - timedelta(days=days)
+    # 本地业务日期作窗口起点,避免 UTC 日期在本地凌晨时段窗口错位
+    since = timezone.localdate() - timedelta(days=days)
 
     # 高频查询中 answer_type='refused' 的查询
     refused_queries = (
         QaRecord.objects
         .filter(
-            created_at__date__gte=since.date(),
+            created_at__date__gte=since,
             answer_type='refused',
             is_hit_cache=False,
         )
@@ -181,10 +183,16 @@ def detect_duplicate_chunks(similarity_threshold: float = 0.9) -> Dict[str, Any]
     chunks_list = list(chunks[:sample_size])
 
     duplicates = []
-    seen_hashes = {}
 
     # 使用 n-gram Jaccard 相似度
-    for chunk in chunks_list:
+    # 性能优化:按词数升序排序,只与词数相近(≥80%)的已处理 chunk 比较。
+    # 数学保证:Jaccard 相似度≥0.9 的两段文本词数之比 ≤ 1.11(由 |A∩B|≤min(|A|,|B|)
+    # 推出),故 20% 裕度不会漏判;排序后从尾部回溯,词数差超限即停,将最坏
+    # 情况 O(n²) 全量两两比较降为与"长度相近子集"的比较(接近线性)
+    entries = sorted(chunks_list, key=lambda c: len((c.content or '').split()))
+    processed = []  # [(words, chunk_id)],按词数升序
+
+    for chunk in entries:
         content = (chunk.content or '')[:500].lower()
         if not content:
             continue
@@ -194,8 +202,10 @@ def detect_duplicate_chunks(similarity_threshold: float = 0.9) -> Dict[str, Any]
         if len(words) < 5:
             continue
 
-        # 检查是否与已处理的 chunk 相似
-        for prev_id, prev_words in seen_hashes.items():
+        # 与已处理的 chunk 比较(词数相近者才有机会相似,词数差超 20% 即停)
+        for prev_words, prev_id in reversed(processed):
+            if len(prev_words) < len(words) * 0.8:
+                break
             intersection = words & prev_words
             union = words | prev_words
             if len(union) == 0:
@@ -210,7 +220,7 @@ def detect_duplicate_chunks(similarity_threshold: float = 0.9) -> Dict[str, Any]
                 })
                 break
 
-        seen_hashes[chunk.id] = words
+        processed.append((words, chunk.id))
 
     dup_rate = len(duplicates) / max(sample_size, 1)
 
@@ -246,7 +256,8 @@ def analyze_domain_coverage(days: int = 30) -> Dict[str, Any]:
     from apps.users.models import Department, Team
     from apps.chat.models import QaRecord
 
-    since = timezone.now() - timedelta(days=days)
+    # 本地业务日期作窗口起点,避免 UTC 日期在本地凌晨时段窗口错位
+    since = timezone.localdate() - timedelta(days=days)
 
     # 预加载部门/团队信息，用于名称查找
     # dept_id/team_id 直接引用 Department/Team 主键
@@ -273,10 +284,10 @@ def analyze_domain_coverage(days: int = 30) -> Dict[str, Any]:
     # 按 QA 记录的命中情况统计全局命中率
     # QaRecord 不含 dept/team 字段，无法按部门拆分命中率，因此各部门共享全局值
     total_queries_global = QaRecord.objects.filter(
-        created_at__date__gte=since.date(), is_hit_cache=False
+        created_at__date__gte=since, is_hit_cache=False
     ).count()
     hit_queries_global = QaRecord.objects.filter(
-        created_at__date__gte=since.date(),
+        created_at__date__gte=since,
         is_hit_cache=False,
     ).exclude(retrieval_hits=[]).count()
     global_hit_rate = hit_queries_global / max(total_queries_global, 1)
@@ -365,14 +376,15 @@ def auto_link_feedback_to_chunks(days: int = 7) -> Dict[str, Any]:
     """
     from apps.chat.models import QaFeedback
 
-    since = timezone.now() - timedelta(days=days)
+    # 本地业务日期作窗口起点,避免 UTC 日期在本地凌晨时段窗口错位
+    since = timezone.localdate() - timedelta(days=days)
 
     bad_feedbacks = (
         QaFeedback.objects
         .filter(
             rating__lt=0,
             status__in=['pending', 'processing'],
-            created_at__date__gte=since.date(),
+            created_at__date__gte=since,
         )
         .select_related('qa_record', 'user')
     )
@@ -454,7 +466,8 @@ def generate_coverage_report(days: int = 7) -> 'CoverageReport':
     """
     from apps.analytics.models import CoverageReport
 
-    report_date = timezone.now().date()
+    # 本地业务日期(与 DailyReport 的 localdate 约定一致),避免 UTC 日期错位
+    report_date = timezone.localdate()
 
     # 执行各项分析
     coverage_data = analyze_hot_query_coverage(days)

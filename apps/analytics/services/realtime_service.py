@@ -99,7 +99,7 @@ def _get_broker_redis():
         return None
 
 
-def _get_redis_safe():
+def get_redis_safe():
     """获取 Redis 连接（带健康检查，TTL 缓存避免热点路径开销）
 
     - lru_cache 缓存的连接如果已经断开，直接用会抛 ConnectionError
@@ -140,7 +140,7 @@ def update_queue_depth():
     """
     from apps.analytics.models import QueueDepthLog
 
-    r = _get_redis_safe()
+    r = get_redis_safe()
     now = timezone.now()
 
     # 先用 pipeline 批量查询所有队列长度（LLEN），
@@ -263,7 +263,7 @@ def get_queue_depth_snapshot():
     会等满 timeout（实测 2s+），放 API 热路径会让接口响应 4s+；
     worker 状态属于分钟级延迟可接受的数据，统一由后台任务聚合。
     """
-    r = _get_redis_safe()
+    r = get_redis_safe()
     result = {}
 
     # 降级 LLEN 用的 broker 连接（队列消息所在 DB），只创建一次复用
@@ -323,7 +323,7 @@ def increment_realtime_metrics(qa_record):
     - 设置 3 天 TTL，防止数据无限累积
     - 指标用途：Dashboard 实时展示今日数据概览，精确 P50/P95 仍以 T+1 报表为准
     """
-    r = _get_redis_safe()
+    r = get_redis_safe()
     # 实时指标 key 按"今日"业务日期生成：timezone.now().date() 返回 UTC 日期，
     # 本地凌晨时段会落到前一天 key 上，导致 Dashboard 今日数据错位
     today = timezone.localdate().isoformat()
@@ -357,7 +357,7 @@ def get_realtime_snapshot():
     所有字段均为累计值（非增量），直接展示即可。
     last_flush_at 用于 Dashboard 判断 Redis 数据是否新鲜（>10 分钟未刷新则降级）。
     """
-    r = _get_redis_safe()
+    r = get_redis_safe()
     today = timezone.localdate().isoformat()
     key = f'analytics:realtime:{today}'
 
@@ -427,7 +427,7 @@ def flush_realtime_metrics():
     - 此函数仅更新 last_flush_at 标记，用于判断 Redis 数据是否新鲜
     - 不移动或删除数据，确保 Dashboard 始终可读取
     """
-    r = _get_redis_safe()
+    r = get_redis_safe()
     today = timezone.localdate().isoformat()
     key = f'analytics:realtime:{today}'
 

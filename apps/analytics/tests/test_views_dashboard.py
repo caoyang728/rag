@@ -29,16 +29,14 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.users.models import (
     User, Role, UserRoleRel, RolePermissionRel, Permission, GrantStatus,
-    Department, Team, UserDeptScopeRel, UserTeamScopeRel,
+    Department, Team,
 )
 from apps.chat.models import QaRecord, QaFeedback
 from apps.memory.models import Session
 from apps.knowledge.models import KnowledgeNode, Document
 from apps.analytics.models import (
-    KeywordWeight, SystemMetricsReport, OrgUsageReport, QueueDepthLog,
-    GoldenDataset, GoldenQuestion, GoldenReferenceAnswer,
-    MultiDimensionScore, DocumentQualityReport, RetrievalQualityReport,
-    CoverageReport, LowScoreAnalysis, RouteAnalysis, WikiPageQualityScore,
+    MultiDimensionScore, LowScoreAnalysis, RouteAnalysis, WikiPageQualityScore,
+    CoverageReport,
 )
 
 
@@ -375,13 +373,13 @@ class TestCoverageReportAPI(AnalyticsViewsBase):
         gaps = [{'query': '什么是社保', 'count': 5}]
         duplicates = {'rate': 0.1, 'count': 2}
         domain = {'domain_coverage': []}
-        with patch('apps.analytics.coverage.analyze_hot_query_coverage',
+        with patch('apps.analytics.services.coverage_service.analyze_hot_query_coverage',
                    return_value=coverage), \
-             patch('apps.analytics.coverage.detect_knowledge_gaps',
+             patch('apps.analytics.services.coverage_service.detect_knowledge_gaps',
                    return_value=gaps), \
-             patch('apps.analytics.coverage.detect_duplicate_chunks',
+             patch('apps.analytics.services.coverage_service.detect_duplicate_chunks',
                    return_value=duplicates), \
-             patch('apps.analytics.coverage.analyze_domain_coverage',
+             patch('apps.analytics.services.coverage_service.analyze_domain_coverage',
                    return_value=domain):
             resp = self.client.get('/api/v1/analytics/coverage/?days=14',
                                    **self.reader_headers)
@@ -407,7 +405,7 @@ class TestFeedbackLoopAPI(AnalyticsViewsBase):
         assert resp.status_code == 400
 
     def test_happy_200(self):
-        with patch('apps.analytics.coverage.auto_link_feedback_to_chunks',
+        with patch('apps.analytics.services.coverage_service.auto_link_feedback_to_chunks',
                    return_value={'linked': 3, 'resolved': 1}) as m:
             resp = self.client.post('/api/v1/analytics/feedback-loop/',
                                     data=json.dumps({'days': 7}),
@@ -435,7 +433,7 @@ class TestGenerateCoverageReportAPI(AnalyticsViewsBase):
     def test_happy_200(self):
         mock_report = MagicMock(id=3, report_date=self.today,
                                 hot_query_coverage_rate=0.85, gap_count=2)
-        with patch('apps.analytics.coverage.generate_coverage_report',
+        with patch('apps.analytics.services.coverage_service.generate_coverage_report',
                    return_value=mock_report) as m:
             resp = self.client.post('/api/v1/analytics/coverage/generate/',
                                     data=json.dumps({'days': 7}),

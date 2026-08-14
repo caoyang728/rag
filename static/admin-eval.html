@@ -167,7 +167,7 @@
 								<div class="text-sub text-sm" id="evalSummary" style="white-space:nowrap;flex-shrink:0;margin-left:8px"></div>
 							</div>
 							<div class="flex gap-4 items-center" style="flex-shrink:0">
-								<input type="number" id="manualQaId" placeholder="QA ID" class="input" style="width:100px" oninput="document.getElementById('btnRunManualEval').disabled=false" onchange="document.getElementById('btnRunManualEval').disabled=false">
+								<input type="number" id="manualQaId" placeholder="QA ID" class="input" style="width:100px">
 								<button id="btnRunManualEval" class="btn btn-primary" onclick="runManualEval()">🔍 手动评估</button>
 							</div>
 						</div>
@@ -304,10 +304,10 @@
 					<div class="eval-toolbar mb-16">
 						<div class="panel-header">
 							<div class="flex gap-4 items-center">
-								<select class="select" id="coverageDays">
-									<option value="7">最近 7 天</option>
-									<option value="30">最近 30 天</option>
-								</select>
+								<select class="select" id="coverageDays" onchange="loadCoverage()">
+								<option value="7">最近 7 天</option>
+								<option value="30">最近 30 天</option>
+							</select>
 								<button class="btn btn-primary" onclick="loadCoverage()">🔄 刷新</button>
 								<button class="btn" onclick="generateCoverage()">📊 生成报告</button>
 							</div>
@@ -652,80 +652,100 @@
 	</div>
 
 	<!-- Dialog: 创建测试集 -->
-	<div class="dialog-mask" id="createDialog" style="display:none">
-		<div class="dialog">
-			<div class="dialog-title">创建测试集</div>
-			<div class="dialog-body">
-				<div class="form-item"><label for="dsName">测试集名称</label><input id="dsName" class="input" placeholder="如: HR领域2026Q3"></div>
-				<div class="form-item"><label for="dsRootType">领域</label>
-					<select id="dsRootType" class="select"></select>
-				</div>
-				<div class="form-item"><label for="dsVersion">版本</label><input id="dsVersion" class="input" value="v1"></div>
-				<div class="form-item"><label for="dsDesc">描述</label><textarea id="dsDesc" class="textarea" rows="3" placeholder="测试集用途说明"></textarea></div>
+	<div class="modal" id="createDialog">
+		<div class="modal-header">
+			<div class="modal-title">创建测试集</div>
+			<button class="modal-close" onclick="closeModal('createDialog')">✕</button>
+		</div>
+		<div class="modal-body">
+			<div class="form-item"><label class="form-label" for="dsName">测试集名称</label><input id="dsName" class="input" placeholder="如: HR领域2026Q3"></div>
+			<div class="form-item"><label class="form-label" for="dsRootType">领域</label>
+				<select id="dsRootType" class="select"></select>
 			</div>
-			<div class="dialog-footer">
-				<button class="btn" onclick="closeDialog('createDialog')">取消</button>
-				<button class="btn btn-primary" onclick="createDataset()">创建</button>
-			</div>
+			<div class="form-item"><label class="form-label" for="dsVersion">版本</label><input id="dsVersion" class="input" value="v1"></div>
+			<div class="form-item"><label class="form-label" for="dsDesc">描述</label><textarea id="dsDesc" class="textarea" rows="3" placeholder="测试集用途说明"></textarea></div>
+		</div>
+		<div class="modal-footer">
+			<button class="btn" onclick="closeModal('createDialog')">取消</button>
+			<button class="btn btn-primary" onclick="createDataset()">创建</button>
 		</div>
 	</div>
 
 	<!-- Dialog: 导入问题 -->
-	<div class="dialog-mask" id="importDialog" style="display:none">
-		<div class="dialog dialog-lg">
-			<div class="dialog-title">批量导入测试问题</div>
-			<div class="dialog-body">
-				<div class="form-item"><label for="importDatasetSel">选择测试集</label>
-					<select id="importDatasetSel" class="select"></select>
-				</div>
-				<div class="form-item"><label for="importJson">JSON 数据</label>
-					<textarea id="importJson" class="textarea" rows="10" placeholder='[{"question":"问题","relevant_doc_ids":[1,2],"reference_answer":"答案"}]'></textarea>
-				</div>
-				<div class="text-sm text-sub mt-8">格式说明：question(问题), relevant_doc_ids(相关文档ID数组), reference_answer(参考答案), key_points(关键点数组)</div>
+	<div class="modal" id="importDialog">
+		<div class="modal-header">
+			<div class="modal-title">批量导入测试问题</div>
+			<button class="modal-close" onclick="closeModal('importDialog')">✕</button>
+		</div>
+		<div class="modal-body">
+			<div class="form-item"><label class="form-label" for="importDatasetSel">选择测试集</label>
+				<select id="importDatasetSel" class="select"></select>
 			</div>
-			<div class="dialog-footer">
-				<button class="btn" onclick="closeDialog('importDialog')">取消</button>
-				<button class="btn btn-primary" onclick="importQuestions()">导入</button>
+			<div class="form-item"><label class="form-label" for="importJson">JSON 数据</label>
+				<textarea id="importJson" class="textarea" rows="10" placeholder='[{"question":"问题","relevant_doc_ids":[1,2],"reference_answer":"答案"}]'></textarea>
 			</div>
+			<div class="text-sm text-sub mt-8">格式说明：question(问题), relevant_doc_ids(相关文档ID数组), reference_answer(参考答案), key_points(关键点数组)</div>
+		</div>
+		<div class="modal-footer">
+			<button class="btn" onclick="closeModal('importDialog')">取消</button>
+			<button class="btn btn-primary" onclick="importQuestions()">导入</button>
 		</div>
 	</div>
 
 	<!-- Dialog: QA 评估明细(12 维) -->
-	<div class="dialog-mask" id="qaDetailDialog" style="display:none">
-		<div class="dialog dialog-lg">
-			<div class="dialog-title">QA 评估明细 · <span id="qaDetailTitle">--</span></div>
-			<div class="dialog-body" id="qaDetailBody">
-				<div class="text-sub">加载中...</div>
-			</div>
-			<div class="dialog-footer">
-				<button class="btn" onclick="closeDialog('qaDetailDialog')">关闭</button>
-			</div>
+	<div class="modal" id="qaDetailDialog">
+		<div class="modal-header">
+			<div class="modal-title">QA 评估明细 · <span id="qaDetailTitle">--</span></div>
+			<button class="modal-close" onclick="closeModal('qaDetailDialog')">✕</button>
+		</div>
+		<div class="modal-body" id="qaDetailBody">
+			<div class="text-sub">加载中...</div>
+		</div>
+		<div class="modal-footer">
+			<button class="btn" onclick="closeModal('qaDetailDialog')">关闭</button>
+		</div>
+	</div>
+
+	<!-- Dialog: 测试集问题列表 -->
+	<div class="modal" id="datasetDetailDialog">
+		<div class="modal-header">
+			<div class="modal-title">测试集问题 · <span id="dsDetailTitle">--</span></div>
+			<button class="modal-close" onclick="closeModal('datasetDetailDialog')">✕</button>
+		</div>
+		<div class="modal-body">
+			<div class="text-sub text-sm mb-8" id="dsDetailMeta"></div>
+			<div id="dsDetailBody"></div>
+		</div>
+		<div class="modal-footer">
+			<button class="btn" onclick="closeModal('datasetDetailDialog')">关闭</button>
 		</div>
 	</div>
 
 	<!-- Dialog: 低分归因详情 -->
-	<div class="dialog-mask" id="attrDetailDialog" style="display:none">
-		<div class="dialog dialog-lg">
-			<div class="dialog-title">低分归因详情 · QA <span id="attrDetailTitle">--</span></div>
-			<div class="dialog-body" id="attrDetailBody">
-				<div class="text-sub">加载中...</div>
-			</div>
-			<div class="dialog-footer">
-				<button class="btn" onclick="closeDialog('attrDetailDialog')">关闭</button>
-			</div>
+	<div class="modal" id="attrDetailDialog">
+		<div class="modal-header">
+			<div class="modal-title">低分归因详情 · QA <span id="attrDetailTitle">--</span></div>
+			<button class="modal-close" onclick="closeModal('attrDetailDialog')">✕</button>
+		</div>
+		<div class="modal-body" id="attrDetailBody">
+			<div class="text-sub">加载中...</div>
+		</div>
+		<div class="modal-footer">
+			<button class="btn" onclick="closeModal('attrDetailDialog')">关闭</button>
 		</div>
 	</div>
 
 	<!-- Dialog: Wiki 页面质量详情 -->
-	<div class="dialog-mask" id="wikiDetailDialog" style="display:none">
-		<div class="dialog dialog-lg">
-			<div class="dialog-title">Wiki 页面质量 · <span id="wikiDetailTitle">--</span></div>
-			<div class="dialog-body" id="wikiDetailBody">
-				<div class="text-sub">加载中...</div>
-			</div>
-			<div class="dialog-footer">
-				<button class="btn" onclick="closeDialog('wikiDetailDialog')">关闭</button>
-			</div>
+	<div class="modal" id="wikiDetailDialog">
+		<div class="modal-header">
+			<div class="modal-title">Wiki 页面质量 · <span id="wikiDetailTitle">--</span></div>
+			<button class="modal-close" onclick="closeModal('wikiDetailDialog')">✕</button>
+		</div>
+		<div class="modal-body" id="wikiDetailBody">
+			<div class="text-sub">加载中...</div>
+		</div>
+		<div class="modal-footer">
+			<button class="btn" onclick="closeModal('wikiDetailDialog')">关闭</button>
 		</div>
 	</div>
 

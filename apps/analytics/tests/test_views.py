@@ -18,7 +18,7 @@ import json
 from datetime import timedelta
 from decimal import Decimal
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pytest
 
@@ -34,9 +34,7 @@ from apps.chat.models import QaRecord, QaFeedback
 from apps.memory.models import Session
 from apps.analytics.models import (
     SystemMetricsReport, OrgUsageReport, QueueDepthLog,
-    KeywordWeight, GoldenDataset, GoldenQuestion, GoldenReferenceAnswer,
-    MultiDimensionScore, DocumentQualityReport, RetrievalQualityReport,
-    CoverageReport, LowScoreAnalysis,
+    KeywordWeight, MultiDimensionScore, LowScoreAnalysis,
 )
 from apps.knowledge.models import KnowledgeNode, Document
 
@@ -1080,9 +1078,9 @@ class TestQueueDepthAPI(AnalyticsAPITestBase):
 
     def test_happy_mocked(self):
         # 正常路径：PG 历史 + Redis 当前快照（均在视图源码导入处 mock）
-        with patch('apps.analytics.utils.get_queue_depth_history',
+        with patch('apps.analytics.services.aggregation_service.get_queue_depth_history',
                    return_value=[{'queue_name': 'default', 'depth': 5}]):
-            with patch('apps.analytics.realtime.get_queue_depth_snapshot',
+            with patch('apps.analytics.services.realtime_service.get_queue_depth_snapshot',
                        return_value={'default': {'size': 5}}):
                 resp = self.client.get('/api/v1/analytics/queue-depth/?hours=12',
                                        **self.reader_headers)
@@ -1094,8 +1092,8 @@ class TestQueueDepthAPI(AnalyticsAPITestBase):
 
     def test_redis_exception_fallback(self):
         # Redis 快照异常时降级为 {}，不阻塞 PG 历史返回
-        with patch('apps.analytics.utils.get_queue_depth_history', return_value=[]):
-            with patch('apps.analytics.realtime.get_queue_depth_snapshot',
+        with patch('apps.analytics.services.aggregation_service.get_queue_depth_history', return_value=[]):
+            with patch('apps.analytics.services.realtime_service.get_queue_depth_snapshot',
                        side_effect=Exception('redis down')):
                 resp = self.client.get('/api/v1/analytics/queue-depth/',
                                        **self.reader_headers)
@@ -1126,7 +1124,7 @@ class TestRealtimeSnapshotAPI(AnalyticsAPITestBase):
         snapshot = {'date': str(self.today), 'total_qa': 3, 'cache_hits': 1,
                     'llm_errors': 0, 'tokens_prompt': 10.0, 'tokens_completion': 5.0,
                     'cost_estimate': 0.1, 'last_flush_at': 0}
-        with patch('apps.analytics.realtime.get_realtime_snapshot',
+        with patch('apps.analytics.services.realtime_service.get_realtime_snapshot',
                    return_value=snapshot):
             resp = self.client.get('/api/v1/analytics/realtime/', **self.reader_headers)
         assert resp.status_code == 200
@@ -1134,7 +1132,7 @@ class TestRealtimeSnapshotAPI(AnalyticsAPITestBase):
 
     def test_exception_fallback(self):
         # Redis 异常：返回 error=snapshot_unavailable 的兜底结构（HTTP 200）
-        with patch('apps.analytics.realtime.get_realtime_snapshot',
+        with patch('apps.analytics.services.realtime_service.get_realtime_snapshot',
                    side_effect=Exception('redis down')):
             resp = self.client.get('/api/v1/analytics/realtime/', **self.reader_headers)
         assert resp.status_code == 200

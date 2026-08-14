@@ -372,8 +372,8 @@ def _build_llm_prompt(
     要求输出结构化 JSON,避免自由发挥(便于落库 + 前端展示)
     """
     # contexts 截断控制 token:每片 300 字,最多 3 片
-    from apps.analytics.production_eval import _build_context_list
-    contexts = _build_context_list(qa_record)[:3]
+    from apps.analytics.services.production_eval_service import build_context_list
+    contexts = build_context_list(qa_record)[:3]
     contexts_text = '\n---\n'.join(c[:300] for c in contexts) if contexts else '(无检索上下文)'
 
     # 低分维度 reason 拼接(给 LLM 看 DeepEval 的判断依据)

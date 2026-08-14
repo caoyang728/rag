@@ -12,6 +12,8 @@ let qaTotal = 0;
 /* 日报趋势图的指标显示开关和缓存数据，勾选 checkbox 时更新开关并重渲染 */
 let dailyTrendData = [];
 let dailyMetricVisible = { qa: true, good: true, bad: true, accuracy: true };
+/* 系统指标页延迟直方图 ECharts 实例：每次重渲染前须 dispose，避免重复 init 报错/内存泄漏 */
+let sysMetricsHistChart = null;
 
 document.addEventListener('DOMContentLoaded', () => {
 	initAnalyticsPage();
@@ -59,35 +61,30 @@ function switchTab(name) {
 		stopRealtimePolling();
 	}
 	// 切到对应 Tab 时加载该面板数据（每次切换均刷新，根节点筛选变更也走 reloadCurrentTab）
-	switch (name) {
-		case 'overview': break; // 已默认加载
-		case 'system': loadSystemMetrics(); break;
-		case 'queue': loadQueueDepth(); break;
-		case 'org': loadOrgUsage(); break;
-		case 'qa': loadQaRecords(); break;
-		case 'daily': loadDailyReport(); break;
-		case 'tools':
-			loadKeywords('keywordsTableBody2');
-			loadBadFeedbacks('feedbackList2');
-			loadFeedbackLoopAggs();
-			break;
-	}
+	// 概览 Tab 已由 loadRealtimeStrip 轮询 + 首屏 loadTrend 覆盖，切回时不重复加载
+	if (name !== 'overview') loadTabData(name, false);
 }
 
 function reloadCurrentTab() {
-	// 根节点切换时，按当前 Tab 懒加载对应数据
-	switch (currentTab) {
-		case 'overview':
-			loadTrend();
-			break;
+	// 根节点切换时，按当前 Tab 懒加载对应数据（qa 分页重置回第 1 页）
+	loadTabData(currentTab, true);
+}
+
+// Tab 数据懒加载分发：switchTab / reloadCurrentTab 共用，避免两份重复的 switch 分支
+function loadTabData(name, resetQaPage) {
+	switch (name) {
+		case 'overview': loadTrend(); break;
 		case 'system': loadSystemMetrics(); break;
 		case 'queue': loadQueueDepth(); break;
 		case 'org': loadOrgUsage(); break;
-		case 'qa': qaPage = 1; loadQaRecords(); break;
+		case 'qa':
+			if (resetQaPage) qaPage = 1;
+			loadQaRecords();
+			break;
 		case 'daily': loadDailyReport(); break;
 		case 'tools':
-			loadKeywords('keywordsTableBody2');
-			loadBadFeedbacks('feedbackList2');
+			loadKeywords();
+			loadBadFeedbacks();
 			loadFeedbackLoopAggs();
 			break;
 	}
@@ -277,9 +274,9 @@ const TrendChart = (function () {
 			return {
 				tooltip: {
 					trigger: 'axis',
-					// 自定义格式化：按指标所属轴的单位/小数位展示数值
+					// 自定义格式化：按指标所属轴的单位/小数位展示数值（日期经转义,防 XSS）
 					formatter: (params) => {
-						const date = days[params[0].dataIndex];
+						const date = escapeHtml(days[params[0].dataIndex]);
 						const lines = params.map(p => {
 							const s = series.find(x => x.label === p.seriesName);
 							const ax = s ? axes[s.axis] : null;
@@ -425,9 +422,14 @@ function buildTrendUrl(opts) {
 /* 概览趋势图组件实例：懒创建一次，图例勾选在组件内部处理 */
 let overviewTrendChart = null;
 
+// 请求序号守卫:时间范围/根节点筛选快速切换时,旧响应后返回不覆盖新状态
+let trendSeq = 0;
 async function loadTrend() {
+	const mySeq = ++trendSeq;
 	try {
 		const data = await api.getJson(buildTrendUrl());
+		// 旧响应后返回时丢弃,避免覆盖新筛选条件下的数据
+		if (mySeq !== trendSeq) return;
 		const trend = data.trend || [];
 
 		if (!overviewTrendChart) {
@@ -458,6 +460,8 @@ async function loadTrend() {
 		}
 		overviewTrendChart.render(trend);
 	} catch (e) {
+		// 旧请求失败同样忽略,避免过期错误提示干扰当前筛选条件
+		if (mySeq !== trendSeq) return;
 		const chart = $('#trendChart');
 		if (chart) chart.innerHTML = '<div class="error-block-lg">加载趋势数据失败</div>';
 		toast('加载趋势数据失败', 'error');
@@ -466,17 +470,20 @@ async function loadTrend() {
 }
 
 /* ---- 关键词表格 ---- */
-async function loadKeywords(tbodyId) {
+// 页面内唯一承载表格的 tbody 为 keywordsTableBody2，历史参数已冗余，改为固定 id
+let kwSeq = 0; // 请求序号守卫:根节点快速切换时,旧响应后返回不覆盖新状态
+async function loadKeywords() {
+	const mySeq = ++kwSeq;
 	try {
 		const rootType = getSelectedRootType();
 		let url = '/api/v1/analytics/keywords/';
 		if (rootType) url += '?root_type=' + encodeURIComponent(rootType);
 		const data = await api.getJson(url);
 		const keywords = data.rows || [];
-		// 页面实际承载表格的 tbody id 为 keywordsTableBody2（默认值同步，避免无参调用时静默落空）
-		const actualTbodyId = tbodyId || 'keywordsTableBody2';
+		// 旧响应后返回时丢弃,避免覆盖新筛选条件下的数据
+		if (mySeq !== kwSeq) return;
 
-		const kwBody = document.getElementById(actualTbodyId);
+		const kwBody = document.getElementById('keywordsTableBody2');
 		if (kwBody) {
 			const kwTpl = tpl('tmpl-kw-row');
 			kwBody.innerHTML = keywords.length === 0
@@ -511,7 +518,9 @@ async function loadKeywords(tbodyId) {
 			}
 		}
 	} catch (e) {
-		const kwBody = document.getElementById(tbodyId || 'keywordsTableBody2');
+		// 旧请求失败同样忽略,避免过期错误提示干扰当前筛选条件
+		if (mySeq !== kwSeq) return;
+		const kwBody = document.getElementById('keywordsTableBody2');
 		if (kwBody) kwBody.innerHTML = '<tr><td colspan="4" class="error-block">加载关键词数据失败</td></tr>';
 		toast('加载关键词数据失败', 'error');
 		console.error('load keywords failed:', e);
@@ -523,7 +532,7 @@ async function adjustKeywordWeight(id, delta) {
 		await api.put(`/api/v1/analytics/keywords/${id}/`, { delta: delta });
 		toast(delta > 0 ? '已加权 +0.1' : '已降权 -0.1', 'success');
 		// 刷新关键词表 + 自动调整记录（手动调整也写入审计）
-		loadKeywords('keywordsTableBody2');
+		loadKeywords();
 		loadFeedbackLoopAggs();
 	} catch (e) {
 		toast(e.message || '操作失败', 'error');
@@ -531,12 +540,16 @@ async function adjustKeywordWeight(id, delta) {
 }
 
 /* ---- 反馈闭环自动调整记录 ---- */
+let fbAggSeq = 0; // 请求序号守卫:与关键词表同步刷新时,旧响应后返回不覆盖新状态
 async function loadFeedbackLoopAggs() {
 	const body = document.getElementById('feedbackAggBody');
 	if (!body) return;
+	const mySeq = ++fbAggSeq;
 	try {
 		const data = await api.getJson('/api/v1/analytics/feedback-loop/aggregations/?limit=100');
 		const rows = data.rows || [];
+		// 旧响应后返回时丢弃,避免覆盖新筛选条件下的数据
+		if (mySeq !== fbAggSeq) return;
 		const kwTpl = tpl('tmpl-fb-agg-row');
 		body.innerHTML = rows.length === 0
 			? '<tr><td colspan="8" class="empty">暂无自动调整记录（点击/反馈数据不足或尚未聚合）</td></tr>'
@@ -578,6 +591,8 @@ async function loadFeedbackLoopAggs() {
 			body._fbAggListenerAttached = true;
 		}
 	} catch (e) {
+		// 旧请求失败同样忽略,避免过期错误提示干扰当前筛选条件
+		if (mySeq !== fbAggSeq) return;
 		body.innerHTML = '<tr><td colspan="8" class="error-block">加载自动调整记录失败</td></tr>';
 		console.error('load feedback loop aggs failed:', e);
 	}
@@ -589,7 +604,7 @@ async function runFeedbackLoop() {
 		await api.postJson('/api/v1/analytics/feedback-loop/run/', {});
 		toast('聚合完成，已刷新记录', 'success');
 		loadFeedbackLoopAggs();
-		loadKeywords('keywordsTableBody2');
+		loadKeywords();
 	} catch (e) {
 		toast(e.message || '聚合失败', 'error');
 	}
@@ -601,7 +616,7 @@ async function applyFeedbackAgg(id, action) {
 		await api.postJson('/api/v1/analytics/feedback-loop/apply/', { id: id, action: action });
 		toast(action === 'apply' ? '已应用调整' : '已忽略', 'success');
 		loadFeedbackLoopAggs();
-		loadKeywords('keywordsTableBody2');
+		loadKeywords();
 	} catch (e) {
 		toast(e.message || '操作失败', 'error');
 	}
@@ -623,8 +638,9 @@ async function loadRootTypes() {
 		const tree = data.tree || [];
 		nodesCache = [];
 		for (const n of tree) {
+			// 只取根节点作为领域筛选项(子节点会随选中根节点联动,无需在前端展开树)
 			if (n.node_type === 'root') {
-				nodesCache.push({ id: n.id, root_type: n.root_type, name: n.name, depth: 0 });
+				nodesCache.push({ id: n.id, root_type: n.root_type, name: n.name });
 			}
 		}
 		updateRootTypeSelect();
@@ -645,8 +661,7 @@ function updateRootTypeSelect() {
 		return;
 	}
 	const options = nodesCache.map(n => {
-		const indent = n.depth > 0 ? '&nbsp;&nbsp;'.repeat(n.depth) + '└─ ' : '';
-		return `<option value="${escapeHtml(String(n.id))}" data-root-type="${escapeHtml(n.root_type)}">${indent}${escapeHtml(n.name)}</option>`;
+		return `<option value="${escapeHtml(String(n.id))}" data-root-type="${escapeHtml(n.root_type)}">${escapeHtml(n.name)}</option>`;
 	}).join('');
 	if (sel1) sel1.innerHTML = `<option value="">全部节点</option>` + options;
 	if (sel2) sel2.innerHTML = `<option value="all">全部</option>` + options;
@@ -679,24 +694,27 @@ async function submitNewKeyword() {
 		await api.postJson('/api/v1/analytics/keywords/', { keyword: keyword, weight_score: weight, root_type: rootType });
 		toast('已新增关键词', 'success');
 		closeAllOverlays();
-		loadKeywords('keywordsTableBody2');
+		loadKeywords();
 	} catch (e) {
 		toast(e.message || '添加失败', 'error');
 	}
 }
 
 /* ---- 差评反馈列表 ---- */
-async function loadBadFeedbacks(listId) {
+// 页面内唯一承载差评列表的容器为 feedbackList2，历史参数已冗余，改为固定 id
+let badFbSeq = 0; // 请求序号守卫:根节点快速切换时,旧响应后返回不覆盖新状态
+async function loadBadFeedbacks() {
+	const mySeq = ++badFbSeq;
 	try {
 		const rootType = getSelectedRootType();
 		let url = '/api/v1/analytics/bad-feedbacks/';
 		if (rootType) url += '?root_type=' + encodeURIComponent(rootType);
 		const data = await api.getJson(url);
 		const feedbacks = data.rows || [];
-		// 页面实际承载列表的容器 id 为 feedbackList2（默认值同步，避免无参调用时静默落空）
-		const actualListId = listId || 'feedbackList2';
+		// 旧响应后返回时丢弃,避免覆盖新筛选条件下的数据
+		if (mySeq !== badFbSeq) return;
 
-		const fbList = document.getElementById(actualListId);
+		const fbList = document.getElementById('feedbackList2');
 		if (fbList) {
 			fbList.innerHTML = feedbacks.length === 0
 				? '<div class="empty">暂无差评反馈</div>'
@@ -753,7 +771,9 @@ async function loadBadFeedbacks(listId) {
 			}
 		}
 	} catch (e) {
-		const fbList = document.getElementById(listId || 'feedbackList2');
+		// 旧请求失败同样忽略,避免过期错误提示干扰当前筛选条件
+		if (mySeq !== badFbSeq) return;
+		const fbList = document.getElementById('feedbackList2');
 		if (fbList) fbList.innerHTML = '<div class="error-block">加载反馈数据失败</div>';
 		toast('加载反馈数据失败', 'error');
 		console.error('load bad feedbacks failed:', e);
@@ -770,7 +790,7 @@ async function markFeedbackProcessed(fbId) {
 	try {
 		await api.put(`/api/v1/analytics/bad-feedbacks/${fbId}/`, { status: 'resolved' });
 		toast('已标记为已处理', 'success');
-		loadBadFeedbacks('feedbackList2');
+		loadBadFeedbacks();
 	} catch (e) {
 		toast(e.message || '操作失败', 'error');
 	}
@@ -842,6 +862,12 @@ function applyCustomDateRange() {
 }
 
 /* ---- 导出报表 ---- */
+// 防 CSV 公式注入:单元格以 = + - @ \t \r 开头时前置单引号,避免 Excel 打开时被当作公式执行
+function csvCell(v) {
+	const s = String(v ?? '');
+	return /^[=+\-@\t\r]/.test(s) ? "'" + s : s;
+}
+
 async function exportReport() {
 	try {
 		const data = await api.getJson(buildTrendUrl());
@@ -851,7 +877,9 @@ async function exportReport() {
 		let csv = BOM + '日期,问答数,好评数,差评数,准确率(%),平均耗时(ms)\n';
 		(data.trend || []).forEach(t => {
 			// 后端 TrendReportView 返回 avg_total_ms（非缓存命中的整体总耗时），并非 avg_latency_ms
-			csv += `${t.date},${t.qa_count},${t.good},${t.bad},${(t.accuracy * 100).toFixed(2)},${t.avg_total_ms || 0}\n`;
+			// accuracy 可能缺失,先归一为 0 再乘 100,避免 (undefined*100).toFixed 输出 "NaN"
+			csv += [csvCell(t.date), csvCell(t.qa_count), csvCell(t.good), csvCell(t.bad),
+				csvCell(((t.accuracy || 0) * 100).toFixed(2)), csvCell(t.avg_total_ms || 0)].join(',') + '\n';
 		});
 
 		const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
@@ -873,13 +901,20 @@ async function exportReport() {
 }
 
 /* ---- Tab 2: 系统性能指标报表（P50/P95/P99 / 缓存命中率 / 失败率 / Token / 错误分布） ---- */
+// 请求序号守卫:日期切换快速触发时,旧响应后返回不覆盖新状态
+let sysMetricsSeq = 0;
 async function loadSystemMetrics() {
+	const mySeq = ++sysMetricsSeq;
 	const box = $('#systemMetricsBody');
+	// 重渲染前先销毁旧柱状图实例：innerHTML 会替换掉旧容器，残留实例会报"容器已存在"并泄漏
+	if (sysMetricsHistChart) { sysMetricsHistChart.dispose(); sysMetricsHistChart = null; }
 	const date = $('#systemMetricsDate')?.value;
 	try {
 		let url = '/api/v1/analytics/system-metrics/';
 		if (date) url += '?date=' + encodeURIComponent(date);
 		const data = await api.getJson(url);
+		// 旧响应后返回时丢弃,避免覆盖新筛选条件下的数据
+		if (mySeq !== sysMetricsSeq) return;
 
 		if (!data.available) {
 			// 空态在 system-card 内直接占位，不再嵌套 .card（避免双层边框）
@@ -943,24 +978,16 @@ async function loadSystemMetrics() {
         </div>
       </div>`;
 
-		// 4. 延迟直方图
+		// 4. 延迟直方图：改为 ECharts 柱状图（100ms 等宽桶，由后端 build_latency_histogram 生成）
+		//    桶数可能上百（延迟跨度大），柱状图固定高度不撑页面，label 靠 echarts 自动隐藏重叠项 + tooltip 看值
 		const hist = data.latency_histogram || {};
-		const histKeys = Object.keys(hist).sort();
+		const histKeys = Object.keys(hist).sort((a, b) => parseInt(a) - parseInt(b));
 		// 直方图总量只算一次，避免每条记录 O(n) reduce 造成的 O(n²)
 		const histTotal = histKeys.reduce((s, kk) => s + (hist[kk] || 0), 0);
-		/* 直方图每行结构抽到 .hist-row / .hist-label / .hist-track / .hist-bar / .hist-value，
-		   .hist-bar 的宽度由下方 setTimeout 动画设置（class __anim 用于选中元素） */
-		const histHtml = histKeys.length === 0 ? '<div class="empty">暂无分布数据</div>' : histKeys.map(k => {
-			const v = hist[k] || 0;
-			const pct = histTotal ? ((v / histTotal) * 100).toFixed(1) : 0;
-			return `<div class="hist-row">
-        <span class="hist-label">${escapeHtml(k)}</span>
-        <div class="hist-track">
-          <div class="hist-bar __anim"></div>
-        </div>
-        <span class="hist-value">${v.toLocaleString()} (${pct}%)</span>
-      </div>`;
-		}).join('');
+		/* histEl 为柱状图容器，数据为空时不渲染 echarts 直接显示空态；
+		   echarts 初始化在下方 setTimeout 中执行（等 innerHTML 落盘） */
+		const histEl = histKeys.length === 0 ? '<div class="empty">暂无分布数据</div>'
+			: '<div class="hist-chart" id="sysMetricsHistChart"></div>';
 
 		// 5. 错误分布
 		const errDist = data.error_distribution || {};
@@ -992,26 +1019,54 @@ async function loadSystemMetrics() {
         </div>
       </div>
       <div class="system-section">
-        <div class="section-title">📊 分布明细</div>
+        <div class="section-title">📊 延迟与错误分布</div>
         <div class="grid-2 grid-cols-1-1">
-          <div class="sub-panel">${histHtml}</div>
-          <div class="sub-panel">${errHtml}</div>
+          <div class="sub-panel">
+            <div class="sub-panel-title">⚡ 延迟分布（ms）</div>
+            ${histEl}
+          </div>
+          <div class="sub-panel">
+            <div class="sub-panel-title">❌ 错误分布</div>
+            ${errHtml}
+          </div>
         </div>
       </div>`;
 
-		// 延迟直方图动画填充（逐行递增，让宽度随 0→实际宽度 动画）
-		// 复用顶部已计算的 histTotal，避免 forEach 内每次 reduce 造成 O(n²)
+		// 延迟直方图柱状图初始化（等 innerHTML 渲染完成再 init）
+		// 桶少时 label 直排，桶多时旋转 45° 并依赖 echarts hideOverlap 自动隐藏重叠项，tooltip 可看任意桶
 		setTimeout(() => {
-			$$('#systemMetricsBody .__anim').forEach((el, idx) => {
-				const target = histTotal ? ((hist[histKeys[idx]] || 0) / histTotal) * 100 : 0;
-				el.style.transition = 'width .5s ease';
-				requestAnimationFrame(() => {
-					el.style.width = target + '%';
-					el.style.background = '#2563eb';
-				});
+			const histEl = $('#sysMetricsHistChart');
+			if (!histEl) return;
+			sysMetricsHistChart = echarts.init(histEl, null, { renderer: 'canvas' });
+			sysMetricsHistChart.setOption({
+				tooltip: {
+					trigger: 'axis',
+					axisPointer: { type: 'shadow' },
+					formatter: (params) => {
+						const p = params[0];
+						const pct = histTotal ? ((p.value / histTotal) * 100).toFixed(1) : '0.0';
+						return `${p.name} ms<br/><b>${Number(p.value).toLocaleString()} 条</b>（${pct}%）`;
+					},
+				},
+				grid: { left: 8, right: 8, top: 8, bottom: 4, containLabel: true },
+				xAxis: {
+					type: 'category',
+					data: histKeys,
+					axisLabel: { fontSize: 10, color: '#6b7280', rotate: histKeys.length > 15 ? 45 : 0 },
+					axisTick: { alignWithLabel: true },
+				},
+				yAxis: { type: 'value', minInterval: 1, splitLine: { lineStyle: { color: '#f3f4f6' } } },
+				series: [{
+					type: 'bar',
+					data: histKeys.map(k => hist[k] || 0),
+					barMaxWidth: 18,
+					itemStyle: { color: '#2563eb', borderRadius: [3, 3, 0, 0] },
+				}],
 			});
 		}, 30);
 	} catch (e) {
+		// 旧请求失败同样忽略,避免过期错误提示干扰当前筛选条件
+		if (mySeq !== sysMetricsSeq) return;
 		box.innerHTML = `<div class="card-error">加载系统指标失败：${escapeHtml(e.message || '')}</div>`;
 		toast('加载系统指标失败', 'error');
 		console.error('load system metrics failed:', e);
@@ -1108,10 +1163,15 @@ async function loadRealtimeStrip(silent) {
 }
 
 /* ---- Tab 4: 队列深度监控 ---- */
+// 请求序号守卫:窗口切换快速触发时,旧响应后返回不覆盖新状态
+let queueSeq = 0;
 async function loadQueueDepth() {
+	const mySeq = ++queueSeq;
 	try {
 		const hours = $('#queueHours')?.value || 24;
 		const data = await api.getJson(`/api/v1/analytics/queue-depth/?hours=${hours}`);
+		// 旧响应后返回时丢弃,避免覆盖新筛选条件下的数据
+		if (mySeq !== queueSeq) return;
 
 		// 1. 当前实时快照 — 渲染到上方紧凑卡片
 		const snapBox = $('#queueSnapshotBody');
@@ -1153,6 +1213,8 @@ async function loadQueueDepth() {
 			renderQueueDepthChart(history);
 		}
 	} catch (e) {
+		// 旧请求失败同样忽略,避免过期错误提示干扰当前筛选条件
+		if (mySeq !== queueSeq) return;
 		const snapBox = $('#queueSnapshotBody');
 		if (snapBox) snapBox.innerHTML = `<div class="error-block">加载队列深度失败：${escapeHtml(e.message || '')}</div>`;
 		toast('加载队列深度失败', 'error');
@@ -1231,7 +1293,10 @@ function renderQueueDepthChart(history) {
 }
 
 /* ---- Tab 5: 部门/团队使用统计 ---- */
+// 请求序号守卫:日期/层级切换快速触发时,旧响应后返回不覆盖新状态
+let orgSeq = 0;
 async function loadOrgUsage() {
+	const mySeq = ++orgSeq;
 	const box = $('#orgUsageBody');
 	try {
 		const date = $('#orgUsageDate')?.value;
@@ -1243,6 +1308,8 @@ async function loadOrgUsage() {
 		const finalUrl = params.length ? url + '?' + params.join('&') : url;
 
 		const data = await api.getJson(finalUrl);
+		// 旧响应后返回时丢弃,避免覆盖新筛选条件下的数据
+		if (mySeq !== orgSeq) return;
 		const rows = data.rows || [];
 
 		if (rows.length === 0) {
@@ -1290,6 +1357,8 @@ async function loadOrgUsage() {
         </div>
       </div>`;
 	} catch (e) {
+		// 旧请求失败同样忽略,避免过期错误提示干扰当前筛选条件
+		if (mySeq !== orgSeq) return;
 		box.innerHTML = `<div class="card card-error">加载组织统计失败：${escapeHtml(e.message || '')}</div>`;
 		toast('加载组织统计失败', 'error');
 		console.error('load org usage failed:', e);
@@ -1466,8 +1535,11 @@ async function showQaDetail(id) {
 }
 
 /* ---- Tab 8: 日报详情（今日 vs 昨日对比 + 多日趋势折线图） ---- */
+// 请求序号守卫:天数/根节点筛选快速切换时,旧响应后返回不覆盖新状态
+let dailySeq = 0;
 async function loadDailyReport() {
 	const box = $('#dailyBody');
+	const mySeq = ++dailySeq;
 	try {
 		// 并行拉取日报对比数据和趋势数据，减少等待时间
 		const trendDays = $('#dailyTrendDays')?.value || 30;
@@ -1478,12 +1550,15 @@ async function loadDailyReport() {
 			// 日报天数选择器独立于概览时间范围，forceDays 强制按 days 查询
 			api.getJson(buildTrendUrl({ days: trendDays, forceDays: true, rootType })),
 		]);
+		// 旧响应后返回时丢弃,避免覆盖新筛选条件下的数据
+		if (mySeq !== dailySeq) return;
 
 		const t = dailyData.today || {};
 		const y = dailyData.yesterday || {};
 
 		const fields = [
-			{ key: 'date', label: '日期', tf: v => v, yf: v => v },
+			// 日期由后端返回,经 escapeHtml 转义后拼入 innerHTML,与表头转义口径一致
+			{ key: 'date', label: '日期', tf: v => escapeHtml(v || '-'), yf: v => escapeHtml(v || '-') },
 			{ key: 'qa_count', label: 'QA 次数', tf: v => (v || 0).toLocaleString(), yf: v => (v || 0).toLocaleString(), cmp: true },
 			{ key: 'good', label: '好评数', tf: v => (v || 0).toLocaleString(), yf: v => (v || 0).toLocaleString(), cmp: true },
 			{ key: 'bad', label: '差评数', tf: v => (v || 0).toLocaleString(), yf: v => (v || 0).toLocaleString(), cmp: true, warn: true },
@@ -1552,6 +1627,8 @@ async function loadDailyReport() {
 			box._dailyListener = true;
 		}
 	} catch (e) {
+		// 旧请求失败同样忽略,避免过期错误提示干扰当前筛选条件
+		if (mySeq !== dailySeq) return;
 		box.innerHTML = `<div class="card card-error">加载日报失败：${escapeHtml(e.message || '')}</div>`;
 		toast('加载日报失败', 'error');
 		console.error('load daily report failed:', e);

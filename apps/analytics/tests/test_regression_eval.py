@@ -1,5 +1,5 @@
 """
-apps.analytics.regression_eval 单元测试 —— 低分回归测试集（沉淀 + 全链路评估）
+apps.analytics.services.regression_service 单元测试 —— 低分回归测试集（沉淀 + 全链路评估）
 
 覆盖范围：
 - _get_or_create_regression_dataset：按 root_type 获取/创建回归测试集
@@ -10,16 +10,16 @@ apps.analytics.regression_eval 单元测试 —— 低分回归测试集（沉�
   评估异常不改动 pass_count / limit 截断 / 连续通过达到阈值标记建议移除
 
 说明：检索与评估引擎全部在源模块导入处 mock
-（apps.retrieval.hybrid.hybrid_search / apps.analytics.deepeval_metrics.evaluate_with_deepeval /
-apps.analytics.offline_eval._generate_answer），GoldenDataset / GoldenQuestion 用真实 Django 测试库。
+（apps.retrieval.hybrid.hybrid_search / apps.analytics.services.deepeval_service.evaluate_with_deepeval /
+apps.analytics.services.offline_eval_service.generate_answer），GoldenDataset / GoldenQuestion 用真实 Django 测试库。
 """
 import pytest
 from datetime import timedelta
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from django.utils import timezone
 
-from apps.analytics import regression_eval
+from apps.analytics.services import regression_service
 from apps.analytics.models import (
     GoldenDataset, GoldenQuestion, MultiDimensionScore,
 )
@@ -74,7 +74,7 @@ class TestGetOrCreateRegressionDataset:
 
     def test_creates_new_dataset(self):
         """首次调用 → 创建 dataset_type=regression_low_score 的测试集"""
-        ds, created = regression_eval._get_or_create_regression_dataset('hr')
+        ds, created = regression_service._get_or_create_regression_dataset('hr')
         assert created is True
         assert ds.dataset_type == 'regression_low_score'
         assert ds.root_type == 'hr'
@@ -84,8 +84,8 @@ class TestGetOrCreateRegressionDataset:
 
     def test_returns_existing(self):
         """再次调用 → 返回已有测试集（不重复创建）"""
-        ds1, _ = regression_eval._get_or_create_regression_dataset('hr')
-        ds2, created = regression_eval._get_or_create_regression_dataset('hr')
+        ds1, _ = regression_service._get_or_create_regression_dataset('hr')
+        ds2, created = regression_service._get_or_create_regression_dataset('hr')
         assert created is False
         assert ds1.id == ds2.id
 
@@ -103,11 +103,11 @@ class TestSiphonLowScoreQA(RegressionTestBase):
                           return_value=top_n), \
              patch.object(AnalyticsConfig, 'low_score_regression_capacity',
                           return_value=capacity):
-            return regression_eval.siphon_low_score_qa_to_regression_set()
+            return regression_service.siphon_low_score_qa_to_regression_set()
 
     def test_no_candidates(self):
         """无低分评估记录 → 返回空统计"""
-        result = regression_eval.siphon_low_score_qa_to_regression_set(top_n=10)
+        result = regression_service.siphon_low_score_qa_to_regression_set(top_n=10)
         assert result == {'siphoned': 0, 'by_root': {}, 'skipped': 0}
 
     def test_siphon_success(self):
@@ -158,7 +158,7 @@ class TestSiphonLowScoreQA(RegressionTestBase):
 
     def test_capacity_enforced(self):
         """超出容量 → 淘汰 pass_count 高的旧记录（已多次通过最不需要保留）"""
-        ds, _ = regression_eval._get_or_create_regression_dataset('hr')
+        ds, _ = regression_service._get_or_create_regression_dataset('hr')
         old_pass = GoldenQuestion.objects.create(dataset=ds, question='旧通过', pass_count=2)
         GoldenQuestion.objects.create(dataset=ds, question='旧未通过', pass_count=0)
         self._qa(question='新低分问题', root_type='hr')
@@ -189,7 +189,7 @@ class TestEnforceRegressionCapacity:
             node=self.node, owner=self.user, title='cap-doc',
             file_name='c.txt', file_type='txt', file_hash='h2',
             root_type='test_root', status='done', dept_id=1)
-        self.ds, _ = regression_eval._get_or_create_regression_dataset('hr')
+        self.ds, _ = regression_service._get_or_create_regression_dataset('hr')
 
     def _mk_question(self, question, pass_count=0):
         """创建指定通过次数的问题"""
@@ -199,7 +199,7 @@ class TestEnforceRegressionCapacity:
     def test_under_capacity_no_removal(self):
         """未超容量 → 不删除"""
         self._mk_question('q1')
-        assert regression_eval._enforce_regression_capacity(self.ds, 10) == 0
+        assert regression_service._enforce_regression_capacity(self.ds, 10) == 0
         assert GoldenQuestion.objects.filter(dataset=self.ds).count() == 1
 
     def test_over_capacity_removes_highest_pass_count(self):
@@ -207,7 +207,7 @@ class TestEnforceRegressionCapacity:
         q_low = self._mk_question('q_low', pass_count=0)
         q_mid = self._mk_question('q_mid', pass_count=1)
         self._mk_question('q_high', pass_count=2)
-        deleted = regression_eval._enforce_regression_capacity(self.ds, 1)
+        deleted = regression_service._enforce_regression_capacity(self.ds, 1)
         assert deleted == 2
         # 保留 pass_count=0 的记录
         remaining = list(GoldenQuestion.objects.filter(dataset=self.ds))
@@ -225,7 +225,7 @@ class TestEnforceRegressionCapacity:
         GoldenQuestion.objects.filter(id=q_old.id).update(
             last_eval_at=now - timedelta(days=30))
         GoldenQuestion.objects.filter(id=q_new.id).update(last_eval_at=now)
-        deleted = regression_eval._enforce_regression_capacity(self.ds, 1)
+        deleted = regression_service._enforce_regression_capacity(self.ds, 1)
         assert deleted == 1
         assert GoldenQuestion.objects.filter(id=q_old.id).exists() is False
         assert GoldenQuestion.objects.filter(id=q_new.id).exists()
@@ -248,26 +248,26 @@ class TestRunRegressionEvaluation(RegressionTestBase):
             patch.object(AnalyticsConfig, 'eval_model', return_value='test-model'),
             patch('apps.retrieval.hybrid.hybrid_search',
                   return_value={'chunks': [{'chunk_id': self.chunk.id}]}),
-            patch('apps.analytics.offline_eval._generate_answer', return_value='生成回答'),
+            patch('apps.analytics.services.offline_eval_service.generate_answer', return_value='生成回答'),
         ]
 
     def _make_regression_question(self, question='回归问题', pass_count=0):
         """创建一条回归测试问题"""
-        ds, _ = regression_eval._get_or_create_regression_dataset('hr')
+        ds, _ = regression_service._get_or_create_regression_dataset('hr')
         return ds, GoldenQuestion.objects.create(
             dataset=ds, question=question, pass_count=pass_count)
 
     def _run(self, mocks, dataset_id, deepeval_return=None, deepeval_effect=None):
         """按序展开 mock 执行评估，返回结果"""
         with mocks[0], mocks[1], mocks[2], mocks[3], mocks[4], \
-             patch('apps.analytics.deepeval_metrics.evaluate_with_deepeval',
+             patch('apps.analytics.services.deepeval_service.evaluate_with_deepeval',
                    return_value=deepeval_return, side_effect=deepeval_effect):
-            return regression_eval.run_regression_evaluation(
+            return regression_service.run_regression_evaluation(
                 dataset_id=dataset_id, user=self.user)
 
     def test_no_dataset(self):
         """无回归测试集 → 返回 no_dataset"""
-        result = regression_eval.run_regression_evaluation(user=self.user)
+        result = regression_service.run_regression_evaluation(user=self.user)
         assert result['evaluated'] == 0
         assert result['reason'] == 'no_dataset'
 
@@ -329,9 +329,9 @@ class TestRunRegressionEvaluation(RegressionTestBase):
         mocks = self._eval_mocks()
         eval_result = [{'dimension': 'clarity', 'score': 0.8, 'reason': 'ok'}]
         with mocks[0], mocks[1], mocks[2], mocks[3], mocks[4], \
-             patch('apps.analytics.deepeval_metrics.evaluate_with_deepeval',
+             patch('apps.analytics.services.deepeval_service.evaluate_with_deepeval',
                    return_value=eval_result) as mock_eval:
-            result = regression_eval.run_regression_evaluation(
+            result = regression_service.run_regression_evaluation(
                 dataset_id=ds.id, user=self.user, limit=1)
         assert result['evaluated'] == 1
         assert mock_eval.call_count == 1

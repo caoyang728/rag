@@ -22,7 +22,7 @@ import pytest
 from django.test import Client
 from django.utils import timezone
 
-from apps.analytics.feedback_loop import (
+from apps.analytics.services.feedback_service import (
     _compute_delta,
     _parse_report_date,
     apply_pending_adjustment,

@@ -1,5 +1,5 @@
 """
-apps.analytics.coverage 单元测试 —— 知识库覆盖率统计与反馈闭环
+apps.analytics.services.coverage_service 单元测试 —— 知识库覆盖率统计与反馈闭环
 
 覆盖范围：
 - _generate_gap_suggestion：知识空白建议（关键词提取 / 兜底文案）
@@ -16,7 +16,7 @@ DB 用例复用真实 ORM（Test 库），QaRecord 创建依赖 Session/User/Kno
 import pytest
 from unittest.mock import patch
 
-from apps.analytics import coverage
+from apps.analytics.services import coverage_service
 from apps.users.models import User, Department, Team
 from apps.knowledge.models import KnowledgeNode, Document, DocumentChunk
 from apps.memory.models import Session
@@ -32,54 +32,54 @@ class TestSuggestions:
     @pytest.mark.unit
     def test_gap_suggestion_with_keywords(self):
         """查询包含 ≥2 字词 → 建议补充这些关键词相关文档（最多 5 个）"""
-        assert coverage._generate_gap_suggestion('员工 请假 流程 说明') == \
+        assert coverage_service._generate_gap_suggestion('员工 请假 流程 说明') == \
             '建议补充关于"员工 请假 流程 说明"相关的文档'
 
     @pytest.mark.unit
     def test_gap_suggestion_short_words_filtered(self):
         """所有词都短于 2 字 → 回退通用建议"""
-        assert coverage._generate_gap_suggestion('a b c') == \
+        assert coverage_service._generate_gap_suggestion('a b c') == \
             '建议检查知识库覆盖范围是否满足该查询需求'
 
     @pytest.mark.unit
     def test_gap_suggestion_empty_query(self):
         """空查询 → 通用建议"""
-        assert coverage._generate_gap_suggestion('') == \
+        assert coverage_service._generate_gap_suggestion('') == \
             '建议检查知识库覆盖范围是否满足该查询需求'
 
     @pytest.mark.unit
     def test_suggest_resolution_accuracy_tags(self):
         """不准确/不相关标签 → 检查切片相关性建议"""
-        suggestion = coverage._suggest_resolution(['不准确'], '')
+        suggestion = coverage_service._suggest_resolution(['不准确'], '')
         assert '切片' in suggestion
 
     @pytest.mark.unit
     def test_suggest_resolution_outdated_tag(self):
         """过时标签 → 更新文档建议"""
-        assert '更新' in coverage._suggest_resolution(['过时'], '')
+        assert '更新' in coverage_service._suggest_resolution(['过时'], '')
 
     @pytest.mark.unit
     def test_suggest_resolution_citation_tag(self):
         """无引用/引用错误 → 优化引用逻辑建议"""
-        suggestion = coverage._suggest_resolution(['无引用'], '')
+        suggestion = coverage_service._suggest_resolution(['无引用'], '')
         assert '引用' in suggestion
 
     @pytest.mark.unit
     def test_suggest_resolution_speed_tag(self):
         """回答慢/速度标签 → LLM 配置与缓存建议"""
-        suggestion = coverage._suggest_resolution(['回答慢'], '')
+        suggestion = coverage_service._suggest_resolution(['回答慢'], '')
         assert 'LLM' in suggestion
 
     @pytest.mark.unit
     def test_suggest_resolution_combined_tags(self):
         """多标签组合 → 多条建议用分号拼接"""
-        suggestion = coverage._suggest_resolution(['不准确', '过时'], '')
+        suggestion = coverage_service._suggest_resolution(['不准确', '过时'], '')
         assert '；' in suggestion
 
     @pytest.mark.unit
     def test_suggest_resolution_generic_fallback(self):
         """无匹配标签 → 通用人工审核建议"""
-        assert '人工审核' in coverage._suggest_resolution(['其他'], 'x')
+        assert '人工审核' in coverage_service._suggest_resolution(['其他'], 'x')
 
 
 # ============================================================================
@@ -139,7 +139,7 @@ class TestAnalyzeHotQueryCoverage(CoverageDBTestBase):
         self._create_qa('热门问题A', retrieval_hits=[1, 2])
         self._create_qa('热门问题A', retrieval_hits=[3])
         self._create_qa('热门问题B')  # 无命中
-        result = coverage.analyze_hot_query_coverage(days=7)
+        result = coverage_service.analyze_hot_query_coverage(days=7)
         assert result['total_hot_queries'] == 2
         assert result['covered_queries'] == 1
         assert result['uncovered_queries'] == 1
@@ -150,13 +150,13 @@ class TestAnalyzeHotQueryCoverage(CoverageDBTestBase):
     def test_cache_hit_excluded(self):
         """缓存命中记录不参与覆盖统计"""
         self._create_qa('Q', retrieval_hits=[1], is_hit_cache=True)
-        result = coverage.analyze_hot_query_coverage(days=7)
+        result = coverage_service.analyze_hot_query_coverage(days=7)
         assert result['total_hot_queries'] == 0
         assert result['hot_query_coverage_rate'] == 0.0
 
     def test_empty_db(self):
         """无任何 QA → 空报告且不除零"""
-        result = coverage.analyze_hot_query_coverage(days=7)
+        result = coverage_service.analyze_hot_query_coverage(days=7)
         assert result['total_hot_queries'] == 0
         assert result['hot_query_coverage_rate'] == 0.0
 
@@ -173,7 +173,7 @@ class TestDetectKnowledgeGaps(CoverageDBTestBase):
         for _ in range(3):
             self._create_qa('高频无资料问题', answer_type='refused')
         self._create_qa('低频无资料问题', answer_type='refused')
-        gaps = coverage.detect_knowledge_gaps(days=7, min_count=3)
+        gaps = coverage_service.detect_knowledge_gaps(days=7, min_count=3)
         assert len(gaps) == 1
         assert gaps[0]['query'] == '高频无资料问题'
         assert gaps[0]['count'] == 3
@@ -182,7 +182,7 @@ class TestDetectKnowledgeGaps(CoverageDBTestBase):
     def test_non_refused_excluded(self):
         """非拒答查询不计入知识空白"""
         self._create_qa('正常问题', answer_type='rag')
-        assert coverage.detect_knowledge_gaps(days=7, min_count=1) == []
+        assert coverage_service.detect_knowledge_gaps(days=7, min_count=1) == []
 
 
 # ============================================================================
@@ -200,7 +200,7 @@ class TestDetectDuplicateChunks(CoverageDBTestBase):
         self._create_chunk(doc, content, chunk_index=0)
         self._create_chunk(doc, content, chunk_index=1)  # 完全相同
         self._create_chunk(doc, '完全 不同 的 内容 主题', chunk_index=2)
-        result = coverage.detect_duplicate_chunks(similarity_threshold=0.9)
+        result = coverage_service.detect_duplicate_chunks(similarity_threshold=0.9)
         assert result['total_chunks_checked'] == 3
         assert result['duplicate_count'] == 1
         assert result['duplicate_examples'][0]['chunk_a_id'] != \
@@ -211,12 +211,12 @@ class TestDetectDuplicateChunks(CoverageDBTestBase):
         doc = self._create_doc(name='short_doc')
         self._create_chunk(doc, '仅 两 个 词', chunk_index=0)
         self._create_chunk(doc, '仅 两 个 词', chunk_index=1)
-        result = coverage.detect_duplicate_chunks()
+        result = coverage_service.detect_duplicate_chunks()
         assert result['duplicate_count'] == 0
 
     def test_empty_db(self):
         """无切片 → total=0 且 duplicate_rate=0"""
-        result = coverage.detect_duplicate_chunks()
+        result = coverage_service.detect_duplicate_chunks()
         assert result['total'] == 0
         assert result['duplicate_rate'] == 0.0
         assert result['duplicate_groups'] == []
@@ -244,7 +244,7 @@ class TestAnalyzeDomainCoverage(CoverageDBTestBase):
         self._create_qa('q1', retrieval_hits=[1])
         self._create_qa('q2')
 
-        result = coverage.analyze_domain_coverage(days=30)
+        result = coverage_service.analyze_domain_coverage(days=30)
         assert result['total_docs'] == 2
         assert result['total_queries'] == 2
         assert result['global_hit_rate'] == 0.5
@@ -274,7 +274,7 @@ class TestAutoLinkFeedbackToChunks(CoverageDBTestBase):
         QaFeedback.objects.create(
             qa_record=qa, user=self.user, rating=-1,
             tags=['不准确'], status='pending')
-        result = coverage.auto_link_feedback_to_chunks(days=7)
+        result = coverage_service.auto_link_feedback_to_chunks(days=7)
         assert result['total_bad_feedbacks'] == 1
         assert result['linked_count'] == 1
         issue = result['issue_chunks'][0]
@@ -287,7 +287,7 @@ class TestAutoLinkFeedbackToChunks(CoverageDBTestBase):
         QaFeedback.objects.create(
             qa_record=qa, user=self.user, rating=-1,
             tags=[], comment='这个回答非常不准确且完全无法解决我的实际问题', status='pending')
-        result = coverage.auto_link_feedback_to_chunks(days=7)
+        result = coverage_service.auto_link_feedback_to_chunks(days=7)
         assert result['linked_count'] == 1
 
     def test_no_hits_not_linked(self):
@@ -296,7 +296,7 @@ class TestAutoLinkFeedbackToChunks(CoverageDBTestBase):
         QaFeedback.objects.create(
             qa_record=qa, user=self.user, rating=-1,
             tags=['不准确'], status='pending')
-        result = coverage.auto_link_feedback_to_chunks(days=7)
+        result = coverage_service.auto_link_feedback_to_chunks(days=7)
         assert result['total_bad_feedbacks'] == 1
         assert result['linked_count'] == 0
 
@@ -315,17 +315,12 @@ class TestGenerateCoverageReport(CoverageDBTestBase):
             'total_hot_queries': 10, 'covered_queries': 8,
             'uncovered_queries': 2, 'hot_query_coverage_rate': 0.8,
         }
-        with patch.object(coverage, 'analyze_hot_query_coverage',
-                          return_value=fake_coverage), \
-             patch.object(coverage, 'detect_knowledge_gaps',
-                          return_value=[{'query': 'g', 'count': 3, 'suggestion': 's'}]), \
-             patch.object(coverage, 'detect_duplicate_chunks',
-                          return_value={'duplicate_rate': 0.1, 'duplicate_count': 2}), \
-             patch.object(coverage, 'analyze_domain_coverage',
-                          return_value={'domain_coverage': [{'name': '研发部'}]}), \
-             patch.object(coverage, 'auto_link_feedback_to_chunks',
-                          return_value={'linked_count': 5}):
-            report = coverage.generate_coverage_report(days=7)
+        with patch.object(coverage_service, 'analyze_hot_query_coverage', return_value=fake_coverage), \
+             patch.object(coverage_service, 'detect_knowledge_gaps', return_value=[{'query': 'g', 'count': 3, 'suggestion': 's'}]), \
+             patch.object(coverage_service, 'detect_duplicate_chunks', return_value={'duplicate_rate': 0.1, 'duplicate_count': 2}), \
+             patch.object(coverage_service, 'analyze_domain_coverage', return_value={'domain_coverage': [{'name': '研发部'}]}), \
+             patch.object(coverage_service, 'auto_link_feedback_to_chunks', return_value={'linked_count': 5}):
+            report = coverage_service.generate_coverage_report(days=7)
 
         assert report.total_hot_queries == 10
         assert report.covered_queries == 8
@@ -336,15 +331,11 @@ class TestGenerateCoverageReport(CoverageDBTestBase):
         assert report.domain_coverage == [{'name': '研发部'}]
         assert report.feedback_loop_count == 5
         # update_or_create：同一天重复生成复用同一行
-        with patch.object(coverage, 'analyze_hot_query_coverage',
-                          return_value=fake_coverage), \
-             patch.object(coverage, 'detect_knowledge_gaps', return_value=[]), \
-             patch.object(coverage, 'detect_duplicate_chunks',
-                          return_value={'duplicate_rate': 0.0, 'duplicate_count': 0}), \
-             patch.object(coverage, 'analyze_domain_coverage',
-                          return_value={'domain_coverage': []}), \
-             patch.object(coverage, 'auto_link_feedback_to_chunks',
-                          return_value={'linked_count': 0}):
-            again = coverage.generate_coverage_report(days=7)
+        with patch.object(coverage_service, 'analyze_hot_query_coverage', return_value=fake_coverage), \
+             patch.object(coverage_service, 'detect_knowledge_gaps', return_value=[]), \
+             patch.object(coverage_service, 'detect_duplicate_chunks', return_value={'duplicate_rate': 0.0, 'duplicate_count': 0}), \
+             patch.object(coverage_service, 'analyze_domain_coverage', return_value={'domain_coverage': []}), \
+             patch.object(coverage_service, 'auto_link_feedback_to_chunks', return_value={'linked_count': 0}):
+            again = coverage_service.generate_coverage_report(days=7)
         assert again.id == report.id
         assert CoverageReport.objects.count() == 1

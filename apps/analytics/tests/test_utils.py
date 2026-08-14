@@ -1,5 +1,5 @@
 """
-apps.analytics.utils 单元测试 —— 统计辅助函数
+apps.analytics.services.aggregation_service 单元测试 —— 统计辅助函数
 
 覆盖范围：
 - calculate_percentile：线性插值百分位（空/单元素/P0/P100/返回 int）
@@ -21,7 +21,7 @@ from decimal import Decimal
 import pytest
 from django.utils import timezone
 
-from apps.analytics import utils
+from apps.analytics.services import aggregation_service
 from apps.analytics.models import QueueDepthLog
 from apps.chat.models import QaRecord, QaFeedback
 from apps.memory.models import Session
@@ -37,42 +37,42 @@ class TestCalculatePercentile:
     @pytest.mark.unit
     def test_empty_returns_zero(self):
         """空列表返回 0（避免上游除零/越界）"""
-        assert utils.calculate_percentile([], 50) == 0
+        assert aggregation_service.calculate_percentile([], 50) == 0
 
     @pytest.mark.unit
     def test_single_element_returns_value(self):
         """单元素返回该元素（int 化）"""
-        assert utils.calculate_percentile([7.9], 50) == 7
+        assert aggregation_service.calculate_percentile([7.9], 50) == 7
 
     @pytest.mark.unit
     def test_linear_interpolation(self):
         """P50 线性插值：[10,20,30,40] → k=1.5 → 20 + 0.5*(30-20) = 25"""
-        assert utils.calculate_percentile([10, 20, 30, 40], 50) == 25
+        assert aggregation_service.calculate_percentile([10, 20, 30, 40], 50) == 25
 
     @pytest.mark.unit
     def test_p0_returns_min(self):
         """P0 取最小值（f=0, c=0 分支）"""
-        assert utils.calculate_percentile([10, 20, 30, 40], 0) == 10
+        assert aggregation_service.calculate_percentile([10, 20, 30, 40], 0) == 10
 
     @pytest.mark.unit
     def test_p100_returns_max(self):
         """P100 取最大值（f+1 == n 走兜底分支）"""
-        assert utils.calculate_percentile([10, 20, 30, 40], 100) == 40
+        assert aggregation_service.calculate_percentile([10, 20, 30, 40], 100) == 40
 
     @pytest.mark.unit
     def test_p95_interpolation(self):
         """P95 线性插值：[10,20,30,40] → k=2.85 → 30 + 0.85*(40-30) = 38.5 → 38"""
-        assert utils.calculate_percentile([10, 20, 30, 40], 95) == 38
+        assert aggregation_service.calculate_percentile([10, 20, 30, 40], 95) == 38
 
     @pytest.mark.unit
     def test_unsorted_input(self):
         """输入乱序也能正确计算（内部先排序）"""
-        assert utils.calculate_percentile([30, 10, 20], 50) == 20
+        assert aggregation_service.calculate_percentile([30, 10, 20], 50) == 20
 
     @pytest.mark.unit
     def test_returns_int_for_float_values(self):
         """浮点输入返回 int（便于直接存入 IntegerField）"""
-        result = utils.calculate_percentile([1.5, 2.5], 50)
+        result = aggregation_service.calculate_percentile([1.5, 2.5], 50)
         assert result == 2
         assert isinstance(result, int)
 
@@ -83,18 +83,18 @@ class TestCalculatePercentiles:
     @pytest.mark.unit
     def test_keys(self):
         """返回 p50/p95/p99 三个键"""
-        assert set(utils.calculate_percentiles([0, 10, 20, 30])) == {'p50', 'p95', 'p99'}
+        assert set(aggregation_service.calculate_percentiles([0, 10, 20, 30])) == {'p50', 'p95', 'p99'}
 
     @pytest.mark.unit
     def test_values(self):
         """P50=15 / P95=28 / P99=29（线性插值后 int 截断）"""
-        assert utils.calculate_percentiles([0, 10, 20, 30]) == {
+        assert aggregation_service.calculate_percentiles([0, 10, 20, 30]) == {
             'p50': 15, 'p95': 28, 'p99': 29}
 
     @pytest.mark.unit
     def test_empty_all_zero(self):
         """空列表 → 三个百分位全部为 0"""
-        assert utils.calculate_percentiles([]) == {'p50': 0, 'p95': 0, 'p99': 0}
+        assert aggregation_service.calculate_percentiles([]) == {'p50': 0, 'p95': 0, 'p99': 0}
 
 
 # ============================================================================
@@ -106,41 +106,41 @@ class TestBuildLatencyHistogram:
     @pytest.mark.unit
     def test_empty_returns_empty_dict(self):
         """空列表返回 {}（与空查询一致）"""
-        assert utils.build_latency_histogram([]) == {}
+        assert aggregation_service.build_latency_histogram([]) == {}
 
     @pytest.mark.unit
     def test_basic_bucketing(self):
         """100ms 桶宽：[50,150,250] → 三个桶各 1 次"""
-        assert utils.build_latency_histogram([50, 150, 250]) == {
+        assert aggregation_service.build_latency_histogram([50, 150, 250]) == {
             '0-100': 1, '100-200': 1, '200-300': 1}
 
     @pytest.mark.unit
     def test_multiple_values_same_bucket(self):
         """同一桶内计数累加"""
-        assert utils.build_latency_histogram([50, 60, 150]) == {
+        assert aggregation_service.build_latency_histogram([50, 60, 150]) == {
             '0-100': 2, '100-200': 1}
 
     @pytest.mark.unit
     def test_boundary_value(self):
         """桶边界 100 归入 100-200 桶（按 int(v)//bucket_size 向下取整）"""
-        assert utils.build_latency_histogram([100]) == {'100-200': 1}
+        assert aggregation_service.build_latency_histogram([100]) == {'100-200': 1}
 
     @pytest.mark.unit
     def test_sorted_by_bucket_start(self):
         """返回结果按键起始值排序（与输入顺序无关）"""
-        hist = utils.build_latency_histogram([250, 50, 150])
+        hist = aggregation_service.build_latency_histogram([250, 50, 150])
         assert list(hist.keys()) == ['0-100', '100-200', '200-300']
 
     @pytest.mark.unit
     def test_custom_bucket_size(self):
         """自定义桶宽 200ms"""
-        assert utils.build_latency_histogram([50, 250], bucket_size=200) == {
+        assert aggregation_service.build_latency_histogram([50, 250], bucket_size=200) == {
             '0-200': 1, '200-400': 1}
 
     @pytest.mark.unit
     def test_float_values(self):
         """浮点延迟值先 int 再分桶"""
-        assert utils.build_latency_histogram([50.5]) == {'0-100': 1}
+        assert aggregation_service.build_latency_histogram([50.5]) == {'0-100': 1}
 
 
 # ============================================================================
@@ -185,7 +185,7 @@ class TestAggregateSystemMetrics(UtilsDBTestBase):
 
     def test_empty_query_all_zero(self):
         """无数据时所有指标为 0，不抛异常"""
-        result = utils.aggregate_system_metrics(report_date=self.report_date)
+        result = aggregation_service.aggregate_system_metrics(report_date=self.report_date)
 
         assert result['total_qa'] == 0
         assert result['cache_hit_count'] == 0
@@ -207,7 +207,7 @@ class TestAggregateSystemMetrics(UtilsDBTestBase):
                 is_success=(i != 3),
                 error_type='timeout' if i == 3 else '',
             )
-        result = utils.aggregate_system_metrics(report_date=self.report_date)
+        result = aggregation_service.aggregate_system_metrics(report_date=self.report_date)
 
         assert result['total_qa'] == 4
         assert result['normal_qa_count'] == 4
@@ -245,7 +245,7 @@ class TestAggregateSystemMetrics(UtilsDBTestBase):
         self._create_qa(question='c2', latency_total_ms=20,
                         tokens_per_second=999.0, is_hit_cache=True)
 
-        result = utils.aggregate_system_metrics(report_date=self.report_date)
+        result = aggregation_service.aggregate_system_metrics(report_date=self.report_date)
 
         assert result['total_qa'] == 4
         assert result['cache_hit_count'] == 2
@@ -265,7 +265,7 @@ class TestAggregateSystemMetrics(UtilsDBTestBase):
         self._create_qa(question='defaults')  # 所有 latency/tps 均为默认 0
         self._create_qa(question='with_latency', latency_total_ms=100)
 
-        result = utils.aggregate_system_metrics(report_date=self.report_date)
+        result = aggregation_service.aggregate_system_metrics(report_date=self.report_date)
 
         assert result['total_qa'] == 2
         # 有效延迟 [0, 100] → P50 = 50；直方图 0→0-100 桶、100→100-200 桶
@@ -274,12 +274,12 @@ class TestAggregateSystemMetrics(UtilsDBTestBase):
 
     def test_date_range_filter(self):
         """只统计 report_date 当天的记录，跨天记录不纳入"""
-        qa_today = self._create_qa(question='today', latency_total_ms=100)
+        self._create_qa(question='today', latency_total_ms=100)
         qa_old = self._create_qa(question='old', latency_total_ms=200)
         # 把第二条记录改写到 3 天前（update() 绕过 auto_now_add）
         self._move_created_at(qa_old, timedelta(days=-3))
 
-        result = utils.aggregate_system_metrics(report_date=self.report_date)
+        result = aggregation_service.aggregate_system_metrics(report_date=self.report_date)
 
         assert result['total_qa'] == 1
         assert result['p50_latency_total'] == 100
@@ -290,7 +290,7 @@ class TestAggregateSystemMetrics(UtilsDBTestBase):
         qa_yesterday = self._create_qa(question='yesterday', latency_total_ms=200)
         self._move_created_at(qa_yesterday, timedelta(days=-1))
 
-        result = utils.aggregate_system_metrics()
+        result = aggregation_service.aggregate_system_metrics()
 
         assert result['total_qa'] == 1
         assert result['p50_latency_total'] == 200
@@ -332,7 +332,7 @@ class TestAggregateOrgUsage:
         QaFeedback.objects.create(qa_record=qa1, user=self.user1, rating=1)
         QaFeedback.objects.create(qa_record=qa2, user=self.user2, rating=-1)
 
-        results = utils.aggregate_org_usage(report_date=self.report_date)
+        results = aggregation_service.aggregate_org_usage(report_date=self.report_date)
         assert len(results) == 2
 
         by_key = {(r['department_id'], r['team_id']): r for r in results}
@@ -361,7 +361,7 @@ class TestAggregateOrgUsage:
         session = Session.objects.create(user=user_no_dept, root_type='test_root')
         self._create_qa(user_no_dept, session)
 
-        assert utils.aggregate_org_usage(report_date=self.report_date) == []
+        assert aggregation_service.aggregate_org_usage(report_date=self.report_date) == []
 
     def test_dept_user_without_team_only_dept_row(self):
         """有部门无团队 → 只生成部门级汇总行"""
@@ -371,7 +371,7 @@ class TestAggregateOrgUsage:
         session = Session.objects.create(user=user, root_type='test_root')
         self._create_qa(user, session)
 
-        results = utils.aggregate_org_usage(report_date=self.report_date)
+        results = aggregation_service.aggregate_org_usage(report_date=self.report_date)
         assert len(results) == 1
         assert results[0]['team_id'] == -1
         assert results[0]['qa_count'] == 1
@@ -381,7 +381,7 @@ class TestAggregateOrgUsage:
         """匿名（user=None）QA 不纳入组织聚合"""
         self._create_qa(None, self.session1)
 
-        assert utils.aggregate_org_usage(report_date=self.report_date) == []
+        assert aggregation_service.aggregate_org_usage(report_date=self.report_date) == []
 
 
 @pytest.mark.django_db
@@ -397,7 +397,7 @@ class TestGetQueueDepthHistory:
         QueueDepthLog.objects.create(
             queue_name='parse', depth=3, worker_count=1)
 
-        result = utils.get_queue_depth_history(hours=24)
+        result = aggregation_service.get_queue_depth_history(hours=24)
         assert len(result) == 2
 
         by_name = {r['queue_name']: r for r in result}
@@ -428,19 +428,19 @@ class TestGetQueueDepthHistory:
         QueueDepthLog.objects.filter(pk=log.pk).update(
             created_at=timezone.now() - timedelta(hours=25))
 
-        assert utils.get_queue_depth_history(hours=24) == []
+        assert aggregation_service.get_queue_depth_history(hours=24) == []
 
     def test_ordering_by_created_at(self):
         """按 created_at 升序返回（先创建的在前）"""
         older = QueueDepthLog.objects.create(
             queue_name='parse', depth=1, worker_count=1)
-        newer = QueueDepthLog.objects.create(
+        QueueDepthLog.objects.create(
             queue_name='default', depth=2, worker_count=1)
         # 强制改写 created_at，保证排序可控
         QueueDepthLog.objects.filter(pk=older.pk).update(
             created_at=timezone.now() - timedelta(minutes=5))
 
-        result = utils.get_queue_depth_history(hours=24)
+        result = aggregation_service.get_queue_depth_history(hours=24)
         assert [r['queue_name'] for r in result] == ['parse', 'default']
 
 
@@ -468,7 +468,7 @@ class TestAggregateRouteAnalysis(UtilsDBTestBase):
             qa_record=qa, dimension='faithfulness', score=0.9,
             reason='r', eval_model='deepseek-chat', status='completed')
 
-        result = utils.aggregate_route_analysis(report_date=self.report_date)
+        result = aggregation_service.aggregate_route_analysis(report_date=self.report_date)
 
         assert result['total'] == 1
         assert result['created'] == 1
@@ -484,8 +484,8 @@ class TestAggregateRouteAnalysis(UtilsDBTestBase):
         from apps.analytics.models import RouteAnalysis
         self._create_routed_qa('rag')
 
-        first = utils.aggregate_route_analysis(report_date=self.report_date)
-        second = utils.aggregate_route_analysis(report_date=self.report_date)
+        first = aggregation_service.aggregate_route_analysis(report_date=self.report_date)
+        second = aggregation_service.aggregate_route_analysis(report_date=self.report_date)
 
         assert first['created'] == 1 and first['updated'] == 0
         assert second['created'] == 0 and second['updated'] == 1
@@ -500,7 +500,7 @@ class TestAggregateRouteAnalysis(UtilsDBTestBase):
         ]
         self._create_routed_qa('rag', trace=trace)
 
-        utils.aggregate_route_analysis(report_date=self.report_date)
+        aggregation_service.aggregate_route_analysis(report_date=self.report_date)
 
         route = RouteAnalysis.objects.get(route_source='rag')
         assert route.confidence == 0.3
@@ -508,12 +508,12 @@ class TestAggregateRouteAnalysis(UtilsDBTestBase):
     def test_excludes_qa_without_route(self):
         """无路由来源(route_source 为空)的 QA 不进入路由分析表"""
         self._create_qa(route_source='')  # 普通 RAG 问答，无路由决策
-        result = utils.aggregate_route_analysis(report_date=self.report_date)
+        result = aggregation_service.aggregate_route_analysis(report_date=self.report_date)
         assert result['total'] == 0
 
     def test_default_report_date_is_yesterday(self):
         """未传 report_date 时按昨天聚合（今天数据不落库）"""
         from apps.analytics.models import RouteAnalysis
         self._create_routed_qa('wiki')  # created_at = 今天
-        utils.aggregate_route_analysis()
+        aggregation_service.aggregate_route_analysis()
         assert RouteAnalysis.objects.count() == 0

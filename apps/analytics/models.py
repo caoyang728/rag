@@ -40,33 +40,6 @@ class KeywordWeight(models.Model):
         ]
 
 
-class AccuracyReport(models.Model):
-    """E4 accuracy_report - 准确率日报
-    每天 02:00 Celery Beat 统计前一天数据"""
-
-    id = models.BigAutoField(primary_key=True)
-    report_date = models.DateField(unique=True)
-    total_qa = models.IntegerField(default=0)
-    good_count = models.IntegerField(default=0)
-    bad_count = models.IntegerField(default=0)
-    no_feedback_count = models.IntegerField(default=0)
-    accuracy_rate = models.FloatField(default=0.0, help_text='good / (good+bad)')
-    avg_latency_ms = models.IntegerField(default=0)
-    total_tokens = models.BigIntegerField(default=0)
-    total_cost = models.DecimalField(max_digits=12, decimal_places=6, default=0)
-    top_bad_tags = models.JSONField(default=list, blank=True,
-                                     help_text='[{tag, count}] 差评标签 Top 5')
-    top_root_types = models.JSONField(default=list, blank=True,
-                                       help_text='[{root_type, qa_count}]')
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        db_table = 'analytics_accuracy_report'
-        indexes = [
-            models.Index(fields=['-report_date'], name='idx_ar_date'),
-        ]
-
-
 class SystemMetricsReport(models.Model):
     """系统级性能指标日报（Celery Beat 预计算，每天 02:00）
 
@@ -312,6 +285,15 @@ class GoldenQuestion(models.Model):
             models.Index(fields=['source_qa_record_id'], name='idx_gq_source_qa'),
             # 低分回归:按通过次数筛选"建议移除"的候选
             models.Index(fields=['pass_count'], name='idx_gq_pass_count'),
+        ]
+        constraints = [
+            # 同一低分对话只能沉淀一次(并发批量任务下靠 DB 约束兜底查重,
+            # 应用层 existing_qa_ids 快照存在竞态窗口,不能只靠应用层)
+            models.UniqueConstraint(
+                fields=['source_qa_record_id'],
+                condition=~models.Q(source_qa_record_id=None),
+                name='uniq_gq_source_qa_record',
+            ),
         ]
 
 

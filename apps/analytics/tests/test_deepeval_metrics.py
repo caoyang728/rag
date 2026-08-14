@@ -1,5 +1,5 @@
 """
-apps.analytics.deepeval_metrics 单元测试 —— DeepEval 12 维 LLM-as-judge 评估
+apps.analytics.services.deepeval_service 单元测试 —— DeepEval 12 维 LLM-as-judge 评估
 
 覆盖范围：
 - get_deepeval_model：EVAL_MODEL 未配置抛 ValueError / 正常构建 DeepSeekModel
@@ -22,7 +22,7 @@ from types import ModuleType
 import pytest
 from unittest.mock import patch, MagicMock
 
-from apps.analytics import deepeval_metrics
+from apps.analytics.services import deepeval_service
 from rag_project.config import AnalyticsConfig
 
 # 12 维全集（与 AnalyticsConfig._ALL_EVAL_DIMENSIONS 保持一致，供测试断言）
@@ -63,11 +63,17 @@ def _fake_deepeval(monkeypatch):
         monkeypatch.setitem(sys.modules, name, mod)
 
 
-def _fake_metric(score, reason=''):
-    """构造一个带 score/reason 的可 measure 假指标"""
+def _fake_metric(score, reason='', input_tokens=0, output_tokens=0):
+    """构造一个带 score/reason 的可 measure 假指标
+
+    原生模型(DeepEvalBaseLLM 子类)measure 后会在 metric 上回填实际
+    input/output tokens,测试显式指定以验证 tokens_used 聚合逻辑。
+    """
     m = MagicMock(name='metric')
     m.score = score
     m.reason = reason
+    m.input_tokens = input_tokens
+    m.output_tokens = output_tokens
     return m
 
 
@@ -83,18 +89,18 @@ class TestGetDeepEvalModel:
         settings.LLM_API_KEY = 'sk-test'
         with patch('apps.system.config_loader.get_config_value', return_value=''):
             with pytest.raises(ValueError, match='EVAL_MODEL'):
-                deepeval_metrics.get_deepeval_model()
+                deepeval_service.get_deepeval_model()
 
     @pytest.mark.unit
     def test_model_constructed_with_config(self, settings):
         """配置存在时按 SystemConfig.EVAL_MODEL 构建 DeepSeekModel（temperature=0 保证可复现）"""
         settings.LLM_API_KEY = 'sk-test'
         fake_model = MagicMock(name='deepseek_instance')
-        deepeval_metrics.get_deepeval_model  # noqa
+        deepeval_service.get_deepeval_model  # noqa
         with patch('apps.system.config_loader.get_config_value',
                    return_value='deepseek-chat'), \
              patch('deepeval.models.DeepSeekModel', return_value=fake_model) as mock_cls:
-            result = deepeval_metrics.get_deepeval_model()
+            result = deepeval_service.get_deepeval_model()
             assert result is fake_model
             mock_cls.assert_called_once_with(
                 model='deepseek-chat', api_key='sk-test', temperature=0)
@@ -106,7 +112,7 @@ class TestGetDeepEvalModel:
         fake_model = MagicMock(name='deepseek_instance')
         with patch('apps.system.config_loader.get_config_value') as mock_cfg, \
              patch('deepeval.models.DeepSeekModel', return_value=fake_model) as mock_cls:
-            deepeval_metrics.get_deepeval_model(model='custom-model')
+            deepeval_service.get_deepeval_model(model='custom-model')
             mock_cfg.assert_not_called()
             mock_cls.assert_called_once_with(
                 model='custom-model', api_key='sk-test', temperature=0)
@@ -121,7 +127,7 @@ class TestBuildMetrics:
     @pytest.mark.unit
     def test_preset_metrics_six_dims(self):
         """预置指标恰为 6 个，且每个都带 async_mode=False（避免 Celery 同步任务 event loop 问题）"""
-        metrics = deepeval_metrics._build_preset_metrics(MagicMock())
+        metrics = deepeval_service._build_preset_metrics(MagicMock())
         assert len(metrics) == 6
         names = [n for n, _ in metrics]
         assert names == ['faithfulness', 'answer_relevancy', 'context_relevancy',
@@ -131,7 +137,7 @@ class TestBuildMetrics:
     def test_preset_metrics_kwargs(self):
         """预置指标统一 threshold=0.5 + include_reason + async_mode=False"""
         model = MagicMock()
-        deepeval_metrics._build_preset_metrics(model)
+        deepeval_service._build_preset_metrics(model)
         from deepeval.metrics import FaithfulnessMetric, ToxicityMetric
         for cls in (FaithfulnessMetric, ToxicityMetric):
             _, kwargs = cls.call_args
@@ -143,7 +149,7 @@ class TestBuildMetrics:
     @pytest.mark.unit
     def test_geval_metrics_six_dims(self):
         """G-Eval 自定义指标恰为 6 个（业务体验 + 答案质量主观维度）"""
-        metrics = deepeval_metrics._build_geval_metrics(MagicMock())
+        metrics = deepeval_service._build_geval_metrics(MagicMock())
         assert len(metrics) == 6
         names = [n for n, _ in metrics]
         assert names == ['completeness', 'conciseness', 'clarity',
@@ -152,7 +158,7 @@ class TestBuildMetrics:
     @pytest.mark.unit
     def test_geval_metrics_params(self):
         """G-Eval 使用 INPUT + ACTUAL_OUTPUT 评估参数，且 async_mode=False"""
-        deepeval_metrics._build_geval_metrics(MagicMock())
+        deepeval_service._build_geval_metrics(MagicMock())
         from deepeval.metrics import GEval
         assert GEval.call_count == 6
         for call in GEval.call_args_list:
@@ -171,10 +177,10 @@ class TestBuildProductionMetrics:
     @pytest.mark.unit
     def test_empty_dims_returns_empty(self):
         """用户主动清空维度配置 → 返回空列表，评估任务跳过"""
-        with patch('apps.analytics.deepeval_metrics._build_preset_metrics') as m1, \
-             patch('apps.analytics.deepeval_metrics._build_geval_metrics') as m2, \
+        with patch('apps.analytics.services.deepeval_service._build_preset_metrics') as m1, \
+             patch('apps.analytics.services.deepeval_service._build_geval_metrics') as m2, \
              patch.object(AnalyticsConfig, 'eval_display_dimensions', return_value=[]):
-            assert deepeval_metrics.build_production_metrics(MagicMock()) == []
+            assert deepeval_service.build_production_metrics(MagicMock()) == []
             m1.assert_not_called()
             m2.assert_not_called()
 
@@ -184,10 +190,10 @@ class TestBuildProductionMetrics:
         model = MagicMock()
         preset = [(d, _fake_metric(1.0)) for d in ALL_DIMS[:6]]
         geval = [(d, _fake_metric(1.0)) for d in ALL_DIMS[6:]]
-        with patch('apps.analytics.deepeval_metrics._build_preset_metrics', return_value=preset), \
-             patch('apps.analytics.deepeval_metrics._build_geval_metrics', return_value=geval), \
+        with patch('apps.analytics.services.deepeval_service._build_preset_metrics', return_value=preset), \
+             patch('apps.analytics.services.deepeval_service._build_geval_metrics', return_value=geval), \
              patch.object(AnalyticsConfig, 'eval_display_dimensions', return_value=list(ALL_DIMS)):
-            result = deepeval_metrics.build_production_metrics(model)
+            result = deepeval_service.build_production_metrics(model)
         assert [n for n, _ in result] == ALL_DIMS
         assert len(result) == 12
 
@@ -196,11 +202,11 @@ class TestBuildProductionMetrics:
         """部分勾选 → 仅构建勾选维度，且保持配置中的勾选顺序"""
         preset = [(d, _fake_metric(1.0)) for d in ALL_DIMS[:6]]
         geval = [(d, _fake_metric(1.0)) for d in ALL_DIMS[6:]]
-        with patch('apps.analytics.deepeval_metrics._build_preset_metrics', return_value=preset), \
-             patch('apps.analytics.deepeval_metrics._build_geval_metrics', return_value=geval), \
+        with patch('apps.analytics.services.deepeval_service._build_preset_metrics', return_value=preset), \
+             patch('apps.analytics.services.deepeval_service._build_geval_metrics', return_value=geval), \
              patch.object(AnalyticsConfig, 'eval_display_dimensions',
                           return_value=['toxicity', 'faithfulness']):
-            result = deepeval_metrics.build_production_metrics(MagicMock())
+            result = deepeval_service.build_production_metrics(MagicMock())
         # 按 eval_display_dimensions 配置顺序输出（toxicity 在前）
         assert [n for n, _ in result] == ['toxicity', 'faithfulness']
 
@@ -209,11 +215,11 @@ class TestBuildProductionMetrics:
         """非法维度名被防御性过滤，不影响合法维度构建"""
         preset = [(d, _fake_metric(1.0)) for d in ALL_DIMS[:6]]
         geval = [(d, _fake_metric(1.0)) for d in ALL_DIMS[6:]]
-        with patch('apps.analytics.deepeval_metrics._build_preset_metrics', return_value=preset), \
-             patch('apps.analytics.deepeval_metrics._build_geval_metrics', return_value=geval), \
+        with patch('apps.analytics.services.deepeval_service._build_preset_metrics', return_value=preset), \
+             patch('apps.analytics.services.deepeval_service._build_geval_metrics', return_value=geval), \
              patch.object(AnalyticsConfig, 'eval_display_dimensions',
                           return_value=['not-a-dim', 'bias']):
-            result = deepeval_metrics.build_production_metrics(MagicMock())
+            result = deepeval_service.build_production_metrics(MagicMock())
         assert [n for n, _ in result] == ['bias']
 
 
@@ -238,18 +244,18 @@ class TestEvaluateWithDeepEval:
 
     def _call(self, metrics, contexts=None, **kwargs):
         """组装 mock 后调用 evaluate_with_deepeval"""
-        with patch('apps.analytics.deepeval_metrics.get_deepeval_model',
+        with patch('apps.analytics.services.deepeval_service.get_deepeval_model',
                    return_value=MagicMock()), \
-             patch('apps.analytics.deepeval_metrics.build_production_metrics',
+             patch('apps.analytics.services.deepeval_service.build_production_metrics',
                    return_value=metrics):
-            return deepeval_metrics.evaluate_with_deepeval(
+            return deepeval_service.evaluate_with_deepeval(
                 question='问题', answer='回答', contexts=contexts or [], **kwargs)
 
     @pytest.mark.unit
     def test_happy_path_scores(self):
         """正常路径：分数按 4 位四舍五入，保留 dimension/reason/latency/tokens 结构"""
         metrics = [
-            ('faithfulness', _fake_metric(0.8, '忠于上下文')),
+            ('faithfulness', _fake_metric(0.8, '忠于上下文', input_tokens=130, output_tokens=70)),
             ('answer_relevancy', _fake_metric(0.654321, '基本切题')),
         ]
         results = self._call(metrics)
@@ -257,7 +263,11 @@ class TestEvaluateWithDeepEval:
         assert results[0]['dimension'] == 'faithfulness'
         assert results[0]['score'] == 0.8
         assert results[0]['reason'] == '忠于上下文'
-        assert results[0]['tokens_used'] == 0
+        # 无 tokens 回填的指标(非原生模型/mock)兜底为 0;有回填时按 input+output 聚合
+        assert results[0]['tokens_used'] == 200
+        assert results[0]['input_tokens'] == 130
+        assert results[0]['output_tokens'] == 70
+        assert results[1]['tokens_used'] == 0
         # 0.654321 → 0.6543
         assert results[1]['score'] == 0.6543
 
@@ -300,11 +310,11 @@ class TestEvaluateWithDeepEval:
     def test_empty_contexts_use_empty_string(self):
         """contexts 为空时传 [''] 避免 DeepEval 抛 None 校验错误"""
         from deepeval.test_case import LLMTestCase
-        with patch('apps.analytics.deepeval_metrics.get_deepeval_model',
+        with patch('apps.analytics.services.deepeval_service.get_deepeval_model',
                    return_value=MagicMock()), \
-             patch('apps.analytics.deepeval_metrics.build_production_metrics',
+             patch('apps.analytics.services.deepeval_service.build_production_metrics',
                    return_value=[('clarity', _fake_metric(0.9))]):
-            deepeval_metrics.evaluate_with_deepeval(
+            deepeval_service.evaluate_with_deepeval(
                 question='q', answer='a', contexts=[])
         # LLMTestCase 以 [''] 作为 retrieval_context 兜底
         _, kwargs = LLMTestCase.call_args

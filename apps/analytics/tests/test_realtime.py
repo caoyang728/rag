@@ -1,9 +1,9 @@
 """
-apps.analytics.realtime 单元测试 —— Redis 实时指标 & 队列深度操作封装
+apps.analytics.services.realtime_service 单元测试 —— Redis 实时指标 & 队列深度操作封装
 
 覆盖范围：
 - _get_redis：REDIS_URL 优先 / 环境变量降级 两种连接构建
-- _get_redis_safe：健康检查 TTL 缓存（间隔内不 ping / 过期 ping / 连接失效重建）
+- get_redis_safe：健康检查 TTL 缓存（间隔内不 ping / 过期 ping / 连接失效重建）
 - update_queue_depth：Redis LLEN → Redis current 键 + PG QueueDepthLog 批量落库、
   worker 数量获取与失败降级、bulk_create 冲突静默
 - get_queue_depth_snapshot：current 键优先 / LLEN 降级 / worker 状态聚合
@@ -12,7 +12,7 @@ apps.analytics.realtime 单元测试 —— Redis 实时指标 & 队列深度操
 - get_yesterday_same_period_stats：昨日同时段聚合（今日实时同比对比数据源）
 - flush_realtime_metrics：last_flush_at 时间戳写入
 
-说明：全部 Redis 交互均 mock 在源模块层（apps.analytics.realtime._get_redis_safe），
+说明：全部 Redis 交互均 mock 在源模块层（apps.analytics.services.realtime_service.get_redis_safe），
 不依赖真实 Redis；QueueDepthLog 落库用真实 Django 测试库。
 """
 import time
@@ -24,7 +24,7 @@ from unittest.mock import patch, MagicMock
 
 from django.utils import timezone
 
-from apps.analytics import realtime
+from apps.analytics.services import realtime_service
 from apps.analytics.models import QueueDepthLog
 from apps.chat.models import QaRecord, Session
 from rag_project.config import AnalyticsConfig
@@ -48,9 +48,9 @@ class TestGetRedis:
         """配置了 REDIS_URL 时解析 host/port/password，DB 切换为 Analytics 专用库"""
         settings.REDIS_URL = 'redis://:secret@rhost:6399/2'
         fake = MagicMock(name='redis_conn')
-        realtime._get_redis.cache_clear()
+        realtime_service._get_redis.cache_clear()
         with patch('redis.Redis', return_value=fake) as m:
-            r = realtime._get_redis()
+            r = realtime_service._get_redis()
         assert r is fake
         _, kwargs = m.call_args
         assert kwargs['host'] == 'rhost'
@@ -67,9 +67,9 @@ class TestGetRedis:
         monkeypatch.setenv('REDIS_DB_PORT', '6380')
         monkeypatch.setenv('REDIS_DB_PASSWORD', 'envpass')
         fake = MagicMock(name='redis_conn')
-        realtime._get_redis.cache_clear()
+        realtime_service._get_redis.cache_clear()
         with patch('redis.Redis', return_value=fake) as m:
-            r = realtime._get_redis()
+            r = realtime_service._get_redis()
         assert r is fake
         _, kwargs = m.call_args
         assert kwargs['host'] == 'envhost'
@@ -79,7 +79,7 @@ class TestGetRedis:
 
 
 # ============================================================================
-# _get_redis_safe —— 健康检查 TTL 缓存
+# get_redis_safe —— 健康检查 TTL 缓存
 # ============================================================================
 class TestGetRedisSafe:
     """Redis 连接健康检查测试"""
@@ -88,9 +88,9 @@ class TestGetRedisSafe:
     def test_ping_when_stale(self):
         """超过检查间隔 → ping 一次并更新时间戳"""
         fake = MagicMock(name='redis_conn')
-        realtime._last_health_check = 0
-        with patch('apps.analytics.realtime._get_redis', return_value=fake) as m:
-            r = realtime._get_redis_safe()
+        realtime_service._last_health_check = 0
+        with patch('apps.analytics.services.realtime_service._get_redis', return_value=fake) as m:
+            r = realtime_service.get_redis_safe()
         assert r is fake
         fake.ping.assert_called_once()
         m.assert_called_once_with()
@@ -99,9 +99,9 @@ class TestGetRedisSafe:
     def test_no_ping_within_interval(self):
         """间隔内 → 不触发 ping（热点路径零开销）"""
         fake = MagicMock(name='redis_conn')
-        realtime._last_health_check = time.time()
-        with patch('apps.analytics.realtime._get_redis', return_value=fake):
-            realtime._get_redis_safe()
+        realtime_service._last_health_check = time.time()
+        with patch('apps.analytics.services.realtime_service._get_redis', return_value=fake):
+            realtime_service.get_redis_safe()
         fake.ping.assert_not_called()
 
     @pytest.mark.unit
@@ -110,9 +110,9 @@ class TestGetRedisSafe:
         fake1 = MagicMock(name='stale')
         fake1.ping.side_effect = Exception('connection lost')
         fake2 = MagicMock(name='fresh')
-        with patch('apps.analytics.realtime._get_redis', side_effect=[fake1, fake2]) as m:
-            realtime._last_health_check = 0
-            r = realtime._get_redis_safe()
+        with patch('apps.analytics.services.realtime_service._get_redis', side_effect=[fake1, fake2]) as m:
+            realtime_service._last_health_check = 0
+            r = realtime_service.get_redis_safe()
         assert r is fake2
         assert m.call_count == 2
 
@@ -148,10 +148,10 @@ class TestUpdateQueueDepth:
         fake_broker = self._fake_broker(depths)
         celery_app = MagicMock()
         celery_app.control.inspect.return_value = None
-        with patch('apps.analytics.realtime._get_redis_safe', return_value=fake_r), \
-             patch('apps.analytics.realtime._get_broker_redis', return_value=fake_broker), \
+        with patch('apps.analytics.services.realtime_service.get_redis_safe', return_value=fake_r), \
+             patch('apps.analytics.services.realtime_service._get_broker_redis', return_value=fake_broker), \
              patch('rag_project.celery.app', celery_app):
-            realtime.update_queue_depth()
+            realtime_service.update_queue_depth()
         logs = list(QueueDepthLog.objects.order_by('queue_name'))
         assert len(logs) == 5
         depth_map = {l.queue_name: l.depth for l in logs}
@@ -174,10 +174,10 @@ class TestUpdateQueueDepth:
         insp = MagicMock()
         insp.active.return_value = {'worker1': ['t1'], 'worker2': ['t2']}
         celery_app.control.inspect.return_value = insp
-        with patch('apps.analytics.realtime._get_redis_safe', return_value=fake_r), \
-             patch('apps.analytics.realtime._get_broker_redis', return_value=fake_broker), \
+        with patch('apps.analytics.services.realtime_service.get_redis_safe', return_value=fake_r), \
+             patch('apps.analytics.services.realtime_service._get_broker_redis', return_value=fake_broker), \
              patch('rag_project.celery.app', celery_app):
-            realtime.update_queue_depth()
+            realtime_service.update_queue_depth()
         assert QueueDepthLog.objects.first().worker_count == 2
 
     def test_inspect_failure_degrades_worker_zero(self):
@@ -186,10 +186,10 @@ class TestUpdateQueueDepth:
         fake_broker = self._fake_broker([0] * 5)
         celery_app = MagicMock()
         celery_app.control.inspect.side_effect = Exception('broker down')
-        with patch('apps.analytics.realtime._get_redis_safe', return_value=fake_r), \
-             patch('apps.analytics.realtime._get_broker_redis', return_value=fake_broker), \
+        with patch('apps.analytics.services.realtime_service.get_redis_safe', return_value=fake_r), \
+             patch('apps.analytics.services.realtime_service._get_broker_redis', return_value=fake_broker), \
              patch('rag_project.celery.app', celery_app):
-            realtime.update_queue_depth()
+            realtime_service.update_queue_depth()
         assert QueueDepthLog.objects.count() == 5
         assert all(l.worker_count == 0 for l in QueueDepthLog.objects.all())
 
@@ -199,12 +199,12 @@ class TestUpdateQueueDepth:
         fake_broker = self._fake_broker([0] * 5)
         celery_app = MagicMock()
         celery_app.control.inspect.return_value = None
-        with patch('apps.analytics.realtime._get_redis_safe', return_value=fake_r), \
-             patch('apps.analytics.realtime._get_broker_redis', return_value=fake_broker), \
+        with patch('apps.analytics.services.realtime_service.get_redis_safe', return_value=fake_r), \
+             patch('apps.analytics.services.realtime_service._get_broker_redis', return_value=fake_broker), \
              patch('rag_project.celery.app', celery_app), \
              patch.object(QueueDepthLog.objects, 'bulk_create',
                           side_effect=Exception('duplicate key')):
-            realtime.update_queue_depth()  # 不应抛异常
+            realtime_service.update_queue_depth()  # 不应抛异常
         assert QueueDepthLog.objects.count() == 0
 
 
@@ -219,9 +219,9 @@ class TestGetQueueDepthSnapshot:
         """Redis current 键存在时直接读取，不再 LLEN"""
         fake_r = MagicMock(name='redis_conn')
         fake_r.get.return_value = '7'
-        with patch('apps.analytics.realtime._get_redis_safe', return_value=fake_r), \
+        with patch('apps.analytics.services.realtime_service.get_redis_safe', return_value=fake_r), \
              patch('rag_project.celery.app', MagicMock()):
-            result = realtime.get_queue_depth_snapshot()
+            result = realtime_service.get_queue_depth_snapshot()
         for q in QUEUE_NAMES:
             assert result[q]['size'] == 7
             assert result[q]['length'] == 7
@@ -234,10 +234,10 @@ class TestGetQueueDepthSnapshot:
         fake_r.get.return_value = None
         fake_broker = MagicMock(name='broker_conn')
         fake_broker.llen.return_value = 4
-        with patch('apps.analytics.realtime._get_redis_safe', return_value=fake_r), \
-             patch('apps.analytics.realtime._get_broker_redis', return_value=fake_broker), \
+        with patch('apps.analytics.services.realtime_service.get_redis_safe', return_value=fake_r), \
+             patch('apps.analytics.services.realtime_service._get_broker_redis', return_value=fake_broker), \
              patch('rag_project.celery.app', MagicMock()):
-            result = realtime.get_queue_depth_snapshot()
+            result = realtime_service.get_queue_depth_snapshot()
         for q in QUEUE_NAMES:
             assert result[q]['size'] == 4
         # 降级 LLEN 直接查队列名（如 parse），而非 celery:parse（误加前缀恒为 0）
@@ -256,9 +256,9 @@ class TestGetQueueDepthSnapshot:
         pipe.get.side_effect = ['2', '1', '0']
         pipe.execute.return_value = ['2', '1', '0']
         fake_r.pipeline.return_value = pipe
-        with patch('apps.analytics.realtime._get_redis_safe', return_value=fake_r), \
-             patch('apps.analytics.realtime._get_broker_redis', return_value=None):
-            result = realtime.get_queue_depth_snapshot()
+        with patch('apps.analytics.services.realtime_service.get_redis_safe', return_value=fake_r), \
+             patch('apps.analytics.services.realtime_service._get_broker_redis', return_value=None):
+            result = realtime_service.get_queue_depth_snapshot()
         entry = result['default']
         assert entry['active'] == 2
         assert entry['queued'] == 1
@@ -274,8 +274,8 @@ class TestGetQueueDepthSnapshot:
         pipe.get.return_value = None
         pipe.execute.return_value = [None, None, None]
         fake_r.pipeline.return_value = pipe
-        with patch('apps.analytics.realtime._get_redis_safe', return_value=fake_r):
-            result = realtime.get_queue_depth_snapshot()
+        with patch('apps.analytics.services.realtime_service.get_redis_safe', return_value=fake_r):
+            result = realtime_service.get_queue_depth_snapshot()
         entry = result['default']
         assert entry['queued'] is None and entry['active'] is None
         assert entry['idle'] is None and entry['failed'] is None
@@ -301,15 +301,15 @@ class TestIncrementRealtimeMetrics:
         """正常请求：total_qa + normal_qa + token/费用 + TTL，不累加 cache_hits"""
         fake_r = MagicMock(name='redis_conn')
         pipe = fake_r.pipeline.return_value
-        with patch('apps.analytics.realtime._get_redis_safe', return_value=fake_r):
-            realtime.increment_realtime_metrics(self._qa())
+        with patch('apps.analytics.services.realtime_service.get_redis_safe', return_value=fake_r):
+            realtime_service.increment_realtime_metrics(self._qa())
         key = _today_key()
         pipe.hincrby.assert_any_call(key, 'total_qa', 1)
         pipe.hincrby.assert_any_call(key, 'normal_qa', 1)
         pipe.hincrbyfloat.assert_any_call(key, 'tokens_prompt', 10.0)
         pipe.hincrbyfloat.assert_any_call(key, 'tokens_completion', 20.0)
         pipe.hincrbyfloat.assert_any_call(key, 'cost_estimate', 0.5)
-        pipe.expire.assert_called_once_with(key, realtime.REALTIME_RETENTION_DAYS * 86400)
+        pipe.expire.assert_called_once_with(key, realtime_service.REALTIME_RETENTION_DAYS * 86400)
         # 正常请求不累加 cache_hits
         fields = [c.args[1] for c in pipe.hincrby.call_args_list]
         assert 'cache_hits' not in fields
@@ -319,8 +319,8 @@ class TestIncrementRealtimeMetrics:
         """缓存命中：只累加 total_qa + cache_hits，不增加 token/费用计数"""
         fake_r = MagicMock(name='redis_conn')
         pipe = fake_r.pipeline.return_value
-        with patch('apps.analytics.realtime._get_redis_safe', return_value=fake_r):
-            realtime.increment_realtime_metrics(self._qa(is_hit_cache=True))
+        with patch('apps.analytics.services.realtime_service.get_redis_safe', return_value=fake_r):
+            realtime_service.increment_realtime_metrics(self._qa(is_hit_cache=True))
         key = _today_key()
         pipe.hincrby.assert_any_call(key, 'total_qa', 1)
         pipe.hincrby.assert_any_call(key, 'cache_hits', 1)
@@ -331,8 +331,8 @@ class TestIncrementRealtimeMetrics:
         """链路失败：额外累加 llm_errors"""
         fake_r = MagicMock(name='redis_conn')
         pipe = fake_r.pipeline.return_value
-        with patch('apps.analytics.realtime._get_redis_safe', return_value=fake_r):
-            realtime.increment_realtime_metrics(self._qa(is_success=False))
+        with patch('apps.analytics.services.realtime_service.get_redis_safe', return_value=fake_r):
+            realtime_service.increment_realtime_metrics(self._qa(is_success=False))
         key = _today_key()
         pipe.hincrby.assert_any_call(key, 'llm_errors', 1)
 
@@ -340,8 +340,8 @@ class TestIncrementRealtimeMetrics:
     def test_none_token_fields_safe(self):
         """tokens/cost 为 None 时安全降级为 0，避免 float(None) TypeError"""
         fake_r = MagicMock(name='redis_conn')
-        with patch('apps.analytics.realtime._get_redis_safe', return_value=fake_r):
-            realtime.increment_realtime_metrics(self._qa(tokens_prompt=None,
+        with patch('apps.analytics.services.realtime_service.get_redis_safe', return_value=fake_r):
+            realtime_service.increment_realtime_metrics(self._qa(tokens_prompt=None,
                                                          tokens_completion=None,
                                                          cost_estimate=None))
         pipe = fake_r.pipeline.return_value
@@ -363,8 +363,8 @@ class TestRealtimeSnapshot:
             'tokens_prompt': '12.34', 'tokens_completion': '8.10',
             'cost_estimate': '0.5', 'last_flush_at': '1700000000',
         }
-        with patch('apps.analytics.realtime._get_redis_safe', return_value=fake_r):
-            snap = realtime.get_realtime_snapshot()
+        with patch('apps.analytics.services.realtime_service.get_redis_safe', return_value=fake_r):
+            snap = realtime_service.get_realtime_snapshot()
         assert snap['total_qa'] == 5
         assert snap['cache_hits'] == 2
         assert snap['normal_qa'] == 3
@@ -380,8 +380,8 @@ class TestRealtimeSnapshot:
         """Redis 无数据（hgetall 空）→ 全部字段默认 0"""
         fake_r = MagicMock(name='redis_conn')
         fake_r.hgetall.return_value = {}
-        with patch('apps.analytics.realtime._get_redis_safe', return_value=fake_r):
-            snap = realtime.get_realtime_snapshot()
+        with patch('apps.analytics.services.realtime_service.get_redis_safe', return_value=fake_r):
+            snap = realtime_service.get_realtime_snapshot()
         assert snap['total_qa'] == 0 and snap['tokens_prompt'] == 0.0
         assert snap['last_flush_at'] == 0
 
@@ -389,8 +389,8 @@ class TestRealtimeSnapshot:
     def test_flush_writes_timestamp(self):
         """flush_realtime_metrics 写入 last_flush_at 时间戳"""
         fake_r = MagicMock(name='redis_conn')
-        with patch('apps.analytics.realtime._get_redis_safe', return_value=fake_r):
-            realtime.flush_realtime_metrics()
+        with patch('apps.analytics.services.realtime_service.get_redis_safe', return_value=fake_r):
+            realtime_service.flush_realtime_metrics()
         key = _today_key()
         assert fake_r.hset.call_count == 1
         args = fake_r.hset.call_args[0]
@@ -437,7 +437,7 @@ class TestYesterdaySamePeriod:
         self._make_qa(session, test_user, y_end + timedelta(hours=2))
         self._make_qa(session, test_user, today_start + elapsed * 0.5)
 
-        agg = realtime.get_yesterday_same_period_stats()
+        agg = realtime_service.get_yesterday_same_period_stats()
         assert agg['total_qa'] == 3
         assert agg['cache_hits'] == 1
         assert agg['normal_qa'] == 2
@@ -453,7 +453,7 @@ class TestYesterdaySamePeriod:
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         self._make_qa(session, test_user, today_start + timedelta(minutes=5))
 
-        agg = realtime.get_yesterday_same_period_stats()
+        agg = realtime_service.get_yesterday_same_period_stats()
         assert agg is not None
         assert agg['total_qa'] == 0
         assert agg['cache_hits'] == 0

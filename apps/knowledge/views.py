@@ -3080,7 +3080,7 @@ class QueueDepthView(APIView):
 
     def get(self, request):
         try:
-            from apps.analytics.realtime import get_queue_depth_snapshot
+            from apps.analytics.services.realtime_service import get_queue_depth_snapshot
             queues = get_queue_depth_snapshot()
         except Exception as e:
             logger.warning(f'[QueueDepth] 快照获取失败: {e}')

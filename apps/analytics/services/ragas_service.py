@@ -19,7 +19,6 @@ get_embedding_client()(BAAI/bge-m3);评估所用模型与生产一致,结果更�
 版本兼容:适配 ragas 0.2.x / 0.3.x(evaluate + EvaluationDataset + SingleTurnSample);
 ragas 0.4+ 有 breaking change,需按官方迁移指南调整。
 """
-import asyncio
 import json
 import os
 import time
@@ -180,7 +179,9 @@ def load_corpus_chunks(
     Returns:
         LangChain Document 列表,metadata 含 doc_id/source 便于溯源
     """
-    from langchain_core.documents import Document
+    # 注意:langchain 的 Document 与 knowledge 的 Document 同名,后者会遮蔽前者,
+    # 必须用别名区分——本函数同时使用两个(Django ORM 查库 + langchain 构造语料)
+    from langchain_core.documents import Document as LangChainDocument
     from apps.knowledge.models import Document, DocumentChunk
 
     doc_qs = Document.objects.filter(
@@ -204,11 +205,11 @@ def load_corpus_chunks(
         content_length__gte=min_chunk_chars,
     ).select_related('document').order_by('document_id', 'chunk_index')
 
-    docs: List[Document] = []
+    docs: List[LangChainDocument] = []
     for c in chunks:
         # metadata.filename 是 Ragas TestsetGenerator 识别同一文档切片的依据,
         # 用 doc_id+title 标识,确保跨切片归属正确
-        docs.append(Document(
+        docs.append(LangChainDocument(
             page_content=c.content,
             metadata={
                 'filename': f'doc_{c.document_id}_{c.document.title}',
@@ -290,7 +291,7 @@ def generate_testset(
     samples = [s for s in samples if s['user_input'] and s['reference']]
 
     testset_id = datetime.now().strftime('%Y%m%d_%H%M%S') + '_' + uuid.uuid4().hex[:6]
-    logger.info('[RagasPipeline] 有效测试样本: {}, testset_id={}', len(samples), testset_id)
+    logger.info(f'[RagasPipeline] 有效测试样本: {len(samples)}, testset_id={testset_id}')
     return samples, testset_id
 
 
@@ -460,9 +461,11 @@ def _evaluate_sync(samples: List[Dict[str, Any]], evaluator_llm, evaluator_embed
     from ragas.dataset_schema import EvaluationDataset, SingleTurnSample
 
     # 先对每条样本跑 RAG,拿到 answer/contexts
+    # 评估用户整个评估期间不变,只查一次(避免每条样本重复查库)
+    eval_user = _get_eval_user()
     enriched: List[Dict[str, Any]] = []
     for s in samples:
-        rag = run_rag_for_question(s['user_input'], _get_eval_user())
+        rag = run_rag_for_question(s['user_input'], eval_user)
         enriched.append({
             'user_input': s['user_input'],
             'reference': s['reference'],
@@ -492,7 +495,7 @@ def _evaluate_sync(samples: List[Dict[str, Any]], evaluator_llm, evaluator_embed
     metrics = _build_metrics(evaluator_llm, evaluator_embeddings)
     dataset = EvaluationDataset(eval_samples)
 
-    logger.info('[RagasPipeline] 开始 Ragas 指标评估, 样本数={}', len(eval_samples))
+    logger.info(f'[RagasPipeline] 开始 Ragas 指标评估, 样本数={len(eval_samples)}')
     t0 = time.time()
 
     # evaluate 默认 allow_nest_asyncio=True,在 Django 同步命令环境可正常执行
@@ -502,7 +505,7 @@ def _evaluate_sync(samples: List[Dict[str, Any]], evaluator_llm, evaluator_embed
         show_progress=True,
         raise_exceptions=False,  # 单条失败返回 NaN,不中断整体
     )
-    logger.info('[RagasPipeline] 评估完成, 耗时={}s', int(time.time() - t0))
+    logger.info(f'[RagasPipeline] 评估完成, 耗时={int(time.time() - t0)}s')
 
     # 把评估结果合并回 enriched(result 是按行索引的)
     # result.to_pandas() 返回每行各指标分数
@@ -639,7 +642,7 @@ def run_full_pipeline(
     limit_docs: int = 50,
     root_type: Optional[str] = None,
     model: Optional[str] = None,
-    output_dir: str = 'eval_reports',
+    output_dir: str = 'scripts/tmp/eval_reports',
     corpus_docs: Optional[List[Any]] = None,
     samples: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:

@@ -18,6 +18,7 @@ import time
 from collections import defaultdict
 from datetime import timedelta
 
+from django.db import transaction
 from django.utils import timezone
 from loguru import logger
 
@@ -177,59 +178,63 @@ def run_keyword_feedback_loop(report_date=None):
             continue
         total += 1
 
-        # 读当前权重（存在则用现值，否则按默认 1.0 初始化，get_or_create 幂等）
-        kw, _ = KeywordWeight.objects.get_or_create(
-            keyword=keyword, root_type=root_type,
-            defaults={'weight_score': 1.0},
-        )
-        old_score = kw.weight_score
-        # 与手动调整一致的钳位区间 0.1~5.0（模型层已约束 default 1.0）
-        new_score = max(0.1, min(5.0, old_score + delta))
-        actual_delta = round(new_score - old_score, 4)
-
-        agg, created = KeywordFeedbackAgg.objects.get_or_create(
-            report_date=date, keyword=keyword, root_type=root_type,
-            defaults={
-                'shown_count': row['shown_count'],
-                'click_count': row['click_count'],
-                'adopt_count': row['adopt_count'],
-                'bad_count': row['bad_count'],
-                'click_rate': round(row['click_count'] / row['shown_count'], 4),
-                'adopt_rate': round(row['adopt_count'] / row['shown_count'], 4),
-                'old_score': old_score,
-                'new_score': new_score,
-                'delta': actual_delta,
-                'reason': ';'.join(reasons),
-                'adjust_type': 'auto',
-                'status': 'applied' if auto_apply else 'pending',
-                'applied_at': now if auto_apply else None,
-            },
-        )
-
-        if not created:
-            # 幂等：已处理过的日期只刷新统计值，不重复应用权重；
-            # 若同日已被人工接管（manual），同样跳过应用，保证手动覆盖优先
-            _refresh_stats_only(agg, row)
-            skipped += 1
-            continue
-
-        if auto_apply:
-            # 权重应用 + 累计计数（hit/bad）保持 KeywordWeight 历史统计可用
-            kw.weight_score = new_score
-            kw.hit_count += row['shown_count']
-            kw.bad_feedback += row['bad_count']
-            kw.save(update_fields=['weight_score', 'hit_count', 'bad_feedback'])
-            applied += 1
-            logger.info(
-                f'[FeedbackLoop] auto {keyword}({root_type}) {old_score:+.2f}→{new_score:+.2f} '
-                f'delta={actual_delta:+.2f} reasons={reasons}'
+        # 聚合记录创建与权重应用必须原子:auto_apply 时先落聚合再改权重,
+        # 若中途失败会留下"已聚合未应用"的半截状态,重跑时 created=False
+        # 会走 _refresh_stats_only 跳过应用,权重永远不生效
+        with transaction.atomic():
+            # 读当前权重（存在则用现值，否则按默认 1.0 初始化，get_or_create 幂等）
+            kw, _ = KeywordWeight.objects.get_or_create(
+                keyword=keyword, root_type=root_type,
+                defaults={'weight_score': 1.0},
             )
-        else:
-            pending += 1
-            logger.info(
-                f'[FeedbackLoop] pending {keyword}({root_type}) 建议 delta={actual_delta:+.2f} '
-                f'reasons={reasons}（等待人工复核）'
+            old_score = kw.weight_score
+            # 与手动调整一致的钳位区间 0.1~5.0（模型层已约束 default 1.0）
+            new_score = max(0.1, min(5.0, old_score + delta))
+            actual_delta = round(new_score - old_score, 4)
+
+            agg, created = KeywordFeedbackAgg.objects.get_or_create(
+                report_date=date, keyword=keyword, root_type=root_type,
+                defaults={
+                    'shown_count': row['shown_count'],
+                    'click_count': row['click_count'],
+                    'adopt_count': row['adopt_count'],
+                    'bad_count': row['bad_count'],
+                    'click_rate': round(row['click_count'] / row['shown_count'], 4),
+                    'adopt_rate': round(row['adopt_count'] / row['shown_count'], 4),
+                    'old_score': old_score,
+                    'new_score': new_score,
+                    'delta': actual_delta,
+                    'reason': ';'.join(reasons),
+                    'adjust_type': 'auto',
+                    'status': 'applied' if auto_apply else 'pending',
+                    'applied_at': now if auto_apply else None,
+                },
             )
+
+            if not created:
+                # 幂等：已处理过的日期只刷新统计值，不重复应用权重；
+                # 若同日已被人工接管（manual），同样跳过应用，保证手动覆盖优先
+                _refresh_stats_only(agg, row)
+                skipped += 1
+                continue
+
+            if auto_apply:
+                # 权重应用 + 累计计数（hit/bad）保持 KeywordWeight 历史统计可用
+                kw.weight_score = new_score
+                kw.hit_count += row['shown_count']
+                kw.bad_feedback += row['bad_count']
+                kw.save(update_fields=['weight_score', 'hit_count', 'bad_feedback'])
+                applied += 1
+                logger.info(
+                    f'[FeedbackLoop] auto {keyword}({root_type}) {old_score:+.2f}→{new_score:+.2f} '
+                    f'delta={actual_delta:+.2f} reasons={reasons}'
+                )
+            else:
+                pending += 1
+                logger.info(
+                    f'[FeedbackLoop] pending {keyword}({root_type}) 建议 delta={actual_delta:+.2f} '
+                    f'reasons={reasons}（等待人工复核）'
+                )
 
     logger.info(
         f'[FeedbackLoop] {date} done: total={total} applied={applied} '
@@ -272,42 +277,47 @@ def apply_pending_adjustment(agg_id, action='apply', user=None):
     Returns:
         (ok, message)
     """
+    from django.db import transaction
     from django.utils import timezone as tz
 
-    try:
-        agg = KeywordFeedbackAgg.objects.get(id=agg_id)
-    except KeywordFeedbackAgg.DoesNotExist:
-        return False, '聚合记录不存在'
-    if agg.status != 'pending':
-        return False, f'该记录当前状态为 {agg.get_status_display()}，不可操作'
+    # 事务 + 行锁：并发管理员同时对同一 pending 记录点击"应用"时，
+    # 若不做互斥，两人都会读到 pending 状态并基于同一 old_score 叠加 delta，
+    # 造成权重被重复调整且无法被幂等键拦截
+    with transaction.atomic():
+        try:
+            agg = KeywordFeedbackAgg.objects.select_for_update().get(id=agg_id)
+        except KeywordFeedbackAgg.DoesNotExist:
+            return False, '聚合记录不存在'
+        if agg.status != 'pending':
+            return False, f'该记录当前状态为 {agg.get_status_display()}，不可操作'
 
-    if action == 'ignore':
-        agg.status = 'ignored'
-        agg.save(update_fields=['status', 'updated_at'])
-        logger.info(f'[FeedbackLoop] ignore agg_id={agg.id} keyword={agg.keyword}')
-        return True, '已忽略该调整'
+        if action == 'ignore':
+            agg.status = 'ignored'
+            agg.save(update_fields=['status', 'updated_at'])
+            logger.info(f'[FeedbackLoop] ignore agg_id={agg.id} keyword={agg.keyword}')
+            return True, '已忽略该调整'
 
-    # apply：以当前权重为基准叠加 delta（兼容应用前权重被手动改动的场景）
-    kw, _ = KeywordWeight.objects.get_or_create(
-        keyword=agg.keyword, root_type=agg.root_type,
-        defaults={'weight_score': 1.0},
-    )
-    old_score = kw.weight_score
-    new_score = max(0.1, min(5.0, old_score + agg.delta))
-    kw.weight_score = new_score
-    kw.save(update_fields=['weight_score'])
+        # apply：以当前权重为基准叠加 delta（兼容应用前权重被手动改动的场景）
+        kw, _ = KeywordWeight.objects.select_for_update().get_or_create(
+            keyword=agg.keyword, root_type=agg.root_type,
+            defaults={'weight_score': 1.0},
+        )
+        old_score = kw.weight_score
+        new_score = max(0.1, min(5.0, old_score + agg.delta))
+        kw.weight_score = new_score
+        kw.save(update_fields=['weight_score'])
 
-    agg.old_score = old_score
-    agg.new_score = new_score
-    agg.status = 'applied'
-    agg.applied_at = tz.now()
-    agg.actor = user
-    agg.save(update_fields=['old_score', 'new_score', 'status', 'applied_at', 'actor', 'updated_at'])
-    logger.info(
-        f'[FeedbackLoop] apply agg_id={agg.id} keyword={agg.keyword} '
-        f'{old_score:+.2f}→{new_score:+.2f} actor={getattr(user, "username", None)}'
-    )
-    return True, f'已应用调整 {agg.delta:+.2f}'
+        agg.old_score = old_score
+        agg.new_score = new_score
+        agg.status = 'applied'
+        agg.applied_at = tz.now()
+        agg.actor = user
+        agg.save(update_fields=['old_score', 'new_score', 'status', 'applied_at', 'actor', 'updated_at'])
+        logger.info(
+            f'[FeedbackLoop] apply agg_id={agg.id} keyword={agg.keyword} '
+            f'{old_score:+.2f}→{new_score:+.2f} actor={getattr(user, "username", None)}'
+        )
+        return True, f'已应用调整 {agg.delta:+.2f}'
 
 
 def record_manual_adjustment(kw, old_score, user):

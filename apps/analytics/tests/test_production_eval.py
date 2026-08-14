@@ -1,15 +1,14 @@
 """
-apps.analytics.production_eval 单元测试 —— 生产对话自动评估（采样 + 分层限速）
+apps.analytics.services.production_eval_service 单元测试 —— 生产对话自动评估（采样 + 分层限速）
 
 覆盖范围：
-- _build_context_list：从 retrieval_scores 提取切片内容（Top5 + 500 字截断 / 空处理）
+- build_context_list：从 retrieval_scores 提取切片内容（Top5 + 500 字截断 / 空处理）
 - _acquire_token / _acquire_hourly_token：Redis 原子计数器限速（超限 / 首次 EXPIRE / 异常保守跳过）
-- _check_daily_budget：数量上限（超限回退 DECR）+ 成本上限（DB 聚合）+ 聚合异常降级
-- _check_guarantee：小时/日保底名额（超限回退 / 双计数器回退 / Redis 异常降级）
+- check_daily_budget：数量上限（超限回退 DECR）+ 成本上限（DB 聚合）+ 聚合异常降级
 - maybe_dispatch_eval：开关 → 无效对话过滤 → 采样 → 分层限速 → dispatch
 - evaluate_sampled_qa：QA 不存在 / 预算拦截 / 无上下文 / 评估落库 / 评估异常
 
-说明：Redis 全部 mock（apps.analytics.production_eval._get_redis），
+说明：Redis 全部 mock（apps.analytics.services.production_eval_service.get_redis），
 evaluate_with_deepeval / run_low_score_analysis.delay 在源模块层 mock，
 MultiDimensionScore 落库用真实 Django 测试库。
 """
@@ -19,7 +18,7 @@ from types import SimpleNamespace
 import pytest
 from unittest.mock import patch, MagicMock
 
-from apps.analytics import production_eval
+from apps.analytics.services import production_eval_service
 from apps.analytics.models import MultiDimensionScore
 from apps.chat.models import QaRecord
 from apps.knowledge.models import KnowledgeNode, Document, DocumentChunk
@@ -29,7 +28,7 @@ from rag_project.config import AnalyticsConfig
 
 
 # ============================================================================
-# _build_context_list —— 检索上下文提取
+# build_context_list —— 检索上下文提取
 # ============================================================================
 @pytest.mark.django_db
 class TestBuildContextList:
@@ -59,18 +58,18 @@ class TestBuildContextList:
             {'chunk_id': self.chunk2.id},          # 空内容 → 过滤
             {'chunk_id': 999999},                  # 不存在的切片 → 过滤
         ])
-        ctx = production_eval._build_context_list(qa)
+        ctx = production_eval_service.build_context_list(qa)
         assert len(ctx) == 1
         assert len(ctx[0]) == 500
 
     def test_empty_retrieval_scores(self):
         """无检索分数 → 空列表"""
-        assert production_eval._build_context_list(SimpleNamespace(retrieval_scores=[])) == []
+        assert production_eval_service.build_context_list(SimpleNamespace(retrieval_scores=[])) == []
 
     def test_missing_chunk_id_skipped(self):
         """hit 缺 chunk_id → 跳过"""
         qa = SimpleNamespace(retrieval_scores=[{'rerank': 0.5}])
-        assert production_eval._build_context_list(qa) == []
+        assert production_eval_service.build_context_list(qa) == []
 
     def test_more_than_five_hits_limited(self):
         """超过 5 条命中只取前 5"""
@@ -78,7 +77,7 @@ class TestBuildContextList:
             document=self.doc, chunk_index=i + 2, content=f'片段{i}') for i in range(6)]
         qa = SimpleNamespace(retrieval_scores=[
             {'chunk_id': c.id} for c in chunks])
-        ctx = production_eval._build_context_list(qa)
+        ctx = production_eval_service.build_context_list(qa)
         assert len(ctx) == 5
 
 
@@ -94,8 +93,8 @@ class TestAcquireToken:
         import time as _t
         fake = MagicMock()
         fake.incr.return_value = 1
-        with patch('apps.analytics.production_eval._get_redis', return_value=fake):
-            assert production_eval._acquire_token(rate_per_min=5) is True
+        with patch('apps.analytics.services.production_eval_service.get_redis', return_value=fake):
+            assert production_eval_service._acquire_token(rate_per_min=5) is True
         fake.expire.assert_called_once_with(
             f'analytics:eval_rate:{int(_t.time() // 60)}', 65)
 
@@ -104,8 +103,8 @@ class TestAcquireToken:
         """计数 > 上限 → False，不设置 EXPIRE"""
         fake = MagicMock()
         fake.incr.return_value = 6
-        with patch('apps.analytics.production_eval._get_redis', return_value=fake):
-            assert production_eval._acquire_token(rate_per_min=5) is False
+        with patch('apps.analytics.services.production_eval_service.get_redis', return_value=fake):
+            assert production_eval_service._acquire_token(rate_per_min=5) is False
         fake.expire.assert_not_called()
 
     @pytest.mark.unit
@@ -113,8 +112,8 @@ class TestAcquireToken:
         """Redis 异常 → 保守返回 False（宁可少评估）"""
         fake = MagicMock()
         fake.incr.side_effect = Exception('redis down')
-        with patch('apps.analytics.production_eval._get_redis', return_value=fake):
-            assert production_eval._acquire_token(rate_per_min=5) is False
+        with patch('apps.analytics.services.production_eval_service.get_redis', return_value=fake):
+            assert production_eval_service._acquire_token(rate_per_min=5) is False
 
 
 class TestAcquireHourlyToken:
@@ -125,16 +124,16 @@ class TestAcquireHourlyToken:
         """计数 <= 上限 → True"""
         fake = MagicMock()
         fake.incr.return_value = 2
-        with patch('apps.analytics.production_eval._get_redis', return_value=fake):
-            assert production_eval._acquire_hourly_token(rate_per_hour=50) is True
+        with patch('apps.analytics.services.production_eval_service.get_redis', return_value=fake):
+            assert production_eval_service._acquire_hourly_token(rate_per_hour=50) is True
 
     @pytest.mark.unit
     def test_first_count_sets_expire(self):
         """首次计数（count=1）→ 设置 3700s EXPIRE"""
         fake = MagicMock()
         fake.incr.return_value = 1
-        with patch('apps.analytics.production_eval._get_redis', return_value=fake):
-            assert production_eval._acquire_hourly_token(rate_per_hour=50) is True
+        with patch('apps.analytics.services.production_eval_service.get_redis', return_value=fake):
+            assert production_eval_service._acquire_hourly_token(rate_per_hour=50) is True
         fake.expire.assert_called_once()
 
     @pytest.mark.unit
@@ -142,34 +141,34 @@ class TestAcquireHourlyToken:
         """计数 > 上限 → False"""
         fake = MagicMock()
         fake.incr.return_value = 51
-        with patch('apps.analytics.production_eval._get_redis', return_value=fake):
-            assert production_eval._acquire_hourly_token(rate_per_hour=50) is False
+        with patch('apps.analytics.services.production_eval_service.get_redis', return_value=fake):
+            assert production_eval_service._acquire_hourly_token(rate_per_hour=50) is False
 
     @pytest.mark.unit
     def test_redis_error(self):
         """Redis 异常 → False"""
         fake = MagicMock()
         fake.incr.side_effect = Exception('redis down')
-        with patch('apps.analytics.production_eval._get_redis', return_value=fake):
-            assert production_eval._acquire_hourly_token(rate_per_hour=50) is False
+        with patch('apps.analytics.services.production_eval_service.get_redis', return_value=fake):
+            assert production_eval_service._acquire_hourly_token(rate_per_hour=50) is False
 
 
 # ============================================================================
-# _get_redis —— Analytics 专用连接
+# get_redis —— Analytics 专用连接
 # ============================================================================
 class TestGetRedis:
     """Redis 连接复用测试"""
 
     @pytest.mark.unit
     def test_reuses_analytics_connection(self):
-        """复用 apps.analytics.realtime._get_redis_safe 的连接"""
+        """复用 apps.analytics.services.realtime_service.get_redis_safe 的连接"""
         fake = MagicMock()
-        with patch('apps.analytics.realtime._get_redis_safe', return_value=fake):
-            assert production_eval._get_redis() is fake
+        with patch('apps.analytics.services.realtime_service.get_redis_safe', return_value=fake):
+            assert production_eval_service.get_redis() is fake
 
 
 # ============================================================================
-# _check_daily_budget —— 日预算检查（数量 + 成本）
+# check_daily_budget —— 日预算检查（数量 + 成本）
 # ============================================================================
 @pytest.mark.django_db
 class TestCheckDailyBudget:
@@ -192,7 +191,7 @@ class TestCheckDailyBudget:
         fake.incr.return_value = 501  # 大于默认 500
         with patch.object(AnalyticsConfig, 'eval_daily_limit', return_value=500), \
              patch.object(AnalyticsConfig, 'eval_cost_limit', return_value=1.0):
-            passed, reason = production_eval._check_daily_budget(fake)
+            passed, reason = production_eval_service.check_daily_budget(fake)
         assert (passed, reason) == (False, 'daily_limit_exceeded')
         fake.decr.assert_called_once()
         # count=501 非首次计数，TTL 已在首次 INCR 时设置，此处不重复 EXPIRE
@@ -204,7 +203,7 @@ class TestCheckDailyBudget:
         fake.incr.return_value = 1
         with patch.object(AnalyticsConfig, 'eval_daily_limit', return_value=500), \
              patch.object(AnalyticsConfig, 'eval_cost_limit', return_value=1.0):
-            passed, _ = production_eval._check_daily_budget(fake)
+            passed, _ = production_eval_service.check_daily_budget(fake)
         assert passed is True
         fake.expire.assert_called_once()
 
@@ -217,7 +216,7 @@ class TestCheckDailyBudget:
         fake.incr.return_value = 2
         with patch.object(AnalyticsConfig, 'eval_daily_limit', return_value=500), \
              patch.object(AnalyticsConfig, 'eval_cost_limit', return_value=1.0):
-            passed, reason = production_eval._check_daily_budget(fake)
+            passed, reason = production_eval_service.check_daily_budget(fake)
         assert (passed, reason) == (False, 'cost_limit_exceeded')
         fake.decr.assert_called_once()
 
@@ -233,60 +232,10 @@ class TestCheckDailyBudget:
              patch.object(AnalyticsConfig, 'eval_cost_limit', return_value=1.0), \
              patch.object(MultiDimensionScore.objects, 'filter',
                           side_effect=Exception('db down')), \
-             patch('apps.analytics.production_eval.logger'):
-            passed, reason = production_eval._check_daily_budget(fake)
+             patch('apps.analytics.services.production_eval_service.logger'):
+            passed, reason = production_eval_service.check_daily_budget(fake)
         assert passed is True
         assert reason == ''
-
-
-# ============================================================================
-# _check_guarantee —— 保底评估名额（已废弃，兼容保留）
-# ============================================================================
-class TestCheckGuarantee:
-    """保底名额检查测试"""
-
-    @pytest.mark.unit
-    def test_hourly_exhausted(self):
-        """小时名额超限 → ('', hourly_exhausted)，回退小时计数"""
-        fake = MagicMock()
-        fake.incr.return_value = 2  # 超过 hourly_limit=1
-        with patch.object(AnalyticsConfig, 'production_eval_hourly_guarantee', return_value=1), \
-             patch.object(AnalyticsConfig, 'production_eval_daily_guarantee', return_value=10):
-            passed, source = production_eval._check_guarantee(fake)
-        assert (passed, source) == (False, 'hourly_exhausted')
-        fake.decr.assert_called_once()
-
-    @pytest.mark.unit
-    def test_daily_exhausted_rolls_back_both(self):
-        """日名额超限 → 回退日计数 + 小时计数"""
-        fake = MagicMock()
-        fake.incr.side_effect = [1, 11]  # hour=1 通过；day=11 超限（daily=10）
-        with patch.object(AnalyticsConfig, 'production_eval_hourly_guarantee', return_value=10), \
-             patch.object(AnalyticsConfig, 'production_eval_daily_guarantee', return_value=10):
-            passed, source = production_eval._check_guarantee(fake)
-        assert (passed, source) == (False, 'daily_exhausted')
-        assert fake.decr.call_count == 2  # 日 + 小时各回退一次
-
-    @pytest.mark.unit
-    def test_guarantee_granted(self):
-        """小时/日名额均未超限 → (True, 'guarantee')"""
-        fake = MagicMock()
-        fake.incr.side_effect = [1, 1]
-        with patch.object(AnalyticsConfig, 'production_eval_hourly_guarantee', return_value=10), \
-             patch.object(AnalyticsConfig, 'production_eval_daily_guarantee', return_value=10):
-            passed, source = production_eval._check_guarantee(fake)
-        assert (passed, source) == (True, 'guarantee')
-        fake.decr.assert_not_called()
-
-    @pytest.mark.unit
-    def test_redis_error_degrades_to_sample(self):
-        """Redis 异常 → (False, 'redis_error') 降级采样"""
-        fake = MagicMock()
-        fake.incr.side_effect = Exception('redis down')
-        with patch.object(AnalyticsConfig, 'production_eval_hourly_guarantee', return_value=10), \
-             patch.object(AnalyticsConfig, 'production_eval_daily_guarantee', return_value=10):
-            passed, source = production_eval._check_guarantee(fake)
-        assert (passed, source) == (False, 'redis_error')
 
 
 # ============================================================================
@@ -307,20 +256,20 @@ class TestMaybeDispatchEval:
             patch.object(AnalyticsConfig, 'production_eval_sample_rate', return_value=1.0),
             patch.object(AnalyticsConfig, 'production_eval_rate_per_min', return_value=5),
             patch.object(AnalyticsConfig, 'production_eval_rate_per_hour', return_value=50),
-            patch('apps.analytics.production_eval.random.random', return_value=0.1),
-            patch('apps.analytics.production_eval._acquire_token', return_value=True),
-            patch('apps.analytics.production_eval._acquire_hourly_token', return_value=True),
-            patch('apps.analytics.production_eval._get_redis', return_value=MagicMock()),
-            patch('apps.analytics.production_eval._check_daily_budget', return_value=(True, '')),
-            patch('apps.analytics.production_eval.evaluate_sampled_qa'),
+            patch('apps.analytics.services.production_eval_service.random.random', return_value=0.1),
+            patch('apps.analytics.services.production_eval_service._acquire_token', return_value=True),
+            patch('apps.analytics.services.production_eval_service._acquire_hourly_token', return_value=True),
+            patch('apps.analytics.services.production_eval_service.get_redis', return_value=MagicMock()),
+            patch('apps.analytics.services.production_eval_service.check_daily_budget', return_value=(True, '')),
+            patch('apps.analytics.services.production_eval_service.evaluate_sampled_qa'),
         ]
 
     @pytest.mark.unit
     def test_disabled_skips(self):
         """开关关闭 → 直接返回"""
         with patch.object(AnalyticsConfig, 'production_eval_enabled', return_value=False), \
-             patch('apps.analytics.production_eval.evaluate_sampled_qa') as mock_task:
-            production_eval.maybe_dispatch_eval(self._qa())
+             patch('apps.analytics.services.production_eval_service.evaluate_sampled_qa') as mock_task:
+            production_eval_service.maybe_dispatch_eval(self._qa())
         mock_task.delay.assert_not_called()
 
     @pytest.mark.unit
@@ -330,8 +279,8 @@ class TestMaybeDispatchEval:
                    self._qa(answer_type='refused'),
                    self._qa(is_hit_cache=True)):
             with patch.object(AnalyticsConfig, 'production_eval_enabled', return_value=True), \
-                 patch('apps.analytics.production_eval.evaluate_sampled_qa') as mock_task:
-                production_eval.maybe_dispatch_eval(qa)
+                 patch('apps.analytics.services.production_eval_service.evaluate_sampled_qa') as mock_task:
+                production_eval_service.maybe_dispatch_eval(qa)
             mock_task.delay.assert_not_called()
 
     @pytest.mark.unit
@@ -339,9 +288,9 @@ class TestMaybeDispatchEval:
         """采样未命中（random >= sample_rate）→ 跳过"""
         with patch.object(AnalyticsConfig, 'production_eval_enabled', return_value=True), \
              patch.object(AnalyticsConfig, 'production_eval_sample_rate', return_value=0.05), \
-             patch('apps.analytics.production_eval.random.random', return_value=0.5), \
-             patch('apps.analytics.production_eval.evaluate_sampled_qa') as mock_task:
-            production_eval.maybe_dispatch_eval(self._qa())
+             patch('apps.analytics.services.production_eval_service.random.random', return_value=0.5), \
+             patch('apps.analytics.services.production_eval_service.evaluate_sampled_qa') as mock_task:
+            production_eval_service.maybe_dispatch_eval(self._qa())
         mock_task.delay.assert_not_called()
 
     @pytest.mark.unit
@@ -350,10 +299,10 @@ class TestMaybeDispatchEval:
         mocks = self._pass_all()
         with mocks[0], mocks[1], mocks[2], mocks[3], mocks[4], mocks[5], mocks[6], \
              mocks[7], mocks[8], mocks[9]:
-            with patch('apps.analytics.production_eval._acquire_token', return_value=False):
-                production_eval.maybe_dispatch_eval(self._qa())
-            with patch('apps.analytics.production_eval._acquire_hourly_token', return_value=False):
-                production_eval.maybe_dispatch_eval(self._qa())
+            with patch('apps.analytics.services.production_eval_service._acquire_token', return_value=False):
+                production_eval_service.maybe_dispatch_eval(self._qa())
+            with patch('apps.analytics.services.production_eval_service._acquire_hourly_token', return_value=False):
+                production_eval_service.maybe_dispatch_eval(self._qa())
 
     @pytest.mark.unit
     def test_daily_budget_skips(self):
@@ -361,9 +310,9 @@ class TestMaybeDispatchEval:
         mocks = self._pass_all()
         with mocks[0], mocks[1], mocks[2], mocks[3], mocks[4], mocks[5], mocks[6], \
              mocks[7], mocks[8], mocks[9]:
-            with patch('apps.analytics.production_eval._check_daily_budget',
+            with patch('apps.analytics.services.production_eval_service.check_daily_budget',
                        return_value=(False, 'cost_limit_exceeded')):
-                production_eval.maybe_dispatch_eval(self._qa())
+                production_eval_service.maybe_dispatch_eval(self._qa())
 
     @pytest.mark.unit
     def test_daily_budget_error_conservative_skip(self):
@@ -371,10 +320,10 @@ class TestMaybeDispatchEval:
         mocks = self._pass_all()
         with mocks[0], mocks[1], mocks[2], mocks[3], mocks[4], mocks[5], mocks[6], \
              mocks[7], mocks[8], mocks[9] as mock_task:
-            with patch('apps.analytics.production_eval._check_daily_budget',
+            with patch('apps.analytics.services.production_eval_service.check_daily_budget',
                        side_effect=Exception('redis down')), \
-                 patch('apps.analytics.production_eval.logger'):
-                production_eval.maybe_dispatch_eval(self._qa())
+                 patch('apps.analytics.services.production_eval_service.logger'):
+                production_eval_service.maybe_dispatch_eval(self._qa())
         mock_task.delay.assert_not_called()
 
     @pytest.mark.unit
@@ -383,7 +332,7 @@ class TestMaybeDispatchEval:
         mocks = self._pass_all()
         with mocks[0], mocks[1], mocks[2], mocks[3], mocks[4], mocks[5], mocks[6], \
              mocks[7], mocks[8], mocks[9] as mock_task:
-            production_eval.maybe_dispatch_eval(self._qa())
+            production_eval_service.maybe_dispatch_eval(self._qa())
         mock_task.delay.assert_called_once_with(1)
 
     @pytest.mark.unit
@@ -391,8 +340,8 @@ class TestMaybeDispatchEval:
         """配置读取异常 → 记录日志不抛错（不影响主对话流程）"""
         with patch.object(AnalyticsConfig, 'production_eval_enabled',
                           side_effect=Exception('config down')), \
-             patch('apps.analytics.production_eval.evaluate_sampled_qa') as mock_task:
-            production_eval.maybe_dispatch_eval(self._qa())  # 不应抛出
+             patch('apps.analytics.services.production_eval_service.evaluate_sampled_qa') as mock_task:
+            production_eval_service.maybe_dispatch_eval(self._qa())  # 不应抛出
         mock_task.delay.assert_not_called()
 
 
@@ -419,10 +368,10 @@ class TestEvaluateSampledQA:
         """标准 mock 集合（evaluate_sampled_qa 成功路径所需）"""
         return [
             patch.object(AnalyticsConfig, 'eval_model', return_value='test-model'),
-            patch('apps.analytics.production_eval._get_redis', return_value=MagicMock()),
-            patch('apps.analytics.production_eval._check_daily_budget', return_value=(True, '')),
-            patch('apps.analytics.production_eval._build_context_list', return_value=['上下文']),
-            patch('apps.analytics.deepeval_metrics.evaluate_with_deepeval',
+            patch('apps.analytics.services.production_eval_service.get_redis', return_value=MagicMock()),
+            patch('apps.analytics.services.production_eval_service.check_daily_budget', return_value=(True, '')),
+            patch('apps.analytics.services.production_eval_service.build_context_list', return_value=['上下文']),
+            patch('apps.analytics.services.deepeval_service.evaluate_with_deepeval',
                   return_value=evaluate_return),
             patch('apps.analytics.tasks.run_low_score_analysis'),
         ]
@@ -430,23 +379,23 @@ class TestEvaluateSampledQA:
     def _run(self, mocks, **kwargs):
         """按序展开 mock 上下文执行任务，返回 (结果, 低分归因 mock)"""
         with mocks[0], mocks[1], mocks[2], mocks[3], mocks[4], mocks[5] as mock_low:
-            return production_eval.evaluate_sampled_qa(self.qa.id, **kwargs), mock_low
+            return production_eval_service.evaluate_sampled_qa(self.qa.id, **kwargs), mock_low
 
     def test_qa_not_found(self):
         """QA 不存在 → {'ok': False, 'reason': 'qa_not_found'}"""
         with patch.object(AnalyticsConfig, 'eval_model', return_value='m'), \
-             patch('apps.analytics.production_eval._get_redis', return_value=MagicMock()), \
-             patch('apps.analytics.production_eval._check_daily_budget', return_value=(True, '')):
-            result = production_eval.evaluate_sampled_qa(999999)
+             patch('apps.analytics.services.production_eval_service.get_redis', return_value=MagicMock()), \
+             patch('apps.analytics.services.production_eval_service.check_daily_budget', return_value=(True, '')):
+            result = production_eval_service.evaluate_sampled_qa(999999)
         assert result == {'ok': False, 'reason': 'qa_not_found'}
 
     def test_budget_blocked(self):
         """日预算二次检查不通过（非手动场景）→ skipped"""
         mocks = self._mocks([{'dimension': 'clarity', 'score': 0.8, 'reason': 'ok'}])
         with mocks[0], mocks[1], mocks[2], mocks[3], mocks[4], mocks[5]:
-            with patch('apps.analytics.production_eval._check_daily_budget',
+            with patch('apps.analytics.services.production_eval_service.check_daily_budget',
                        return_value=(False, 'cost_limit_exceeded')):
-                result = production_eval.evaluate_sampled_qa(self.qa.id)
+                result = production_eval_service.evaluate_sampled_qa(self.qa.id)
         assert result == {'ok': False, 'skipped': True, 'reason': 'cost_limit_exceeded'}
 
     def test_skip_budget_check_bypasses(self):
@@ -460,8 +409,8 @@ class TestEvaluateSampledQA:
         """无检索上下文 → {'ok': False, 'reason': 'no_context'}"""
         mocks = self._mocks([{'dimension': 'clarity', 'score': 0.8, 'reason': 'ok'}])
         with mocks[0], mocks[1], mocks[2], mocks[3], mocks[4], mocks[5]:
-            with patch('apps.analytics.production_eval._build_context_list', return_value=[]):
-                result = production_eval.evaluate_sampled_qa(self.qa.id)
+            with patch('apps.analytics.services.production_eval_service.build_context_list', return_value=[]):
+                result = production_eval_service.evaluate_sampled_qa(self.qa.id)
         assert result == {'ok': False, 'reason': 'no_context'}
 
     def test_success_persists_and_dispatches_low_score(self):
@@ -492,9 +441,9 @@ class TestEvaluateSampledQA:
         """评估抛异常 → {'ok': False, 'reason': 'eval_failed: ...'}"""
         mocks = self._mocks(None)
         with mocks[0], mocks[1], mocks[2], mocks[3], mocks[4], mocks[5]:
-            with patch('apps.analytics.deepeval_metrics.evaluate_with_deepeval',
+            with patch('apps.analytics.services.deepeval_service.evaluate_with_deepeval',
                        side_effect=RuntimeError('llm down')):
-                result = production_eval.evaluate_sampled_qa(self.qa.id)
+                result = production_eval_service.evaluate_sampled_qa(self.qa.id)
         assert result['ok'] is False
         assert result['reason'].startswith('eval_failed:')
 
@@ -502,30 +451,30 @@ class TestEvaluateSampledQA:
         """预算检查异常 → 记录警告继续评估（不阻塞）"""
         mocks = self._mocks([{'dimension': 'clarity', 'score': 0.9, 'reason': 'ok'}])
         with mocks[0], mocks[1], mocks[2], mocks[3], mocks[4], mocks[5]:
-            with patch('apps.analytics.production_eval._check_daily_budget',
+            with patch('apps.analytics.services.production_eval_service.check_daily_budget',
                        side_effect=Exception('redis down')):
-                result = production_eval.evaluate_sampled_qa(self.qa.id)
+                result = production_eval_service.evaluate_sampled_qa(self.qa.id)
         assert result['ok'] is True
 
     def test_provided_batch_id_used(self):
         """手动评估传入 eval_batch_id 时应原样使用（不自动生成）"""
         mocks = self._mocks([{'dimension': 'clarity', 'score': 0.8, 'reason': 'ok'}])
         with mocks[0], mocks[1], mocks[2], mocks[3], mocks[4], mocks[5]:
-            result = production_eval.evaluate_sampled_qa(self.qa.id, eval_batch_id='manual_001')
+            result = production_eval_service.evaluate_sampled_qa(self.qa.id, eval_batch_id='manual_001')
         assert result['eval_batch_id'] == 'manual_001'
 
     def test_low_score_dispatch_failure_ignored(self):
         """低分归因派发异常 → 忽略，评估结果不受影响"""
         mocks = self._mocks([{'dimension': 'clarity', 'score': 0.8, 'reason': 'ok'}])
         with mocks[0], mocks[1], mocks[2], mocks[3], mocks[4], mocks[5] as mock_low, \
-             patch('apps.analytics.production_eval.logger'):
+             patch('apps.analytics.services.production_eval_service.logger'):
             mock_low.delay.side_effect = Exception('celery down')
-            result = production_eval.evaluate_sampled_qa(self.qa.id)
+            result = production_eval_service.evaluate_sampled_qa(self.qa.id)
         assert result['ok'] is True
 
 
 # ============================================================================
-# 路由分支 —— wiki / graphrag 上下文重建（_build_context_list 分流）
+# 路由分支 —— wiki / graphrag 上下文重建（build_context_list 分流）
 # ============================================================================
 class TestRouteContexts:
     """三层路由回答的评估上下文重建测试"""
@@ -533,9 +482,9 @@ class TestRouteContexts:
     @pytest.mark.unit
     def test_context_list_wiki_route(self):
         """route_source='wiki' 时走 wiki 上下文重建"""
-        with patch('apps.analytics.production_eval._build_wiki_route_context',
+        with patch('apps.analytics.services.production_eval_service._build_wiki_route_context',
                    return_value=['wiki 内容']) as m:
-            ctx = production_eval._build_context_list(SimpleNamespace(
+            ctx = production_eval_service.build_context_list(SimpleNamespace(
                 route_source='wiki', question='问题'))
         m.assert_called_once_with('问题')
         assert ctx == ['wiki 内容']
@@ -543,9 +492,9 @@ class TestRouteContexts:
     @pytest.mark.unit
     def test_context_list_graphrag_route(self):
         """route_source 以 graphrag 开头时走图谱上下文重建"""
-        with patch('apps.analytics.production_eval._build_graphrag_route_context',
+        with patch('apps.analytics.services.production_eval_service._build_graphrag_route_context',
                    return_value=['图上下文']) as m:
-            ctx = production_eval._build_context_list(SimpleNamespace(
+            ctx = production_eval_service.build_context_list(SimpleNamespace(
                 route_source='graphrag_default', question='q', user_id=7))
         m.assert_called_once_with('q', 7)
         assert ctx == ['图上下文']
@@ -555,7 +504,7 @@ class TestRouteContexts:
         """wiki 检索成功返回正文并截断 500 字"""
         with patch('apps.wiki.retriever.search_wiki',
                    return_value=[{'content': 'W' * 600}]):
-            ctx = production_eval._build_wiki_route_context('q')
+            ctx = production_eval_service._build_wiki_route_context('q')
         assert len(ctx) == 1
         assert len(ctx[0]) == 500
 
@@ -563,20 +512,20 @@ class TestRouteContexts:
     def test_wiki_context_search_error_returns_empty(self):
         """wiki 检索异常 → 空列表"""
         with patch('apps.wiki.retriever.search_wiki', side_effect=Exception('down')), \
-             patch('apps.analytics.production_eval.logger'):
-            assert production_eval._build_wiki_route_context('q') == []
+             patch('apps.analytics.services.production_eval_service.logger'):
+            assert production_eval_service._build_wiki_route_context('q') == []
 
     @pytest.mark.unit
     def test_wiki_context_no_results(self):
         """wiki 无命中结果 → 空列表"""
         with patch('apps.wiki.retriever.search_wiki', return_value=[]):
-            assert production_eval._build_wiki_route_context('q') == []
+            assert production_eval_service._build_wiki_route_context('q') == []
 
     @pytest.mark.unit
     def test_wiki_context_empty_content(self):
         """wiki 结果正文为空 → 空列表"""
         with patch('apps.wiki.retriever.search_wiki', return_value=[{'content': '  '}]):
-            assert production_eval._build_wiki_route_context('q') == []
+            assert production_eval_service._build_wiki_route_context('q') == []
 
     @pytest.mark.django_db
     def test_graphrag_context_uses_user(self):
@@ -585,7 +534,7 @@ class TestRouteContexts:
             username='g_user', password='x', email='g@test.com')
         with patch('apps.graph.retriever.graphrag_search',
                    return_value={'context': '图上下文内容'}) as m:
-            ctx = production_eval._build_graphrag_route_context('q', user.id)
+            ctx = production_eval_service._build_graphrag_route_context('q', user.id)
         m.assert_called_once()
         assert m.call_args[0][1].id == user.id
         assert ctx == ['图上下文内容']
@@ -596,7 +545,7 @@ class TestRouteContexts:
         User.objects.create_user(username='system', password='x', email='sys@test.com')
         with patch('apps.graph.retriever.graphrag_search',
                    return_value={'context': 'c'}) as m:
-            ctx = production_eval._build_graphrag_route_context('q', 999999)
+            ctx = production_eval_service._build_graphrag_route_context('q', 999999)
         assert m.call_args[0][1].username == 'system'
         assert ctx == ['c']
 
@@ -606,7 +555,7 @@ class TestRouteContexts:
         mock_qs = MagicMock()
         mock_qs.first.return_value = None
         with patch('apps.users.models.User.objects.filter', return_value=mock_qs):
-            assert production_eval._build_graphrag_route_context('q', 0) == []
+            assert production_eval_service._build_graphrag_route_context('q', 0) == []
 
     @pytest.mark.unit
     def test_graphrag_context_user_lookup_error_falls_back(self):
@@ -618,8 +567,8 @@ class TestRouteContexts:
                    side_effect=[Exception('db down'), mock_qs]), \
              patch('apps.graph.retriever.graphrag_search',
                    return_value={'context': 'c'}) as m, \
-             patch('apps.analytics.production_eval.logger'):
-            ctx = production_eval._build_graphrag_route_context('q', 1)
+             patch('apps.analytics.services.production_eval_service.logger'):
+            ctx = production_eval_service._build_graphrag_route_context('q', 1)
         assert m.call_args[0][1].username == 'system'
         assert ctx == ['c']
 
@@ -631,8 +580,8 @@ class TestRouteContexts:
         mock_qs.first.return_value = user
         with patch('apps.users.models.User.objects.filter', return_value=mock_qs), \
              patch('apps.graph.retriever.graphrag_search', side_effect=Exception('down')), \
-             patch('apps.analytics.production_eval.logger'):
-            assert production_eval._build_graphrag_route_context('q', 1) == []
+             patch('apps.analytics.services.production_eval_service.logger'):
+            assert production_eval_service._build_graphrag_route_context('q', 1) == []
 
     @pytest.mark.unit
     def test_graphrag_context_empty_result_returns_empty(self):
@@ -642,4 +591,4 @@ class TestRouteContexts:
         mock_qs.first.return_value = user
         with patch('apps.users.models.User.objects.filter', return_value=mock_qs), \
              patch('apps.graph.retriever.graphrag_search', return_value={'context': ' '}):
-            assert production_eval._build_graphrag_route_context('q', 1) == []
+            assert production_eval_service._build_graphrag_route_context('q', 1) == []

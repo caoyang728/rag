@@ -1,5 +1,5 @@
 """
-apps.analytics.low_score_analyzer 单元测试 —— 低分对话规则归因分析
+apps.analytics.services.low_score_service 单元测试 —— 低分对话规则归因分析
 
 覆盖范围（仅规则归因部分，不含真实 LLM 调用）：
 - _get_low_dimensions：阈值过滤 / 升序排序 / None 分处理 / reason 截断
@@ -18,7 +18,7 @@ import pytest
 from types import SimpleNamespace
 from unittest.mock import patch, MagicMock, ANY as unittest_mock_ANY
 
-from apps.analytics import low_score_analyzer
+from apps.analytics.services import low_score_service
 from apps.users.models import User
 from apps.knowledge.models import KnowledgeNode
 from apps.memory.models import Session
@@ -62,7 +62,7 @@ class TestGetLowDimensions:
             ('faithfulness', 0.4, 'bad'),
             ('bias', 0.5, '边界'),
         )
-        low = low_score_analyzer._get_low_dimensions(scores, threshold=0.5)
+        low = low_score_service._get_low_dimensions(scores, threshold=0.5)
         # 0.5 不 < 0.5，被排除；0.9 高于阈值被排除
         assert [d['dimension'] for d in low] == ['toxicity', 'faithfulness']
 
@@ -70,21 +70,21 @@ class TestGetLowDimensions:
     def test_none_score_treated_zero(self):
         """score 缺失/None 按 0 处理（低于任意正阈值 → 进入低分列表）"""
         scores = [{'dimension': 'clarity', 'score': None, 'reason': 'x'}]
-        low = low_score_analyzer._get_low_dimensions(scores, threshold=0.5)
+        low = low_score_service._get_low_dimensions(scores, threshold=0.5)
         assert low[0]['score'] == 0.0
 
     @pytest.mark.unit
     def test_reason_truncated_and_score_rounded(self):
         """reason 截断到 200 字符，score 保留 4 位小数"""
         scores = [{'dimension': 'clarity', 'score': 0.12345678, 'reason': '长' * 300}]
-        low = low_score_analyzer._get_low_dimensions(scores, threshold=0.5)
+        low = low_score_service._get_low_dimensions(scores, threshold=0.5)
         assert low[0]['score'] == 0.1235
         assert len(low[0]['reason']) == 200
 
     @pytest.mark.unit
     def test_empty_input(self):
         """空评分列表 → 空低分列表"""
-        assert low_score_analyzer._get_low_dimensions([], 0.5) == []
+        assert low_score_service._get_low_dimensions([], 0.5) == []
 
 
 # ============================================================================
@@ -96,14 +96,14 @@ class TestGetRetrievalSignal:
     @pytest.mark.unit
     def test_no_hits(self):
         """无检索命中 → 全零信号且 has_context=False"""
-        sig = low_score_analyzer._get_retrieval_signal(_qa_record(retrieval_scores=[]))
+        sig = low_score_service._get_retrieval_signal(_qa_record(retrieval_scores=[]))
         assert sig == {'hit_count': 0, 'max_rerank': 0.0, 'avg_rerank': 0.0, 'has_context': False}
 
     @pytest.mark.unit
     def test_rerank_field_used(self):
         """优先使用 rerank 字段计算 max/avg"""
         hits = [{'chunk_id': 1, 'rerank': 0.3}, {'chunk_id': 2, 'rerank': 0.7}]
-        sig = low_score_analyzer._get_retrieval_signal(_qa_record(retrieval_scores=hits))
+        sig = low_score_service._get_retrieval_signal(_qa_record(retrieval_scores=hits))
         assert sig['hit_count'] == 2
         assert sig['max_rerank'] == 0.7
         assert sig['avg_rerank'] == 0.5
@@ -113,7 +113,7 @@ class TestGetRetrievalSignal:
     def test_rerank_score_fallback(self):
         """旧数据只有 rerank_score 字段时兼容读取"""
         hits = [{'chunk_id': 1, 'rerank_score': 0.9}]
-        sig = low_score_analyzer._get_retrieval_signal(_qa_record(retrieval_scores=hits))
+        sig = low_score_service._get_retrieval_signal(_qa_record(retrieval_scores=hits))
         assert sig['max_rerank'] == 0.9
         assert sig['has_context'] is True
 
@@ -121,7 +121,7 @@ class TestGetRetrievalSignal:
     def test_invalid_rerank_values_skipped(self):
         """rerank 为非法值时跳过，不影响命中数统计"""
         hits = [{'chunk_id': 1, 'rerank': 'abc'}, {'chunk_id': 2, 'rerank': None}]
-        sig = low_score_analyzer._get_retrieval_signal(_qa_record(retrieval_scores=hits))
+        sig = low_score_service._get_retrieval_signal(_qa_record(retrieval_scores=hits))
         assert sig['hit_count'] == 2
         assert sig['max_rerank'] == 0.0
         # 有命中切片但无有效 rerank 分 → 仍视为有上下文
@@ -131,7 +131,7 @@ class TestGetRetrievalSignal:
     def test_all_rerank_values_invalid(self):
         """全部 rerank 值非法 → 无有效 rerank 分可统计，走空分兜底分支"""
         hits = [{'chunk_id': 1, 'rerank': 'abc'}, {'chunk_id': 2, 'rerank': [1, 2]}]
-        sig = low_score_analyzer._get_retrieval_signal(_qa_record(retrieval_scores=hits))
+        sig = low_score_service._get_retrieval_signal(_qa_record(retrieval_scores=hits))
         assert sig['hit_count'] == 2
         assert sig['max_rerank'] == 0.0
         assert sig['avg_rerank'] == 0.0
@@ -147,8 +147,8 @@ class TestRuleBasedRootCause:
 
     def _call(self, scores, retrieval_signal, answer_type='rag'):
         qa = _qa_record(answer_type=answer_type)
-        low = low_score_analyzer._get_low_dimensions(scores, 0.5)
-        return low_score_analyzer._rule_based_root_cause(
+        low = low_score_service._get_low_dimensions(scores, 0.5)
+        return low_score_service._rule_based_root_cause(
             scores, low, qa, retrieval_signal, 0.5)
 
     @pytest.mark.unit
@@ -252,26 +252,26 @@ class TestShouldTriggerLLM:
     def test_no_llm_for_safety_question_unknown(self):
         """safety/question_side/unknown 三类不走 LLM（模板告警即可）"""
         for cat in ('safety', 'question_side', 'unknown'):
-            assert low_score_analyzer._should_trigger_llm(cat, []) is False
+            assert low_score_service._should_trigger_llm(cat, []) is False
 
     @pytest.mark.unit
     def test_critical_dimension_triggers(self):
         """关键维度（faithfulness/context_relevancy/answer_relevancy/hallucination）低分触发 LLM"""
         low = [{'dimension': 'faithfulness', 'score': 0.2, 'reason': ''}]
-        assert low_score_analyzer._should_trigger_llm('generation_hallucination', low) is True
+        assert low_score_service._should_trigger_llm('generation_hallucination', low) is True
 
     @pytest.mark.unit
     def test_multi_dimension_triggers(self):
         """≥3 个低分维度触发 LLM（综合问题需深度分析）"""
         low = [{'dimension': d, 'score': 0.3, 'reason': ''}
                for d in ('clarity', 'conciseness', 'professionalism')]
-        assert low_score_analyzer._should_trigger_llm('generation_format', low) is True
+        assert low_score_service._should_trigger_llm('generation_format', low) is True
 
     @pytest.mark.unit
     def test_single_edge_dimension_no_llm(self):
         """单一边缘维度低分（clarity 等）仅模板建议"""
         low = [{'dimension': 'clarity', 'score': 0.3, 'reason': ''}]
-        assert low_score_analyzer._should_trigger_llm('generation_format', low) is False
+        assert low_score_service._should_trigger_llm('generation_format', low) is False
 
 
 # ============================================================================
@@ -283,23 +283,23 @@ class TestBuildTemplateSuggestions:
     @pytest.mark.unit
     def test_known_category(self):
         """已知分类返回 short_term + long_term 结构建议"""
-        suggestions = low_score_analyzer._build_template_suggestions('retrieval_recall')
+        suggestions = low_score_service._build_template_suggestions('retrieval_recall')
         assert len(suggestions) > 0
         assert all(s['type'] in ('short_term', 'long_term') and s['action'] for s in suggestions)
 
     @pytest.mark.unit
     def test_unknown_category_fallback(self):
         """未知分类回退到 unknown 模板（兜底建议）"""
-        suggestions = low_score_analyzer._build_template_suggestions('no_such_cat')
+        suggestions = low_score_service._build_template_suggestions('no_such_cat')
         assert len(suggestions) > 0
         assert any('规则' in s['action'] for s in suggestions)
 
     @pytest.mark.unit
     def test_category_to_layer_mapping(self):
         """归因分类到影响层级的映射完整"""
-        assert low_score_analyzer.CATEGORY_TO_LAYER['safety'] == 'safety'
-        assert low_score_analyzer.CATEGORY_TO_LAYER['retrieval_recall'] == 'retrieval'
-        assert low_score_analyzer.CATEGORY_TO_LAYER['generation_hallucination'] == 'generation'
+        assert low_score_service.CATEGORY_TO_LAYER['safety'] == 'safety'
+        assert low_score_service.CATEGORY_TO_LAYER['retrieval_recall'] == 'retrieval'
+        assert low_score_service.CATEGORY_TO_LAYER['generation_hallucination'] == 'generation'
 
 
 # ============================================================================
@@ -311,7 +311,7 @@ class TestParseLLMResponse:
     @pytest.mark.unit
     def test_plain_json(self):
         """标准 JSON 正常解析"""
-        result = low_score_analyzer._parse_llm_response(
+        result = low_score_service._parse_llm_response(
             '{"diagnosis": "召回不足", "short_term_actions": ["调大TopK"], '
             '"long_term_actions": ["补文档"]}')
         assert result['diagnosis'] == '召回不足'
@@ -322,31 +322,31 @@ class TestParseLLMResponse:
     def test_markdown_fenced_json(self):
         """LLM 用 ```json 代码块包裹时先剥离再解析"""
         content = '```json\n{"diagnosis": "幻觉", "short_term_actions": ["降温度"], "long_term_actions": []}\n```'
-        result = low_score_analyzer._parse_llm_response(content)
+        result = low_score_service._parse_llm_response(content)
         assert result['diagnosis'] == '幻觉'
 
     @pytest.mark.unit
     def test_invalid_json_returns_none(self):
         """非法 JSON → None（调用方降级模板建议）"""
-        assert low_score_analyzer._parse_llm_response('not json') is None
-        assert low_score_analyzer._parse_llm_response('') is None
+        assert low_score_service._parse_llm_response('not json') is None
+        assert low_score_service._parse_llm_response('') is None
 
     @pytest.mark.unit
     def test_non_dict_returns_none(self):
         """JSON 是数组等非 dict → None"""
-        assert low_score_analyzer._parse_llm_response('[1, 2, 3]') is None
+        assert low_score_service._parse_llm_response('[1, 2, 3]') is None
 
     @pytest.mark.unit
     def test_missing_fields_defaulted(self):
         """缺少字段时用空值兜底，不抛 KeyError"""
-        result = low_score_analyzer._parse_llm_response('{"diagnosis": "x"}')
+        result = low_score_service._parse_llm_response('{"diagnosis": "x"}')
         assert result['short_term_actions'] == []
         assert result['long_term_actions'] == []
 
     @pytest.mark.unit
     def test_action_count_and_length_limited(self):
         """短期建议最多 3 条、长期最多 2 条，每条截断 100 字"""
-        result = low_score_analyzer._parse_llm_response(
+        result = low_score_service._parse_llm_response(
             '{"diagnosis": "x", "short_term_actions": ["a", "b", "c", "d"], '
             '"long_term_actions": ["1", "2", "3"]}')
         assert len(result['short_term_actions']) == 3
@@ -363,9 +363,9 @@ class TestBuildLLMPrompt:
     def test_contexts_truncated_to_top3(self):
         """contexts 最多取前 3 片，每片截断 300 字"""
         qa = _qa_record(retrieval_scores=[{'chunk_id': i} for i in range(4)])
-        with patch('apps.analytics.production_eval._build_context_list',
+        with patch('apps.analytics.services.production_eval_service.build_context_list',
                    return_value=['c1', 'c2', 'c3', 'c4']):
-            messages = low_score_analyzer._build_llm_prompt(
+            messages = low_score_service._build_llm_prompt(
                 qa, [{'dimension': 'clarity', 'score': 0.3, 'reason': '模糊'}],
                 'generation_format', 'detail', _sig(hit_count=4, max_rerank=0.8, has_context=True))
         assert len(messages) == 2
@@ -401,9 +401,9 @@ class TestLLMGenerateSuggestions:
             '{"diagnosis": "召回不足", "short_term_actions": ["调大TopK"], '
             '"long_term_actions": ["补文档"]}')
         with patch('apps.llm.factory.get_llm', return_value=fake_llm) as mock_get, \
-             patch('apps.analytics.production_eval._build_context_list', return_value=[]):
+             patch('apps.analytics.services.production_eval_service.build_context_list', return_value=[]):
             diagnosis, suggestions, tokens, cost, latency = \
-                low_score_analyzer._llm_generate_suggestions(
+                low_score_service._llm_generate_suggestions(
                     qa, [{'dimension': 'clarity', 'score': 0.3, 'reason': '模糊'}],
                     'generation_format', 'detail',
                     _sig(hit_count=1, max_rerank=0.0, has_context=True), 'test-llm')
@@ -426,9 +426,9 @@ class TestLLMGenerateSuggestions:
         fake_llm.chat.return_value = self._llm_resp(
             '{"diagnosis": "x", "short_term_actions": [], "long_term_actions": []}')
         with patch('apps.llm.factory.get_llm', return_value=fake_llm), \
-             patch('apps.analytics.production_eval._build_context_list', return_value=[]):
+             patch('apps.analytics.services.production_eval_service.build_context_list', return_value=[]):
             diagnosis, suggestions, tokens, cost, latency = \
-                low_score_analyzer._llm_generate_suggestions(
+                low_score_service._llm_generate_suggestions(
                     qa, [{'dimension': 'clarity', 'score': 0.3, 'reason': '模糊'}],
                     'generation_format', 'detail', _sig(), 'test-llm')
         assert diagnosis == ''
@@ -443,7 +443,7 @@ class TestLLMGenerateSuggestions:
         with patch('apps.llm.factory.get_llm',
                    side_effect=RuntimeError('llm down')):
             diagnosis, suggestions, tokens, cost, latency = \
-                low_score_analyzer._llm_generate_suggestions(
+                low_score_service._llm_generate_suggestions(
                     qa, [{'dimension': 'clarity', 'score': 0.3, 'reason': '模糊'}],
                     'generation_format', 'detail', _sig(), 'test-llm')
         assert diagnosis == ''
@@ -480,11 +480,11 @@ class TestAnalyzeLowScoreQA:
     def test_no_scores_raises(self):
         """无评估分数 → 抛 ValueError（调用方捕获落 failed 状态）"""
         with pytest.raises(ValueError, match='无评估分数'):
-            low_score_analyzer.analyze_low_score_qa(self.qa.id, scores=[])
+            low_score_service.analyze_low_score_qa(self.qa.id, scores=[])
 
     def test_no_low_dims_returns_unknown(self):
         """无低分维度 → unknown 兜底，不触发任何建议"""
-        result = low_score_analyzer.analyze_low_score_qa(
+        result = low_score_service.analyze_low_score_qa(
             self.qa.id, scores=self._scores(('clarity', 0.9, 'ok')))
         assert result['category'] == 'unknown'
         assert result['method'] == 'rule'
@@ -493,8 +493,8 @@ class TestAnalyzeLowScoreQA:
 
     def test_rule_only_path(self):
         """边缘维度低分（clarity）→ 规则归因 + 模板建议，method='rule'"""
-        with patch('apps.analytics.low_score_analyzer._llm_generate_suggestions') as mock_llm:
-            result = low_score_analyzer.analyze_low_score_qa(
+        with patch('apps.analytics.services.low_score_service._llm_generate_suggestions') as mock_llm:
+            result = low_score_service.analyze_low_score_qa(
                 self.qa.id, scores=self._scores(('clarity', 0.3, '模糊')))
         assert result['category'] == 'generation_format'
         assert result['affected_layer'] == 'generation'
@@ -508,9 +508,9 @@ class TestAnalyzeLowScoreQA:
     def test_hybrid_path_with_llm(self):
         """关键维度低分（faithfulness + rerank 高）→ 触发 LLM，method='hybrid'"""
         fake_llm_result = ('生成层幻觉', [{'type': 'short_term', 'action': '加强约束'}], 100, 0.01, 50)
-        with patch('apps.analytics.low_score_analyzer._llm_generate_suggestions',
+        with patch('apps.analytics.services.low_score_service._llm_generate_suggestions',
                    return_value=fake_llm_result) as mock_llm:
-            result = low_score_analyzer.analyze_low_score_qa(
+            result = low_score_service.analyze_low_score_qa(
                 self.qa.id,
                 scores=self._scores(('faithfulness', 0.2, '幻觉')),
                 model='test-llm')
@@ -524,7 +524,7 @@ class TestAnalyzeLowScoreQA:
 
     def test_avg_score_computed(self):
         """avg_score 为所有维度（含高分）的均值"""
-        result = low_score_analyzer.analyze_low_score_qa(
+        result = low_score_service.analyze_low_score_qa(
             self.qa.id, scores=self._scores(
                 ('clarity', 0.3, '模糊'), ('professionalism', 0.9, 'ok')),
             model='test-llm')
@@ -538,8 +538,8 @@ class TestAnalyzeLowScoreQA:
             qa_record=self.qa, dimension='clarity', score=0.3, reason='模糊')
         MultiDimensionScore.objects.create(
             qa_record=self.qa, dimension='professionalism', score=0.9, reason='ok')
-        with patch('apps.analytics.low_score_analyzer._llm_generate_suggestions') as mock_llm:
-            result = low_score_analyzer.analyze_low_score_qa(self.qa.id)
+        with patch('apps.analytics.services.low_score_service._llm_generate_suggestions') as mock_llm:
+            result = low_score_service.analyze_low_score_qa(self.qa.id)
         assert result['category'] == 'generation_format'
         assert result['method'] == 'rule'
         assert [d['dimension'] for d in result['low_dimensions']] == ['clarity']

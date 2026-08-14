@@ -60,7 +60,7 @@ function checkEvalCache(qaId) {
 
 /* ============ 通用 ============ */
 
-// 组织架构筛选使用 common.js 的 OrgFilter 公共组件,3 个 Tab 各自初始化一对级联下拉。
+// 组织架构筛选使用 common.js 的 OrgFilter 公共组件,4 个 Tab 各自初始化一对级联下拉。
 // 页面初始化时并行发起(不阻塞 Tab 切换),数据就绪后自动填充下拉并绑定 change 事件。
 function initOrgFilters() {
 	OrgFilter.init('evalDept', 'evalTeam', () => loadDashboard());
@@ -201,7 +201,7 @@ function loadTabData(name) {
 	switch (name) {
 		case 'golden': loadDatasets(); break;
 		case 'retrieval': loadRetrievalTab(); break;
-		case 'answer': loadAnswerScores(); break;
+		case 'answer': loadDashboard(); break;
 		case 'doc': loadDocQuality(); break;
 		case 'coverage': loadCoverage(); break;
 		case 'feedback': break;
@@ -209,10 +209,6 @@ function loadTabData(name) {
 		case 'route': loadRouteAnalysis(); break;
 		case 'wiki': loadWikiQuality(); break;
 	}
-}
-
-function closeDialog(id) {
-	$('#' + id).style.display = 'none';
 }
 
 /** 根据分数返回语义化的 CSS 类名 */
@@ -243,6 +239,9 @@ async function loadDatasets() {
 		const total = datasetsCache.length;
 		const totalQuestions = datasetsCache.reduce((s, d) => s + d.question_count, 0);
 		$('#datasetSummary').textContent = `共 ${total} 个测试集，${totalQuestions} 个问题`;
+		// 同步低分回归说明条中的建议移除阈值(与后端配置一致,避免硬编码不一致)
+		const tipEl = $('#regressionSuggestPasses');
+		if (tipEl && data.suggest_remove_passes) tipEl.textContent = data.suggest_remove_passes;
 
 		const tbody = $('#datasetTableBody');
 		if (!datasetsCache.length) {
@@ -265,7 +264,7 @@ async function loadDatasets() {
 				<td><span class="tag">${escapeHtml(rootTypeLabel(d.root_type))}</span></td>
 				<td>${d.question_count}</td>
 				<td>${escapeHtml(d.version)}</td>
-				<td><span class="badge ${badgeClass(d.status)}">${statusLabel(d.status)}</span></td>
+				<td><span class="badge ${badgeClass(d.status)}">${escapeHtml(statusLabel(d.status))}</span></td>
 				<td>${formatDate(d.updated_at)}</td>
 				<td>
 					<button class="btn btn-sm" onclick="viewDataset(${d.id})">查看</button>
@@ -310,7 +309,7 @@ async function loadRootTypes() {
 }
 
 async function showCreateDatasetDialog() {
-	$('#createDialog').style.display = 'flex';
+	showModal('createDialog');
 	$('#dsName').value = '';
 	$('#dsDesc').value = '';
 	$('#dsVersion').value = 'v1';
@@ -336,7 +335,7 @@ async function createDataset() {
 	try {
 		await api.post('/api/v1/analytics/golden-datasets/', payload);
 		toast('创建成功', 'success');
-		closeDialog('createDialog');
+		closeModal('createDialog');
 		loadDatasets();
 	} catch (e) {
 		toast('创建失败: ' + e.message, 'error');
@@ -376,26 +375,26 @@ async function viewDataset(id) {
 			toast('此测试集暂无问题，可点击"批量导入"或"沉淀低分"添加', 'info');
 			return;
 		}
-		const lines = [
-			`测试集: ${data.name}（${data.dataset_type_label || '自定义'}）`,
-			`共 ${rows.length} 个问题:`, '',
-		];
-		rows.slice(0, 5).forEach((q, i) => {
-			const question = (q.question || '').substring(0, 50);
+		// 问题列表改用模态框展示(toast 3 秒即消失,不适合承载列表内容)
+		$('#dsDetailTitle').textContent = data.name;
+		$('#dsDetailMeta').textContent = `${data.dataset_type_label || '自定义'} · 共 ${rows.length} 个问题`;
+		$('#dsDetailBody').innerHTML = rows.map((q, i) => {
+			const question = escapeHtml((q.question || '').substring(0, 60));
+			let extra;
 			if (isRegression) {
 				// 低分回归:展示连续通过次数 + 最近评估时间 + 建议移除标记
 				const passInfo = `通过 ${q.pass_count || 0} 次`;
 				const evalTime = q.last_eval_at ? formatDate(q.last_eval_at) : '未评估';
 				const suggest = (q.pass_count || 0) >= suggestPasses ? ' ⭐建议移除' : '';
-				lines.push(`${i + 1}. ${question}... [${passInfo} | ${evalTime}]${suggest}`);
+				extra = `${passInfo} | ${evalTime}${suggest}`;
 			} else {
-				lines.push(`${i + 1}. ${question}... [难度:${q.difficulty}]`);
+				extra = `难度:${escapeHtml(q.difficulty)}`;
 			}
-		});
-		if (rows.length > 5) lines.push('', `... 还有 ${rows.length - 5} 个问题`);
-		toast(lines.join('\n'), 'info');
+			return `<div class="ds-item"><span class="ds-idx">${i + 1}.</span><span class="ds-question">${question}</span><span class="text-sub text-sm">${extra}</span></div>`;
+		}).join('');
+		showModal('datasetDetailDialog');
 	} catch (e) {
-		toast('加载失败', 'error');
+		toast('加载失败: ' + (e.message || e), 'error');
 	}
 }
 
@@ -407,7 +406,7 @@ function showImportDialog() {
 	const sel = $('#importDatasetSel');
 	sel.innerHTML = datasetsCache.map(d => `<option value="${d.id}">${escapeHtml(d.name)}</option>`).join('');
 	$('#importJson').value = '';
-	$('#importDialog').style.display = 'flex';
+	showModal('importDialog');
 }
 
 async function importQuestions() {
@@ -433,7 +432,7 @@ async function importQuestions() {
 	try {
 		const result = await api.postJson(`/api/v1/analytics/golden-datasets/${dsId}/import/`, { questions });
 		toast(`导入成功: 创建 ${result.created}, 更新 ${result.updated}`, 'success');
-		closeDialog('importDialog');
+		closeModal('importDialog');
 		loadDatasets();
 	} catch (e) {
 		toast('导入失败: ' + e.message, 'error');
@@ -501,6 +500,8 @@ function runRegressionEval() {
 }
 
 /* ============ 检索质量 ============ */
+// 请求序号守卫:快速切换测试集/刷新时,旧响应后返回不覆盖新状态
+let retrievalSeq = 0;
 function loadRetrievalTab() {
 	loadDatasetOptions('#retrievalDatasetSel');
 	loadRetrievalReports();
@@ -514,8 +515,16 @@ function loadDatasetOptions(selId) {
 }
 
 async function loadRetrievalReports() {
+	const mySeq = ++retrievalSeq;
+	// 测试集下拉联动:按选中测试集过滤历史报告(不选则展示全部)
+	const dsId = $('#retrievalDatasetSel')?.value || '';
+	const url = dsId
+		? '/api/v1/analytics/eval/retrieval-reports/?dataset_id=' + encodeURIComponent(dsId)
+		: '/api/v1/analytics/eval/retrieval-reports/';
 	try {
-		const data = await api.getJson('/api/v1/analytics/eval/retrieval-reports/');
+		const data = await api.getJson(url);
+		// 旧响应后返回时丢弃,避免覆盖新筛选条件下的数据
+		if (mySeq !== retrievalSeq) return;
 		const rows = data.rows || [];
 		const tbody = $('#retrievalReportBody');
 		if (!rows.length) {
@@ -597,10 +606,60 @@ async function runRetrievalEval() {
 	}
 }
 
-function drawGainChart(report) {
-	const svg = $('#gainChart');
-	if (!svg) return;
+/**
+ * 渲染 SVG 分组条形图(柱体入场动画 + 柱顶数值 + 柱底标签)
+ * 供检索增益分析与文档质量分布复用:两图仅刻度模式与布局参数不同
+ * @param {HTMLElement} svgEl 目标 SVG 容器
+ * @param {Array<{label:string,value:number,color:string}>} data 柱数据
+ * @param {Object} opts 布局选项:
+ *   width/height/padLeft/padBottom/padTop 画布尺寸与边距
+ *   startX 首柱起始 x、barGap 柱间距
+ *   maxMode 'value'=数值刻度(带 Y 轴百分比网格) / 'sum'=比例堆叠(无网格)
+ *   valueText 柱顶文字格式化回调(value)
+ */
+function renderSvgBarChart(svgEl, data, opts = {}) {
+	if (!svgEl) return;
+	// Number() 强制数值化，防止字段被污染为字符串导致 SVG 注入
+	const num = (v) => Number(v) || 0;
+	const w = opts.width, h = opts.height;
+	const padLeft = opts.padLeft || 0, padBottom = opts.padBottom || 30, padTop = opts.padTop || 10;
+	const startX = opts.startX !== undefined ? opts.startX : (padLeft || 20);
+	const barGap = opts.barGap || 10;
+	const barW = (w - padLeft - 20) / data.length - barGap;
+	const maxVal = opts.maxMode === 'sum'
+		? (data.reduce((s, d) => s + num(d.value), 0) || 1)
+		: Math.max(...data.map(d => num(d.value)), 0.1) * 1.2;
+	const valueText = opts.valueText || ((v) => String(v));
 
+	let html = '';
+	// Y轴网格仅数值刻度模式渲染(比例模式柱子按占比铺满,无需参考线)
+	if (opts.maxMode !== 'sum') {
+		for (let i = 0; i <= 4; i++) {
+			const y = padTop + (h - padTop - padBottom) * i / 4;
+			const val = (maxVal * (1 - i / 4)).toFixed(2);
+			html += `<line x1="${padLeft}" y1="${y}" x2="${w - 10}" y2="${y}" stroke="#e5e7eb" stroke-width="1"/>`;
+			html += `<text x="${padLeft - 5}" y="${y + 4}" text-anchor="end" fill="#6b7280" font-size="11">${(val * 100).toFixed(0)}%</text>`;
+		}
+	}
+
+	// 柱子 + 标签
+	data.forEach((d, i) => {
+		const value = num(d.value);
+		const x = startX + i * (barW + barGap);
+		const barH = (h - padTop - padBottom) * (value / maxVal);
+		const y = h - padBottom - barH;
+		html += `<rect x="${x}" y="${y}" width="${barW}" height="${barH}" fill="${d.color}" rx="3" opacity="0.85">
+			<animate attributeName="height" from="0" to="${barH}" dur="0.6s" fill="freeze"/>
+			<animate attributeName="y" from="${h - padBottom}" to="${y}" dur="0.6s" fill="freeze"/>
+		</rect>`;
+		html += `<text x="${x + barW / 2}" y="${y - 4}" text-anchor="middle" fill="#374151" font-size="11" font-weight="600">${valueText(value)}</text>`;
+		html += `<text x="${x + barW / 2}" y="${h - padBottom + 16}" text-anchor="middle" fill="#6b7280" font-size="12">${d.label}</text>`;
+	});
+
+	svgEl.innerHTML = html;
+}
+
+function drawGainChart(report) {
 	// Number() 强制数值化，防止后端字段被污染为字符串导致 SVG 注入
 	const num = (v) => Number(v) || 0;
 	const data = [
@@ -609,34 +668,11 @@ function drawGainChart(report) {
 		{ label: '混合', value: num(report.hybrid_recall_at_10), color: '#06b6d4' },
 		{ label: 'Rerank', value: num(report.rerank_recall_at_10), color: '#10b981' },
 	];
-
-	const w = 500, h = 200, padLeft = 40, padBottom = 30, padTop = 10;
-	const barW = (w - padLeft - 20) / data.length - 10;
-	const maxVal = Math.max(...data.map(d => d.value), 0.1) * 1.2;
-
-	let html = '';
-	// Y轴网格
-	for (let i = 0; i <= 4; i++) {
-		const y = padTop + (h - padTop - padBottom) * i / 4;
-		const val = (maxVal * (1 - i / 4)).toFixed(2);
-		html += `<line x1="${padLeft}" y1="${y}" x2="${w - 10}" y2="${y}" stroke="#e5e7eb" stroke-width="1"/>`;
-		html += `<text x="${padLeft - 5}" y="${y + 4}" text-anchor="end" fill="#6b7280" font-size="11">${(val * 100).toFixed(0)}%</text>`;
-	}
-
-	// 柱子 + 标签
-	data.forEach((d, i) => {
-		const x = padLeft + 10 + i * (barW + 10);
-		const barH = (h - padTop - padBottom) * (d.value / maxVal);
-		const y = h - padBottom - barH;
-		html += `<rect x="${x}" y="${y}" width="${barW}" height="${barH}" fill="${d.color}" rx="3" opacity="0.85">
-			<animate attributeName="height" from="0" to="${barH}" dur="0.6s" fill="freeze"/>
-			<animate attributeName="y" from="${h - padBottom}" to="${y}" dur="0.6s" fill="freeze"/>
-		</rect>`;
-		html += `<text x="${x + barW / 2}" y="${y - 4}" text-anchor="middle" fill="#374151" font-size="11" font-weight="600">${(d.value * 100).toFixed(1)}%</text>`;
-		html += `<text x="${x + barW / 2}" y="${h - padBottom + 16}" text-anchor="middle" fill="#6b7280" font-size="12">${d.label}</text>`;
+	renderSvgBarChart($('#gainChart'), data, {
+		width: 500, height: 200, padLeft: 40, padBottom: 30, padTop: 10,
+		startX: 50,
+		valueText: (v) => (v * 100).toFixed(1) + '%',
 	});
-
-	svg.innerHTML = html;
 }
 
 /* ============ 回答质量(评估看板) ============ */
@@ -686,11 +722,10 @@ function getVisibleDimsOrdered() {
 	return ALL_DIMS_ORDERED.filter(d => isDimVisible(d));
 }
 
-function loadAnswerScores() {
-	loadDashboard();
-}
-
+// 请求序号守卫:筛选/切换快速触发时,旧响应后返回不覆盖新状态
+let dashboardSeq = 0;
 async function loadDashboard() {
+	const mySeq = ++dashboardSeq;
 	const days = $('#evalDays') ? $('#evalDays').value : 7;
 	const deptId = OrgFilter.getDeptId('evalDept');
 	const teamId = OrgFilter.getTeamId('evalTeam');
@@ -706,6 +741,8 @@ async function loadDashboard() {
 			api.getJson('/api/v1/analytics/eval-dashboard/overview/' + qs),
 			api.getJson('/api/v1/analytics/eval-dashboard/low-score-qa/' + qs + '&limit=20'),
 		]);
+		// 旧响应后返回时丢弃,避免覆盖新筛选条件下的数据
+		if (mySeq !== dashboardSeq) return;
 		// 缓存展示维度白名单：后端返回 null/undefined 时保持 null（按全部展示兜底），
 		// 返回空数组时表示用户主动清空（不展示任何维度）
 		_displayDimensions = overview.display_dimensions ?? null;
@@ -715,6 +752,8 @@ async function loadDashboard() {
 		const scopeText = OrgFilter.describeScope(overview.dept_id ?? deptId, overview.team_id ?? teamId);
 		$('#evalSummary').textContent = `窗口 ${overview.days} 天 · 范围 ${scopeText} · 阈值 ${overview.threshold}`;
 	} catch (e) {
+		// 旧请求失败同样忽略,避免过期错误提示干扰当前筛选条件
+		if (mySeq !== dashboardSeq) return;
 		toast('看板加载失败: ' + (e.message || e), 'error');
 	}
 }
@@ -1016,12 +1055,17 @@ function renderLowScoreTable(rows, totalEvaluated) {
 	`).join('');
 }
 
+// 请求序号守卫:连续查看不同 QA 时,旧响应后返回不覆盖新弹窗内容
+let qaDetailSeq = 0;
 async function showQaDetail(qaId) {
+	const mySeq = ++qaDetailSeq;
 	$('#qaDetailTitle').textContent = `QA #${qaId}`;
 	$('#qaDetailBody').innerHTML = '<div class="text-sub">加载中...</div>';
-	document.getElementById('qaDetailDialog').style.display = 'flex';
+	showModal('qaDetailDialog');
 	try {
 		const data = await api.getJson('/api/v1/analytics/eval-dashboard/qa-detail/?qa_record_id=' + qaId);
+		// 旧响应后返回时丢弃
+		if (mySeq !== qaDetailSeq) return;
 		const qa = data.qa;
 		const scores = data.scores || [];
 
@@ -1036,7 +1080,7 @@ async function showQaDetail(qaId) {
 				<div><strong class="text-sub">回答:</strong> ${escapeHtml(qa.answer)}</div>
 			</div>
 			<div class="mb-16 text-sm text-sub">
-				耗时 ${qa.latency_total_ms}ms · Token ${qa.tokens_total} · 命中切片 ${qa.retrieval_hits.length} 个 · ${formatDate(qa.created_at)}
+				耗时 ${qa.latency_total_ms}ms · Token ${qa.tokens_total} · 命中切片 ${(qa.retrieval_hits || []).length} 个 · ${formatDate(qa.created_at)}
 			</div>
 		`;
 
@@ -1048,7 +1092,7 @@ async function showQaDetail(qaId) {
 			html += '<div class="text-sub">未选择任何展示维度</div>';
 		} else {
 			html += '<div><strong>评估明细</strong></div>';
-			Object.entries(visibleGroups).forEach(([key, g]) => {
+			Object.entries(visibleGroups).forEach(([, g]) => {
 				const groupScores = scores.filter(s => g.dims.includes(s.dimension));
 				if (!groupScores.length) return;
 				html += `<div class="mb-16">
@@ -1154,7 +1198,10 @@ async function pollManualEvalResult(qaId, evalBatchId, token) {
 }
 
 /* ============ 文档质量 ============ */
+// 请求序号守卫:部门/团队筛选快速切换时,旧响应后返回不覆盖新状态
+let docQualitySeq = 0;
 async function loadDocQuality() {
+	const mySeq = ++docQualitySeq;
 	try {
 		const deptId = OrgFilter.getDeptId('docDept');
 		const teamId = OrgFilter.getTeamId('docTeam');
@@ -1167,6 +1214,8 @@ async function loadDocQuality() {
 			api.getJson(`/api/v1/analytics/doc-quality/reports/${qs}`),
 			api.getJson(`/api/v1/analytics/doc-quality/${qs}`),
 		]);
+		// 旧响应后返回时丢弃,避免覆盖新筛选条件下的数据
+		if (mySeq !== docQualitySeq) return;
 		const total = summary.total_docs || 0;
 		const avgScore = summary.avg_score || 0;
 		const dist = summary.score_distribution || {};
@@ -1189,7 +1238,7 @@ async function loadDocQuality() {
 		$('#commonIssues').innerHTML = commonIssues.length
 			? commonIssues.map(i => `
 				<div class="issue-item">
-					<span class="issue-icon ${sevClass(i.severity)}">${(i.type || '?')[0]}</span>
+					<span class="issue-icon ${sevClass(i.severity)}">${escapeHtml((i.type || '?')[0])}</span>
 					<div class="issue-content">${escapeHtml(i.type || '未知问题')}</div>
 					<span class="issue-count">${i.count || 0} 次</span>
 				</div>`).join('')
@@ -1225,13 +1274,13 @@ async function loadDocQuality() {
 			</tr>
 		`).join('');
 	} catch (e) {
+		// 旧请求失败同样忽略,避免过期错误提示干扰当前筛选条件
+		if (mySeq !== docQualitySeq) return;
 		toast('加载失败', 'error');
 	}
 }
 
 function drawDocDistChart(dist) {
-	const svg = $('#docDistChart');
-	if (!svg) return;
 	// Number() 强制数值化，防止 dist 字段被污染为字符串导致 SVG 注入
 	const num = (v) => Number(v) || 0;
 	const data = [
@@ -1241,24 +1290,14 @@ function drawDocDistChart(dist) {
 		{ label: '待改进', value: num(dist.poor), color: '#ef4444' },
 	];
 	// 紧凑布局:h=140、padTop=20、padBottom=24(柱顶文字最小 y=16,顶部边界 5>0 不被裁剪)
-	const w = 400, h = 140, padBottom = 24, padTop = 20;
-	const total = data.reduce((s, d) => s + d.value, 0) || 1;
-	const barW = (w - 40) / data.length - 10;
-
-	let html = '';
-	data.forEach((d, i) => {
-		const x = 20 + i * (barW + 10);
-		const barH = (h - padTop - padBottom) * (d.value / total);
-		const y = h - padBottom - barH;
-		html += `<rect x="${x}" y="${y}" width="${barW}" height="${barH}" fill="${d.color}" rx="3" opacity="0.85">
-			<animate attributeName="height" from="0" to="${barH}" dur="0.5s" fill="freeze"/>
-			<animate attributeName="y" from="${h - padBottom}" to="${y}" dur="0.5s" fill="freeze"/>
-		</rect>`;
-		const pct = total > 0 ? (d.value / total * 100).toFixed(0) : 0;
-		html += `<text x="${x + barW / 2}" y="${y - 4}" text-anchor="middle" fill="#374151" font-size="11" font-weight="600">${d.value} (${pct}%)</text>`;
-		html += `<text x="${x + barW / 2}" y="${h - padBottom + 16}" text-anchor="middle" fill="#6b7280" font-size="12">${d.label}</text>`;
+	const total = data.reduce((s, d) => s + d.value, 0);
+	renderSvgBarChart($('#docDistChart'), data, {
+		width: 400, height: 140, padLeft: 20, padBottom: 24, padTop: 20,
+		startX: 20,
+		maxMode: 'sum',
+		// 比例模式下柱顶显示"数量 (占比%)"
+		valueText: (v) => `${v} (${total > 0 ? (v / total * 100).toFixed(0) : 0}%)`,
 	});
-	svg.innerHTML = html;
 }
 
 async function runBatchDocEval() {
@@ -1274,10 +1313,15 @@ async function runBatchDocEval() {
 }
 
 /* ============ 覆盖率 ============ */
+// 请求序号守卫:天数筛选快速切换时,旧响应后返回不覆盖新状态
+let coverageSeq = 0;
 async function loadCoverage() {
+	const mySeq = ++coverageSeq;
 	const days = $('#coverageDays').value;
 	try {
 		const data = await api.getJson(`/api/v1/analytics/coverage/?days=${days}`);
+		// 旧响应后返回时丢弃,避免覆盖新筛选条件下的数据
+		if (mySeq !== coverageSeq) return;
 		const cov = data.coverage || {};
 		const gaps = data.gaps || [];
 		const dup = data.duplicates || {};
@@ -1348,6 +1392,8 @@ async function loadCoverage() {
 		// 加载历史报告列表
 		loadCoverageReports();
 	} catch (e) {
+		// 旧请求失败同样忽略,避免过期错误提示干扰当前筛选条件
+		if (mySeq !== coverageSeq) return;
 		toast('加载失败', 'error');
 	}
 }
@@ -1365,12 +1411,17 @@ async function generateCoverage() {
 	}
 }
 
+// 请求序号守卫:列表快速刷新时,旧响应后返回不覆盖新状态
+let coverageReportSeq = 0;
 /** 加载历史覆盖率报告列表 */
 async function loadCoverageReports() {
+	const mySeq = ++coverageReportSeq;
 	const tbody = $('#coverageReportBody');
 	if (!tbody) return;
 	try {
 		const data = await api.getJson('/api/v1/analytics/coverage/reports/');
+		// 旧响应后返回时丢弃,避免覆盖新状态
+		if (mySeq !== coverageReportSeq) return;
 		const rows = data.rows || [];
 		if (!rows.length) {
 			tbody.innerHTML = `
@@ -1496,7 +1547,7 @@ async function runFeedbackLoop() {
 			<tr>
 				<td>${f.feedback_id}</td>
 				<td title="${escapeHtml(f.question || '')}">${escapeHtml((f.question || '').substring(0, 40))}</td>
-				<td>${scorePill(0, () => String(f.rating))}</td>
+				<td><span class="score-pill score-low">${escapeHtml(String(f.rating))}</span></td>
 				<td>${(f.tags || []).map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('')}</td>
 				<td>${(f.chunk_ids || []).map(cid => `<span class="tag">#${cid}</span>`).join('') || '-'}</td>
 				<td class="fb-suggestion"><strong>💡 建议:</strong> ${escapeHtml(f.suggestion || '')}</td>
@@ -1547,7 +1598,10 @@ const ATTR_LAYER_LABEL = {
 
 // 加载低分归因列表 + 统计(切换 Tab / 筛选 / 刷新时调用)
 // 并行请求列表与统计两个接口,减少串行等待
+// 请求序号守卫:筛选/刷新快速触发时,旧响应后返回不覆盖新状态
+let attrSeq = 0;
 async function loadAttribution() {
+	const mySeq = ++attrSeq;
 	const days = $('#attrDays') ? $('#attrDays').value : '7';
 	const category = $('#attrCategory') ? $('#attrCategory').value : '';
 	const layer = $('#attrLayer') ? $('#attrLayer').value : '';
@@ -1576,18 +1630,23 @@ async function loadAttribution() {
 			api.getJson(`/api/v1/analytics/low-score-analysis/?${listParams.toString()}`),
 			api.getJson(`/api/v1/analytics/low-score-analysis/stats/?${statsParams.toString()}`),
 		]);
+		// 旧响应后返回时丢弃,避免覆盖新筛选条件下的数据
+		if (mySeq !== attrSeq) return;
 		renderAttrStats(statsData);
 		renderAttrList(listData);
-		// summary 行(如有)显示组织范围
+		// summary 行统一展示列表条数 + 组织范围(条数取自列表响应,范围取自 stats 兜底)
 		const scopeEl = $('#attrSummary');
 		if (scopeEl) {
+			const rows = listData.rows || [];
 			const scopeText = OrgFilter.describeScope(
 				statsData.dept_id ?? deptId,
 				statsData.team_id ?? teamId,
 			);
-			scopeEl.textContent = `范围 ${scopeText} · 窗口 ${statsData.days || days} 天`;
+			scopeEl.textContent = `共 ${rows.length} 条(最近 ${listData.days || days} 天) · 范围 ${scopeText}`;
 		}
 	} catch (e) {
+		// 旧请求失败同样忽略,避免过期错误提示干扰当前筛选条件
+		if (mySeq !== attrSeq) return;
 		toast('加载归因数据失败: ' + (e.message || e), 'error');
 		$('#attrTableBody').innerHTML = `<tr><td colspan="11" class="text-center text-sub">加载失败</td></tr>`;
 	}
@@ -1632,10 +1691,9 @@ function renderAttrStats(data) {
 }
 
 // 渲染归因列表表格
+// 注意:summary 行由 loadAttribution 统一写入(条数 + 组织范围),此处只负责表格
 function renderAttrList(data) {
 	const rows = data.rows || [];
-	const days = data.days || 7;
-	$('#attrSummary').textContent = `共 ${rows.length} 条(最近 ${days} 天)`;
 
 	const tbody = $('#attrTableBody');
 	if (!rows.length) {
@@ -1674,17 +1732,12 @@ function renderAttrList(data) {
 	}).join('');
 }
 
-// 手动触发单条 QA 归因(异步,派发后立即返回,前端不阻塞轮询)
+// 派发单条 QA 归因的公共逻辑(异步,提交后立即返回,前端不做轮询)
 // 归因任务通常 2~10s 完成(规则归因秒级,LLM 归因取决于模型响应),
-// 这里不做轮询,只提示用户稍后刷新,避免复杂的状态机
-async function runManualAttribution() {
-	const qaId = $('#attrManualQaId').value.trim();
-	if (!qaId) { toast('请输入 QA 记录 ID', 'error'); return; }
-
-	const btn = $('#btnRunManualAttr');
+// 成功提示后 3 秒自动刷新列表;按钮禁用态由调用方经 opts.btn 传入控制
+async function dispatchAttribution(qaId, opts = {}) {
+	const btn = opts.btn;
 	if (btn) { btn.disabled = true; }
-	toast('归因已派发,规则归因秒级完成,LLM 归因约 10~30s,请稍后刷新查看', 'info');
-
 	try {
 		const resp = await api.postJson('/api/v1/analytics/low-score-analysis/run/', {
 			qa_record_id: parseInt(qaId),
@@ -1692,7 +1745,7 @@ async function runManualAttribution() {
 		if (!resp || !resp.queued) {
 			throw new Error(resp?.detail || '派发归因失败');
 		}
-		toast('归因已派发,3 秒后自动刷新列表', 'success');
+		toast('归因已派发,3 秒后自动刷新', 'success');
 		// 3 秒后自动刷新(规则归因通常已完成,LLM 归因可能仍在跑)
 		setTimeout(() => loadAttribution(), 3000);
 	} catch (e) {
@@ -1702,31 +1755,33 @@ async function runManualAttribution() {
 	}
 }
 
-// 列表"重跑"按钮:复用 run 接口
-async function rerunAttr(qaId) {
-	toast('正在重新归因...', 'info');
-	try {
-		const resp = await api.postJson('/api/v1/analytics/low-score-analysis/run/', {
-			qa_record_id: qaId,
-		});
-		if (!resp || !resp.queued) {
-			throw new Error(resp?.detail || '派发归因失败');
-		}
-		toast('归因已派发,3 秒后自动刷新', 'success');
-		setTimeout(() => loadAttribution(), 3000);
-	} catch (e) {
-		toast('归因失败: ' + (e.message || e), 'error');
-	}
+// 手动输入 QA ID 派发归因(带输入校验与按钮禁用提示)
+async function runManualAttribution() {
+	const qaId = $('#attrManualQaId').value.trim();
+	if (!qaId) { toast('请输入 QA 记录 ID', 'error'); return; }
+	toast('归因已派发,规则归因秒级完成,LLM 归因约 10~30s,请稍后刷新查看', 'info');
+	await dispatchAttribution(qaId, { btn: $('#btnRunManualAttr') });
 }
 
+// 列表"重跑"按钮:复用公共派发逻辑
+async function rerunAttr(qaId) {
+	toast('正在重新归因...', 'info');
+	await dispatchAttribution(qaId);
+}
+
+// 请求序号守卫:连续查看不同归因时,旧响应后返回不覆盖新弹窗内容
+let attrDetailSeq = 0;
 // 显示归因详情弹窗(完整对话 + 归因结论 + 低分维度 + 优化建议)
 async function showAttrDetail(qaId) {
+	const mySeq = ++attrDetailSeq;
 	$('#attrDetailTitle').textContent = `#${qaId}`;
 	$('#attrDetailBody').innerHTML = '<div class="text-sub">加载中...</div>';
-	document.getElementById('attrDetailDialog').style.display = 'flex';
+	showModal('attrDetailDialog');
 
 	try {
 		const data = await api.getJson(`/api/v1/analytics/low-score-analysis/detail/?qa_record_id=${qaId}`);
+		// 旧响应后返回时丢弃
+		if (mySeq !== attrDetailSeq) return;
 
 		const catLabel = data.category_label || ATTR_CATEGORY_LABEL[data.root_cause_category] || data.root_cause_category;
 		const layerLabel = data.layer_label || ATTR_LAYER_LABEL[data.affected_layer] || data.affected_layer;
@@ -1827,7 +1882,10 @@ const ROUTE_LABEL = {
 // 每层固定配色(堆叠条/命中分布用),顺序与 ROUTE_ORDER 一致
 const ROUTE_COLOR = ['#10b981', '#3b82f6', '#8b5cf6', '#f59e0b'];
 
+// 请求序号守卫:筛选/刷新快速触发时,旧响应后返回不覆盖新状态
+let routeSeq = 0;
 async function loadRouteAnalysis() {
+	const mySeq = ++routeSeq;
 	try {
 		const days = $('#routeDays') ? $('#routeDays').value : 7;
 		const deptId = OrgFilter.getDeptId('routeDept');
@@ -1839,6 +1897,8 @@ async function loadRouteAnalysis() {
 		const qs = '?' + params.toString();
 
 		const data = await api.getJson('/api/v1/analytics/eval-dashboard/route-analysis/' + qs);
+		// 旧响应后返回时丢弃,避免覆盖新筛选条件下的数据
+		if (mySeq !== routeSeq) return;
 		renderRouteKpi(data);
 		renderRouteCoverage(data);
 		renderRouteTrend(data);
@@ -1846,6 +1906,8 @@ async function loadRouteAnalysis() {
 		const scopeText = OrgFilter.describeScope(data.dept_id ?? deptId, data.team_id ?? teamId);
 		$('#routeSummary').textContent = `窗口 ${data.days} 天 · 范围 ${scopeText} · 路由请求 ${data.total || 0}`;
 	} catch (e) {
+		// 旧请求失败同样忽略,避免过期错误提示干扰当前筛选条件
+		if (mySeq !== routeSeq) return;
 		toast('路由分析加载失败: ' + (e.message || e), 'error');
 	}
 }
@@ -1870,15 +1932,19 @@ function renderRouteCoverage(data) {
 		tbody.innerHTML = `<tr><td colspan="6" class="text-center text-sub">暂无数据,请先在上方点击"聚合路由数据"(或等待每日定时聚合)</td></tr>`;
 		return;
 	}
-	tbody.innerHTML = rows.map(r => `
-		<tr>
+	tbody.innerHTML = rows.map(r => {
+		// 平均置信度可能为 null(该层暂无聚合数据),空值显示 -- 避免 NaN%
+		const conf = Number(r.avg_confidence);
+		const confCell = isFinite(conf) ? (conf * 100).toFixed(1) + '%' : '<span class="text-sub">--</span>';
+		return `<tr>
 			<td><span class="tag" style="background:${ROUTE_COLOR[ROUTE_ORDER.indexOf(r.route)] || '#6b7280'}22;color:${ROUTE_COLOR[ROUTE_ORDER.indexOf(r.route)] || '#6b7280'}">${escapeHtml(ROUTE_LABEL[r.route] || r.route)}</span></td>
 			<td>${r.count}</td>
 			<td>${fmtPct(r.share)}</td>
-			<td>${(r.avg_confidence * 100).toFixed(1)}%</td>
+			<td>${confCell}</td>
 			<td>${r.avg_latency_ms}</td>
 			<td>${r.avg_answer_quality !== null && r.avg_answer_quality !== undefined && r.avg_answer_quality > 0 ? scorePill(r.avg_answer_quality, fmtPct) : '<span class="text-sub">--</span>'}</td>
-		</tr>`).join('');
+		</tr>`;
+	}).join('');
 }
 
 // 按天命中趋势:纯 div 堆叠条,避免引入图表库依赖
@@ -1952,7 +2018,10 @@ async function runRouteAggregate() {
 
 const WIKI_DIM_LABEL = { faithfulness: '忠实度', completeness: '完整性' };
 
+// 请求序号守卫:筛选快速切换时,旧响应后返回不覆盖新状态
+let wikiSeq = 0;
 async function loadWikiQuality() {
+	const mySeq = ++wikiSeq;
 	try {
 		const days = $('#wikiDays').value;
 		const dim = $('#wikiDim').value;
@@ -1964,8 +2033,12 @@ async function loadWikiQuality() {
 		const qs = '?' + params.toString();
 
 		const data = await api.getJson('/api/v1/analytics/wiki-quality/' + qs);
+		// 旧响应后返回时丢弃,避免覆盖新筛选条件下的数据
+		if (mySeq !== wikiSeq) return;
 		renderWikiQuality(data);
 	} catch (e) {
+		// 旧请求失败同样忽略,避免过期错误提示干扰当前筛选条件
+		if (mySeq !== wikiSeq) return;
 		toast('Wiki 质量加载失败: ' + (e.message || e), 'error');
 	}
 }
@@ -2009,17 +2082,22 @@ function renderWikiQuality(data) {
 	}).join('');
 }
 
+// 请求序号守卫:连续查看不同页面时,旧响应后返回不覆盖新弹窗内容
+let wikiDetailSeq = 0;
 // 展示单页两个维度的评估理由/错误信息
 async function showWikiDetail(pageId, title) {
+	const mySeq = ++wikiDetailSeq;
 	$('#wikiDetailTitle').textContent = decodeURIComponent(title);
 	$('#wikiDetailBody').innerHTML = '<div class="text-sub">加载中...</div>';
-	$('#wikiDetailDialog').style.display = 'flex';
+	showModal('wikiDetailDialog');
 	try {
 		// 详情按 page_id 精确查询该页两个维度的完整评估记录
 		const params = new URLSearchParams();
 		params.set('days', '90');
 		params.set('page_id', pageId);
 		const data = await api.getJson('/api/v1/analytics/wiki-quality/?' + params.toString());
+		// 旧响应后返回时丢弃
+		if (mySeq !== wikiDetailSeq) return;
 		const row = (data.rows || [])[0];
 		if (!row) {
 			$('#wikiDetailBody').innerHTML = '<div class="text-sub">未找到该页面的评估记录</div>';
@@ -2064,8 +2142,13 @@ function fmtPct(v) {
 
 /* ============ 初始化 ============ */
 document.addEventListener('DOMContentLoaded', () => {
-	// 初始化 3 个 Tab 的组织架构级联下拉(内部异步加载数据,不阻塞 Tab 切换)
+	// 初始化 4 个 Tab 的组织架构级联下拉(内部异步加载数据,不阻塞 Tab 切换)
 	initOrgFilters();
+	// 手动评估期间按钮会被禁用,用户修改 QA ID 时自动恢复可点击(原为 HTML 内联 handler,统一收敛到 JS)
+	$('#manualQaId')?.addEventListener('input', () => {
+		const btn = $('#btnRunManualEval');
+		if (btn) btn.disabled = false;
+	});
 	// 默认落在「回答质量」(生产监控最高频),离线评估/治理类 Tab 按需切换
 	switchEvalTab('answer');
 	// 首次计算 Tab 折叠(窗口过窄时收进「⋯ 更多」),窗口尺寸变化时重算

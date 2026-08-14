@@ -13,17 +13,17 @@ Ragas 全自动评估命令
 
   # 复用已生成的测试集,跳过生成步骤(--testset 指向 JSON 文件)
   docker compose exec django python manage.py ragas_eval --skip-generate \
-      --testset eval_reports/testset_20260802_120000_abc123.json
+      --testset scripts/tmp/eval_reports/testset_20260802_120000_abc123.json
 
 前置条件:
   1. pip install -r requirements-eval.txt
   2. 知识库中已有 status=done 的文档
   3. LLM_API_KEY / Embedding 服务可用
 
-输出:
-  eval_reports/testset_<id>.json   测试集(可复用、可人工抽检)
-  eval_reports/report_<id>.json    评估明细(JSON)
-  eval_reports/report_<id>.md      评估摘要(Markdown)
+输出(临时产物统一放 scripts/tmp 目录):
+  scripts/tmp/eval_reports/testset_<id>.json   测试集(可复用、可人工抽检)
+  scripts/tmp/eval_reports/report_<id>.json    评估明细(JSON)
+  scripts/tmp/eval_reports/report_<id>.md      评估摘要(Markdown)
 """
 import os
 
@@ -52,8 +52,8 @@ class Command(BaseCommand):
             help='评估/生成用 LLM 模型(默认项目 LLM_BASE_MODEL)',
         )
         parser.add_argument(
-            '--output-dir', type=str, default='eval_reports',
-            help='报告输出目录(默认 eval_reports)',
+            '--output-dir', type=str, default='scripts/tmp/eval_reports',
+            help='报告输出目录(默认 scripts/tmp/eval_reports,临时产物统一放 scripts/tmp)',
         )
         parser.add_argument(
             '--skip-generate', action='store_true',
@@ -66,7 +66,7 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         # 延迟导入,确保 Django 环境已就绪
-        from apps.analytics.ragas_pipeline import run_full_pipeline, load_testset
+        from apps.analytics.services.ragas_service import run_full_pipeline, load_testset
 
         testset_size = options['testset_size']
         limit_docs = options['limit_docs']

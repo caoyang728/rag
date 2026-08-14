@@ -1,5 +1,5 @@
 """
-apps.graph.tasks 测试 —— 图谱 Celery 任务（按节点防抖合并）
+apps.graph.tasks 测试 —— 图谱 Celery 任务（按节点防抖合并 + 续传 + 自愈）
 
 覆盖范围：
 - graph_extract_task(node_id)：按节点批量处理待抽取文档
@@ -7,6 +7,9 @@ apps.graph.tasks 测试 —— 图谱 Celery 任务（按节点防抖合并）
   - 配置关闭 → 该节点待处理文档标记 skipped，不抽取
   - 收集 graph_status='pending' 的已完成文档，统一标记 extracting 后逐文档
     清理+抽取，结果回写 done / failed
+  - 续传：有匹配版本进度时跳过清理、从进度切片继续
+  - 预算耗尽未完成：保存进度、文档回退 pending、续派任务
+- graph_recover_task / _recover_stuck_graph_docs：自愈卡死的 extracting / pending
 - community_detection_task：获取 LLM 并运行社区检测
 
 DB 集成（django_db）：任务内部直接 ORM 查询节点下文档并回写状态，
@@ -19,6 +22,9 @@ from unittest.mock import patch
 
 from apps.knowledge.models import KnowledgeNode, Document, VisibilityLevel
 from apps.users.models import User, Department, Team
+
+# 单文档抽取的通用 mock 返回值（completed=True 表示全部切片处理完）
+_DONE_RESULT = {'completed': True, 'processed': 1, 'next_chunk': 1}
 
 
 def _make_node():
@@ -76,21 +82,48 @@ class TestGraphExtractTask:
         self.doc_pending_2 = _make_doc(self.node, self.owner, '待抽取2', graph_status='pending')
         self.doc_done = _make_doc(self.node, self.owner, '已完成', graph_status='done')
 
+    def _run_task(self, **patches):
+        """执行 graph_extract_task 的公共入口：注入基础 mock 并返回任务结果
+
+        patches 为额外 mock 的 name: return_value/side_effect 映射。
+        """
+        from apps.graph.tasks import graph_extract_task
+        patchers = [
+            patch('apps.graph.sync._graph_enabled', return_value=True),
+            patch('apps.graph.tasks._get_doc_progress', return_value=None),
+            patch('apps.graph.sync._clean_graph_data'),
+            patch('apps.graph.extractor.batch_extract_for_document',
+                  return_value=_DONE_RESULT),
+            patch('apps.graph.tasks.graph_extract_task.delay'),
+        ]
+        for name, value in patches.items():
+            patchers.append(patch(name, **value) if isinstance(value, dict) else patch(name, value))
+        for p in patchers:
+            p.start()
+        try:
+            return graph_extract_task(self.node.id)
+        finally:
+            for p in patchers:
+                p.stop()
+
     def test_batches_pending_docs_and_writes_done(self):
         """应批量处理节点下 pending 文档并回写 done，跳过已 done 文档"""
         from apps.graph.tasks import graph_extract_task
 
         with patch('apps.graph.sync._graph_enabled', return_value=True), \
+                patch('apps.graph.tasks._get_doc_progress', return_value=None), \
                 patch('apps.graph.sync._clean_graph_data') as mock_clean, \
-                patch('apps.graph.extractor.batch_extract_for_document') as mock_batch:
+                patch('apps.graph.extractor.batch_extract_for_document',
+                      return_value=_DONE_RESULT) as mock_batch, \
+                patch('apps.graph.tasks.graph_extract_task.delay'):
             result = graph_extract_task(self.node.id)
 
         assert result == {'ok': True, 'processed': 2, 'failed': 0, 'total': 2, 'timed_out': False}
-        # 逐文档清理 + 抽取
+        # 无进度 → 逐文档清理 + 从 0 抽取
         assert mock_clean.call_count == 2
         assert mock_batch.call_count == 2
-        mock_batch.assert_any_call(self.doc_pending_1.id)
-        mock_batch.assert_any_call(self.doc_pending_2.id)
+        start_chunks = [c.kwargs.get('start_chunk') for c in mock_batch.call_args_list]
+        assert start_chunks == [0, 0]
         # 状态回写：pending → done，已 done 的文档不受影响
         self.doc_pending_1.refresh_from_db()
         self.doc_pending_2.refresh_from_db()
@@ -104,10 +137,7 @@ class TestGraphExtractTask:
         from apps.graph.tasks import graph_extract_task
         KnowledgeNode.objects.filter(id=self.node.id).update(graph_pending=True)
 
-        with patch('apps.graph.sync._graph_enabled', return_value=True), \
-                patch('apps.graph.sync._clean_graph_data'), \
-                patch('apps.graph.extractor.batch_extract_for_document'):
-            graph_extract_task(self.node.id)
+        self._run_task()
 
         self.node.refresh_from_db()
         assert self.node.graph_pending is False
@@ -117,14 +147,18 @@ class TestGraphExtractTask:
         from apps.graph.tasks import graph_extract_task
 
         with patch('apps.graph.sync._graph_enabled', return_value=True), \
+                patch('apps.graph.tasks._get_doc_progress', return_value=None), \
                 patch('apps.graph.sync._clean_graph_data') as mock_clean, \
                 patch('apps.graph.extractor.batch_extract_for_document',
-                      side_effect=[RuntimeError('llm down'), None]) as mock_batch:
+                      side_effect=[RuntimeError('llm down'), _DONE_RESULT]) as mock_batch, \
+                patch('apps.graph.tasks.graph_extract_task.delay'):
             result = graph_extract_task(self.node.id)
 
         assert result['processed'] == 1
         assert result['failed'] == 1
         assert result['total'] == 2
+        assert mock_clean.call_count == 2
+        assert mock_batch.call_count == 2
         self.doc_pending_1.refresh_from_db()
         self.doc_pending_2.refresh_from_db()
         assert self.doc_pending_1.graph_status == 'failed'
@@ -157,13 +191,166 @@ class TestGraphExtractTask:
             graph_status='done')
 
         with patch('apps.graph.sync._graph_enabled', return_value=True), \
+                patch('apps.graph.tasks._get_doc_progress', return_value=None), \
                 patch('apps.graph.sync._clean_graph_data') as mock_clean, \
-                patch('apps.graph.extractor.batch_extract_for_document') as mock_batch:
+                patch('apps.graph.extractor.batch_extract_for_document') as mock_batch, \
+                patch('apps.graph.tasks.graph_extract_task.delay'):
             result = graph_extract_task(self.node.id)
 
         assert result == {'ok': True, 'processed': 0}
         mock_clean.assert_not_called()
         mock_batch.assert_not_called()
+
+    def test_resumes_from_saved_progress_without_clean(self):
+        """存在匹配版本的进度时，应从进度切片续传且不清理旧图谱数据"""
+        from apps.graph.tasks import graph_extract_task
+
+        with patch('apps.graph.sync._graph_enabled', return_value=True), \
+                patch('apps.graph.tasks._get_doc_progress',
+                      return_value={'chunk_index': 3, 'version': 1}) as mock_progress, \
+                patch('apps.graph.sync._clean_graph_data') as mock_clean, \
+                patch('apps.graph.extractor.batch_extract_for_document',
+                      return_value=_DONE_RESULT) as mock_batch, \
+                patch('apps.graph.tasks.graph_extract_task.delay'):
+            result = graph_extract_task(self.node.id)
+
+        assert result['processed'] == 2
+        assert result['timed_out'] is False
+        # 有进度 → 不清理旧数据，直接从进度续传
+        mock_clean.assert_not_called()
+        assert mock_progress.call_count == 2
+        start_chunks = [c.kwargs.get('start_chunk') for c in mock_batch.call_args_list]
+        assert start_chunks == [3, 3]
+
+    def test_resumes_from_start_when_version_changed(self):
+        """进度版本与文档版本不匹配时，应清理旧数据并从 0 重新抽取（版本升级）"""
+        from apps.graph.tasks import graph_extract_task
+        Document.objects.filter(id=self.doc_pending_1.id).update(version=2)
+
+        with patch('apps.graph.sync._graph_enabled', return_value=True), \
+                patch('apps.graph.tasks._get_doc_progress',
+                      return_value={'chunk_index': 5, 'version': 1}), \
+                patch('apps.graph.sync._clean_graph_data') as mock_clean, \
+                patch('apps.graph.extractor.batch_extract_for_document',
+                      return_value=_DONE_RESULT) as mock_batch, \
+                patch('apps.graph.tasks.graph_extract_task.delay'):
+            graph_extract_task(self.node.id)
+
+        # 版本不匹配的文档1从头清理抽取；版本匹配的文档2保留进度续传
+        assert mock_clean.call_count == 1
+        start_chunks = [c.kwargs.get('start_chunk') for c in mock_batch.call_args_list]
+        assert sorted(start_chunks) == [0, 5]
+
+    def test_unfinished_doc_saves_progress_and_dispatches_next(self):
+        """预算耗尽未完成时，应保存进度、文档回退 pending，并续派下一轮任务"""
+        from apps.graph.tasks import graph_extract_task
+
+        with patch('apps.graph.sync._graph_enabled', return_value=True), \
+                patch('apps.graph.tasks._get_doc_progress', return_value=None), \
+                patch('apps.graph.sync._clean_graph_data') as mock_clean, \
+                patch('apps.graph.extractor.batch_extract_for_document',
+                      side_effect=[{'completed': False, 'processed': 2, 'next_chunk': 2},
+                                   _DONE_RESULT]) as mock_batch, \
+                patch('apps.graph.tasks._set_doc_progress') as mock_set_progress, \
+                patch('apps.graph.tasks.graph_extract_task.delay') as mock_delay:
+            result = graph_extract_task(self.node.id)
+
+        assert result['timed_out'] is True
+        assert result['processed'] == 0
+        # 未完成的文档：保存进度 + 回退 pending
+        mock_set_progress.assert_called_once_with(self.doc_pending_1.id, 2, 1)
+        self.doc_pending_1.refresh_from_db()
+        assert self.doc_pending_1.graph_status == 'pending'
+        # 剩余文档（本批已标记 extracting 未处理）回退 pending，并续派任务
+        self.doc_pending_2.refresh_from_db()
+        assert self.doc_pending_2.graph_status == 'pending'
+        mock_delay.assert_called_once_with(self.node.id)
+
+
+@pytest.mark.django_db
+@pytest.mark.integration
+class TestGraphRecover:
+    """graph_recover_task / _recover_stuck_graph_docs 自愈测试"""
+
+    @pytest.fixture(autouse=True)
+    def _env(self):
+        """注入节点/用户/文档：2 个卡死 extracting + 1 个无触发源 pending"""
+        self.node = _make_node()
+        self.owner = User.objects.create_user(
+            username='graph-recover', email='graph-recover@test.com', password='x')
+        self.doc_stuck_1 = _make_doc(self.node, self.owner, '卡死1', graph_status='extracting')
+        self.doc_stuck_2 = _make_doc(self.node, self.owner, '卡死2', graph_status='extracting')
+        self.doc_stuck_3 = _make_doc(self.node, self.owner, '卡死3', graph_status='extracting')
+        # 另一节点：有 pending 文档但无任务在跑（失去触发源）
+        self.node2 = _make_node()
+        self.doc_pending = _make_doc(self.node2, self.owner, '无触发源', graph_status='pending')
+
+    def test_recovers_stuck_extracting_and_dispatches(self):
+        """节点无任务且无活跃标记时，应回退 extracting 为 pending 并重新派发任务"""
+        from apps.graph.tasks import _recover_stuck_graph_docs
+
+        with patch('apps.graph.tasks._node_active', return_value=False), \
+                patch('apps.graph.tasks.graph_extract_task.delay') as mock_delay:
+            stats = _recover_stuck_graph_docs()
+
+        assert stats['recovered'] == 3
+        assert stats['dispatched_nodes'] == 2
+        for doc in (self.doc_stuck_1, self.doc_stuck_2, self.doc_stuck_3):
+            doc.refresh_from_db()
+            assert doc.graph_status == 'pending'
+        # 两个节点都应派发任务（卡死节点 + 无触发源节点）
+        assert mock_delay.call_count == 2
+        node_ids = sorted(c.args[0] for c in mock_delay.call_args_list)
+        assert node_ids == sorted([self.node.id, self.node2.id])
+
+    def test_skips_node_with_active_task(self):
+        """节点存在活跃任务标记时，不应回退（避免误伤正在抽取的文档）"""
+        from apps.graph.tasks import _recover_stuck_graph_docs
+
+        with patch('apps.graph.tasks._node_active', return_value=True), \
+                patch('apps.graph.tasks.graph_extract_task.delay') as mock_delay:
+            stats = _recover_stuck_graph_docs()
+
+        assert stats['recovered'] == 0
+        assert stats['dispatched_nodes'] == 0
+        mock_delay.assert_not_called()
+        self.doc_stuck_1.refresh_from_db()
+        assert self.doc_stuck_1.graph_status == 'extracting'
+
+    def test_force_recovery_ignores_active_flag(self):
+        """force=True 时跳过活跃标记检查（人工运维场景），强制恢复卡死文档"""
+        from apps.graph.tasks import _recover_stuck_graph_docs
+
+        with patch('apps.graph.tasks._node_active', return_value=True), \
+                patch('apps.graph.tasks.graph_extract_task.delay') as mock_delay:
+            stats = _recover_stuck_graph_docs(force=True)
+
+        assert stats['recovered'] == 3
+        assert stats['dispatched_nodes'] == 2
+        assert mock_delay.call_count == 2
+
+    def test_recover_task_delegates_to_shared_logic(self):
+        """graph_recover_task 应委托共享恢复逻辑（配置开启时）"""
+        from apps.graph.tasks import graph_recover_task
+
+        with patch('apps.graph.sync._graph_enabled', return_value=True), \
+                patch('apps.graph.tasks._recover_stuck_graph_docs',
+                      return_value={'recovered': 2, 'dispatched_nodes': 1}) as mock_recover:
+            result = graph_recover_task()
+
+        assert result == {'ok': True, 'recovered': 2, 'dispatched_nodes': 1}
+        mock_recover.assert_called_once_with()
+
+    def test_recover_task_skips_when_graph_disabled(self):
+        """配置关闭时自愈任务直接跳过，不执行恢复"""
+        from apps.graph.tasks import graph_recover_task
+
+        with patch('apps.graph.sync._graph_enabled', return_value=False), \
+                patch('apps.graph.tasks._recover_stuck_graph_docs') as mock_recover:
+            result = graph_recover_task()
+
+        assert result == {'ok': True, 'recovered': 0, 'dispatched_nodes': 0, 'skipped': True}
+        mock_recover.assert_not_called()
 
 
 @pytest.mark.unit

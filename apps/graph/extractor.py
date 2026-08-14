@@ -7,6 +7,7 @@
 """
 import json
 import re
+import time
 
 from loguru import logger
 
@@ -360,16 +361,23 @@ def save_extraction_result(chunk, result: dict) -> tuple:
     return entity_objs, relation_objs
 
 
-def batch_extract_for_document(document_id: int):
-    """批量处理一个文档的所有切片：逐个切片抽取并写入图谱。
+def batch_extract_for_document(document_id: int, start_chunk: int = 0, deadline=None) -> dict:
+    """批量处理一个文档的切片：逐个切片抽取并写入图谱，支持续传与时间预算控制。
 
-    流程：
-    1. 查询该文档所有 DocumentChunk（按 chunk_index 排序）
-    2. 逐 chunk 调用 extract + save，跳过过短切片（<20 字符无抽取价值）
-    3. 汇总记录抽取日志
+    大文档（数百上千切片）单次任务无法在 Celery 硬超时内完成，为此：
+    - start_chunk：从指定切片序号继续抽取（已抽取的切片跳过，数据不重复清理），
+      配合任务层记录的进度实现"一次任务处理一部分、下次接着处理"的续传；
+    - deadline：绝对时间点（time.monotonic() 语义），每个切片处理前检查，
+      到点立即返回未完成信号，避免任务被硬超时 SIGKILL 后无法回退状态。
 
     Args:
         document_id: 文档 ID
+        start_chunk: 起始切片序号（含），默认 0 表示从头开始
+        deadline: 时间预算截止点（time.monotonic() 值），None 表示不限时
+
+    Returns:
+        {'completed': 是否全部切片处理完毕, 'processed': 本次处理的切片数,
+         'next_chunk': 下一个待处理切片序号（续传起点）}
     """
     from apps.knowledge.models import DocumentChunk
 
@@ -378,8 +386,12 @@ def batch_extract_for_document(document_id: int):
 
     total_entities = 0
     total_relations = 0
+    processed = 0
 
-    for chunk in chunks:
+    for chunk in chunks[start_chunk:]:
+        # 预算耗尽：提前结束并返回续传起点，由任务层保存进度后交下一轮任务
+        if deadline is not None and time.monotonic() > deadline:
+            break
         if len(chunk.content.strip()) < 20:
             continue
         try:
@@ -394,7 +406,10 @@ def batch_extract_for_document(document_id: int):
             total_relations += len(relations)
             logger.debug(
                 f'[Graph Extract] chunk={chunk.id} entities={len(entities)} relations={len(relations)}')
+        processed += 1
 
     logger.info(
         f'[Graph Extract] document={document_id} chunks={len(chunks)} '
         f'entities={total_entities} relations={total_relations}')
+    next_chunk = start_chunk + processed
+    return {'completed': next_chunk >= len(chunks), 'processed': processed, 'next_chunk': next_chunk}

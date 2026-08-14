@@ -979,11 +979,15 @@ class NodeTreeView(APIView):
         qs = KnowledgeNode.objects.filter(is_deleted=False)
         if root_type:
             qs = qs.filter(root_type=root_type)
-        # 统计每个节点下未删除的文档数（与详情页 document_count 口径一致）
+        # 统计每个节点下已通过双审（审核+复核）的文档数：未通过审核/复核的文档不计入，
+        # 各页面（管理端/选择器/详情）展示的"文档数量"统一为正式可用文档量
         qs = qs.annotate(
             document_count=Count(
                 "documents",
-                filter=models.Q(documents__is_deleted=False),
+                filter=models.Q(
+                    documents__is_deleted=False,
+                    documents__audit_status='passed',
+                ),
             ),
         )
         if permission_only:
@@ -1120,10 +1124,17 @@ class KnowledgeNodeViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         qs = super().get_queryset()
         # 预计算 children_count 和 document_count，避免 N+1
+        # document_count 仅统计已通过双审（audit_status=passed）且未删除的文档
         if self.action in ("retrieve", "list"):
             qs = qs.annotate(
                 _children_count=Count("children", filter=models.Q(children__is_deleted=False)),
-                _document_count=Count("documents", filter=models.Q(documents__is_deleted=False)),
+                _document_count=Count(
+                    "documents",
+                    filter=models.Q(
+                        documents__is_deleted=False,
+                        documents__audit_status='passed',
+                    ),
+                ),
             )
         return qs
 
@@ -1323,13 +1334,13 @@ class DocumentFilter(django_filters.FilterSet):
     def filter_status(self, queryset, name, value):
         if value == 'parsing':
             return queryset.filter(models.Q(status='parsing') | models.Q(status='desensitizing'))
+        # 处理全部完成：解析完成 + 图谱/Wiki 构建完成或跳过（审核维度统计的前置条件）
+        full_done = models.Q(status='done') & models.Q(
+            graph_status__in=('done', 'skipped')) & models.Q(
+            wiki_status__in=('done', 'skipped'))
         if value == 'done':
-            # "已完成"要求整条流水线全部结束：解析完成 + 图谱/Wiki 构建完成或跳过
-            return queryset.filter(
-                status='done',
-                graph_status__in=('done', 'skipped'),
-                wiki_status__in=('done', 'skipped'),
-            )
+            # "已完成" = 处理全部完成 + 审核双审通过（聚合唯一归属，不再与其他状态重叠）
+            return queryset.filter(full_done, audit_status='passed')
         # 图谱/Wiki 状态筛选：status=done 且对应字段匹配
         if value == 'graph_pending':
             return queryset.filter(status='done', graph_status='pending')
@@ -1343,6 +1354,14 @@ class DocumentFilter(django_filters.FilterSet):
             return queryset.filter(status='done', wiki_status='extracting')
         if value == 'wiki_failed':
             return queryset.filter(status='done', wiki_status='failed')
+        # 审核维度筛选：待审核/待复核仅统计处理全部完成的文档（处理未完成计入前置流程）
+        if value == 'pending_team':
+            return queryset.filter(full_done, audit_status='pending_team')
+        if value == 'pending_compliance':
+            return queryset.filter(full_done, audit_status='pending_compliance')
+        if value == 'rejected':
+            # 驳回为终态：不要求处理完成（驳回时可能仍在处理中，产物已清理）
+            return queryset.filter(audit_status='rejected')
         return queryset.filter(status=value)
 
     class Meta:
@@ -1562,6 +1581,20 @@ class DocumentViewSet(viewsets.ModelViewSet):
         ).order_by('wiki_status')
         wiki_counts = {item['wiki_status']: item['count'] for item in wiki_counts_raw}
 
+        # 处理全部完成：解析 + 图谱/Wiki 构建均结束（审核维度统计的前置条件）
+        full_done_qs = done_qs.filter(
+            graph_status__in=('done', 'skipped'),
+            wiki_status__in=('done', 'skipped'),
+        )
+        # 审核状态统计：待审核/待复核仅计处理全部完成的文档（聚合唯一归属，
+        # 处理未完成的文档计入对应前置流程，下拉各状态不再重叠）
+        audit_full_raw = full_done_qs.values('audit_status').annotate(
+            count=Count('id')
+        ).order_by('audit_status')
+        audit_full_counts = {item['audit_status']: item['count'] for item in audit_full_raw}
+        # 驳回为终态：不论处理阶段一律统计（驳回时可能仍在处理中，产物已清理）
+        rejected_count = qs.filter(audit_status='rejected').count()
+
         # 组合返回，key 与前端筛选 value 对应
         result = {
             # 主状态
@@ -1571,7 +1604,11 @@ class DocumentViewSet(viewsets.ModelViewSet):
             'embedding': main_counts.get('embedding', 0),
             'embedding_failed': main_counts.get('embedding_failed', 0),
             'failed': main_counts.get('failed', 0),
-            'done': main_counts.get('done', 0),
+            # 审核状态（聚合归属）：处理全部完成后按审核维度归属
+            'done': audit_full_counts.get('passed', 0),
+            'pending_team': audit_full_counts.get('pending_team', 0),
+            'pending_compliance': audit_full_counts.get('pending_compliance', 0),
+            'rejected': rejected_count,
             # 图谱状态（基于 status=done 的文档）
             'graph_pending': graph_counts.get('pending', 0),
             'graph_extracting': graph_counts.get('extracting', 0),
@@ -1581,12 +1618,6 @@ class DocumentViewSet(viewsets.ModelViewSet):
             'wiki_extracting': wiki_counts.get('extracting', 0),
             'wiki_failed': wiki_counts.get('failed', 0),
         }
-
-        # "已完成"要求整条流水线全部结束
-        result['done'] = done_qs.filter(
-            graph_status__in=('done', 'skipped'),
-            wiki_status__in=('done', 'skipped'),
-        ).count()
 
         return Response(result)
 
@@ -1767,6 +1798,10 @@ class DocumentViewSet(viewsets.ModelViewSet):
         """
         doc = self.get_object()
         self._require_write(doc)
+
+        # 已驳回文档为终态，不允许重新解析（需重新上传才会重新进入审核）
+        if doc.audit_status == 'rejected':
+            return Response({"detail": "已驳回的文档不可重新解析，请重新上传"}, status=400)
 
         # 仅失败阶段重试：图谱/wiki 构建失败不需重跑解析链路
         if doc.status == 'done' and (doc.graph_status == 'failed' or doc.wiki_status == 'failed'):
@@ -3271,6 +3306,20 @@ class DocAuditPendingView(APIView):
             audit_status__in=['pending_team', 'pending_compliance'],
         ).select_related('owner', 'node').order_by('-created_at')
 
+        # 关键字搜索：匹配文档标题 / 文件名 / 上传人账号 / 上传人姓名
+        keyword = (request.query_params.get('keyword') or '').strip()
+        if keyword:
+            qs = qs.filter(
+                models.Q(title__icontains=keyword)
+                | models.Q(file_name__icontains=keyword)
+                | models.Q(owner__username__icontains=keyword)
+                | models.Q(owner__real_name__icontains=keyword)
+            )
+        # 阶段筛选：pending_team=待审核 / pending_compliance=待复核
+        status = (request.query_params.get('status') or '').strip()
+        if status in ('pending_team', 'pending_compliance'):
+            qs = qs.filter(audit_status=status)
+
         # 按用户身份 + audit_status 过滤范围
         rows = []
         for doc in qs:
@@ -3308,6 +3357,16 @@ class DocAuditRejectedView(APIView):
             is_deleted=False,
             audit_status='rejected',
         ).select_related('owner', 'node').order_by('-updated_at')
+
+        # 关键字搜索：匹配文档标题 / 文件名 / 上传人账号 / 上传人姓名
+        keyword = (request.query_params.get('keyword') or '').strip()
+        if keyword:
+            qs = qs.filter(
+                models.Q(title__icontains=keyword)
+                | models.Q(file_name__icontains=keyword)
+                | models.Q(owner__username__icontains=keyword)
+                | models.Q(owner__real_name__icontains=keyword)
+            )
 
         # 按用户审核范围过滤
         rows = []
@@ -3375,6 +3434,11 @@ class DocAuditRecordView(APIView):
             action__startswith='doc_audit',
             document__isnull=False,
         ).select_related('document').order_by('-created_at')
+
+        # 关键字搜索：匹配文档标题
+        keyword = (request.query_params.get('keyword') or '').strip()
+        if keyword:
+            logs = logs.filter(document__title__icontains=keyword)
 
         # 仅展示当前用户审核范围内的文档记录
         rows = []
@@ -3513,12 +3577,27 @@ class DocAuditRejectView(APIView):
         if not can:
             raise PermissionDenied("您没有该文档的审核权限")
 
+        # 记录驳回阶段（team=团队审核 / compliance=合规复核），写入 extra 供前端进度区分展示
+        # （此处 doc.audit_status 仍为驳回前状态，先取阶段再置终态）
+        reject_stage = 'team' if doc.audit_status == 'pending_team' else 'compliance'
+        extra = dict(doc.extra or {})
+        extra['reject_stage'] = reject_stage
+        doc.extra = extra
         doc.audit_status = 'rejected'
-        doc.save(update_fields=['audit_status', 'updated_at'])
+        doc.save(update_fields=['audit_status', 'extra', 'updated_at'])
         # 同步检索向量审核状态：驳回后该文档立即从检索链路移除
         _sync_vectors_audit([doc.id], 'rejected')
+        # 驳回即终态：停止后续处理并清理已生成的切片/向量/图谱数据
+        # （拦截排队中的解析任务，删除产物，释放节点防抖标记；解析任务运行期间的
+        #   兜底清理见 tasks.parse_document 置 done 前的检查）
+        try:
+            from apps.knowledge.tasks import _clean_rejected_doc_data
+            _clean_rejected_doc_data(doc.id)
+        except Exception as e:
+            logger.warning(f'[Audit] 驳回清理数据失败 doc={doc.id}: {e}')
         _log_operation(request, 'doc_audit_reject', document=doc,
-                       detail={'comment': comment, 'rejector': user.username})
+                       detail={'comment': comment, 'rejector': user.username,
+                               'stage': reject_stage})
         logger.info(f"Doc audit rejected: id={pk}, rejector={user.username}, reason={comment[:100]}")
         return Response({
             "ok": True,

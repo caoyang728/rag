@@ -24,7 +24,7 @@
 				<div class="page-header-flex">
 					<div class="flex items-baseline gap-10">
 						<div class="page-title">文档上传</div>
-						<div class="page-subtitle">支持 PDF / Word / MD / TXT / 源代码 / YML / JSON 六大类文档，自动脱敏与向量化入库</div>
+						<div class="page-subtitle">支持 PDF / Word / MD / TXT / 源代码 / YML / JSON 等文档，自动脱敏与向量化入库</div>
 					</div>
 					<div id="celeryStatus" class="flex items-center gap-12">
 						<span class="tag tag-default flex items-center gap-6">
@@ -160,21 +160,37 @@
 								<option value="dept">部门</option>
 								<option value="team">团队</option>
 							</select>
-							<select class="select" id="filterStatus" style="width:150px" onchange="loadUploadHistory(1)">
+							<!-- 状态筛选只保留"需要关注"的状态，按类别分组；
+							     终态（已通过/未启用等）不单独筛选：全部结束即"已完成"，
+							     未结束则显示下一步待办状态 -->
+							<select class="select" id="filterStatus" style="width:160px" onchange="loadUploadHistory(1)">
 								<option value="">全部状态</option>
-								<option value="pending">等待解析</option>
-								<option value="parsing">解析中</option>
-								<option value="chunking">切片中</option>
-								<option value="embedding">向量构建中</option>
-								<option value="embedding_failed">向量构建失败</option>
-								<option value="failed">解析失败</option>
-								<option value="graph_pending">等待图谱构建</option>
-								<option value="graph_extracting">图谱构建中</option>
-								<option value="graph_failed">图谱构建失败</option>
-								<option value="wiki_pending">等待Wiki生成</option>
-								<option value="wiki_extracting">Wiki生成中</option>
-								<option value="wiki_failed">Wiki生成失败</option>
-								<option value="done">已完成</option>
+								<optgroup label="处理中">
+									<option value="pending">等待解析</option>
+									<option value="parsing">解析中</option>
+									<option value="chunking">切片中</option>
+									<option value="embedding">向量构建中</option>
+								</optgroup>
+								<optgroup label="审核中">
+									<option value="pending_team">待审核</option>
+									<option value="pending_compliance">待合规复核</option>
+								</optgroup>
+								<optgroup label="构建中">
+									<option value="graph_pending">等待图谱构建</option>
+									<option value="graph_extracting">图谱构建中</option>
+									<option value="wiki_pending">等待Wiki生成</option>
+									<option value="wiki_extracting">Wiki生成中</option>
+								</optgroup>
+								<optgroup label="异常">
+									<option value="failed">解析失败</option>
+									<option value="embedding_failed">向量构建失败</option>
+									<option value="rejected">审核驳回</option>
+									<option value="graph_failed">图谱构建失败</option>
+									<option value="wiki_failed">Wiki生成失败</option>
+								</optgroup>
+								<optgroup label="汇总">
+									<option value="done">已完成</option>
+								</optgroup>
 							</select>
 							<label class="checkbox"><input type="checkbox" id="showDeleted" onchange="toggleShowDeleted(this)">显示已删除</label>
 						</div>
@@ -223,6 +239,7 @@
 			<td>
 				<div class="table-actions">
 					<button class="btn-link btn-sm up-row-view">查看</button>
+					<button class="btn-link btn-sm up-row-progress">进度</button>
 					<button class="btn-link btn-sm up-row-reparse">重新解析</button>
 					<button class="btn-link btn-sm text-danger up-row-delete">删除</button>
 				</div>
@@ -352,6 +369,19 @@
 			</div>
 		</div>
 	</template>
+
+	<!-- 文档处理进度弹窗：8 步步骤条（处理线/审核线/构建线），动态填充 -->
+	<div class="modal" id="docProgressModal">
+		<div class="modal-content" style="width:580px;max-height:85vh">
+			<div class="modal-header">
+				<div class="modal-title" id="docProgressModalTitle">处理进度</div>
+				<button class="modal-close" onclick="closeModal('docProgressModal')">&times;</button>
+			</div>
+			<div class="modal-body" style="max-height:calc(85vh - 90px);overflow:auto">
+				<div class="progress-steps" id="docProgressSteps"></div>
+			</div>
+		</div>
+	</div>
 
 	<!-- 文档预览弹窗由 preview-doc.js 动态创建，无需预留 HTML -->
 

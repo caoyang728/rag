@@ -89,6 +89,8 @@ class TestDocumentFilterPipelineStatus(KnowledgeViewsExtraBase):
             self.doc_own_private.id, self.doc_other_public.id,
             self.doc_other_private.id,
         ]).update(graph_status='done', wiki_status='done')
+        # 私有文档审核通过（代表"已完成"文档），其余保持待团队审核（代表"待审核"）
+        Document.objects.filter(id=self.doc_own_private.id).update(audit_status='passed')
         kw = dict(node=self.category_node, owner=self.super_admin,
                   team_id=self.team.id, dept_id=self.dept.id)
         self.g_pending = _create_document(
@@ -125,8 +127,25 @@ class TestDocumentFilterPipelineStatus(KnowledgeViewsExtraBase):
         assert 'Wiki待建' in self._titles('wiki_pending')
         assert 'Wiki抽取中' in self._titles('wiki_extracting')
         assert 'Wiki失败' in self._titles('wiki_failed')
-        # done：整条流水线全部结束（基类文档 graph/wiki 已置 done）
+        # done：整条流水线全部结束 + 审核通过（基类 doc_own_private）
         assert '我的私有文档' in self._titles('done')
+
+    @pytest.mark.integration
+    def test_filter_pending_team_requires_processing_done(self):
+        """审核维度筛选：仅处理全部完成的文档计入待团队审核（聚合唯一归属）"""
+        resp = self.client.get(
+            '/api/v1/knowledge/documents/?status=pending_team',
+            **_auth_headers(self.super_admin))
+        assert resp.status_code == 200
+        ids = {d['id'] for d in resp.json()['results']}
+        # full_done + pending_team 的文档命中
+        assert self.doc_other_public.id in ids
+        assert self.doc_other_private.id in ids
+        # 已审核通过的文档不计入待审核
+        assert self.doc_own_private.id not in ids
+        # 处理未完成（图谱/Wiki 待构建等）的文档即使 pending_team 也不计入审核维度
+        assert self.g_pending.id not in ids
+        assert self.w_pending.id not in ids
 
     @pytest.mark.integration
     def test_filter_unknown_status_fallback(self):
@@ -206,7 +225,8 @@ class TestDocumentStatusCounts(KnowledgeViewsExtraBase):
             **kw, title='失败', file_name='st_fail.txt', status='failed')
         self.d_done_all = _create_document(
             **kw, title='全完成', file_name='st_done.txt',
-            status='done', graph_status='done', wiki_status='done')
+            status='done', graph_status='done', wiki_status='done',
+            audit_status='passed')
         self.d_graph_failed = _create_document(
             **kw, title='图谱失败', file_name='st_gf.txt',
             status='done', graph_status='failed', wiki_status='done')
@@ -227,9 +247,13 @@ class TestDocumentStatusCounts(KnowledgeViewsExtraBase):
         assert data['failed'] == 1
         assert data['graph_failed'] == 1
         assert data['wiki_pending'] == 1
-        # done：仅全流水线（graph/wiki done 或 skipped）结束的文档
-        # = 基类 3 篇 + doc_done_all（图谱失败/Wiki待建不计入）
-        assert data['done'] == 4
+        # 审核维度统计：仅处理全部完成的文档计入待审核/已完成（聚合唯一归属）
+        # 基类 3 篇（full_done + pending_team）→ 待团队审核
+        assert data['pending_team'] == 3
+        # d_done_all 审核通过 → 已完成；其余处理未完成文档不计入审核维度
+        assert data['done'] == 1
+        assert data['pending_compliance'] == 0
+        assert data['rejected'] == 0
 
 
 # ============================================================================
@@ -734,6 +758,9 @@ class TestDocAuditRejectByAdmin(KnowledgeViewsExtraBase):
             **_auth_headers(self.super_admin))
         assert resp.status_code == 200
         assert resp.json()['audit_status'] == 'rejected'
+        # 复核阶段驳回 → reject_stage=compliance（供前端显示"复核驳回"）
+        self.compliance_doc.refresh_from_db()
+        assert (self.compliance_doc.extra or {}).get('reject_stage') == 'compliance'
 
 
 class TestDocAuditRejectedScope(KnowledgeViewsExtraBase):

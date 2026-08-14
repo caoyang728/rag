@@ -30,8 +30,13 @@ def on_document_done_for_wiki(document_id: int):
     from apps.knowledge.models import Document, KnowledgeNode
     from apps.wiki.models import WikiPage
 
-    doc = Document.objects.filter(id=document_id).only('id', 'node_id').first()
+    doc = Document.objects.filter(id=document_id).only(
+        'id', 'node_id', 'audit_status'
+    ).first()
     if not doc or not doc.node_id:
+        return
+    # 已驳回文档不再触发 Wiki 构建（驳回即终态，数据已清理）
+    if doc.audit_status == 'rejected':
         return
 
     # 配置关闭：标记未启用，不派发

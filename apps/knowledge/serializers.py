@@ -24,9 +24,10 @@ class KnowledgeNodeSerializer(serializers.ModelSerializer):
         return obj.children.filter(is_deleted=False).count()
 
     def get_document_count(self, obj):
+        # 仅统计已通过双审（audit_status=passed）且未删除的文档：未通过审核/复核的文档不计入
         if hasattr(obj, "_document_count"):
             return obj._document_count
-        return obj.documents.filter(is_deleted=False).count()
+        return obj.documents.filter(is_deleted=False, audit_status='passed').count()
 
     def get_created_by_name(self, obj):
         if obj.created_by:
@@ -71,6 +72,8 @@ class DocumentSerializer(serializers.ModelSerializer):
     visible_scope = serializers.SerializerMethodField()
     # 同组版本总数（node+file_name+dept_id+team_id），>1 时前端展示「版本切换」入口
     version_count = serializers.SerializerMethodField()
+    # 驳回阶段（team=团队审核 / compliance=合规复核），驳回时由 DocAuditRejectView 写入 extra
+    reject_stage = serializers.SerializerMethodField()
 
     class Meta:
         model = Document
@@ -88,6 +91,7 @@ class DocumentSerializer(serializers.ModelSerializer):
             "version", "version_tag", "tags", "is_active", "version_count",
             "root_type", "status", "error_message", "chunk_count",
             "graph_status", "wiki_status",
+            "reject_stage",
             "is_deleted", "delete_time", "created_at", "updated_at",
             "restored_at", "restored_by", "restored_by_name",
             "is_owner", "is_manager", "can_read", "can_download", "can_share",
@@ -145,6 +149,10 @@ class DocumentSerializer(serializers.ModelSerializer):
             node=obj.node, file_name=obj.file_name,
             dept_id=obj.dept_id, team_id=obj.team_id, is_deleted=False,
         ).count()
+
+    def get_reject_stage(self, obj):
+        """驳回阶段（team=团队审核 / compliance=合规复核），空串表示未驳回"""
+        return (obj.extra or {}).get('reject_stage', '')
 
 
 class DocumentChunkSerializer(serializers.ModelSerializer):

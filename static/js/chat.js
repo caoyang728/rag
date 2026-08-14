@@ -2319,19 +2319,57 @@ function renderMessagesFromRecords(records) {
 	return wrapper.innerHTML;
 }
 
-async function delSession(icon, id) {
-	if (!confirm('确定删除此会话？删除后不可恢复。')) return;
+/* 删除会话：使用 common.js 的自定义二次确认弹窗，替代系统默认 confirm */
+function delSession(icon, id) {
+	showConfirmDialog({
+		title: '删除会话',
+		bannerType: 'danger',
+		bannerIcon: '⚠',
+		bannerText: '确定删除此会话？删除后不可恢复。',
+		buttons: [
+			{ text: '取消', type: 'cancel', onClick: ctx => ctx.close() },
+			{ text: '删除', type: 'danger', onClick: ctx => {
+				ctx.close();
+				_doDelSession(id);
+			}}
+		]
+	});
+}
 
+/* 执行会话删除（确认弹窗确认后调用）
+ * 删除当前会话时自动选中最近的下一个会话（列表按最近活跃降序，sessionCache[0] 即最近） */
+async function _doDelSession(id) {
 	try {
 		await api.deleteJson('/api/v1/chat/sessions/' + id + '/');
 		// 同步清理内存缓存并重新渲染
 		sessionCache = sessionCache.filter(s => s.id != id);
+		const deletedCurrent = currentSessionId == id;
+		if (deletedCurrent) {
+			// 先选定下一个会话再渲染，确保列表高亮正确
+			currentSessionId = sessionCache.length > 0 ? sessionCache[0].id : null;
+		}
 		renderSessionList();
 		toast('会话已删除', 'success');
-		if (currentSessionId == id) {
-			currentSessionId = null;
-			const msgs = $('#chatMessages');
+
+		// 删除的不是当前会话，当前视图无需变化
+		if (!deletedCurrent) return;
+
+		const msgs = $('#chatMessages');
+		const chatTitle = $('#chatTitle');
+		if (currentSessionId) {
+			// 自动切换到最近的下一个会话
+			const activeItem = $('#sessionList')?.querySelector('.session-item[data-id="' + currentSessionId + '"]');
+			const titleEl = activeItem ? activeItem.querySelector('.session-title') : null;
+			if (chatTitle) {
+				chatTitle.textContent = titleEl ? titleEl.textContent : '新会话';
+				chatTitle.classList.remove('hidden');
+				delete chatTitle.dataset.hasTitle;
+			}
+			await switchToSession(currentSessionId, { skipToast: true });
+		} else {
+			// 会话已全部删除，回到空状态
 			if (msgs) msgs.innerHTML = renderEmptyState();
+			if (chatTitle) chatTitle.classList.add('hidden');
 		}
 	} catch (e) {
 		toast('删除失败: ' + e.message, 'error');

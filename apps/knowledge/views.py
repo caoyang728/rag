@@ -401,6 +401,8 @@ ALLOWED_EXTENSIONS = {
     ".sh", ".bat", ".ps1", ".css",
     # WPS Office 格式（新版WPS默认使用标准格式，这些是兼容旧版扩展名）
     ".wps", ".et", ".dps",
+    # 图片（OCR 提取文字）
+    ".jpg", ".jpeg", ".png", ".bmp", ".webp",
 }
 MAX_FILE_SIZE = int(getattr(settings, 'DOCUMENT_MAX_SIZE_MB', 100)) * 1024 * 1024
 
@@ -419,6 +421,8 @@ FILE_TYPE_MAP = {
     ".jsx": "code", ".tsx": "code", ".h": "code", ".css": "code",  # 前端源码/样式并入代码类
     ".yaml": "config", ".yml": "config", ".json": "config",
     ".toml": "config", ".ini": "config", ".conf": "config",
+    ".jpg": "image", ".jpeg": "image", ".png": "image",
+    ".bmp": "image", ".webp": "image",
 }
 
 
@@ -601,6 +605,10 @@ def _extract_text_content(content: bytes, file_type: str, filename: str) -> str:
     # 演示文稿（PPTX/PPT/DPS）
     if file_type == "presentation" or ext in (".ppt", ".pptx", ".dps"):
         return _extract_presentation_preview(content, ext)
+
+    # 图片（jpg/png/bmp/webp）：文本由后台 OCR 异步提取，此处仅提示
+    if file_type == "image" or ext in (".jpg", ".jpeg", ".png", ".bmp", ".webp"):
+        return "图片文档：文字内容由后台 OCR 解析完成后可检索，原图可在预览中查看"
 
     # 未知类型：尝试文本解码或显示二进制提示
     try:
@@ -1897,6 +1905,18 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 doc, request, "text",
                 fallback_notice="未安装格式转换组件（LibreOffice），当前以文本模式预览，无法保留原始排版")
 
+        # 图片（jpg/png/bmp/webp）：复用页图模式，单页直出原图
+        if file_type == "image":
+            return Response({
+                "mode": "image",
+                "file_name": doc.file_name,
+                "file_type": file_type,
+                "format_label": "图片",
+                "total_pages": 1,
+                "page_url": f"/api/v1/knowledge/documents/{doc.id}/preview_page/?w=1600&page=",
+                "can_copy": False,
+            })
+
         # 代码/配置：行模式 + 语法高亮语言
         if file_type in ("code", "config"):
             return self._line_mode_response(
@@ -1967,6 +1987,10 @@ class DocumentViewSet(viewsets.ModelViewSet):
             raise PermissionDenied("无权限预览此文档")
         if not doc.file_path:
             raise Http404("文件不存在")
+        # 图片文档：直接返回原图字节（content_type 取文档 mime_type）
+        if doc.file_type == "image":
+            raw = _read_doc_bytes(doc)
+            return HttpResponse(raw, content_type=doc.mime_type or 'image/png')
         page = max(1, int(request.query_params.get("page", 1)))
         width = min(2000, max(400, int(request.query_params.get("w", _PREVIEW_IMAGE_MAX_WIDTH))))
         png = _render_pdf_page_png(doc, page, width)
@@ -2658,6 +2682,12 @@ class DocumentUploadView(APIView):
                 '.wps': ['application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
                 '.et': ['application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'],
                 '.dps': ['application/vnd.ms-powerpoint', 'application/vnd.openxmlformats-officedocument.presentationml.presentation'],
+                # 图片（OCR 提取文字）
+                '.jpg': ['image/jpeg', 'image/jpg'],
+                '.jpeg': ['image/jpeg', 'image/jpg'],
+                '.png': ['image/png', 'image/x-png'],
+                '.bmp': ['image/bmp', 'image/x-ms-bmp'],
+                '.webp': 'image/webp',
                 # 代码类
                 '.py': ['text/x-python', 'text/plain'],
                 '.java': ['text/x-java-source', 'text/plain'],

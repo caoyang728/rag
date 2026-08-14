@@ -341,6 +341,12 @@ OSS_ACCESS_KEY_SECRET = os.getenv('OSS_ACCESS_KEY_SECRET', '')
 OSS_BUCKET_NAME = os.getenv('OSS_BUCKET_NAME', '')
 OSS_REGION = os.getenv('OSS_REGION', '')
 
+# --- 腾讯云 OCR（图片 / 扫描件 PDF 文字识别）---
+# 凭证属敏感信息仅保留在 .env；OCR 开关与接口选择走 SystemConfig（OCR_*）
+TENCENT_OCR_SECRET_ID = os.getenv('TENCENT_OCR_SECRET_ID', '')
+TENCENT_OCR_SECRET_KEY = os.getenv('TENCENT_OCR_SECRET_KEY', '')
+TENCENT_OCR_REGION = os.getenv('TENCENT_OCR_REGION', 'ap-guangzhou')
+
 # --- 检索参数（可被 system_config 覆盖）---
 RETRIEVAL_TOP_K = int(os.getenv('RETRIEVAL_TOP_K', '20'))
 RETRIEVAL_RERANK_TOP_K = int(os.getenv('RETRIEVAL_RERANK_TOP_K', '5'))

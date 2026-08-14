@@ -738,7 +738,8 @@ const ALLOWED_EXTS = new Set([
 	'wps', 'et', 'dps',
 	'py', 'js', 'ts', 'jsx', 'tsx', 'java', 'go', 'rs', 'c', 'cpp', 'h',
 	'yml', 'yaml', 'json', 'xml', 'toml', 'ini', 'conf', 'cfg',
-	'sh', 'bat', 'ps1', 'css'
+	'sh', 'bat', 'ps1', 'css',
+	'jpg', 'jpeg', 'png', 'bmp', 'webp'
 ]);
 const MAX_FILE_SIZE_MB = 100;
 const MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024;

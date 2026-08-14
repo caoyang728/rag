@@ -217,9 +217,13 @@ def parse_document(document_id: int):
                     width=extra.get('width', 0),
                     height=extra.get('height', 0),
                     size_bytes=extra.get('size_bytes', 0),
+                    # 图片文档 OCR 文本同步落库，便于图片资源检索
+                    ocr_text=extra.get('ocr_text', '')[:10000],
                 )
                 image_id = img.id
                 extra.pop('base64_data', None)
+                # OCR 文本已落 ImageResource，不再重复存入 chunk extra 增大存储
+                extra.pop('ocr_text', None)
                 image_count += 1
             
             ch = DocumentChunk.objects.create(
@@ -498,6 +502,8 @@ def batch_import_single_file(temp_file_path, node_id, owner_id, visibility, owne
             '.json': 'json', '.xml': 'xml', '.csv': 'csv',
             '.xlsx': 'xlsx', '.xls': 'xlsx', '.et': 'xlsx',  # WPS 表格
             '.ppt': 'ppt', '.pptx': 'pptx', '.dps': 'pptx',  # WPS 演示
+            '.jpg': 'image', '.jpeg': 'image', '.png': 'image',
+            '.bmp': 'image', '.webp': 'image',  # 图片（OCR 提取文字）
         }
         ext = os.path.splitext(filename)[1].lower()
         file_type = ext_map.get(ext, 'other')
@@ -516,6 +522,8 @@ def batch_import_single_file(temp_file_path, node_id, owner_id, visibility, owne
             '.ppt': 'application/vnd.ms-powerpoint',
             '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
             '.dps': 'application/vnd.ms-powerpoint',
+            '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+            '.png': 'image/png', '.bmp': 'image/bmp', '.webp': 'image/webp',
         }
         mime_type = mime_map.get(ext, 'application/octet-stream')
         

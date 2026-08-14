@@ -56,6 +56,10 @@ pypdf==6.15.0               # PDF 解析
 openpyxl==3.1.5             # Excel XLSX
 python-pptx==1.0.2          # PowerPoint PPTX
 
+# --- OCR（腾讯云）---
+# tencentcloud-sdk-python-common 作为依赖自动安装，无需单独声明
+tencentcloud-sdk-python-ocr==3.1.152   # 腾讯云 OCR（通用印刷体识别）
+
 # --- OSS 存储（可选）---
 #oss2==2.19.0                # 阿里云 OSS SDK
 

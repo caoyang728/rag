@@ -53,6 +53,10 @@ class PDFParser(BaseParser):
     HEADING_FONT_SIZE_RATIO = 1.3
     # 扫描件PDF检测阈值：页面文本占比低于此值视为图片型PDF
     SCANNED_PDF_TEXT_RATIO = 0.01
+    # 单页文本长度低于此值时视为无文本页，触发 OCR（混合型 PDF 中逐页兜底）
+    OCR_PAGE_MIN_TEXT_LEN = 20
+    # PDF 页渲染缩放系数（2.0 ≈ 144 DPI，兼顾识别精度与请求体积）
+    OCR_PAGE_ZOOM = 2.0
 
     def parse(self, file_path: str, **options) -> List[Dict[str, Any]]:
         """
@@ -84,6 +88,15 @@ class PDFParser(BaseParser):
 
         if is_scanned_pdf:
             logger.warning('[PDFParser] 检测到扫描件PDF，文本提取可能不完整')
+
+        # OCR 能力探测：扫描件/低文本页需要渲染成图片走腾讯云 OCR。
+        # 逐页判断而不是仅依赖整份 PDF 检测，可覆盖"文字页+图片页混合"的文档。
+        pdf_ocr_on = self._pdf_ocr_ready()
+        pdf_ocr_page_limit = 0
+        if pdf_ocr_on:
+            from ..ocr import pdf_ocr_page_limit as _get_page_limit
+            pdf_ocr_page_limit = _get_page_limit()
+        ocr_page_count = 0
 
         # 初始化状态
         section_path = ''
@@ -127,6 +140,22 @@ class PDFParser(BaseParser):
             text_blocks = self._extract_text_blocks(page, text, header_lines, footer_lines,
                                                    pnum, section_path, word_info)
             blocks.extend(text_blocks)
+
+            # 无文本页 OCR 兜底：页面本身没有可提取文字时，渲染成图片走腾讯云 OCR。
+            # 受 OCR_PDF_PAGE_LIMIT 限制，避免大文件扫描件产生不可控的成本。
+            if pdf_ocr_on and ocr_page_count < pdf_ocr_page_limit:
+                page_text_len = len((page_texts[pnum - 1] or '') if pnum - 1 < len(page_texts) else '')
+                if page_text_len < self.OCR_PAGE_MIN_TEXT_LEN:
+                    ocr_text = self._ocr_page(page, pnum)
+                    if ocr_text:
+                        blocks.append({
+                            'type': 'text',
+                            'content': ocr_text,
+                            'section_path': section_path,
+                            'page_number': pnum,
+                            'extra': {'source': 'pdf_ocr', 'ocr_text': ocr_text},
+                        })
+                        ocr_page_count += 1
 
             # 提取图片（包含base64数据）
             images = self._extract_images(page, doc, pnum, section_path)
@@ -369,6 +398,40 @@ class PDFParser(BaseParser):
         text_ratio = avg_text_per_page / estimated_capacity
 
         return text_ratio < self.SCANNED_PDF_TEXT_RATIO
+
+    def _pdf_ocr_ready(self) -> bool:
+        """PDF OCR 是否就绪（总开关 + 扫描件自动 OCR 开关，含凭证检查）
+
+        单独探测而非直接在 _ocr_page 内降级，是为了避免对每个低文本页都重复
+        走一遍开关/凭证读取；全部关闭时整份文档零成本跳过。
+        """
+        try:
+            from ..ocr import is_pdf_ocr_enabled, get_ocr_client
+        except ImportError:
+            return False
+        if not is_pdf_ocr_enabled():
+            return False
+        # 凭证未配置时 OCR 不可用，避免逐页空转
+        return get_ocr_client() is not None
+
+    def _ocr_page(self, page, pnum: int) -> str:
+        """将 PDF 页渲染为图片并调用腾讯云 OCR，返回识别文本；失败/不可用返回空串"""
+        fitz = _get_fitz()
+        if fitz is None:
+            return ''
+        try:
+            from ..ocr import ocr_image_bytes
+            mat = fitz.Matrix(self.OCR_PAGE_ZOOM, self.OCR_PAGE_ZOOM)
+            pix = page.get_pixmap(matrix=mat)
+            # 透明/CMYK 页面统一转 RGB，保证 PNG 渲染正确
+            if pix.n >= 5:
+                pix = fitz.Pixmap(fitz.csRGB, pix)
+            image_bytes = pix.tobytes('png')
+            pix = None  # 及时释放 Pixmap 内存
+            return ocr_image_bytes(image_bytes)
+        except Exception as e:
+            logger.warning(f'[PDFParser] 页面{pnum} OCR 失败: {e}')
+            return ''
 
     def _is_heading(self, line: str, word_info: List[Dict]) -> bool:
         """

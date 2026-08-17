@@ -3,10 +3,9 @@
 # 部署：nginx + django + celery-worker + celery-beat + postgres + redis + xinference
 # 网络拓扑：
 #   - 除 LLM（DeepSeek 云 API）外，所有服务都跑在 docker 内部网络 rag_network
-#   - 仅 nginx 对外暴露 80 端口，postgres/redis/xinference 不暴露到宿主机
+#   - 仅 nginx 对外暴露 80 端口（django 8000 为开发直连，生产环境注释掉）；postgres/redis/xinference 不暴露到宿主机
 #   - embedding/rerank 由 Xinference 自托管（bge-m3 / bge-reranker-v2-m3，CPU）
 # 数据持久化：postgres_data / redis_data / static_data / media_data / xinference_data
-#   （全部为具名卷，容器重建不丢数据；精简版 docker-compose.core.yml 复用同名卷）
 # ==========================================================================
 
 name: rag-full
@@ -49,10 +48,14 @@ services:
 
   django:
     build: .
+    image: rag-django:0.0.1
     container_name: rag_django
     restart: unless-stopped
     # 内存上限 4G：runserver 实际占用约 200M，留足余量给 xinference（模型加载/推理）
     mem_limit: 4g
+    ports:
+      # 开发时直连 django（绕过 nginx 反代，便于调试 SSE/直接访问）；生产环境注释掉此行
+      - "8000:8000"
     env_file:
       - .env
     environment:
@@ -74,6 +77,7 @@ services:
 
   celery-worker:
     build: .
+    image: rag-django:0.0.1
     container_name: rag_celery_worker
     restart: unless-stopped
     env_file:
@@ -96,6 +100,7 @@ services:
 
   celery-beat:
     build: .
+    image: rag-celery-beat:0.0.1
     container_name: rag_celery_beat
     restart: unless-stopped
     env_file:
@@ -118,6 +123,7 @@ services:
   # 反向代理 + 静态资源服务，唯一对外暴露端口的服务
   nginx:
     build: ./nginx
+    image: rag-nginx:0.0.1
     container_name: rag_nginx
     restart: unless-stopped
     depends_on:
@@ -148,8 +154,8 @@ services:
       XINFERENCE_AUTH_ADVANCED: "false"
       # 国内环境：HF 镜像站加速模型下载
       HF_ENDPOINT: https://hf-mirror.com
-      # 首次启动模型时引擎依赖走清华 PyPI 镜像
-      PIP_INDEX_URL: https://pypi.tuna.tsinghua.edu.cn/simple
+      # 首次启动模型时引擎依赖走阿里云 PyPI 镜像(原清华源不可达)
+      PIP_INDEX_URL: https://mirrors.aliyun.com/pypi/simple
       TZ: Asia/Shanghai
     volumes:
       - xinference_data:/root/.xinference

@@ -5,7 +5,7 @@
 # 方案：按 app 分批执行，每批独立进程（跑完释放内存），用 --cov-append 累积覆盖率。
 #
 # 用法：
-#   docker compose -f docker-compose.core.yml exec django bash scripts/run_coverage_batch.sh
+#   docker compose exec django bash scripts/run_coverage_batch.sh
 #   或在容器内直接执行：
 #   bash scripts/run_coverage_batch.sh [选项]
 #

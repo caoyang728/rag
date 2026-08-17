@@ -143,6 +143,18 @@ const TrendChart = (function () {
 			minSpan: 0.1,
 			includeZero: true,
 		},
+		// 耗时类指标专用轴（首字耗时/整体耗时，单位 ms）：与百分比/计数轴独立，
+		// 避免毫秒级数值混入 0-100 的百分比轴导致刻度单位错乱
+		time: {
+			toFixed: 0,
+			unit: 'ms',
+			defaultMin: 0,
+			defaultMax: 5000,
+			padMin: 100, padMax: 200,
+			clampMin: 0, clampMax: null,
+			minSpan: 100,
+			includeZero: true,
+		},
 	};
 
 	/**
@@ -170,7 +182,7 @@ const TrendChart = (function () {
 			key: s.key,
 			label: s.label || s.key,
 			color: s.color || '#2563eb',
-			axis: s.axis === 'right' ? 'right' : 'left',
+			axis: s.axis === 'time' ? 'time' : (s.axis === 'right' ? 'right' : 'left'),
 			dashed: !!s.dashed,
 			strokeWidth: s.strokeWidth || (s.dashed ? 2.5 : 3),
 			get: typeof s.get === 'function' ? s.get : (t => t[s.key] || 0),
@@ -186,6 +198,7 @@ const TrendChart = (function () {
 		const axes = {
 			left: Object.assign({}, DEFAULT_AXES.left, (opts.axes || {}).left),
 			right: Object.assign({}, DEFAULT_AXES.right, (opts.axes || {}).right),
+			time: Object.assign({}, DEFAULT_AXES.time, (opts.axes || {}).time),
 		};
 		const onToggle = typeof opts.onToggle === 'function' ? opts.onToggle : null;
 
@@ -259,18 +272,25 @@ const TrendChart = (function () {
 			const days = data.map(options.xLabel);
 			const leftRange = hasVisibleOn('left') ? axisRange('left') : null;
 			const rightRange = hasVisibleOn('right') ? axisRange('right') : null;
+			const timeRange = hasVisibleOn('time') ? axisRange('time') : null;
 			// 单轴配置：无可见指标时不渲染该轴，有可见指标时按计算范围固定 min/max；
 			// interval 为显式刻度间隔（undefined 时由 ECharts 自动分档）
 			// showSplitLine 控制是否显示该轴的网格线，通常只保留一个轴（如左轴）显示，避免双轴导致网格线杂乱
-			const mkAxis = (cfg, range, showSplitLine) => ({
+			// 同侧存在两个轴时（百分比 + 耗时），耗时轴用 offset 错开，并设 onZero:false 使 position/offset 生效
+			const mkAxis = (cfg, range, showSplitLine, pos, offset) => ({
 				type: 'value',
 				show: !!range,
 				min: range ? range.min : undefined,
 				max: range ? range.max : undefined,
 				interval: cfg.interval,
+				position: pos,
+				offset: offset || 0,
+				axisLine: { onZero: false },
 				axisLabel: { formatter: v => v.toFixed(cfg.toFixed) + cfg.unit },
 				splitLine: { show: showSplitLine, lineStyle: { color: '#e5e7eb', type: 'dashed' } },
 			});
+			// 耗时轴与百分比轴同侧时右移 56px 错开刻度标签；仅耗时轴可见时无需偏移
+			const timeOffset = (rightRange && timeRange) ? 56 : 0;
 			return {
 				tooltip: {
 					trigger: 'axis',
@@ -286,7 +306,8 @@ const TrendChart = (function () {
 					},
 				},
 				legend: { show: false },  // 图例由左侧自绘勾选框承担，不用内置图例
-				grid: { left: 52, right: 56, top: 20, bottom: 32 },
+				// 耗时轴可见时右侧需额外留白（offset 位移 + 两组刻度标签宽度），否则刻度被裁切
+				grid: { left: 52, right: timeRange ? (rightRange ? 116 : 78) : 56, top: 20, bottom: 32 },
 				xAxis: {
 					type: 'category',
 					data: days,
@@ -295,13 +316,14 @@ const TrendChart = (function () {
 					axisLine: { lineStyle: { color: '#d1d5db' } },
 				},
 				yAxis: [
-					mkAxis(axes.left, leftRange, true),   // 左轴：显示网格线作为视觉基准
-					mkAxis(axes.right, rightRange, false) // 右轴：隐藏网格线，仅保留刻度标签
+					mkAxis(axes.left, leftRange, true, 'left'),            // 左轴：显示网格线作为视觉基准
+					mkAxis(axes.right, rightRange, false, 'right'),        // 右轴（百分比）：隐藏网格线，仅保留刻度标签
+					mkAxis(axes.time, timeRange, false, 'right', timeOffset), // 耗时轴（ms）
 				],
 				series: series.filter(s => s.visible).map(s => ({
 					name: s.label,
 					type: 'line',
-					yAxisIndex: s.axis === 'right' ? 1 : 0,
+					yAxisIndex: s.axis === 'right' ? 1 : (s.axis === 'time' ? 2 : 0),
 					boundaryGap: false,
 					symbol: 'circle',
 					symbolSize: 5,
@@ -435,8 +457,9 @@ async function loadTrend() {
 		if (!overviewTrendChart) {
 			overviewTrendChart = TrendChart.create({
 				container: $('#trendChart'),
-				// 指标分轴：左轴=计数类（问答/缓存/好评/差评/活跃用户），右轴=百分比与秒类（满意率/耗时）。
-				// 受双轴限制，% 与 s 共用右轴时秒类线会相对压扁，故耗时类默认不勾选，需要时手动勾选
+				// 指标分轴：左轴=计数类（问答/缓存/好评/差评/活跃用户），右轴=满意率百分比，
+				// 耗时类（首字耗时/整体耗时）走独立 time 轴（单位 ms），避免与 % 混轴导致刻度单位错乱；
+				// 耗时类默认不勾选，需要时手动勾选
 				series: [
 					{ key: 'qa', label: '总问答数', color: '#2563eb', axis: 'left', get: t => t.qa_count || 0 },
 					{ key: 'cache', label: '缓存命中', color: '#059669', axis: 'left', get: t => t.cache_hit_count || 0 },
@@ -444,14 +467,16 @@ async function loadTrend() {
 					{ key: 'bad', label: '差评', color: '#dc2626', axis: 'left', visible: false, get: t => t.bad || 0 },
 					{ key: 'active', label: '活跃用户', color: '#0891b2', axis: 'left', visible: false, get: t => t.active_users || 0 },
 					{ key: 'accuracy', label: '满意率', color: '#7c3aed', axis: 'right', dashed: true, get: t => (t.accuracy || 0) * 100 },
-					{ key: 'ttft', label: '首字耗时', color: '#a16207', axis: 'right', visible: false, get: t => (t.avg_ttft_ms || 0) / 1000 },
-					{ key: 'total', label: '整体耗时', color: '#ef4444', axis: 'right', visible: false, get: t => (t.avg_total_ms || 0) / 1000 },
+					{ key: 'ttft', label: '首字耗时', color: '#a16207', axis: 'time', visible: false, get: t => t.avg_ttft_ms || 0 },
+					{ key: 'total', label: '整体耗时', color: '#ef4444', axis: 'time', visible: false, get: t => t.avg_total_ms || 0 },
 				],
 				axes: {
 					// 左轴：计数类从 0 起算、不设上限，刻度取整数
 					left: { toFixed: 0, includeZero: true, clampMin: 0, clampMax: null, minSpan: 1, padMin: 1, padMax: 1 },
-					// 右轴：默认仅满意率可见（0-100%）；勾选耗时(s)后与百分比混轴，刻度单位以 tooltip 为准
+					// 右轴：满意率百分比（0-100%），耗时类不再共用该轴
 					right: { toFixed: 1, unit: '%', minSpan: 0.1 },
+					// 耗时轴：毫秒刻度，从 0 起算、不设上限；pad/minSpan 保证小波动也有刻度跨度
+					time: { toFixed: 0, unit: 'ms', includeZero: true, clampMin: 0, clampMax: null, minSpan: 100, padMin: 100, padMax: 100 },
 				},
 				// 图表高度占满趋势图区剩余空间（配合 .overview-card .chart-echarts 的 flex 链），
 				// 图例侧栏宽度 130px，比默认更宽松以容纳中文标签

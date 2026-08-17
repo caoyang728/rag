@@ -141,8 +141,8 @@ class TestRunWorkflowStream:
         types = [e['type'] for e in events]
 
         assert 'workflow_start' in types
-        assert types.count('workflow_node_start') == 2   # r1 + r2（finalize 由 run_finalize 单独执行）
-        assert types.count('workflow_node_done') == 2
+        assert types.count('workflow_node_start') == 3   # r1 + r2 + finalize（汇总节点补发轨迹事件）
+        assert types.count('workflow_node_done') == 3
         assert 'first_token' in types
         assert 'delta' in types
 
@@ -152,13 +152,15 @@ class TestRunWorkflowStream:
         assert done['status'] == 'succeeded'
         assert done['is_workflow'] is True
 
-        # 轨迹落库：r1/r2 全部 succeeded；finalize 汇总节点由 run_finalize 单独执行
+        # 轨迹落库：r1/r2/finalize 全部 succeeded（汇总节点状态同步落库）
         from apps.agent.models import AgentWorkflow
         wf = AgentWorkflow.objects.get(id=done['workflow_id'])
         assert wf.status == 'succeeded'
         assert wf.node_runs.count() == 3
-        assert wf.node_runs.filter(status='succeeded').count() == 2
-        assert wf.node_runs.get(node_id='finalize').status == 'pending'
+        assert wf.node_runs.filter(status='succeeded').count() == 3
+        finalize = wf.node_runs.get(node_id='finalize')
+        assert finalize.status == 'succeeded'
+        assert finalize.latency_ms is not None
 
     def test_run_workflow_when_approval_node_then_blocked(self, workflow_env):
         """approval 节点：统一内嵌确认（不创建工单），工作流停留 waiting_approval，done 无 message_id"""

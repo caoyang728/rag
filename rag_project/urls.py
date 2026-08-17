@@ -53,10 +53,14 @@ def healthz(request):
     return JsonResponse(checks, status=200 if checks["ok"] else 503)
 
 
-def _serve_frontend(page):
-    """读取 static/ 目录下的纯静态 HTML，不走 Django 模板引擎（前后端分离）"""
+def _serve_frontend(_page):
+    """统一返回 Vue SPA 入口（static/vue/index.html），页面路由由前端 hash 接管。
+    兼容旧 MPA 路径（/chat/ 等）：全部返回同一 SPA，前端根据路径名映射到对应 hash 路由。
+    旧的 static/*.html 保留不动，作为构建前的回退产物。"""
     def view(_request):
-        path = os.path.join(settings.BASE_DIR, 'static', f'{page}.html')
+        path = os.path.join(settings.BASE_DIR, 'static', 'vue', 'index.html')
+        if not os.path.exists(path):
+            return HttpResponse('<h1>前端尚未构建，请先执行 frontend 的 npm run build</h1>', status=503)
         with open(path, 'r', encoding='utf-8') as f:
             return HttpResponse(f.read(), content_type='text/html; charset=utf-8')
     return view

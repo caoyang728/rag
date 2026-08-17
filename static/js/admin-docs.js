@@ -30,6 +30,12 @@ let _paginationInited = false;
 let _currentDocs = [];
 // 请求序号守卫：异步响应返回时丢弃过期数据，防止旧响应覆盖新状态
 let _requestSeq = 0;
+// 搜索关键字（所有 tab 生效）
+let _auditKeyword = '';
+// 阶段筛选：pending_team=待审核 / pending_compliance=待复核（仅待审核 tab 生效）
+let _auditStage = '';
+// 搜索输入防抖定时器（300ms 后自动触发搜索）
+let _auditSearchTimer = null;
 
 /* ============ 页面启动 ============ */
 document.addEventListener('DOMContentLoaded', () => {
@@ -42,9 +48,20 @@ document.addEventListener('DOMContentLoaded', () => {
 
 	// 顶栏 / 侧栏 / 全局搜索 已由 common.js 的 DOMContentLoaded 注入，无需重复
 
+	// 同步阶段筛选可见性（默认待审核 tab 展示）
+	_syncStageFilterVisibility();
+
 	// 加载待审核文档列表
 	loadAuditList();
 });
+
+/* ---------- 阶段筛选可见性：仅待审核 tab 展示 ---------- */
+function _syncStageFilterVisibility() {
+	const stageFilter = $('#docStageFilter');
+	if (stageFilter) {
+		stageFilter.style.display = _auditTab === 'pending' ? '' : 'none';
+	}
+}
 
 /* ---------- 页面级权限判断 ---------- */
 function _canAccessPage() {
@@ -63,6 +80,14 @@ function switchAuditTab(tab) {
 	_auditPage = 1;
 	// 切换 tab 后需重建分页（容器可能已被 Pagination.destroy 清空）
 	_paginationInited = false;
+	// 切换 tab 时清空搜索与阶段筛选，避免旧条件串到其他列表
+	_auditKeyword = '';
+	_auditStage = '';
+	const searchInput = $('#docSearchInput');
+	if (searchInput) searchInput.value = '';
+	const stageFilter = $('#docStageFilter');
+	if (stageFilter) stageFilter.value = '';
+	_syncStageFilterVisibility();
 	document.querySelectorAll('.tab-item').forEach(el => {
 		el.classList.toggle('active', el.getAttribute('data-tab') === tab);
 	});
@@ -89,7 +114,12 @@ function loadAuditList(page) {
 	_renderTableHead(head);
 	tbody.innerHTML = `<tr><td colspan="${_auditTab === 'records' ? 5 : 8}" class="text-sub text-sm text-center" style="padding:30px">加载中...</td></tr>`;
 
-	api.getJson(`${_auditApiUrl()}?page=${_auditPage}&page_size=${_auditPageSize}`)
+	// 组装查询参数：分页 + 搜索关键字 + 阶段筛选（阶段筛选仅待审核 tab 生效）
+	const params = new URLSearchParams({ page: _auditPage, page_size: _auditPageSize });
+	if (_auditKeyword) params.set('keyword', _auditKeyword);
+	if (_auditTab === 'pending' && _auditStage) params.set('status', _auditStage);
+
+	api.getJson(`${_auditApiUrl()}?${params.toString()}`)
 		.then(res => {
 			// 过期响应丢弃
 			if (seq !== _requestSeq) return;
@@ -130,6 +160,40 @@ function loadAuditList(page) {
 		});
 }
 
+/* ============================================================================
+ * 搜索 / 阶段筛选 —— 变化后重置到第 1 页并重新加载
+ * ============================================================================ */
+
+/* ---------- 搜索输入（300ms 防抖，避免每次按键都发请求） ---------- */
+function onAuditSearchInput() {
+	clearTimeout(_auditSearchTimer);
+	_auditSearchTimer = setTimeout(() => onAuditSearchCommit(), 300);
+}
+
+/* ---------- 搜索框回车：立即触发，同时清掉未执行的防抖 ---------- */
+function onAuditSearchKeydown(e) {
+	if (e.key === 'Enter') {
+		clearTimeout(_auditSearchTimer);
+		onAuditSearchCommit();
+	}
+}
+
+/* ---------- 提交搜索条件并重新加载 ---------- */
+function onAuditSearchCommit() {
+	_auditKeyword = ($('#docSearchInput')?.value || '').trim();
+	_auditPage = 1;
+	_paginationInited = false;
+	loadAuditList(1);
+}
+
+/* ---------- 阶段筛选变化（待审核 / 待复核，仅待审核 tab 展示） ---------- */
+function onAuditFilterChange() {
+	_auditStage = ($('#docStageFilter')?.value || '').trim();
+	_auditPage = 1;
+	_paginationInited = false;
+	loadAuditList(1);
+}
+
 /* ---------- 空列表提示 ---------- */
 function _emptyTip() {
 	return {
@@ -155,7 +219,7 @@ function _renderTableHead(head) {
 			<th style="width:90px">类型</th>
 			<th style="width:90px">密级</th>
 			<th>上传人</th>
-			<th style="width:120px">归属</th>
+			<th style="width:220px">归属</th>
 			<th style="width:120px">阶段</th>
 			<th style="width:160px">上传时间</th>
 			<th style="width:100px">操作</th>
@@ -193,10 +257,12 @@ function _renderDocRow(d) {
 	const secLvMap = { 1: '普通', 2: '内部', 3: '机密', 4: '绝密' };
 	const secBadge = { 1: '', 2: 'badge-info', 3: 'badge-warn', 4: 'badge-danger' }[d.secret_level] || '';
 	const belong = [d.dept_name, d.team_name].filter(Boolean).join(' / ');
-	// 阶段：仅展示状态徽章（统一使用 badge-warn 样式，不再显示审核步骤说明）
+	// 阶段：待审核(橙)/待复核(蓝)/已驳回(红) 用不同颜色徽章区分，便于一眼识别当前流程阶段
 	const stageText = d.audit_status === 'rejected' ? '已驳回'
 		: d.audit_status === 'pending_compliance' ? '待复核' : '待审核';
-	const stageHtml = `<span class="badge badge-warn">${stageText}</span>`;
+	const stageBadge = d.audit_status === 'rejected' ? 'badge-danger'
+		: d.audit_status === 'pending_compliance' ? 'badge-info' : 'badge-warn';
+	const stageHtml = `<span class="badge ${stageBadge}">${stageText}</span>`;
 	// 文件名与标题相同时不重复展示（避免标题下方文件名重复出现）
 	const fileSub = d.file_name && d.file_name !== d.title
 		? `<div class="text-sub text-xs">${escapeHtml(d.file_name)}</div>` : '';
@@ -215,7 +281,7 @@ function _renderDocRow(d) {
 		<td class="text-sm">${escapeHtml(d.file_type || '—')}</td>
 		<td>${secLvMap[d.secret_level] ? `<span class="badge ${secBadge}">${secLvMap[d.secret_level]}</span>` : '—'}</td>
 		<td class="text-sm">${escapeHtml(d.owner_username || d.owner_name || '—')}</td>
-		<td class="text-sm">${escapeHtml(belong || '—')}</td>
+		<td class="text-sm" style="white-space:nowrap">${escapeHtml(belong || '—')}</td>
 		<td>${stageHtml}</td>
 		<td class="text-sm text-sub">${formatDate(d.created_at)}</td>
 		<td>

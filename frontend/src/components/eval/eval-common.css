@@ -1,0 +1,693 @@
+/* ============================================================
+   质量评估中心公共样式（原 static/css/admin-eval.css 迁移）
+   由 AdminEval.vue 全局引入,供各 Tab 面板组件共用
+   ============================================================ */
+
+/* ===== KPI 卡片 ===== */
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+}
+
+.kpi-card {
+  background: var(--app-card-bg);
+  border: 1px solid var(--el-border-color, #e5e7eb);
+  border-radius: 10px;
+  padding: 14px 16px;
+  transition: transform .2s, box-shadow .2s, border-color .2s;
+  position: relative;
+  overflow: hidden;
+}
+
+.kpi-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, .08);
+  border-color: var(--el-color-primary, #409eff);
+}
+
+.kpi-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, var(--el-color-primary, #409eff), transparent);
+}
+
+.kpi-highlight::before { background: linear-gradient(90deg, #22c55e, transparent); }
+.kpi-good::before     { background: linear-gradient(90deg, #3b82f6, transparent); }
+.kpi-fair::before     { background: linear-gradient(90deg, #f59e0b, transparent); }
+.kpi-poor::before     { background: linear-gradient(90deg, #ef4444, transparent); }
+
+.kpi-label {
+  font-size: 12px;
+  color: var(--el-text-color-secondary, #6b7280);
+  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.kpi-value {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--el-text-color-primary, #1f2937);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+
+.kpi-value .kpi-unit {
+  font-size: 12px;
+  font-weight: normal;
+  color: var(--el-text-color-secondary, #6b7280);
+  margin-left: 2px;
+}
+
+.kpi-red    { color: #ef4444 !important; }
+.kpi-orange { color: #f59e0b !important; }
+.kpi-green  { color: #22c55e !important; }
+
+/* KPI 值的语义着色 */
+.kpi-value.val-good { color: #22c55e; }
+.kpi-value.val-mid  { color: #f59e0b; }
+.kpi-value.val-poor { color: #ef4444; }
+
+/* ===== 面板 ===== */
+.eval-panel {
+  background: var(--app-card-bg);
+  border: 1px solid var(--el-border-color, #e5e7eb);
+  border-radius: 10px;
+  overflow: hidden;
+  transition: box-shadow .2s, border-color .2s;
+}
+
+.eval-panel:hover {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, .04);
+}
+
+.eval-panel-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--el-text-color-primary, #1f2937);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.eval-panel-title::before {
+  content: '';
+  display: inline-block;
+  width: 3px;
+  height: 14px;
+  background: var(--el-color-primary, #409eff);
+  border-radius: 2px;
+}
+
+.eval-panel-body {
+  padding: 14px 16px;
+}
+
+/* 工具栏面板（仅操作按钮、无 body,更紧凑） */
+.eval-toolbar {
+  background: var(--app-card-bg);
+  border: 1px solid var(--el-border-color, #e5e7eb);
+  border-radius: 10px;
+  overflow: hidden;
+  padding: 8px 14px;
+}
+
+/* ===== 分数胶囊（el-tag 化的三档着色） ===== */
+.score-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 10px;
+  border-radius: 12px;
+  font-weight: 600;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  min-width: 52px;
+}
+
+.score-pill.score-high { background: rgba(34, 197, 94, .12);  color: #16a34a; }
+.score-pill.score-mid  { background: rgba(245, 158, 11, .12); color: #d97706; }
+.score-pill.score-low  { background: rgba(239, 68, 68, .12);  color: #dc2626; }
+
+/* ===== 空状态 ===== */
+.eval-empty {
+  text-align: center;
+  padding: 32px 16px;
+  color: var(--el-text-color-secondary, #6b7280);
+}
+
+.eval-empty-icon {
+  font-size: 36px;
+  margin-bottom: 8px;
+  opacity: .5;
+}
+
+/* ===== 低分回归说明条 ===== */
+.regression-tip {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 14px;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 6px;
+  color: #1e40af;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.regression-tip-icon {
+  flex-shrink: 0;
+  font-size: 16px;
+  line-height: 1.6;
+}
+
+.regression-tip-text strong {
+  color: #1e3a8a;
+}
+
+/* 深色模式下低分回归说明条：柔化蓝底与文字色,保证暗色背景可读 */
+html.dark .regression-tip {
+  background: rgba(59, 130, 246, .1);
+  border-color: rgba(59, 130, 246, .3);
+  color: #93c5fd;
+}
+
+html.dark .regression-tip-text strong {
+  color: #bfdbfe;
+}
+
+/* ===== 12 维质量画像布局 ===== */
+.eval-portrait-body {
+  display: flex;
+  gap: 24px;
+  align-items: flex-start;
+}
+
+.eval-radar-wrap {
+  flex: 0 0 46%;
+  max-width: 560px;
+  min-width: 340px;
+}
+
+.eval-dim-wrap {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+@media (max-width: 900px) {
+  .eval-portrait-body {
+    flex-wrap: wrap;
+    gap: 16px;
+  }
+  .eval-radar-wrap {
+    flex: 0 0 100%;
+    max-width: 100%;
+  }
+  .eval-dim-wrap {
+    flex: 0 0 100%;
+  }
+}
+
+/* ===== 维度 sparkline 表 ===== */
+.dim-group { margin-bottom: 12px; }
+
+.dim-group-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--el-text-color-secondary, #6b7280);
+  padding: 6px 0 4px;
+  border-bottom: 1px solid var(--el-border-color, #e5e7eb);
+  margin-bottom: 2px;
+}
+
+.dim-table { font-size: 13px; }
+
+.dim-row {
+  display: grid;
+  grid-template-columns: 95px 77px 83px 1fr 53px;
+  gap: 6px;
+  align-items: center;
+  padding: 4px 0;
+  border-bottom: 1px solid rgba(0, 0, 0, .04);
+}
+
+.dim-row-head {
+  font-size: 11px;
+  color: var(--el-text-color-secondary, #6b7280);
+  font-weight: 500;
+  border-bottom: 1px solid var(--el-border-color, #e5e7eb);
+}
+
+.dim-row-head span { padding: 4px 0; }
+
+.dim-col-name { font-weight: 500; color: var(--el-text-color-primary, #1f2937); }
+.dim-col-avg { text-align: left; }
+.dim-col-mom { text-align: left; }
+.dim-col-spark { text-align: left; }
+.dim-col-cnt { text-align: right; }
+
+.sparkline { vertical-align: middle; }
+
+.mom-up { color: #22c55e; font-weight: 600; font-size: 12px; }
+.mom-down { color: #ef4444; font-weight: 600; font-size: 12px; }
+.mom-flat { color: var(--el-text-color-secondary, #6b7280); font-weight: 600; font-size: 12px; }
+
+/* ===== 低分对话列表限高滚动 ===== */
+.eval-low-score-body {
+  max-height: 420px;
+  overflow-y: auto;
+}
+
+/* ===== 测试集问题列表 ===== */
+.ds-list {
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.ds-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--el-border-color, #e5e7eb);
+}
+
+.ds-idx { flex-shrink: 0; color: var(--el-text-color-secondary, #6b7280); font-size: 12px; }
+.ds-question { flex: 1; min-width: 0; word-break: break-all; }
+
+/* ===== 覆盖度行 ===== */
+.coverage-row {
+  display: grid;
+  grid-template-columns: 2fr 3fr 1fr;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--el-border-color, #e5e7eb);
+  font-size: 13px;
+  transition: background .15s;
+  border-radius: 4px;
+}
+
+.coverage-row:hover {
+  background: var(--el-fill-color-light, #f5f7fa);
+}
+
+.coverage-row:last-child { border-bottom: none; }
+
+.coverage-dept-group {
+  margin-bottom: 16px;
+}
+
+.coverage-row-dept {
+  border-bottom: 2px solid var(--el-border-color, #e5e7eb);
+}
+
+.coverage-row-dept .coverage-name {
+  font-weight: 600;
+}
+
+.coverage-row-team {
+  padding-left: 24px;
+}
+
+.coverage-row-team .coverage-name {
+  font-size: 12px;
+  color: var(--el-text-color-secondary, #6b7280);
+}
+
+.coverage-row-team .coverage-rate {
+  font-size: 12px;
+}
+
+.coverage-name {
+  font-weight: 500;
+  color: var(--el-text-color-primary, #1f2937);
+}
+
+.coverage-bar {
+  height: 18px;
+  background: var(--el-fill-color-light, #f5f7fa);
+  border-radius: 4px;
+  overflow: hidden;
+  position: relative;
+}
+
+.coverage-bar-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width .5s ease;
+  position: relative;
+  background: var(--el-color-primary, #409eff);
+}
+
+.coverage-row-team .coverage-bar-fill {
+  background: linear-gradient(90deg, #8b5cf6, #6366f1);
+}
+
+.coverage-bar-fill::after {
+  content: attr(data-value);
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 11px;
+  font-weight: 600;
+  color: #fff;
+  white-space: nowrap;
+}
+
+.coverage-rate {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+/* ===== 知识空白卡片 ===== */
+.gap-card {
+  border: 1px solid var(--el-border-color, #e5e7eb);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-bottom: 10px;
+  background: var(--el-fill-color-lighter, #fafafa);
+  transition: border-color .2s, box-shadow .2s;
+}
+
+.gap-card:hover {
+  border-color: var(--el-color-primary, #409eff);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, .04);
+}
+
+.gap-question {
+  font-weight: 500;
+  color: var(--el-text-color-primary, #1f2937);
+  margin-bottom: 6px;
+  font-size: 14px;
+}
+
+.gap-meta {
+  display: flex;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary, #6b7280);
+  flex-wrap: wrap;
+}
+
+.gap-meta span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* ===== 常见质量问题 ===== */
+.issue-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 6px;
+  border-bottom: 1px solid var(--el-border-color, #e5e7eb);
+  font-size: 13px;
+  transition: background .15s;
+  border-radius: 4px;
+}
+
+.issue-item:hover {
+  background: var(--el-fill-color-light, #f5f7fa);
+}
+
+.issue-item:last-child { border-bottom: none; }
+
+.issue-icon {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 600;
+  color: #fff;
+}
+
+.issue-icon.sev-high { background: #ef4444; }
+.issue-icon.sev-mid  { background: #f59e0b; }
+.issue-icon.sev-low  { background: #3b82f6; }
+
+.issue-content { flex: 1; color: var(--el-text-color-primary, #1f2937); }
+
+.issue-count {
+  font-size: 12px;
+  color: var(--el-text-color-secondary, #6b7280);
+  margin-left: auto;
+  flex-shrink: 0;
+  font-weight: 600;
+}
+
+/* ===== 反馈闭环 ===== */
+.fb-suggestion {
+  font-size: 12px;
+  color: var(--el-text-color-secondary, #6b7280);
+  line-height: 1.5;
+}
+
+.fb-suggestion strong {
+  color: var(--el-text-color-primary, #1f2937);
+}
+
+/* ===== 低分归因 ===== */
+.attr-bar-row {
+  display: grid;
+  grid-template-columns: 120px 1fr 50px 90px;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--el-border-color, #e5e7eb);
+}
+
+.attr-bar-row:last-child { border-bottom: none; }
+
+.attr-bar-label {
+  font-size: 13px;
+  color: var(--el-text-color-primary, #1f2937);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.attr-bar-track {
+  height: 10px;
+  background: var(--el-fill-color-light, #f5f7fa);
+  border-radius: 5px;
+  overflow: hidden;
+}
+
+/* 条形填充:渐变色突出占比,宽度由 v-bind 按比例设置 */
+.attr-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #6366f1, #8b5cf6);
+  border-radius: 5px;
+  transition: width .3s ease;
+}
+
+.attr-bar-count {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--el-text-color-primary, #1f2937);
+  text-align: right;
+}
+
+.attr-bar-avg {
+  font-size: 12px;
+  color: var(--el-text-color-secondary, #6b7280);
+  text-align: right;
+}
+
+/* 归因详情弹窗分区 */
+.attr-section {
+  padding: 12px 0;
+  border-top: 1px solid var(--el-border-color, #e5e7eb);
+}
+
+.attr-section:first-child { border-top: none; }
+
+.attr-section-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--el-text-color-primary, #1f2937);
+  margin-bottom: 10px;
+}
+
+.attr-conclusion {
+  background: var(--el-fill-color-light, #f5f7fa);
+  border-radius: 6px;
+  padding: 12px;
+}
+
+.attr-meta-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  font-size: 13px;
+}
+
+.attr-meta-label {
+  color: var(--el-text-color-secondary, #6b7280);
+  font-size: 12px;
+}
+
+.attr-detail-text {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--el-text-color-primary, #1f2937);
+  padding: 8px 0;
+}
+
+/* LLM 一句话诊断:蓝色背景突出 */
+.attr-diagnosis {
+  margin-top: 8px;
+  padding: 8px 12px;
+  background: #e0f2fe;
+  border-left: 3px solid #0ea5e9;
+  border-radius: 4px;
+  font-size: 13px;
+  color: #0c4a6e;
+  line-height: 1.5;
+}
+
+/* 失败错误信息:红色背景 */
+.attr-error {
+  margin-top: 8px;
+  padding: 8px 12px;
+  background: #fee2e2;
+  border-left: 3px solid #ef4444;
+  border-radius: 4px;
+  font-size: 13px;
+  color: #991b1b;
+  line-height: 1.5;
+}
+
+.attr-dim-row {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--el-border-color, #e5e7eb);
+}
+
+.attr-dim-row:last-child { border-bottom: none; }
+
+.attr-suggestion-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--el-border-color, #e5e7eb);
+}
+
+.attr-suggestion-row:last-child { border-bottom: none; }
+
+.attr-suggestion-text {
+  flex: 1;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--el-text-color-primary, #1f2937);
+}
+
+/* ===== 路由分析：按天命中趋势堆叠条 ===== */
+.route-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary, #6b7280);
+  margin-bottom: 8px;
+}
+
+.route-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.route-legend-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.route-trend-list {
+  max-height: 360px;
+  overflow-y: auto;
+}
+
+.route-trend-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 0;
+  font-size: 12px;
+}
+
+.route-trend-row:not(:last-child) {
+  border-bottom: 1px dashed var(--el-border-color, #e5e7eb);
+}
+
+.route-trend-date {
+  flex-shrink: 0;
+  width: 88px;
+  color: var(--el-text-color-secondary, #6b7280);
+  font-variant-numeric: tabular-nums;
+}
+
+.route-trend-bar {
+  flex: 1;
+  display: flex;
+  height: 20px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--app-menu-hover);
+}
+
+.route-trend-seg {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  min-width: 18px;
+  transition: filter .15s;
+}
+
+.route-trend-seg:hover {
+  filter: brightness(1.1);
+}
+
+/* ===== 表格内文本溢出省略 ===== */
+.eval-cell-ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ===== 低分回归测试集 tag 高亮（橙色调,区别于普通 tag） ===== */
+.tag-regression {
+  background: #fef3c7;
+  color: #92400e;
+  border: 1px solid #fcd34d;
+}
+
+/* ===== 响应式 ===== */
+@media (max-width: 768px) {
+  .kpi-grid { grid-template-columns: repeat(2, 1fr); }
+  .coverage-row { grid-template-columns: 1fr; }
+  .coverage-rate { text-align: left; }
+}

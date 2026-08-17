@@ -872,3 +872,103 @@ def test_merge_pages():
     assert parser._merge_pages({'pages': [1, 2]}, {}, 1, 3) == [1, 2, 3]
     # 页码已存在时不重复添加
     assert parser._merge_pages({'pages': [1, 2]}, {}, 1, 2) == [1, 2]
+
+
+# ============================================================================
+# 无文本页 OCR 兜底
+# ============================================================================
+@patch('apps.knowledge.parsers.pdf_parser.logger')
+def test_parse_ocr_when_enabled_and_page_without_text_then_adds_ocr_block(mock_logger):
+    """OCR 就绪且页面无文本：渲染页面并追加 OCR 文本块（source=pdf_ocr）"""
+    parser = PDFParser()
+    with patch.object(parser, '_pdf_ocr_ready', return_value=True), \
+            patch.object(parser, '_ocr_page', return_value='扫描件识别结果') as mock_ocr:
+        blocks = _run_parse(parser, [_make_page(text='')])
+
+    assert any(b['content'] == '扫描件识别结果' for b in blocks)
+    ocr_block = next(b for b in blocks if b['content'] == '扫描件识别结果')
+    assert ocr_block['type'] == 'text'
+    assert ocr_block['page_number'] == 1
+    assert ocr_block['extra']['source'] == 'pdf_ocr'
+    mock_ocr.assert_called_once()
+
+
+@patch('apps.knowledge.parsers.pdf_parser.logger')
+def test_parse_ocr_when_disabled_then_no_ocr_block(mock_logger):
+    """OCR 未就绪：不渲染页面也不产出 OCR 文本块"""
+    parser = PDFParser()
+    with patch.object(parser, '_pdf_ocr_ready', return_value=False), \
+            patch.object(parser, '_ocr_page', return_value='应被跳过') as mock_ocr:
+        blocks = _run_parse(parser, [_make_page(text='')])
+
+    assert not any(b.get('extra', {}).get('source') == 'pdf_ocr' for b in blocks)
+    mock_ocr.assert_not_called()
+
+
+@patch('apps.knowledge.parsers.pdf_parser.logger')
+def test_parse_ocr_when_page_has_text_then_skips(mock_logger):
+    """页面本身有文本：即使 OCR 就绪也不重复识别，避免双份成本"""
+    parser = PDFParser()
+    with patch.object(parser, '_pdf_ocr_ready', return_value=True), \
+            patch.object(parser, '_ocr_page', return_value='不应触发') as mock_ocr:
+        blocks = _run_parse(parser, [_make_page(text='这是一段足够长的正常文字页内容，用于验证有文本时不会触发 OCR 识别。')])
+
+    assert not any(b.get('extra', {}).get('source') == 'pdf_ocr' for b in blocks)
+    mock_ocr.assert_not_called()
+
+
+@patch('apps.knowledge.parsers.pdf_parser.logger')
+def test_parse_ocr_respects_page_limit(mock_logger):
+    """OCR_PDF_PAGE_LIMIT=1：两页无文本仅识别第一页，控制成本"""
+    parser = PDFParser()
+    pages = [_make_page(text='') for _ in range(2)]
+    with patch.object(parser, '_pdf_ocr_ready', return_value=True), \
+            patch.object(parser, '_ocr_page', return_value='识别文本') as mock_ocr, \
+            patch('apps.knowledge.ocr.pdf_ocr_page_limit', return_value=1):
+        blocks = _run_parse(parser, pages)
+
+    assert sum(1 for b in blocks if b.get('extra', {}).get('source') == 'pdf_ocr') == 1
+    mock_ocr.assert_called_once()
+
+
+def test_pdf_ocr_ready_when_master_off_then_false():
+    """OCR 总开关关闭 → PDF OCR 不就绪"""
+    with patch('apps.knowledge.ocr.is_pdf_ocr_enabled', return_value=False):
+        assert PDFParser()._pdf_ocr_ready() is False
+
+
+def test_pdf_ocr_ready_when_no_credentials_then_false():
+    """开关开启但凭证缺失（get_ocr_client 返回 None）→ PDF OCR 不就绪"""
+    with patch('apps.knowledge.ocr.is_pdf_ocr_enabled', return_value=True), \
+            patch('apps.knowledge.ocr.get_ocr_client', return_value=None):
+        assert PDFParser()._pdf_ocr_ready() is False
+
+
+def test_pdf_ocr_ready_when_all_ready_then_true():
+    """开关开启且凭证就绪 → PDF OCR 就绪"""
+    with patch('apps.knowledge.ocr.is_pdf_ocr_enabled', return_value=True), \
+            patch('apps.knowledge.ocr.get_ocr_client', return_value='client'):
+        assert PDFParser()._pdf_ocr_ready() is True
+
+
+def test_ocr_page_when_success_then_returns_text():
+    """页面渲染成功 → 调用 ocr_image_bytes 并返回识别文本"""
+    parser = PDFParser()
+    page = MagicMock()
+    pix = MagicMock()
+    pix.n = 3
+    pix.tobytes.return_value = b'png-bytes'
+    page.get_pixmap.return_value = pix
+    with patch.dict('sys.modules', {'fitz': MagicMock(Matrix=MagicMock(return_value='m'))}), \
+            patch('apps.knowledge.ocr.ocr_image_bytes', return_value='识别文本') as mock_ocr:
+        assert parser._ocr_page(page, 1) == '识别文本'
+    mock_ocr.assert_called_once_with(b'png-bytes')
+
+
+def test_ocr_page_when_render_fails_then_empty():
+    """页面渲染失败 → 记录 warning 并返回空串，不抛异常"""
+    parser = PDFParser()
+    page = MagicMock()
+    page.get_pixmap.side_effect = Exception('render fail')
+    with patch.dict('sys.modules', {'fitz': MagicMock()}):
+        assert parser._ocr_page(page, 1) == ''

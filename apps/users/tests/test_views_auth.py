@@ -3,18 +3,27 @@ apps.users.views 认证与账号补充测试 —— 登出 / 登录边界 / 资�
 
 与 test_views.py 互补：
 - LogoutView + LoginView 边界（禁用用户、用户不存在）
+- LoginView 新增能力：邮箱登录 / 记住我 token 生命周期 / RSA 密文密码
 - ProfileView 补充分支
 - ResetPasswordView / PasswordResetRequestView / PasswordResetConfirmView
   （mock 验证码 + Redis + 邮件）
 """
+import base64
 import csv
+import datetime
 import io
 import json
+from datetime import timedelta
 from unittest.mock import patch
 
+import jwt
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import padding
+from django.conf import settings
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import Client
+from django.utils import timezone
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.users.models import (
@@ -85,6 +94,186 @@ class TestLogoutAndLoginEdge(UsersAPIExtraBase):
             content_type='application/json',
         )
         assert resp.status_code == 401
+
+
+# ============================================================================
+# LoginView 新增能力 —— 邮箱登录 / 记住我 / RSA 密文密码
+# ============================================================================
+
+def _rsa_encrypt_with_key(plain):
+    """签发一次性密钥并用其公钥加密明文，返回 (base64 密文, key_id)（模拟前端 JSEncrypt）"""
+    from apps.security.login_crypto import issue_encrypt_key
+    key_info = issue_encrypt_key()
+    pub = serialization.load_pem_public_key(key_info['public_key'].encode('utf-8'))
+    cipher = pub.encrypt(plain.encode('utf-8'), padding.PKCS1v15())
+    return base64.b64encode(cipher).decode('utf-8'), key_info['key_id']
+
+
+def _refresh_exp_delta(refresh_token):
+    """解析 refresh token 的 exp，返回距当前时间的剩余时长（用于断言生命周期）"""
+    payload = jwt.decode(refresh_token, settings.SECRET_KEY, algorithms=['HS256'])
+    return timezone.now() - datetime.datetime.fromtimestamp(payload['exp'], tz=datetime.timezone.utc)
+
+
+class TestLoginEmailRememberEncrypt(UsersAPIExtraBase):
+    """LoginView：邮箱登录 / 记住我 token 生命周期 / 密文密码解密"""
+
+    @pytest.fixture(autouse=True)
+    def _fake_redis(self):
+        """Mock Redis：一次性加密密钥/图形验证码等存储走内存 FakeRedis，不依赖真实 Redis"""
+        self.fake_redis = FakeRedis()
+        patcher = patch('apps.security.views._get_redis', return_value=self.fake_redis)
+        patcher.start()
+        yield
+        patcher.stop()
+
+    def _login(self, payload):
+        """POST 登录的公共请求"""
+        return self.client.post(
+            '/api/v1/auth/login/',
+            data=json.dumps(payload),
+            content_type='application/json',
+        )
+
+    @patch('apps.security.views.verify_captcha', return_value=True)
+    @pytest.mark.integration
+    def test_login_with_email_success(self, _mock_captcha):
+        """邮箱登录（大小写不敏感）应返回 200 与 JWT"""
+        resp = self._login({
+            'username': 'NORMAL@TEST.COM',
+            'password': 'pass12345',
+            'captcha_id': 'x',
+            'captcha_code': 'x',
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data['user']['username'] == 'normal'
+
+    @patch('apps.security.views.verify_captcha', return_value=True)
+    @pytest.mark.integration
+    def test_login_with_email_wrong_password_401(self, _mock_captcha):
+        """邮箱正确但密码错误应 401"""
+        resp = self._login({
+            'username': 'normal@test.com',
+            'password': 'wrong_pass',
+            'captcha_id': 'x',
+            'captcha_code': 'x',
+        })
+        assert resp.status_code == 401
+
+    @patch('apps.security.views.verify_captcha', return_value=True)
+    @pytest.mark.integration
+    def test_login_with_account_field_success(self, _mock_captcha):
+        """前端改用 account 字段名（兼容）也应能登录"""
+        resp = self._login({
+            'account': 'normal',
+            'password': 'pass12345',
+            'captcha_id': 'x',
+            'captcha_code': 'x',
+        })
+        assert resp.status_code == 200
+
+    @patch('apps.security.views.verify_captcha', return_value=True)
+    @pytest.mark.integration
+    def test_login_default_remember_me_refresh_7days(self, _mock_captcha):
+        """不传 remember_me（默认）→ refresh token 有效期约 7 天"""
+        resp = self._login({'username': 'normal', 'password': 'pass12345',
+                            'captcha_id': 'x', 'captcha_code': 'x'})
+        assert resp.status_code == 200
+        delta = _refresh_exp_delta(resp.json()['refresh'])
+        assert timedelta(days=-7, hours=-2) < delta < timedelta(days=-6, hours=-20)
+
+    @patch('apps.security.views.verify_captcha', return_value=True)
+    @pytest.mark.integration
+    def test_login_remember_me_true_refresh_7days(self, _mock_captcha):
+        """remember_me=true → refresh token 有效期约 7 天"""
+        resp = self._login({'username': 'normal', 'password': 'pass12345',
+                            'remember_me': True,
+                            'captcha_id': 'x', 'captcha_code': 'x'})
+        assert resp.status_code == 200
+        delta = _refresh_exp_delta(resp.json()['refresh'])
+        assert timedelta(days=-7, hours=-2) < delta < timedelta(days=-6, hours=-20)
+
+    @patch('apps.security.views.verify_captcha', return_value=True)
+    @pytest.mark.integration
+    def test_login_remember_me_false_refresh_1day(self, _mock_captcha):
+        """remember_me=false（不记住我）→ refresh token 收紧到约 1 天"""
+        resp = self._login({'username': 'normal', 'password': 'pass12345',
+                            'remember_me': False,
+                            'captcha_id': 'x', 'captcha_code': 'x'})
+        assert resp.status_code == 200
+        delta = _refresh_exp_delta(resp.json()['refresh'])
+        assert timedelta(days=-1, hours=-2) < delta < timedelta(hours=-20)
+
+    @patch('apps.security.views.verify_captcha', return_value=True)
+    @pytest.mark.integration
+    def test_login_encrypted_password_success(self, _mock_captcha):
+        """一次性 RSA 密文密码 + key_id → 解密后登录成功"""
+        cipher, key_id = _rsa_encrypt_with_key('pass12345')
+        resp = self._login({
+            'username': 'normal',
+            'password': cipher,
+            'encrypted_password': True,
+            'key_id': key_id,
+            'captcha_id': 'x',
+            'captcha_code': 'x',
+        })
+        assert resp.status_code == 200
+        assert resp.json()['user']['username'] == 'normal'
+
+    @patch('apps.security.views.verify_captcha', return_value=True)
+    @pytest.mark.integration
+    def test_login_encrypted_password_consumed_once(self, _mock_captcha):
+        """一次性密钥用后即焚：同一密文二次重放应解密失败返回 400"""
+        cipher, key_id = _rsa_encrypt_with_key('pass12345')
+        payload = {
+            'username': 'normal', 'password': cipher,
+            'encrypted_password': True, 'key_id': key_id,
+            'captcha_id': 'x', 'captcha_code': 'x',
+        }
+        assert self._login(payload).status_code == 200
+        # 密钥已被消耗，重放同一密文+key_id 无法解密
+        resp = self._login(payload)
+        assert resp.status_code == 400
+        assert '解密失败' in resp.json()['detail']
+
+    @patch('apps.security.views.verify_captcha', return_value=True)
+    @pytest.mark.integration
+    def test_login_encrypted_password_garbage_400(self, _mock_captcha):
+        """密文无法解密（伪造/损坏）→ 400，提示刷新页面"""
+        _, key_id = _rsa_encrypt_with_key('pass12345')
+        resp = self._login({
+            'username': 'normal',
+            'password': '!!!not-base64-密文!!!',
+            'encrypted_password': True,
+            'key_id': key_id,
+            'captcha_id': 'x',
+            'captcha_code': 'x',
+        })
+        assert resp.status_code == 400
+
+    @patch('apps.security.views.verify_captcha', return_value=True)
+    @pytest.mark.integration
+    def test_login_encrypted_password_missing_key_id_400(self, _mock_captcha):
+        """声明已加密但未带 key_id（无可用密钥）→ 400"""
+        resp = self._login({
+            'username': 'normal',
+            'password': 'some-cipher',
+            'encrypted_password': True,
+            'captcha_id': 'x',
+            'captcha_code': 'x',
+        })
+        assert resp.status_code == 400
+
+    @pytest.mark.integration
+    def test_encrypt_key_endpoint_returns_onetime_key(self):
+        """GET /api/v1/security/encrypt-key/ → 200，返回 key_id + 一次性 PEM 公钥"""
+        resp = self.client.get('/api/v1/security/encrypt-key/')
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data['key_id']
+        assert data['expires_in'] == 300
+        assert 'BEGIN PUBLIC KEY' in data['public_key']
 
 
 # ============================================================================

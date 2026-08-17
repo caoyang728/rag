@@ -75,8 +75,13 @@ def on_document_done(document_id: int):
     """
     from apps.knowledge.models import Document
 
-    doc = Document.objects.filter(id=document_id).only('id', 'node_id', 'chunk_count').first()
+    doc = Document.objects.filter(id=document_id).only(
+        'id', 'node_id', 'chunk_count', 'audit_status'
+    ).first()
     if doc is None:
+        return
+    # 已驳回文档不再触发图谱构建（驳回即终态，数据已清理）
+    if doc.audit_status == 'rejected':
         return
     dispatched = _dispatch_node_graph_task(doc)
     if dispatched:
@@ -86,13 +91,20 @@ def on_document_done(document_id: int):
 def on_document_updated(document_id: int):
     """文档更新后的处理：防抖派发节点级图谱重新抽取（清理 + 抽取由任务内部完成）
 
-    Args:
-        document_id: 文档 ID
+    先清除该文档的历史抽取进度（Redis），确保版本升级后从新切片从头抽取，
+    避免续传机制沿用旧版本进度导致数据错乱。
     """
     from apps.knowledge.models import Document
+    from apps.graph.tasks import _clear_doc_progress
 
-    doc = Document.objects.filter(id=document_id).only('id', 'node_id', 'chunk_count').first()
+    _clear_doc_progress(document_id)
+    doc = Document.objects.filter(id=document_id).only(
+        'id', 'node_id', 'chunk_count', 'audit_status'
+    ).first()
     if doc is None:
+        return
+    # 已驳回文档不再触发图谱重新抽取（驳回即终态，数据已清理）
+    if doc.audit_status == 'rejected':
         return
     dispatched = _dispatch_node_graph_task(doc)
     if dispatched:
@@ -155,6 +167,10 @@ def on_document_deleted(document_id: int):
         document_id: 文档 ID
     """
     from apps.graph.models import GraphCommunity
+    from apps.graph.tasks import _clear_doc_progress
+
+    # 清除该文档的抽取进度缓存，防止已删除文档的进度残留导致下次误续传
+    _clear_doc_progress(document_id)
 
     # 文档删除可能发生在节点任务派发后尚未执行期间：清除该节点待处理标记，
     # 避免残留 True 导致该节点后续文档完成时不再派发（自愈）

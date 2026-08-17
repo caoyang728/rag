@@ -20,6 +20,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from django.db.models import Q
+from django.utils import timezone
 
 from apps.knowledge.models import KnowledgeNode
 from apps.wiki.access import can_read_wiki, can_manage_wiki, get_accessible_node_ids
@@ -115,13 +116,74 @@ class WikiPageViewSet(viewsets.ReadOnlyModelViewSet):
 
     @action(detail=True, methods=['post'], url_path='expire')
     def expire(self, request, pk=None):
-        """标记页面过期（内容与源文档不一致，待刷新）"""
+        """标记页面过期：记录操作人 / 时间 / 原因，幂等
+
+        权限对齐刷新（can_manage_wiki，即节点管理者 / 管理员）；仅知识节点 Wiki 支持，
+        community 页面无文档权限维度，不允许标记过期。
+        过期后页面仍可浏览（页首提示内容可能已过时），刷新重建后自动恢复为已发布。
+        """
         page = self.get_object()
+        if not page.node_id:
+            return Response({'detail': '仅知识节点 Wiki 支持标记过期'}, status=status.HTTP_400_BAD_REQUEST)
         if not can_manage_wiki(request.user, page.node):
             raise PermissionDenied('您没有权限操作该 Wiki 页面')
 
-        WikiPage.objects.filter(id=page.id).update(status='expired')
+        # 已是过期状态：幂等返回，不重复覆盖操作人 / 原因
+        if page.status == 'expired':
+            return Response({'ok': True, 'detail': '该页面已标记为过期'})
+
+        reason = (request.data.get('reason') or '')[:500]
+        WikiPage.objects.filter(id=page.id).update(
+            status='expired',
+            expire_reason=reason,
+            expired_by=request.user,
+            expired_at=timezone.now(),
+        )
+        logger.info(f'[Wiki] 页面 {page.id} 被 {request.user.username} 标记过期: {reason}')
         return Response({'ok': True, 'detail': '已标记为过期'})
+
+    @action(detail=True, methods=['get'], url_path='resolve_doc')
+    def resolve_doc(self, request, pk=None):
+        """按链接文字（文件名 / 标题）在节点下解析来源文档
+
+        正文参考资料链接（[文件名](#)）点击时，前端可能因 source_docs 上限
+        （20 条）或标题/文件名差异匹配不到，这里提供服务端兜底：在节点全部
+        已完成文档中按 file_name / title 精确匹配（不设上限），返回文档 id 与
+        当前用户可访问标记，前端据此直接预览或提示申请权限。
+        community 页面无文档来源，直接返回 not_found。
+        """
+        page = self.get_object()
+        if not page.node_id:
+            return Response({'found': False})
+        name = (request.query_params.get('name') or '').strip()
+        if not name:
+            return Response({'found': False, 'detail': '缺少 name 参数'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        from apps.knowledge.access import filter_accessible_doc_ids
+        from apps.knowledge.models import Document
+
+        doc = (
+            Document.objects.filter(
+                node_id=page.node_id, is_deleted=False, status='done'
+            ).filter(Q(file_name=name) | Q(title=name)).order_by('id').first()
+        )
+        if not doc:
+            return Response({'found': False})
+
+        user = request.user
+        if getattr(user, 'is_super_admin', False) or getattr(user, 'is_kb_admin', False):
+            can_access = True
+        else:
+            can_access = doc.id in set(filter_accessible_doc_ids(user, [doc.id]))
+        return Response({
+            'found': True,
+            'id': doc.id,
+            'title': doc.title,
+            'file_name': doc.file_name,
+            'file_type': doc.file_type,
+            'can_access': can_access,
+        })
 
 
 class WikiPageGenerateView(APIView):

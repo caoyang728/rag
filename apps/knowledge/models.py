@@ -203,6 +203,7 @@ class Document(models.Model):
         ('txt', 'txt'),
         ('code', 'code'),
         ('config', 'config'),
+        ('image', 'image'),
         ('other', 'other'),
     ]
     AUDIT_STATUS_CHOICES = [
@@ -619,6 +620,34 @@ class ImageResource(models.Model):
 
     def __str__(self):
         return f'Image<{self.id}>{self.storage_mode}'
+
+
+# ============================================================================
+# OcrUsageCounter（开发期 OCR 调用计数，生产环境删除本模型）
+# ============================================================================
+
+class OcrUsageCounter(models.Model):
+    """OCR 调用次数计数器（开发期临时表，生产环境删除）
+
+    用途：腾讯云 OCR 按调用量计费，开发/联调期间可能高频触发，
+    配合 tencent_ocr.DEV_OCR_QUOTA 硬编码上限，累计调用达到上限后自动停止识别，
+    防止误耗云费用。仅保留 id=1 的单行计数，配合 select_for_update 保证并发下计数准确。
+    """
+
+    id = models.PositiveSmallIntegerField(
+        primary_key=True, default=1, editable=False,
+        help_text='固定为 1（单行计数器）',
+    )
+    count = models.PositiveIntegerField(default=0, help_text='已累计的 OCR 调用次数')
+    updated_at = models.DateTimeField(auto_now=True, help_text='最近一次计数更新时间')
+
+    class Meta:
+        db_table = 'knowledge_ocr_usage_counter'
+        verbose_name = 'OCR 调用计数（开发期）'
+        verbose_name_plural = verbose_name
+
+    def __str__(self):
+        return f'OcrUsageCounter<{self.count}>'
 
 
 # ============================================================================

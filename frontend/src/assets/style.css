@@ -1,0 +1,410 @@
+/* 全局基础样式（Element Plus 主题覆盖 + 通用工具类）
+   主题变量：浅色为默认，html.dark 下覆盖为暗色值 */
+
+:root {
+  --app-header-height: 64px;
+  /* 自定义主题变量（浅色默认值） */
+  --app-bg: #f5f7fa;
+  --app-card-bg: #ffffff;
+  --app-border: #e4e7ed;
+  --app-text: #303133;
+  --app-text-sub: #909399;
+  --app-menu-hover: #f5f7fa;
+  /* 细滚动条滑块颜色（浅色主题） */
+  --app-scrollbar-thumb: rgba(144, 147, 153, 0.45);
+  --app-scrollbar-thumb-hover: rgba(144, 147, 153, 0.7);
+  /* 等宽字体族：key/时间戳/JSON 等场景统一，替代各页面 20+ 处字符串重复 */
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* 暗色主题：Element Plus dark css-vars 依赖 html.dark 类，
+   此处仅覆盖全局自定义变量的取值 */
+html.dark {
+  --app-bg: #0f1419;
+  --app-card-bg: #1c2128;
+  --app-border: #30363d;
+  --app-text: #e6edf3;
+  --app-text-sub: #8b949e;
+  --app-menu-hover: #21262d;
+  background: var(--app-bg);
+  color-scheme: dark;
+  /* 暗色主题下滚动条滑块颜色提亮一档，保证在深色背景上可见 */
+  --app-scrollbar-thumb: rgba(139, 148, 158, 0.5);
+  --app-scrollbar-thumb-hover: rgba(139, 148, 158, 0.8);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body, #app {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background: var(--app-bg);
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  color: var(--app-text);
+  font-size: 14px;
+}
+
+/* ===== 页面统一布局骨架 =====
+   规则：左侧导航栏 + 右侧页面；右侧页面分为上下两部分——
+   页面 header（固定高度、不滚动）+ 页面 body（撑满剩余空间、固定）。
+   body 内需要上下滑动时，再套一层 .page-scroll 并在其内部滚动；
+   body 内可同时存在固定 div 与可滚动 div（固定 div 不包 scroll）。 */
+.page-container {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+}
+
+/* 页面 header：固定高度，与侧栏 logo 高度一致 */
+.page-header {
+  flex-shrink: 0;
+  height: var(--app-header-height);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 20px;
+  background: var(--app-card-bg);
+  border-bottom: 1px solid var(--app-border);
+}
+
+.page-title {
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--app-text);
+}
+
+.page-desc {
+  margin-top: 4px;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--app-text-sub);
+}
+
+/* 页面 header 右侧的操作区（按钮组），与左侧标题区保持两端对齐 */
+.page-header-actions {
+  flex-shrink: 0;
+  display: flex;
+  gap: 8px;
+}
+
+/* 页面 body：撑满剩余空间且固定，不随内容滚动 */
+.page-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 16px 20px;
+  overflow: hidden;
+}
+
+/* body 内的可滚动层：由固定 div（如工具栏）与滚动 div 组合时使用 */
+.page-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* 表格卡片滚动区：卡片 padding 归零时补 12px 水平间距（Ticket/AdminDocs/AdminUsers 三处重复，收敛到全局） */
+.page-scroll.pad-x-12 {
+  padding: 0 12px;
+}
+
+/* 通用卡片 */
+.app-card {
+  background: var(--app-card-bg);
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  padding: 16px;
+  margin-bottom: 16px;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04), 0 1px 3px rgba(16, 24, 40, 0.06);
+  transition: box-shadow 0.2s ease;
+}
+
+.app-card + .app-card {
+  margin-top: 16px;
+}
+
+/* 筛选工具条 */
+.filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+/* ===== 列表卡片工具条 =====
+   各列表页（工单/用户/文档/任务）重复定义"flex + 底部边框 + 不收缩"的工具条，
+   统一收敛到全局；右侧按钮组用 .toolbar-right 推向右端 */
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--app-border);
+  flex-shrink: 0;
+}
+
+.toolbar-left,
+.toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.toolbar-right {
+  margin-left: auto;
+}
+
+/* ===== 分页容器 =====
+   列表页统一"上边距 + 右对齐 + 底部内边距"的分页排版 */
+.pagination-bar {
+  margin-top: 14px;
+  justify-content: flex-end;
+  padding: 0 12px 12px;
+  flex-shrink: 0;
+}
+
+/* ===== 详情网格（弹窗/详情页信息展示）=====
+   统一"两列信息网格 + 标签/值"的展示形态，AdminTasks/AdminAudit 等详情弹窗共用，
+   页面如有个性化变体（卡片化 cell、不同间距）可自行覆盖或另命名 */
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px 20px;
+  margin-bottom: 8px;
+}
+
+.detail-block {
+  margin-top: 12px;
+}
+
+.detail-label {
+  font-size: 12px;
+  color: var(--app-text-sub);
+  margin-bottom: 4px;
+}
+
+.detail-value {
+  font-size: 13px;
+  color: var(--app-text);
+  word-break: break-all;
+}
+
+/* 表格操作按钮间距 */
+.table-op-btn {
+  margin-right: 8px;
+}
+
+.text-sub {
+  color: var(--app-text-sub);
+}
+
+.text-xs {
+  font-size: 12px;
+}
+
+/* ===== 通用工具类 =====
+   各页面重复定义 .flex/.items-center/.gap-*/.mb-*/.mt-*/.fw-500/.mono/.text-sm，统一收敛；
+   页面 scoped 中若已有同名定义（值不一致），以 scoped 覆盖为准 */
+.text-sm {
+  font-size: 13px;
+}
+
+.flex {
+  display: flex;
+}
+
+.items-center {
+  align-items: center;
+}
+
+.gap-6 {
+  gap: 6px;
+}
+
+.gap-8 {
+  gap: 8px;
+}
+
+.gap-2 {
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.mb-2 {
+  margin-bottom: 8px;
+}
+
+.mb-3 {
+  margin-bottom: 16px;
+}
+
+.mt-2 {
+  margin-top: 8px;
+}
+
+.fw-500 {
+  font-weight: 500;
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+/* 空态占位：列表/面板无数据时的居中灰色提示 */
+.empty-state {
+  padding: 40px 0;
+  text-align: center;
+  color: var(--app-text-sub);
+}
+
+/* 状态标签（流水线状态映射） */
+.status-tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.status-tag-success { background: #f0f9eb; color: #67c23a; }
+.status-tag-warning { background: #fdf6ec; color: #e6a23c; }
+.status-tag-danger { background: #fef0f0; color: #f56c6c; }
+.status-tag-default { background: #f4f4f5; color: #909399; }
+
+/* 聊天内容中 LLM 流式输出的 markdown 样式容错 */
+.chat-content {
+  line-height: 1.7;
+  word-break: break-word;
+}
+
+/* 通用 el-card 内边距微调 */
+.el-card__body {
+  padding: 16px;
+}
+
+/* ===== 细滚动条（全局兜底）=====
+   统一"更细 + 鼠标放上去才显示 + 不占布局"的滚动体验：
+   - WebKit：6px 细条，thumb 平时透明隐藏，鼠标进入滚动区域后显示，
+     悬停 thumb 本身时加深；轨道透明，视觉上不干扰内容；
+   - 鼠标在滚动区域外时 thumb 隐藏，近似 overlay 效果；
+   - Firefox：scrollbar-width: thin + 透明 color，仅 @supports 内启用，
+     避免影响 WebKit；
+   - 页面内已有的局部滚动条样式（如 .panel-body、.card-scroll、
+     .doc-detail-body）优先级更高，不受此全局规则影响 */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* 平时 thumb 透明（滚动条不可见），不侵占页面视觉位置 */
+::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 3px;
+}
+
+/* 鼠标进入任意滚动区域时显示滑块 */
+*:hover::-webkit-scrollbar-thumb {
+  background: var(--app-scrollbar-thumb);
+}
+
+/* 悬停滑块本身时加深，便于抓取 */
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--app-scrollbar-thumb-hover);
+}
+
+/* Firefox 兜底：默认透明隐藏，悬停（滑动）时显示 */
+@supports (-moz-appearance: none) {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: transparent transparent;
+  }
+
+  *:hover {
+    scrollbar-color: var(--app-scrollbar-thumb) transparent;
+  }
+}
+
+/* ===== 卡片头部标题 =====
+   各页面重复定义"15px + 600 + 主文本色"的标题，统一收敛；
+   兼容历史命名（.panel-title/.org-card-title/.up-panel-title 等可逐步迁移到 .card-title） */
+.card-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--app-text);
+  flex-shrink: 0;
+}
+
+/* ===== 表单通用样式（表单五件套）=====
+   各页面（用户/组织/系统配置/节点/上传等）重复定义表单标签/提示/必填样式，
+   统一收敛到全局；页面有个性化间距时用 scoped 覆盖 */
+.form-item {
+  margin-bottom: 16px;
+}
+
+.form-label {
+  display: block;
+  font-size: 13px;
+  color: var(--app-text);
+  margin-bottom: 8px;
+}
+
+/* 必填标识：挂在 label 上的红色星号，用法见各页面模板（如 <span class="required">*</span>） */
+.required {
+  color: #f56c6c;
+}
+
+.form-hint {
+  font-size: 12px;
+  color: var(--app-text-sub);
+  line-height: 1.5;
+  margin-top: 4px;
+}
+
+.form-row {
+  display: flex;
+  gap: 12px;
+}
+
+/* ===== tabs 撑满 + 面板内部滚动（.tabs-fill）=====
+   AdminEval/AdminAnalytics/AdminAudit/AdminScheduler/Graph 五处逐字重复的
+   :deep() 修改 el-tabs 三件套，统一收敛；页面将卡片容器类替换为 tabs-fill 即可 */
+.tabs-fill .el-tabs {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.tabs-fill .el-tabs__content {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.tabs-fill .el-tab-pane {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}

@@ -96,18 +96,19 @@ def detect_communities(level: int = 0) -> List[Dict]:
     return results
 
 
-def generate_community_summary(community_id: int, level: int, llm) -> str:
+def generate_community_summary(community: "GraphCommunity", llm) -> str:
     """用 LLM 生成社区摘要，并落库。
 
+    直接传入刚创建的社区实例（而非按 community_id+level 反查）：整体重建期间
+    旧社区尚未删除，按 community_id+level 查询会命中新旧多条记录，只能按 pk 定位。
+
     Args:
-        community_id: 社区编号
-        level: 社区层级
+        community: 待生成摘要的社区实例（含 entity_ids）
         llm: LLM 实例
 
     Returns:
         生成的摘要文本
     """
-    community = GraphCommunity.objects.get(community_id=community_id, level=level)
     entity_ids = community.entity_ids
 
     entities = GraphEntity.objects.filter(id__in=entity_ids)
@@ -167,8 +168,10 @@ def run_community_detection(llm, levels: List[int] = None) -> int:
     if levels is None:
         levels = [0, 1, 2]
 
-    # 先清空旧社区（社区随图谱增量变化，整体重建）
-    GraphCommunity.objects.all().delete()
+    # 旧社区不先删：全部新社区创建成功后才清理旧数据，任务中途被杀（超时/崩溃）时
+    # 旧数据得以保留，避免社区列表被清空（曾因检测任务被杀后社区表为空）。
+    # 重建期间新旧数据短暂共存，成功完成后用 pk 排除法删除全部旧记录。
+    new_pks = []
 
     total_count = 0
     for level in levels:
@@ -179,12 +182,16 @@ def run_community_detection(llm, levels: List[int] = None) -> int:
                 level=comm['level'],
                 entity_ids=comm['entity_ids'],
             )
+            new_pks.append(obj.pk)
             total_count += 1
             # 摘要生成失败不阻断整体流程
             try:
-                generate_community_summary(obj.community_id, obj.level, llm)
+                generate_community_summary(obj, llm)
             except Exception as e:
                 logger.error(f'[Graph Community] 摘要生成失败 community_id={obj.community_id}: {e}')
+
+    # 新社区全部创建（并尽力生成摘要）后，删除旧社区记录
+    GraphCommunity.objects.exclude(pk__in=new_pks).delete()
 
     logger.info(f'[Graph Community] 检测完成，共 {total_count} 个社区（levels={levels}）')
     return total_count

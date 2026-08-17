@@ -24,6 +24,7 @@ def get_parser(file_type: str) -> 'BaseParser':
     from .config_parser import ConfigParser
     from .spreadsheet_parser import SpreadsheetParser
     from .presentation_parser import PresentationParser
+    from .image_parser import ImageParser
 
     file_type = (file_type or '').lower()
     mapping = {
@@ -46,5 +47,12 @@ def get_parser(file_type: str) -> 'BaseParser':
         'code': CodeParser(),
         'py': CodeParser(),
         'config': ConfigParser(),
+        # 图片（OCR 提取文字）
+        'image': ImageParser(),
+        'jpg': ImageParser(),
+        'jpeg': ImageParser(),
+        'png': ImageParser(),
+        'bmp': ImageParser(),
+        'webp': ImageParser(),
     }
     return mapping.get(file_type, MarkdownParser())

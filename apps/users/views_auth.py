@@ -22,12 +22,18 @@ User = get_user_model()
 
 
 class LoginView(APIView):
-    """POST /api/v1/auth/login/  -> {access, refresh, user}"""
+    """POST /api/v1/auth/login/  -> {access, refresh, user}
+
+    支持两种账号形式：用户名（工号）或邮箱（大小写不敏感）。
+    密码可加密传输：前端用 RSA 公钥加密后携带 encrypted_password=true，
+    后端解密后再做校验；未加密的明文密码向后兼容。
+    remember_me 控制 refresh token 生命周期（7 天 / 24 小时）。
+    """
     permission_classes = [AllowAny]
     throttle_scope = "login"
 
     def post(self, request):
-        username = (request.data.get("username") or "").strip()
+        username = (request.data.get("username") or request.data.get("account") or "").strip()
         password = request.data.get("password") or ""
         captcha_id = request.data.get("captcha_id") or ""
         captcha_code = request.data.get("captcha_code") or ""
@@ -43,7 +49,19 @@ class LoginView(APIView):
             record_login_attempt(username, None, ip, ua, "captcha_fail")
             return Response({"detail": "验证码错误"}, status=401)
 
-        user = User.objects.filter(username=username, is_deleted=False).first()
+        # 前端已启用 RSA 加密：按 key_id 取一次性密钥解密，失败视为请求异常
+        if request.data.get("encrypted_password") in (True, "true", 1, "1"):
+            from apps.security.login_crypto import decrypt_password
+            key_id = request.data.get("key_id") or request.data.get("encrypt_key_id") or ""
+            password = decrypt_password(password, key_id)
+            if password is None:
+                return Response({"detail": "密码解密失败，请刷新页面重试"}, status=400)
+
+        # 支持用户名（工号）与邮箱两种登录方式：邮箱大小写不敏感
+        from django.db.models import Q
+        user = User.objects.filter(is_deleted=False).filter(
+            Q(username=username) | Q(email__iexact=username)
+        ).first()
         if not user or not user.check_password(password):
             record_login_attempt(
                 username, user if user else None, ip, ua,
@@ -55,7 +73,8 @@ class LoginView(APIView):
             logger.warning(f"Login attempt for inactive user: {user.username}, status={user.status}")
             return Response({"detail": "用户名或密码错误"}, status=401)
 
-        refresh = finalize_login(user, ip, ua)
+        remember_me = request.data.get("remember_me", True) not in (False, "false", 0, "0")
+        refresh = finalize_login(user, ip, ua, remember_me=remember_me)
         return Response({
             "access": str(refresh.access_token),
             "refresh": str(refresh),

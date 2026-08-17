@@ -4,6 +4,7 @@ LLM Wiki 数据模型
 - WikiSection: 页面章节（预留，可记录结构化章节）
 - WikiLink: 页面间自动链接
 """
+from django.conf import settings
 from django.db import models
 from django.contrib.postgres.fields import ArrayField
 from pgvector.django import VectorField, HnswIndex
@@ -32,6 +33,13 @@ class WikiPage(models.Model):
     summary = models.TextField(blank=True, default='')
     content = models.TextField(blank=True, default='', help_text='Wiki 正文，Markdown 格式')
     status = models.CharField(max_length=16, choices=STATUS_CHOICES, default='draft')
+    # 过期审计信息：标记过期记录操作人 / 时间 / 原因，重建后由生成器清空（见 generator.py）
+    expire_reason = models.TextField(blank=True, default='', help_text='标记过期时填写的原因')
+    expired_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True,
+        on_delete=models.SET_NULL, db_column='expired_by_id', related_name='+',
+        help_text='标记过期的操作人（文档变化自动过期时为空）')
+    expired_at = models.DateTimeField(null=True, blank=True, help_text='标记过期时间')
     embedding = VectorField(dimensions=1024, null=True, blank=True,
                             help_text='页面语义向量（BGE-M3 1024 维）')
     tags = ArrayField(models.CharField(max_length=32), default=list, blank=True)

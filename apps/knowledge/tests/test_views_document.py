@@ -663,6 +663,49 @@ class TestDocumentListFilters(KnowledgeViewsExtraBase):
         assert self.doc_other_private.id not in ids
 
     @pytest.mark.integration
+    def test_list_filter_status_pending_team_returns_auditing_docs(self):
+        """status=pending_team 按审核维度过滤：仅返回处理全部完成且待团队审核的文档"""
+        # 基类文档默认 graph/wiki=pending（处理未完成），先补齐为已完成流水线
+        Document.objects.filter(id__in=[
+            self.doc_own_private.id, self.doc_other_public.id,
+            self.doc_other_private.id,
+        ]).update(graph_status='done', wiki_status='done')
+        resp = self.client.get(
+            '/api/v1/knowledge/documents/?status=pending_team',
+            **_auth_headers(self.super_admin))
+        assert resp.status_code == 200
+        ids = {d['id'] for d in resp.json()['results']}
+        # 基类文档 audit_status 默认 pending_team，处理全部完成后计入待团队审核
+        assert self.doc_own_private.id in ids
+        assert self.doc_other_public.id in ids
+        assert self.doc_other_private.id in ids
+
+    @pytest.mark.integration
+    def test_list_filter_status_pending_team_excludes_unfinished(self):
+        """status=pending_team 不含处理未完成（图谱等待构建）的文档（聚合唯一归属）"""
+        resp = self.client.get(
+            '/api/v1/knowledge/documents/?status=pending_team',
+            **_auth_headers(self.super_admin))
+        assert resp.status_code == 200
+        ids = {d['id'] for d in resp.json()['results']}
+        # 基类文档 graph/wiki 默认 pending（处理未完成），即使 audit_status=pending_team 也不计入
+        assert self.doc_own_private.id not in ids
+
+    @pytest.mark.integration
+    def test_list_filter_status_rejected_returns_only_rejected(self):
+        """status=rejected 仅返回已驳回文档"""
+        self.doc_own_private.audit_status = 'rejected'
+        self.doc_own_private.save(update_fields=['audit_status'])
+        resp = self.client.get(
+            '/api/v1/knowledge/documents/?status=rejected',
+            **_auth_headers(self.super_admin))
+        assert resp.status_code == 200
+        ids = {d['id'] for d in resp.json()['results']}
+        assert self.doc_own_private.id in ids
+        assert self.doc_other_public.id not in ids
+        assert self.doc_other_private.id not in ids
+
+    @pytest.mark.integration
     def test_available_depts_cached(self):
         """第二次请求命中缓存（cache key: available_depts_list）"""
         cache.delete('available_depts_list')

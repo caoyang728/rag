@@ -219,6 +219,14 @@ SCHEDULED_TASKS: List[dict] = [
         'label': '任务日志清理',
         'description': '清理超过保留期的后台任务日志（数据量控制，默认 30 天）',
     },
+    {
+        'name': 'graph-status-recover',
+        'task': 'apps.graph.tasks.graph_recover_task',
+        'cron': '*/5 * * * *',
+        'enabled': True,
+        'label': '图谱构建状态自愈',
+        'description': '扫描卡死的图谱构建状态（extracting 长时间无任务），回退并重新派发',
+    },
 ]
 
 # ---------------------------------------------------------------------------

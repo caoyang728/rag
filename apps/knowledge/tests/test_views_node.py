@@ -93,6 +93,67 @@ class TestNodeTreeFilter(KnowledgeViewsExtraBase):
         assert resp.json()['tree'] == []
 
 
+def _find_tree_node(nodes, node_id):
+    """在嵌套树结构中按 id 递归查找节点（含子节点），找不到返回 None"""
+    for n in nodes:
+        if n['id'] == node_id:
+            return n
+        if n.get('children'):
+            found = _find_tree_node(n['children'], node_id)
+            if found:
+                return found
+    return None
+
+
+class TestNodeDocumentCountAudited(KnowledgeViewsExtraBase):
+    """节点 document_count 仅统计通过双审（audit_status=passed）的文档
+
+    未通过审核/复核的文档（待审核/待复核/驳回等）不计入，
+    admin-nodes 页面展示的"文档数量"即正式可用文档量。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _env(self):
+        self._init_env()
+        # 通过双审 → 计入
+        _create_document(self.category_node, self.normal_user, team_id=self.team.id,
+                         dept_id=self.dept.id, title='已通过文档',
+                         audit_status='passed')
+        # 待审核 / 驳回 → 不计入
+        _create_document(self.category_node, self.normal_user, team_id=self.team.id,
+                         dept_id=self.dept.id, title='待审核文档',
+                         audit_status='pending_team')
+        _create_document(self.category_node, self.normal_user, team_id=self.team.id,
+                         dept_id=self.dept.id, title='驳回文档',
+                         audit_status='rejected')
+
+    @pytest.mark.integration
+    def test_tree_document_count_excludes_unapproved(self):
+        """tree 接口 document_count 只统计通过双审的文档"""
+        resp = self.client.get(
+            '/api/v1/knowledge/nodes/tree/',
+            **_auth_headers(self.super_admin))
+        assert resp.status_code == 200
+        node = _find_tree_node(resp.json()['tree'], self.category_node.id)
+        assert node is not None
+        expected = Document.objects.filter(
+            node=self.category_node, is_deleted=False,
+            audit_status='passed', is_active=True).count()
+        assert node['document_count'] == expected
+
+    @pytest.mark.integration
+    def test_node_detail_document_count_excludes_unapproved(self):
+        """节点详情接口 document_count 与 tree 口径一致"""
+        resp = self.client.get(
+            f'/api/v1/knowledge/nodes/{self.category_node.id}/',
+            **_auth_headers(self.super_admin))
+        assert resp.status_code == 200
+        expected = Document.objects.filter(
+            node=self.category_node, is_deleted=False,
+            audit_status='passed', is_active=True).count()
+        assert resp.json()['document_count'] == expected
+
+
 # ============================================================================
 # KnowledgeNodeViewSet create / update / destroy
 # ============================================================================

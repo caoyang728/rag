@@ -93,6 +93,9 @@ function updateStatusCountsUI(counts) {
 		'embedding': 'embedding',
 		'embedding_failed': 'embedding_failed',
 		'failed': 'failed',
+		'pending_team': 'pending_team',
+		'pending_compliance': 'pending_compliance',
+		'rejected': 'rejected',
 		'graph_pending': 'graph_pending',
 		'graph_extracting': 'graph_extracting',
 		'graph_failed': 'graph_failed',
@@ -223,6 +226,8 @@ async function loadUploadHistory(page = 1) {
 				row.querySelector('.up-row-time').textContent = '删除于 ' + formatDate(h.delete_time);
 				row.querySelector('.up-row-view').onclick = null;
 				row.querySelector('.up-row-view').style.cursor = 'default';
+				row.querySelector('.up-row-progress').onclick = null;
+				row.querySelector('.up-row-progress').style.cursor = 'default';
 				row.querySelector('.up-row-reparse').onclick = null;
 				row.querySelector('.up-row-reparse').style.cursor = 'default';
 				row.querySelector('.up-row-delete').textContent = '🔄 恢复';
@@ -247,9 +252,10 @@ async function loadUploadHistory(page = 1) {
 					}
 				}
 			} else {
-				row.querySelector('.up-row-status').innerHTML = pipelineStatusTag(h);
+				row.querySelector('.up-row-status').innerHTML = uploadStatusTag(h);
 				row.querySelector('.up-row-time').textContent = formatDate(h.created_at);
 				row.querySelector('.up-row-view').onclick = function () { viewDocument(h.id); };
+				row.querySelector('.up-row-progress').onclick = function () { showDocProgress(h.id); };
 				row.querySelector('.up-row-reparse').onclick = function () { reparseDocument(h.id); };
 				row.querySelector('.up-row-delete').onclick = function () { deleteDocument(h.id); };
 				// 版本切换入口：同组存在多版本时展示（版本历史弹窗由 common.js 提供）
@@ -317,6 +323,138 @@ function viewDocument(docId) {
 
 	// 打开文档预览弹窗（元信息 + 原文内容，公共模块 preview-doc.js 实现）
 	previewDoc(docId);
+}
+
+/* ============ 文档处理进度弹窗（8 步步骤条） ============ */
+
+// 上传历史行内状态：处理维度 + 审核维度聚合，每篇文档唯一归属一个状态
+// 归属顺序：处理异常 > 审核驳回（终态）> 处理全部完成后按审核维度归类 > 处理未完成按流水线展示
+// 与下拉筛选/后端统计口径一致：待审核/待复核仅计入处理全部完成的文档
+function uploadStatusTag(h) {
+	const s = h.status || 'pending';
+	// 处理异常最优先（可重试）
+	if (s === 'failed') return '<span class="tag tag-danger">解析失败</span>';
+	if (s === 'embedding_failed') return '<span class="tag tag-danger">向量构建失败</span>';
+	// 驳回为终态，无论处理进行到哪一步都优先展示；按驳回阶段区分文案
+	if ((h.audit_status || '') === 'rejected') {
+		return h.reject_stage === 'compliance'
+			? '<span class="tag tag-danger">复核驳回</span>'
+			: '<span class="tag tag-danger">审核驳回</span>';
+	}
+
+	// 处理全部完成（解析 + 图谱/wiki 均 done/skipped）时按审核维度归属
+	const g = h.graph_status || 'pending';
+	const w = h.wiki_status || 'pending';
+	const processingDone = s === 'done' &&
+		(g === 'done' || g === 'skipped') &&
+		(w === 'done' || w === 'skipped');
+	if (processingDone) {
+		const audit = h.audit_status || 'pending_team';
+		if (audit === 'pending_team') return '<span class="tag tag-info">待审核</span>';
+		if (audit === 'pending_compliance') return '<span class="tag tag-warning">待合规复核</span>';
+		return '<span class="tag tag-success">已完成</span>';
+	}
+	// 处理未完成：按处理流水线展示（解析中/切片中/图谱等待构建等）
+	return pipelineStatusTag(h);
+}
+
+// 步骤状态：done=完成 / active=进行中 / todo=待办 / failed=失败 / skipped=跳过
+// 三线并行：处理线(status) → 审核线(audit_status) → 构建线(graph_status + wiki_status)
+function showDocProgress(docId) {
+	const doc = currentDocs.find(function (d) { return d.id === docId; });
+	if (!doc) {
+		toast('文档不存在', 'error');
+		return;
+	}
+
+	const s = doc.status || 'pending';
+	const audit = doc.audit_status || 'pending_team';
+	const g = doc.graph_status || 'pending';
+	const w = doc.wiki_status || 'pending';
+
+	// 处理线：解析 / 切片 / 向量化，按主流水线 status 判定（脱敏并入解析）
+	let parseState, parseText;
+	if (s === 'failed') { parseState = 'failed'; parseText = '解析失败'; }
+	else if (s === 'parsing' || s === 'desensitizing') { parseState = 'active'; parseText = '解析中'; }
+	else if (s === 'pending') { parseState = 'todo'; parseText = '等待解析'; }
+	else { parseState = 'done'; parseText = '解析完成'; }
+
+	let chunkState, chunkText;
+	if (s === 'failed') { chunkState = 'failed'; chunkText = '解析失败'; }
+	else if (s === 'chunking') { chunkState = 'active'; chunkText = '切片中'; }
+	else if (s === 'pending' || s === 'parsing' || s === 'desensitizing') { chunkState = 'todo'; chunkText = '等待切片'; }
+	else { chunkState = 'done'; chunkText = '切片完成'; }
+
+	let embedState, embedText;
+	if (s === 'embedding_failed') { embedState = 'failed'; embedText = '向量构建失败'; }
+	else if (s === 'embedding') { embedState = 'active'; embedText = '向量构建中'; }
+	else if (s === 'done') { embedState = 'done'; embedText = '向量构建完成'; }
+	else { embedState = 'todo'; embedText = '等待向量化'; }
+
+	// 审核线：双审（团队审核 → 合规复核），按 audit_status 判定（驳回分支见下方统一处理）
+	let audit1State, audit1Text;
+	if (audit === 'pending_team') { audit1State = 'active'; audit1Text = '待审核'; }
+	else if (audit === 'pending_compliance' || audit === 'passed') { audit1State = 'done'; audit1Text = '审核通过'; }
+	else { audit1State = 'todo'; audit1Text = '待审核'; }
+
+	let audit2State, audit2Text;
+	if (audit === 'pending_compliance') { audit2State = 'active'; audit2Text = '待合规复核'; }
+	else if (audit === 'passed') { audit2State = 'done'; audit2Text = '复核通过'; }
+	else { audit2State = 'todo'; audit2Text = '等待复核'; }
+
+	// 构建线：图谱 / Wiki 仅在解析完成(status=done)后由节点级防抖任务驱动
+	const buildStep = function (st, name) {
+		if (s !== 'done') return { state: 'todo', text: '等待解析完成' };
+		if (st === 'extracting') return { state: 'active', text: name + '中' };
+		if (st === 'done') return { state: 'done', text: '构建完成' };
+		if (st === 'failed') return { state: 'failed', text: '构建失败' };
+		if (st === 'skipped') return { state: 'skipped', text: '未启用' };
+		return { state: 'todo', text: '等待构建' };
+	};
+	const graphStep = buildStep(g, '图谱构建');
+	const wikiStep = buildStep(w, 'Wiki生成');
+
+	const steps = [
+		{ name: '上传', state: 'done', text: '已上传' },
+		{ name: '解析/脱敏', state: parseState, text: parseText },
+		{ name: '切片', state: chunkState, text: chunkText },
+		{ name: '向量化', state: embedState, text: embedText },
+		{ name: '团队审核', state: audit1State, text: audit1Text },
+		{ name: '合规复核', state: audit2State, text: audit2Text },
+		{ name: '图谱构建', state: graphStep.state, text: graphStep.text },
+		{ name: 'Wiki生成', state: wikiStep.state, text: wikiStep.text },
+	];
+
+	// 驳回为终态：仅驳回阶段标注失败文案（团队审核驳回/合规复核驳回），其余步骤统一显示横杠
+	if (audit === 'rejected') {
+		const rejectStage = doc.reject_stage || 'team';
+		const failIdx = rejectStage === 'compliance' ? 5 : 4;  // 步骤下标：4=团队审核, 5=合规复核
+		const failText = rejectStage === 'compliance' ? '复核驳回' : '审核驳回';
+		steps.forEach(function (step, i) {
+			if (i === failIdx) { step.state = 'failed'; step.text = failText; }
+			else { step.state = 'skipped'; step.text = '—'; }
+		});
+	}
+
+	// 状态标记映射：图标 + 标签样式
+	const icons = { done: '✓', active: '◐', todo: '○', failed: '✗', skipped: '—' };
+	const tagCls = { done: 'tag-success', active: 'tag-info', todo: 'tag-default', failed: 'tag-danger', skipped: 'tag-default' };
+
+	const titleEl = document.getElementById('docProgressModalTitle');
+	if (titleEl) titleEl.textContent = '处理进度 · ' + (doc.title || doc.file_name || '');
+	const container = document.getElementById('docProgressSteps');
+	if (!container) return;
+	container.innerHTML = '';
+	steps.forEach(function (step) {
+		const div = document.createElement('div');
+		div.className = 'progress-step' + (step.state === 'active' ? ' is-active' : '');
+		div.innerHTML =
+			'<div class="progress-step-icon ' + step.state + '">' + (icons[step.state] || '○') + '</div>' +
+			'<div class="progress-step-name">' + escapeHtml(step.name) + '</div>' +
+			'<span class="tag ' + (tagCls[step.state] || 'tag-default') + '">' + escapeHtml(step.text) + '</span>';
+		container.appendChild(div);
+	});
+	showModal('docProgressModal');
 }
 
 /* ============ 文档预览（预览弹窗由公共模块 preview-doc.js 实现） ============ */
@@ -600,7 +738,8 @@ const ALLOWED_EXTS = new Set([
 	'wps', 'et', 'dps',
 	'py', 'js', 'ts', 'jsx', 'tsx', 'java', 'go', 'rs', 'c', 'cpp', 'h',
 	'yml', 'yaml', 'json', 'xml', 'toml', 'ini', 'conf', 'cfg',
-	'sh', 'bat', 'ps1', 'css'
+	'sh', 'bat', 'ps1', 'css',
+	'jpg', 'jpeg', 'png', 'bmp', 'webp'
 ]);
 const MAX_FILE_SIZE_MB = 100;
 const MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024;

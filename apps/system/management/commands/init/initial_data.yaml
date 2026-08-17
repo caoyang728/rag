@@ -524,6 +524,53 @@ system_configs:
     is_secret: false
     is_readonly: false
 
+  # ==================== OCR 配置（category: knowledge）====================
+  # 腾讯云 OCR 凭证（SecretId/SecretKey/Region）属敏感凭证，保留在 .env（TENCENT_OCR_*），不入库
+  - key: OCR_ENABLED
+    value: "false"
+    value_type: bool
+    category: knowledge
+    label: "OCR 总开关"
+    description: "是否启用图片 / 扫描件 PDF 文字识别（需先在 .env 配置腾讯云 OCR 凭证）"
+    is_secret: false
+    is_readonly: false
+    risk_level: high
+
+  - key: OCR_API
+    value: "GeneralBasicOCR"
+    value_type: string
+    category: knowledge
+    label: "OCR 接口"
+    description: "腾讯云通用印刷体识别接口：GeneralBasicOCR 标准 / GeneralAccurateOCR 高精 / GeneralEfficientOCR 精简（价格更优惠）"
+    options:
+      - value: GeneralBasicOCR
+        label: 通用印刷体（标准）
+      - value: GeneralAccurateOCR
+        label: 通用印刷体（高精版）
+      - value: GeneralEfficientOCR
+        label: 通用印刷体（精简版）
+    is_secret: false
+    is_readonly: false
+
+  - key: OCR_PDF_AUTO
+    value: "true"
+    value_type: bool
+    category: knowledge
+    label: "扫描件 PDF 自动 OCR"
+    description: "PDF 解析时检测到无文本页（扫描件）是否自动渲染并 OCR，受 OCR_PDF_PAGE_LIMIT 限制"
+    is_secret: false
+    is_readonly: false
+
+  - key: OCR_PDF_PAGE_LIMIT
+    value: 50
+    value_type: int
+    category: knowledge
+    label: "单份 PDF 最大 OCR 页数"
+    description: "成本控制：单份扫描件 PDF 最多识别的页数，超出部分跳过"
+    unit: "页"
+    is_secret: false
+    is_readonly: false
+
   # ==================== Embedding / Rerank（category: embedding）====================
   # API Key 仍保留在 .env（EMBEDDING_API_KEY）
   # base_url 已迁移到模型管理（LLMModel 表），不再作为系统配置项

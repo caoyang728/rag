@@ -42,7 +42,7 @@ class TestDocAuditPending(KnowledgeViewsExtraBase):
 
     @pytest.fixture(autouse=True)
     def _env(self):
-        """在基类环境基础上补充待审文档"""
+        """在基类环境基础上补充待审文档（待审核 + 待复核各一）"""
         self._init_env()
         # Document.audit_status 默认值为 pending_team，先把基类文档置为终态，
         # 避免它们混入待审列表
@@ -55,6 +55,11 @@ class TestDocAuditPending(KnowledgeViewsExtraBase):
             self.category_node, self.normal_user, team_id=self.team.id,
             dept_id=self.dept.id, title='待审文档', file_name='audit.txt',
             audit_status='pending_team')
+        # 待合规复核的文档（供阶段筛选测试）
+        self.compliance_doc = _create_document(
+            self.category_node, self.other_user, team_id=self.team.id,
+            dept_id=self.dept.id, title='待复核文档', file_name='compliance.txt',
+            audit_status='pending_compliance')
 
     @pytest.mark.integration
     def test_team_leader_sees_own_team_docs(self):
@@ -85,6 +90,62 @@ class TestDocAuditPending(KnowledgeViewsExtraBase):
             '/api/v1/knowledge/documents/pending-audits/',
             **_auth_headers(self.normal_user))
         assert resp.status_code == 403
+
+    @pytest.mark.integration
+    def test_filter_status_pending_team_returns_only_team_docs(self):
+        """阶段筛选 status=pending_team 仅返回待审核文档"""
+        resp = self.client.get(
+            '/api/v1/knowledge/documents/pending-audits/?status=pending_team',
+            **_auth_headers(self.super_admin))
+        assert resp.status_code == 200
+        ids = [r['id'] for r in resp.json()['rows']]
+        assert self.pending_doc.id in ids
+        assert self.compliance_doc.id not in ids
+
+    @pytest.mark.integration
+    def test_filter_status_pending_compliance_returns_only_compliance_docs(self):
+        """阶段筛选 status=pending_compliance 仅返回待复核文档"""
+        resp = self.client.get(
+            '/api/v1/knowledge/documents/pending-audits/?status=pending_compliance',
+            **_auth_headers(self.super_admin))
+        assert resp.status_code == 200
+        ids = [r['id'] for r in resp.json()['rows']]
+        assert self.compliance_doc.id in ids
+        assert self.pending_doc.id not in ids
+
+    @pytest.mark.integration
+    def test_search_keyword_matches_title(self):
+        """关键字搜索命中标题，仅返回匹配文档"""
+        resp = self.client.get(
+            '/api/v1/knowledge/documents/pending-audits/?keyword=待复核',
+            **_auth_headers(self.super_admin))
+        assert resp.status_code == 200
+        ids = [r['id'] for r in resp.json()['rows']]
+        assert self.compliance_doc.id in ids
+        assert self.pending_doc.id not in ids
+
+    @pytest.mark.integration
+    def test_search_keyword_matches_owner_username(self):
+        """关键字搜索命中上传人账号"""
+        resp = self.client.get(
+            '/api/v1/knowledge/documents/pending-audits/?keyword=normal',
+            **_auth_headers(self.super_admin))
+        assert resp.status_code == 200
+        ids = [r['id'] for r in resp.json()['rows']]
+        assert self.pending_doc.id in ids
+        assert self.compliance_doc.id not in ids
+
+    @pytest.mark.integration
+    def test_search_keyword_combined_with_status(self):
+        """关键字 + 阶段筛选组合生效（超管全量范围内互斥过滤）"""
+        resp = self.client.get(
+            '/api/v1/knowledge/documents/pending-audits/'
+            '?keyword=待复核&status=pending_compliance',
+            **_auth_headers(self.super_admin))
+        assert resp.status_code == 200
+        ids = [r['id'] for r in resp.json()['rows']]
+        assert self.compliance_doc.id in ids
+        assert self.pending_doc.id not in ids
 
 class TestDocAuditApprove(KnowledgeViewsExtraBase):
     """DocAuditApproveView 审核通过测试"""
@@ -179,7 +240,7 @@ class TestDocAuditReject(KnowledgeViewsExtraBase):
 
     @pytest.mark.integration
     def test_reject_sets_rejected(self):
-        """驳回 → audit_status=rejected"""
+        """驳回 → audit_status=rejected，且记录驳回阶段（团队审核）供前端进度展示"""
         resp = self.client.post(
             f'/api/v1/knowledge/documents/{self.pending_doc.id}/audit-reject/',
             data=json.dumps({'comment': '资料不全'}),
@@ -188,6 +249,17 @@ class TestDocAuditReject(KnowledgeViewsExtraBase):
         assert resp.status_code == 200
         assert resp.json()['audit_status'] == 'rejected'
         assert resp.json()['reject_comment'] == '资料不全'
+        self.pending_doc.refresh_from_db()
+        assert (self.pending_doc.extra or {}).get('reject_stage') == 'team'
+        # 列表序列化应带出 reject_stage
+        resp_list = self.client.get(
+            '/api/v1/knowledge/documents/?status=rejected',
+            **_auth_headers(self.super_admin))
+        rows = resp_list.json()
+        assert resp_list.status_code == 200
+        hit = next((r for r in (rows.get('results') or rows)
+                    if r['id'] == self.pending_doc.id), None)
+        assert hit is not None and hit['reject_stage'] == 'team'
 
     @pytest.mark.integration
     def test_reject_not_authorized_403(self):
@@ -475,6 +547,22 @@ class TestDocAuditRejectedList(KnowledgeViewsExtraBase):
             '/api/v1/knowledge/documents/audit-rejected/',
             **_auth_headers(self.normal_user))
         assert resp.status_code == 403
+
+    @pytest.mark.integration
+    def test_search_keyword_filters_rejected_docs(self):
+        """已驳回列表支持关键字搜索（命中标题）"""
+        resp = self.client.get(
+            '/api/v1/knowledge/documents/audit-rejected/?keyword=已驳回',
+            **_auth_headers(self.super_admin))
+        assert resp.status_code == 200
+        ids = [r['id'] for r in resp.json()['rows']]
+        assert self.rejected_doc.id in ids
+
+        resp = self.client.get(
+            '/api/v1/knowledge/documents/audit-rejected/?keyword=不存在的标题',
+            **_auth_headers(self.super_admin))
+        assert resp.status_code == 200
+        assert resp.json()['rows'] == []
 
 
 class TestDocAuditRecordList(KnowledgeViewsExtraBase):

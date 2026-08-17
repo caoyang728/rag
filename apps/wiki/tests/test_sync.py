@@ -14,7 +14,7 @@ apps.wiki.sync 单元测试 —— Wiki 增量同步（节点级防抖派发）
 聚焦早返回分支、状态写入与防抖派发契约。
 """
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, ANY
 
 from apps.wiki.sync import on_document_done_for_wiki
 
@@ -110,8 +110,9 @@ class TestSyncDispatch:
 
         mock_wiki_page.objects.filter.assert_called_once_with(
             node_id=42, status='published')
+        # 系统自动过期：记录过期时间，不记操作人 / 原因（人工过期走 views.expire）
         mock_wiki_page.objects.filter.return_value.update.assert_called_once_with(
-            status='expired')
+            status='expired', expire_reason='', expired_by=None, expired_at=ANY)
 
     @pytest.mark.unit
     @patch('apps.wiki.tasks.build_node_wiki_task')

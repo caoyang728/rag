@@ -132,6 +132,10 @@ def parse_document(document_id: int):
     except Document.DoesNotExist:
         return {'ok': False, 'error': 'doc not found'}
 
+    # 文档被审核驳回后不再继续处理：拦截排队中的解析任务（数据已在驳回时清理）
+    if doc.audit_status == 'rejected':
+        return {'ok': False, 'skipped': 'rejected'}
+
     temp_file = None
     try:
         print(f"========== 开始解析文档 [{doc.id}] {doc.file_name} ==========")
@@ -213,9 +217,13 @@ def parse_document(document_id: int):
                     width=extra.get('width', 0),
                     height=extra.get('height', 0),
                     size_bytes=extra.get('size_bytes', 0),
+                    # 图片文档 OCR 文本同步落库，便于图片资源检索
+                    ocr_text=extra.get('ocr_text', '')[:10000],
                 )
                 image_id = img.id
                 extra.pop('base64_data', None)
+                # OCR 文本已落 ImageResource，不再重复存入 chunk extra 增大存储
+                extra.pop('ocr_text', None)
                 image_count += 1
             
             ch = DocumentChunk.objects.create(
@@ -289,6 +297,10 @@ def parse_document(document_id: int):
 
         # 5. done
         print(f"[步骤5/5] 完成处理...")
+        # 处理期间被审核驳回：兜底清理本轮生成的数据并停止（不置 done，不触发图谱/wiki）
+        if Document.objects.filter(id=doc.id, audit_status='rejected').exists():
+            _clean_rejected_doc_data(doc.id)
+            return {'ok': False, 'skipped': 'rejected'}
         doc.status = 'done'
         doc.chunk_count = len(chunk_objs)
         doc.error_message = ''
@@ -329,6 +341,42 @@ def parse_document(document_id: int):
     finally:
         if temp_file and os.path.exists(temp_file.name):
             os.remove(temp_file.name)
+
+
+def _clean_rejected_doc_data(document_id: int) -> None:
+    """审核驳回后的数据清理（驳回视图与解析任务兜底共用）
+
+    驳回视为终态，删除该文档已生成的处理产物并释放构建标记：
+    - 删除切片（DocumentChunk）与检索向量（表 + 向量库）
+    - 清理该文档产生的图谱实体/关系并刷新社区，清除抽取进度缓存
+    - 释放节点 graph_pending / wiki_pending 防抖标记，
+      避免残留标记阻塞同节点其他文档的图谱/wiki 构建派发
+    - 置 graph_status / wiki_status = skipped，不再触发构建
+    Wiki 页面为节点级共享产物（一个节点聚合多文档生成），不随单文档驳回删除。
+
+    Args:
+        document_id: 文档 ID
+    """
+    from apps.retrieval.vector_store import delete_by_document
+    from apps.graph.sync import on_document_deleted
+
+    DocumentChunk.objects.filter(document_id=document_id).delete()
+    try:
+        delete_by_document(document_id)
+    except Exception as e:
+        logger.warning(f'[Parse] 驳回清理向量失败 doc={document_id}: {e}')
+    # 图谱数据 + 抽取进度缓存 + 节点 graph_pending 释放（复用文档删除联动逻辑）
+    try:
+        on_document_deleted(document_id)
+    except Exception as e:
+        logger.warning(f'[Parse] 驳回清理图谱数据失败 doc={document_id}: {e}')
+    # 释放 wiki 防抖标记并置构建状态终态
+    from apps.knowledge.models import KnowledgeNode
+    node_id = Document.objects.filter(id=document_id).values_list('node_id', flat=True).first()
+    if node_id:
+        KnowledgeNode.objects.filter(id=node_id).update(wiki_pending=False)
+    Document.objects.filter(id=document_id).update(
+        graph_status='skipped', wiki_status='skipped')
 
 
 @shared_task(name='knowledge.cleanup_deleted_docs', queue='cleanup')
@@ -454,6 +502,8 @@ def batch_import_single_file(temp_file_path, node_id, owner_id, visibility, owne
             '.json': 'json', '.xml': 'xml', '.csv': 'csv',
             '.xlsx': 'xlsx', '.xls': 'xlsx', '.et': 'xlsx',  # WPS 表格
             '.ppt': 'ppt', '.pptx': 'pptx', '.dps': 'pptx',  # WPS 演示
+            '.jpg': 'image', '.jpeg': 'image', '.png': 'image',
+            '.bmp': 'image', '.webp': 'image',  # 图片（OCR 提取文字）
         }
         ext = os.path.splitext(filename)[1].lower()
         file_type = ext_map.get(ext, 'other')
@@ -472,6 +522,8 @@ def batch_import_single_file(temp_file_path, node_id, owner_id, visibility, owne
             '.ppt': 'application/vnd.ms-powerpoint',
             '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
             '.dps': 'application/vnd.ms-powerpoint',
+            '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+            '.png': 'image/png', '.bmp': 'image/bmp', '.webp': 'image/webp',
         }
         mime_type = mime_map.get(ext, 'application/octet-stream')
         

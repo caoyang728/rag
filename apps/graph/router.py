@@ -16,6 +16,23 @@ WIKI_SEARCH_THRESHOLD = 0.55       # Wiki 检索最低阈值
 GRAPH_CONFIDENCE_THRESHOLD = 0.45  # GraphRAG 接受阈值（实体全相关+有关系的场景约 0.5+）
 
 
+def _citation_chunks(query: str, user, node_ids, root_types, limit: int = 5) -> List[Dict]:
+    """为 Wiki/GraphRAG 命中补充文档引用 chunks（仅用于构建来源卡片）
+
+    Wiki/GraphRAG 命中的回答上下文来自 wiki 页面/知识图谱，本身不携带文档 chunks，
+    导致前端无来源卡片可展示。这里额外做一次快速 RAG 检索（不做 rerank，控制成本），
+    用检索到的文档 chunks 支撑引用展示；检索失败或为空时不影响主回答。
+    """
+    try:
+        from apps.retrieval.hybrid import hybrid_search
+        result = hybrid_search(query, user, do_rerank=False,
+                               node_ids=node_ids, root_types=root_types)
+        return result.get('chunks', [])[:limit]
+    except Exception as e:
+        logger.exception(f'[Router] 引用补充检索失败: {e}')
+        return []
+
+
 def decide_route(query: str, user, node_ids: Optional[List[int]] = None,
                  root_types: Optional[List[str]] = None) -> Dict:
     """三层路由决策。
@@ -61,7 +78,8 @@ def decide_route(query: str, user, node_ids: Optional[List[int]] = None,
         return {
             'source': 'wiki',
             'context': f"# {wiki_page['title']}\n\n{wiki_page['content']}",
-            'chunks': [],
+            # Wiki 页面本身不携带文档 chunks：补充 RAG 检索结果仅用于前端来源卡片
+            'chunks': _citation_chunks(query, user, node_ids, root_types),
             'entities': [],
             'relations': [],
             'communities': [],
@@ -84,7 +102,8 @@ def decide_route(query: str, user, node_ids: Optional[List[int]] = None,
         return {
             'source': graph_result.get('source', 'graphrag'),
             'context': graph_result.get('context', ''),
-            'chunks': [],
+            # 图谱上下文不携带文档 chunks：补充 RAG 检索结果仅用于前端来源卡片
+            'chunks': _citation_chunks(query, user, node_ids, root_types),
             'entities': graph_result.get('entities', []),
             'relations': graph_result.get('relations', []),
             'communities': graph_result.get('communities', []),

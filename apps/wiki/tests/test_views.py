@@ -143,6 +143,9 @@ class WikiViewsTestBase:
         self.team = Team.objects.create(
             name='后端组', code='rd-backend', department=self.dept,
             leader=self.team_leader)
+        # 用于构造当前用户不可读文档的另一个团队（TEAM_ONLY 隔离）
+        self.other_team = Team.objects.create(
+            name='前端组', code='rd-frontend', department=self.dept)
         # 团队组长绑定本团队（get_user_managed_teams 依赖 user.team_id / 属地授权）
         self.team_leader.team = self.team
         self.team_leader.save(update_fields=['team'])
@@ -173,6 +176,11 @@ class WikiViewsTestBase:
             self.other_node, self.super_admin,
             visibility_level=VisibilityLevel.TEAM_ONLY,
             team_id=self.team.id, dept_id=self.dept.id, title='他人私有文档')
+        # 挂在 wiki_visible 同节点、但当前用户不可读的文档（用于参考资料 can_access 判定）
+        self.doc_invisible = _create_document(
+            self.category_node, self.super_admin,
+            visibility_level=VisibilityLevel.TEAM_ONLY,
+            team_id=self.other_team.id, dept_id=self.dept.id, title='他人隔离文档')
 
         # Wiki 页面矩阵
         self.wiki_visible = _create_wiki_page(self.category_node, '业务分类 Wiki')
@@ -318,6 +326,30 @@ class TestWikiDetail(WikiViewsTestBase):
         assert self.wiki_visible.view_count == 1
 
     @pytest.mark.integration
+    def test_retrieve_includes_source_docs_with_access_flag(self):
+        """详情返回参考资料（节点下已完成文档），按当前用户标记可访问性"""
+        resp = self.client.get(
+            f'/api/v1/wiki/pages/{self.wiki_visible.id}/',
+            **_auth_headers(self.normal_user))
+        assert resp.status_code == 200
+        src = {d['id']: d for d in resp.json()['source_docs']}
+        # 本人文档 / 公开文档可访问
+        assert src[self.doc_own_private.id]['can_access'] is True
+        assert src[self.doc_other_public.id]['can_access'] is True
+        # 其他团队 TEAM_ONLY 文档不可访问（前端据此提示申请权限）
+        assert src[self.doc_invisible.id]['can_access'] is False
+        assert src[self.doc_invisible.id]['title'] == '他人隔离文档'
+
+    @pytest.mark.integration
+    def test_retrieve_source_docs_empty_for_community(self):
+        """社区 Wiki 无参考资料"""
+        resp = self.client.get(
+            f'/api/v1/wiki/pages/{self.wiki_community.id}/',
+            **_auth_headers(self.super_admin))
+        assert resp.status_code == 200
+        assert resp.json()['source_docs'] == []
+
+    @pytest.mark.integration
     def test_retrieve_inaccessible_403(self):
         """不可读页面（机密节点）返回 403"""
         resp = self.client.get(
@@ -332,6 +364,94 @@ class TestWikiDetail(WikiViewsTestBase):
             f'/api/v1/wiki/pages/{self.wiki_community.id}/',
             **_auth_headers(self.normal_user))
         assert resp.status_code == 403
+
+    @pytest.mark.integration
+    def test_resolve_doc_matches_by_file_name(self):
+        """按文件名解析来源文档（正文参考资料链接场景）"""
+        resp = self.client.get(
+            f'/api/v1/wiki/pages/{self.wiki_visible.id}/resolve_doc/'
+            f'?name={self.doc_own_private.file_name}',
+            **_auth_headers(self.normal_user))
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data['found'] is True
+        assert data['id'] == self.doc_own_private.id
+        assert data['can_access'] is True
+
+    @pytest.mark.integration
+    def test_resolve_doc_matches_by_title(self):
+        """按标题解析来源文档"""
+        resp = self.client.get(
+            f'/api/v1/wiki/pages/{self.wiki_visible.id}/resolve_doc/'
+            f'?name={self.doc_other_public.title}',
+            **_auth_headers(self.normal_user))
+        assert resp.status_code == 200
+        assert resp.json()['found'] is True
+        assert resp.json()['id'] == self.doc_other_public.id
+
+    @pytest.mark.integration
+    def test_resolve_doc_inaccessible_doc_returns_can_access_false(self):
+        """解析到不可读文档：found=True 但 can_access=False（前端据此提示申请权限）"""
+        resp = self.client.get(
+            f'/api/v1/wiki/pages/{self.wiki_visible.id}/resolve_doc/'
+            f'?name={self.doc_invisible.file_name}',
+            **_auth_headers(self.normal_user))
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data['found'] is True
+        assert data['id'] == self.doc_invisible.id
+        assert data['can_access'] is False
+
+    @pytest.mark.integration
+    def test_resolve_doc_beyond_source_docs_limit(self):
+        """文档超过 source_docs 前 20 条上限时，仍可服务端按名解析"""
+        # 追加 22 篇已完成文档使节点文档总量 > 20（source_docs 只回前 20 条）
+        last_doc = None
+        for i in range(22):
+            last_doc = _create_document(
+                self.category_node, self.super_admin,
+                visibility_level=VisibilityLevel.PUBLIC, title=f'批量文档{i}')
+        detail_resp = self.client.get(
+            f'/api/v1/wiki/pages/{self.wiki_visible.id}/',
+            **_auth_headers(self.normal_user))
+        assert detail_resp.status_code == 200
+        # 列表仅回 20 条，最后一篇不在其中
+        assert len(detail_resp.json()['source_docs']) == 20
+        assert all(d['id'] != last_doc.id for d in detail_resp.json()['source_docs'])
+        # 但 resolve_doc 不设条数上限，可解析到该文档
+        resp = self.client.get(
+            f'/api/v1/wiki/pages/{self.wiki_visible.id}/resolve_doc/'
+            f'?name={last_doc.file_name}',
+            **_auth_headers(self.normal_user))
+        assert resp.status_code == 200
+        assert resp.json()['found'] is True
+        assert resp.json()['id'] == last_doc.id
+
+    @pytest.mark.integration
+    def test_resolve_doc_not_found(self):
+        """解析不到返回 found=False"""
+        resp = self.client.get(
+            f'/api/v1/wiki/pages/{self.wiki_visible.id}/resolve_doc/?name=no_such_file.pptx',
+            **_auth_headers(self.normal_user))
+        assert resp.status_code == 200
+        assert resp.json()['found'] is False
+
+    @pytest.mark.integration
+    def test_resolve_doc_community_page_not_found(self):
+        """社区 Wiki 无文档来源，返回 found=False"""
+        resp = self.client.get(
+            f'/api/v1/wiki/pages/{self.wiki_community.id}/resolve_doc/?name=x.pdf',
+            **_auth_headers(self.super_admin))
+        assert resp.status_code == 200
+        assert resp.json()['found'] is False
+
+    @pytest.mark.integration
+    def test_resolve_doc_inaccessible_page_403(self):
+        """不可读页面的解析接口同样拒绝（get_object 走节点级权限过滤）"""
+        resp = self.client.get(
+            f'/api/v1/wiki/pages/{self.wiki_hidden.id}/resolve_doc/?name=x.pdf',
+            **_auth_headers(self.normal_user))
+        assert resp.status_code in (403, 404)
 
     @pytest.mark.integration
     def test_retrieve_community_admin_200(self):
@@ -455,6 +575,55 @@ class TestWikiRefreshAndExpire(WikiViewsTestBase):
         assert resp.status_code == 200
         self.wiki_visible.refresh_from_db()
         assert self.wiki_visible.status == 'expired'
+
+    @pytest.mark.integration
+    def test_expire_records_reason_and_operator(self):
+        """标记过期记录原因 / 操作人 / 时间（可审计）"""
+        resp = self.client.post(
+            f'/api/v1/wiki/pages/{self.wiki_visible.id}/expire/',
+            data=json.dumps({'reason': '源文档已更新，内容过时'}),
+            content_type='application/json',
+            **_auth_headers(self.super_admin))
+        assert resp.status_code == 200
+        self.wiki_visible.refresh_from_db()
+        assert self.wiki_visible.status == 'expired'
+        assert self.wiki_visible.expire_reason == '源文档已更新，内容过时'
+        assert self.wiki_visible.expired_by_id == self.super_admin.id
+        assert self.wiki_visible.expired_at is not None
+        # 详情接口透出过期审计信息，前端展示提示条
+        resp2 = self.client.get(
+            f'/api/v1/wiki/pages/{self.wiki_visible.id}/',
+            **_auth_headers(self.super_admin))
+        data = resp2.json()
+        assert data['expire_reason'] == '源文档已更新，内容过时'
+        assert data['expired_by_name'] == self.super_admin.username
+        assert data['status'] == 'expired'
+
+    @pytest.mark.integration
+    def test_expire_already_expired_is_idempotent(self):
+        """已过期页面重复标记：幂等返回，不覆盖原操作人 / 原因"""
+        self.wiki_visible_expired.expire_reason = '初次过期原因'
+        self.wiki_visible_expired.expired_by = self.super_admin
+        self.wiki_visible_expired.save(update_fields=['expire_reason', 'expired_by'])
+        resp = self.client.post(
+            f'/api/v1/wiki/pages/{self.wiki_visible_expired.id}/expire/',
+            data=json.dumps({'reason': '重复标记'}),
+            content_type='application/json',
+            **_auth_headers(self.super_admin))
+        assert resp.status_code == 200
+        assert resp.json()['ok'] is True
+        self.wiki_visible_expired.refresh_from_db()
+        # 幂等：保留首次过期信息，不因重复操作被覆盖
+        assert self.wiki_visible_expired.expire_reason == '初次过期原因'
+        assert self.wiki_visible_expired.expired_by_id == self.super_admin.id
+
+    @pytest.mark.integration
+    def test_expire_community_page_400(self):
+        """社区 Wiki 不支持标记过期 → 400"""
+        resp = self.client.post(
+            f'/api/v1/wiki/pages/{self.wiki_community.id}/expire/',
+            **_auth_headers(self.super_admin))
+        assert resp.status_code == 400
 
     @pytest.mark.integration
     def test_expire_normal_user_403(self):

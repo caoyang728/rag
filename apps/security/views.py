@@ -141,6 +141,24 @@ class CaptchaView(APIView):
         })
 
 
+class EncryptKeyView(APIView):
+    """GET /api/v1/security/encrypt-key/ - 获取一次性登录加密公钥
+
+    每次调用生成新 RSA 密钥对：公钥（PEM）下发前端，私钥存 Redis（TTL 300s），
+    登录时按 key_id 取用、取出即删（防重放）。公钥公开无泄露风险。
+    """
+
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        from apps.security.login_crypto import issue_encrypt_key
+        try:
+            return Response(issue_encrypt_key())
+        except Exception as e:
+            logger.error(f"获取登录加密公钥失败: {e}")
+            return Response({"detail": "加密服务不可用"}, status=500)
+
+
 def verify_captcha(captcha_id, captcha_code):
     """验证验证码是否正确"""
     if not captcha_id or not captcha_code:

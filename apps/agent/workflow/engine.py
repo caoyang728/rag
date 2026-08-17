@@ -615,10 +615,18 @@ def run_workflow_stream(user, session, question: str, plan: dict,
         'status': 'running',
     }
 
-    runner = WorkflowRunner(workflow, user, session, root_types, node_ids,
-                            sources=sources)
+    runner = WorkflowRunner(workflow, user, session, root_types, node_ids, sources=sources)
     events = runner.execute()
     yield from events
+
+    # finalize 汇总节点不在拓扑执行循环内（由 run_finalize 单独执行），
+    # 这里补发节点轨迹事件并同步数据库状态，避免界面一直停留在"待执行"
+    runner._mark_node('finalize', 'running', emit=False)
+    yield {
+        'type': 'workflow_node_start',
+        'node_id': 'finalize', 'step_type': 'finalize',
+        'name': runner.node_map.get('finalize', {}).get('name', 'finalize'),
+    }
 
     # 审批阻塞：工作流停留 waiting_approval，结束第一段流式
     if runner.blocked:
@@ -637,7 +645,9 @@ def run_workflow_stream(user, session, question: str, plan: dict,
         return
 
     # 全部节点执行完：finalize 汇总（非流式一次性输出，同 task_split 分支协议）
+    t0 = time.time()
     final = runner.run_finalize()
+    final_latency = int((time.time() - t0) * 1000)
     answer = final.get('answer', '')
     llm_stats = final.get('llm_stats', {})
 
@@ -651,10 +661,18 @@ def run_workflow_stream(user, session, question: str, plan: dict,
     else:
         yield {'type': 'delta', 'delta': safe_answer}
 
+    # finalize 节点完成事件：答案下发后再标记汇总节点成功，并同步数据库状态
+    runner._mark_node('finalize', 'succeeded', emit=False, latency=final_latency)
+    yield {
+        'type': 'workflow_node_done',
+        'node_id': 'finalize', 'step_type': 'finalize',
+        'name': runner.node_map.get('finalize', {}).get('name', 'finalize'),
+        'status': 'succeeded', 'latency_ms': final_latency,
+    }
+
     # 落库 + 更新工作流终态（degraded 由节点失败/被拒/跳过触发）
     tool_traces = runner.all_tool_traces
-    qa_id = _persist_workflow_result(
-        workflow, answer, [], [], tool_traces, llm_stats, runner.degraded)
+    qa_id = _persist_workflow_result(workflow, answer, [], [], tool_traces, llm_stats, runner.degraded)
 
     yield {
         'type': 'done',
@@ -709,13 +727,15 @@ def resume_workflow(workflow: AgentWorkflow, node_id: str, approved: bool):
     root_types = None
     # 恢复段重建数据来源开关（首次流式执行时已快照到 workflow.result）
     sources = (workflow.result or {}).get('sources')
-    runner = WorkflowRunner(workflow, user, session, root_types, None,
-                            sources=sources)
+    runner = WorkflowRunner(workflow, user, session, root_types, None, sources=sources)
     runner.restore_completed()
     runner.execute()
 
-    # 汇总 + 落库（同步完成）
+    # 汇总 + 落库（同步完成）：finalize 节点状态同步落库，供工作流详情 API 展示
+    runner._mark_node('finalize', 'running', emit=False)
+    t0 = time.time()
     final = runner.run_finalize()
+    runner._mark_node('finalize', 'succeeded', emit=False, latency=int((time.time() - t0) * 1000))
     answer = final.get('answer', '')
     # 恢复段答案同样过审（与流式段一致）
     from apps.agent.executor import _check_full_text

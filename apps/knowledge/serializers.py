@@ -24,10 +24,11 @@ class KnowledgeNodeSerializer(serializers.ModelSerializer):
         return obj.children.filter(is_deleted=False).count()
 
     def get_document_count(self, obj):
-        # 仅统计已通过双审（audit_status=passed）且未删除的文档：未通过审核/复核的文档不计入
+        # 仅统计已通过双审（audit_status=passed）、未删除且活跃版本的文档：
+        # 未通过审核/复核或已失效的旧版本不计入（与节点树/文档列表默认口径一致）
         if hasattr(obj, "_document_count"):
             return obj._document_count
-        return obj.documents.filter(is_deleted=False, audit_status='passed').count()
+        return obj.documents.filter(is_deleted=False, audit_status='passed', is_active=True).count()
 
     def get_created_by_name(self, obj):
         if obj.created_by:
@@ -58,10 +59,36 @@ class KnowledgeNodeCreateSerializer(serializers.ModelSerializer):
         return value
 
 
+def _doc_org_names(obj):
+    """文档归属部门/团队名称（dept_id/team_id 为冗余字段而非外键）
+
+    与 _doc_audit_row 规则一致：有 team_id 时团队优先、部门取团队所属部门；
+    仅 dept_id 时只回填部门名。用于 detail/单个序列化场景的实时兜底查询，
+    列表页由 view 层批量预取 _org_names 传入 context，避免 N+1。
+    """
+    from apps.users.models import Department, Team
+    dept_name, team_name = '', ''
+    if obj.team_id:
+        t = Team.objects.filter(id=obj.team_id, is_deleted=False).only('name', 'department_id').first()
+        if t:
+            team_name = t.name
+            d = Department.objects.filter(id=t.department_id, is_deleted=False).only('name').first()
+            if d:
+                dept_name = d.name
+    elif obj.dept_id:
+        d = Department.objects.filter(id=obj.dept_id, is_deleted=False).only('name').first()
+        if d:
+            dept_name = d.name
+    return dept_name, team_name
+
+
 class DocumentSerializer(serializers.ModelSerializer):
     node_name = serializers.CharField(source="node.name", read_only=True)
     owner_name = serializers.CharField(source="owner.username", read_only=True)
     restored_by_name = serializers.CharField(source="restored_by.username", read_only=True)
+    # 归属部门/团队名称：列表页由 view 预取 _org_names（一次 SQL），detail 兜底实时查询
+    dept_name = serializers.SerializerMethodField()
+    team_name = serializers.SerializerMethodField()
     # 权限标志（当前用户视角）
     is_owner = serializers.SerializerMethodField()
     is_manager = serializers.SerializerMethodField()
@@ -81,7 +108,7 @@ class DocumentSerializer(serializers.ModelSerializer):
             "id", "uuid", "node_id", "node_name", "title", "file_name", "file_type",
             "file_size", "file_hash", "mime_type", "owner_id", "owner_name",
             # 归属：node(FK) + dept_id + team_id（二选一非空）
-            "dept_id", "team_id",
+            "dept_id", "team_id", "dept_name", "team_name",
             # 可见性层级：TEAM_ONLY / DEPT_ONLY / PUBLIC
             "visibility_level", "visible_scope", "secret_level", "audit_status",
             # 权限冗余标志位：has_block_user(黑名单) + has_resource_share(跨范围共享)
@@ -137,6 +164,22 @@ class DocumentSerializer(serializers.ModelSerializer):
             'DEPT_ONLY': 'dept',
             'PUBLIC': 'public',
         }.get(obj.visibility_level, obj.visibility_level)
+
+    def get_dept_name(self, obj):
+        if obj.dept_id:
+            ctx = self.context.get("_org_names")
+            if ctx is not None:
+                return ctx.get("dept", {}).get(obj.dept_id, '')
+            return _doc_org_names(obj)[0]
+        return ''
+
+    def get_team_name(self, obj):
+        if obj.team_id:
+            ctx = self.context.get("_org_names")
+            if ctx is not None:
+                return ctx.get("team", {}).get(obj.team_id, '')
+            return _doc_org_names(obj)[1]
+        return ''
 
     def get_version_count(self, obj):
         """同组版本总数：列表页优先用 view 层预计算的 _version_count_map（一次 SQL），

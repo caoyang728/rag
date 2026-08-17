@@ -138,7 +138,7 @@ class TestNodeDocumentCountAudited(KnowledgeViewsExtraBase):
         assert node is not None
         expected = Document.objects.filter(
             node=self.category_node, is_deleted=False,
-            audit_status='passed').count()
+            audit_status='passed', is_active=True).count()
         assert node['document_count'] == expected
 
     @pytest.mark.integration
@@ -150,7 +150,7 @@ class TestNodeDocumentCountAudited(KnowledgeViewsExtraBase):
         assert resp.status_code == 200
         expected = Document.objects.filter(
             node=self.category_node, is_deleted=False,
-            audit_status='passed').count()
+            audit_status='passed', is_active=True).count()
         assert resp.json()['document_count'] == expected
 
 

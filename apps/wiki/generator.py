@@ -62,6 +62,10 @@ def generate_wiki_page(node_id: int, llm) -> WikiPage:
             'summary': content[:300] if len(content) > 300 else content,
             'status': 'published',
             'tags': [node.root_type],
+            # 重建即视为内容已更新：清空上次的过期审计信息
+            'expire_reason': '',
+            'expired_by': None,
+            'expired_at': None,
         }
     )
 
@@ -122,6 +126,10 @@ def generate_community_wiki(community_id: int, level: int, llm) -> WikiPage:
             'summary': content[:300] if len(content) > 300 else content,
             'status': 'published',
             'tags': community.keywords[:5],
+            # 重建即视为内容已更新：清空上次的过期审计信息
+            'expire_reason': '',
+            'expired_by': None,
+            'expired_at': None,
         }
     )
 

@@ -1,6 +1,7 @@
 """认证与账号安全业务逻辑：登录收尾、登录审计、密码策略、密码重置"""
 import re
 import secrets
+from datetime import timedelta
 
 from django.conf import settings
 from django.utils import timezone
@@ -50,9 +51,17 @@ def record_login_attempt(username, user, ip, user_agent, result):
         logger.exception("write LoginAttempt failed")
 
 
-def finalize_login(user, ip, user_agent):
-    """登录成功收尾：last_login 快照 + 成功日志 + 生成 JWT token"""
+def finalize_login(user, ip, user_agent, remember_me=True):
+    """登录成功收尾：last_login 快照 + 成功日志 + 生成 JWT token
+
+    remember_me 控制 refresh token 生命周期：
+    - True（记住我 7 天）→ 使用全局默认 REFRESH_TOKEN_LIFETIME（7 天）
+    - False（不记住我）→ 收紧到 24 小时，浏览器会话隔天失效
+    access token 时长不受影响（默认 8 小时）。
+    """
     refresh = RefreshToken.for_user(user)
+    if not remember_me:
+        refresh.set_exp(lifetime=timedelta(days=1))
     user.last_login_at = timezone.now()
     user.last_login_ip = ip
     # 仅更新登录快照字段，避免 save() 全字段触发 last_login_ip（IPv4Address）类型报错

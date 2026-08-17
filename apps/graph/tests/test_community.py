@@ -5,7 +5,7 @@ apps.graph.community 单元/集成测试 —— 社区检测与摘要生成
 - build_graph：从 DB 构图（关系为边 + 孤立节点兜底）
 - detect_communities：Louvain 算法 + level 粒度 + 空图降级
 - generate_community_summary：LLM 摘要 + JSON 解析 + 代码块兼容 + 降级兜底
-- run_community_detection：完整流程（清空 + 检测 + 摘要 + 异常隔离）
+- run_community_detection：完整流程（检测 + 摘要 + 异常隔离 + 重建成功后清理旧数据）
 
 测试分层：
 - build_graph / detect_communities / run_community_detection：mock GraphRelation/build_graph，
@@ -203,7 +203,7 @@ class TestGenerateCommunitySummary:
         })
         llm = self._make_llm(llm_response)
 
-        result = generate_community_summary(0, 0, llm)
+        result = generate_community_summary(self.community, llm)
 
         self.community.refresh_from_db()
         assert self.community.summary == '张三隶属于HR部门'
@@ -223,7 +223,7 @@ class TestGenerateCommunitySummary:
         }) + '\n```'
         llm = self._make_llm(content)
 
-        generate_community_summary(0, 0, llm)
+        generate_community_summary(self.community, llm)
 
         self.community.refresh_from_db()
         assert self.community.summary == '代码块摘要内容'
@@ -240,7 +240,7 @@ class TestGenerateCommunitySummary:
         }) + '\n```'
         llm = self._make_llm(content)
 
-        generate_community_summary(0, 0, llm)
+        generate_community_summary(self.community, llm)
 
         self.community.refresh_from_db()
         assert self.community.summary == '纯代码块摘要'
@@ -250,7 +250,7 @@ class TestGenerateCommunitySummary:
         from apps.graph.community import generate_community_summary
 
         llm = self._make_llm('这不是合法的JSON内容')
-        result = generate_community_summary(0, 0, llm)
+        result = generate_community_summary(self.community, llm)
 
         self.community.refresh_from_db()
         # 降级：summary = content[:500]
@@ -262,7 +262,7 @@ class TestGenerateCommunitySummary:
         from apps.graph.community import generate_community_summary
 
         llm = self._make_llm('')
-        result = generate_community_summary(0, 0, llm)
+        result = generate_community_summary(self.community, llm)
 
         self.community.refresh_from_db()
         assert self.community.summary == ''
@@ -275,7 +275,7 @@ class TestGenerateCommunitySummary:
         content = json.dumps({'topic': '只有主题'})
         llm = self._make_llm(content)
 
-        result = generate_community_summary(0, 0, llm)
+        result = generate_community_summary(self.community, llm)
 
         self.community.refresh_from_db()
         # summary 默认 content[:300]
@@ -289,7 +289,7 @@ class TestGenerateCommunitySummary:
         from apps.graph.community import generate_community_summary
 
         llm = self._make_llm('{"summary": "ok"}')
-        generate_community_summary(0, 0, llm)
+        generate_community_summary(self.community, llm)
 
         llm.chat.assert_called_once()
         call_args = llm.chat.call_args
@@ -308,7 +308,7 @@ class TestGenerateCommunitySummary:
         from apps.graph.community import generate_community_summary
 
         llm = self._make_llm('{"summary": "ok"}')
-        generate_community_summary(0, 0, llm)
+        generate_community_summary(self.community, llm)
 
         call_kwargs = llm.chat.call_args[1]
         assert call_kwargs['temperature'] == 0.3
@@ -336,8 +336,9 @@ def test_run_community_detection_creates_communities(mock_gc, mock_detect, mock_
     count = run_community_detection(llm, levels=[0])
 
     assert count == 2
-    # 先清空旧社区
-    mock_gc.objects.all.return_value.delete.assert_called_once()
+    # 新社区创建成功后，用 pk 排除法清理旧社区（失败时旧数据保留）
+    mock_gc.objects.exclude.assert_called_once()
+    mock_gc.objects.exclude.return_value.delete.assert_called_once()
     # 为每个社区创建记录
     assert mock_gc.objects.create.call_count == 2
     # 为每个社区生成摘要
@@ -401,8 +402,8 @@ def test_run_community_detection_empty_communities(mock_gc, mock_detect, mock_su
     assert count == 0
     mock_gc.objects.create.assert_not_called()
     mock_summary.assert_not_called()
-    # 仍应清空旧社区
-    mock_gc.objects.all.return_value.delete.assert_called_once()
+    # 即使无新社区，也应清空旧社区（与旧行为一致）
+    mock_gc.objects.exclude.assert_called_once()
 
 
 @pytest.mark.unit
@@ -423,3 +424,44 @@ def test_run_community_detection_creates_with_correct_fields(mock_gc, mock_detec
     mock_gc.objects.create.assert_called_once_with(
         community_id=5, level=1, entity_ids=[10, 20],
     )
+
+
+# ============================================================================
+# run_community_detection 防丢失：旧社区重建成功后清理，中途失败时保留
+# ============================================================================
+@pytest.mark.integration
+@pytest.mark.django_db
+@patch('apps.graph.community.generate_community_summary')
+def test_run_community_detection_keeps_old_data_when_detect_fails(mock_summary):
+    """检测中途异常时旧社区应保留，避免社区列表被清空"""
+    from apps.graph.community import run_community_detection
+
+    old = GraphCommunity.objects.create(community_id=9, level=0, entity_ids=[1])
+    with patch('apps.graph.community.detect_communities',
+               side_effect=RuntimeError('boom')):
+        with pytest.raises(RuntimeError):
+            run_community_detection(MagicMock(), levels=[0])
+
+    # 旧数据未被清空
+    assert GraphCommunity.objects.filter(pk=old.pk).exists()
+    assert GraphCommunity.objects.count() == 1
+
+
+@pytest.mark.integration
+@pytest.mark.django_db
+@patch('apps.graph.community.generate_community_summary')
+def test_run_community_detection_replaces_old_data_after_success(mock_summary):
+    """重建成功后应删除旧社区，仅保留新社区"""
+    from apps.graph.community import run_community_detection
+
+    old = GraphCommunity.objects.create(community_id=99, level=0, entity_ids=[1])
+    with patch('apps.graph.community.detect_communities', return_value=[
+        {'community_id': 0, 'entity_ids': [1], 'level': 0},
+    ]):
+        count = run_community_detection(MagicMock(), levels=[0])
+
+    assert count == 1
+    assert GraphCommunity.objects.filter(pk=old.pk).exists() is False
+    # 仅剩新社区
+    assert GraphCommunity.objects.count() == 1
+    assert GraphCommunity.objects.first().community_id == 0

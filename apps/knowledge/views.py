@@ -987,7 +987,8 @@ class NodeTreeView(APIView):
         qs = KnowledgeNode.objects.filter(is_deleted=False)
         if root_type:
             qs = qs.filter(root_type=root_type)
-        # 统计每个节点下已通过双审（审核+复核）的文档数：未通过审核/复核的文档不计入，
+        # 统计每个节点下已通过双审（审核+复核）的活跃版本文档数：未通过审核/复核的文档不计入，
+        # 且只计活跃版本（旧版本不计入，与文档列表默认"仅活跃版本"口径一致），
         # 各页面（管理端/选择器/详情）展示的"文档数量"统一为正式可用文档量
         qs = qs.annotate(
             document_count=Count(
@@ -995,6 +996,7 @@ class NodeTreeView(APIView):
                 filter=models.Q(
                     documents__is_deleted=False,
                     documents__audit_status='passed',
+                    documents__is_active=True,
                 ),
             ),
         )
@@ -1132,7 +1134,7 @@ class KnowledgeNodeViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         qs = super().get_queryset()
         # 预计算 children_count 和 document_count，避免 N+1
-        # document_count 仅统计已通过双审（audit_status=passed）且未删除的文档
+        # document_count 仅统计已通过双审（audit_status=passed）、未删除且活跃版本的文档
         if self.action in ("retrieve", "list"):
             qs = qs.annotate(
                 _children_count=Count("children", filter=models.Q(children__is_deleted=False)),
@@ -1141,6 +1143,7 @@ class KnowledgeNodeViewSet(viewsets.ModelViewSet):
                     filter=models.Q(
                         documents__is_deleted=False,
                         documents__audit_status='passed',
+                        documents__is_active=True,
                     ),
                 ),
             )
@@ -1375,7 +1378,8 @@ class DocumentFilter(django_filters.FilterSet):
     class Meta:
         model = Document
         fields = ["node", "status", "file_type", "visibility_level",
-                  "root_type", "owner", "is_deleted", "dept_id", "team_id"]
+                  "root_type", "owner", "is_deleted", "dept_id", "team_id",
+                  "audit_status"]
 
 
 class DocumentViewSet(viewsets.ModelViewSet):
@@ -1446,10 +1450,26 @@ class DocumentViewSet(viewsets.ModelViewSet):
             ctx = self.get_serializer_context()
             ctx["_grants_map"] = build_grants_map(request.user, [d.id for d in page])
             ctx["_version_count_map"] = self._build_version_count_map(page)
+            ctx["_org_names"] = self._build_org_names_map(page)
             serializer = self.get_serializer(page, many=True, context=ctx)
             return self.get_paginated_response(serializer.data)
         serializer = self.get_serializer(queryset, many=True)
         return Response(serializer.data)
+
+    def _build_org_names_map(self, docs):
+        """批量预取部门/团队名称（dept_id/team_id 为冗余字段而非外键，无法 select_related）
+
+        与序列化器 _doc_org_names 规则一致：团队归属时 dept_id 冗余 = team.department_id，
+        因此部门名直接从 dept_id 查 Department 一次、团队名查 Team 一次即可。
+        """
+        from apps.users.models import Department, Team
+        dept_ids = {d.dept_id for d in docs if d.dept_id}
+        team_ids = {d.team_id for d in docs if d.team_id}
+        dept_map = dict(
+            Department.objects.filter(id__in=dept_ids, is_deleted=False).values_list('id', 'name'))
+        team_map = dict(
+            Team.objects.filter(id__in=team_ids, is_deleted=False).values_list('id', 'name'))
+        return {'dept': dept_map, 'team': team_map}
 
     def _build_version_count_map(self, docs):
         """单次查询统计每个文档同组（node+file_name+dept_id+team_id）的版本总数

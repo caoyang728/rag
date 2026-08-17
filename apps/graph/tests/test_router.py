@@ -18,6 +18,12 @@ class TestDecideRouteWiki:
         mock_wiki.return_value = [
             {'title': '公司请假制度', 'content': '员工可请假', 'score': 0.85}
         ]
+        # Wiki 页面本身不携带 chunks：命中后补充 RAG 检索结果仅用于来源卡片
+        mock_hybrid.return_value = {
+            'chunks': [{'doc_title': '请假制度文档', 'section_path': 'S1',
+                        'content': 'xx', 'chunk_id': 1, 'document_id': 1}],
+            'stats': {},
+        }
         user = MagicMock()
         from apps.graph.router import decide_route
         result = decide_route('请假流程', user)
@@ -28,9 +34,10 @@ class TestDecideRouteWiki:
         # Wiki 直接命中时提前返回，route_trace 只有 1 层
         assert len(result['route_trace']) == 1
         assert result['route_trace'][0]['layer'] == 'wiki'
-        # GraphRAG 和 hybrid 不应被调用
+        # GraphRAG 不应被调用；hybrid 被调用仅用于补充引用 chunks
         mock_graph.assert_not_called()
-        mock_hybrid.assert_not_called()
+        mock_hybrid.assert_called_once()
+        assert len(result['chunks']) == 1
 
     @patch('apps.wiki.retriever.search_wiki')
     @patch('apps.graph.retriever.graphrag_search')
@@ -48,6 +55,12 @@ class TestDecideRouteWiki:
             'relations': [('张三', '负责', 'HR')],
             'communities': [],
         }
+        # 图谱上下文不携带 chunks：命中后补充 RAG 检索结果仅用于来源卡片
+        mock_hybrid.return_value = {
+            'chunks': [{'doc_title': '张三档案', 'section_path': 'S1',
+                        'content': 'xx', 'chunk_id': 2, 'document_id': 2}],
+            'stats': {},
+        }
         user = MagicMock()
         from apps.graph.router import decide_route
         result = decide_route('张三负责什么', user)
@@ -55,7 +68,9 @@ class TestDecideRouteWiki:
         assert result['source'] == 'graphrag_local'
         assert result['confidence'] == 0.60
         assert result['route_trace'][1]['layer'] == 'graphrag'
-        mock_hybrid.assert_not_called()
+        # hybrid 被调用仅用于补充引用 chunks
+        mock_hybrid.assert_called_once()
+        assert len(result['chunks']) == 1
 
     @patch('apps.wiki.retriever.search_wiki')
     @patch('apps.graph.retriever.graphrag_search')

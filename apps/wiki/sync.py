@@ -1,14 +1,17 @@
-"""Wiki 增量同步与数据一致性
+"""
+Wiki 增量同步与数据一致性
 
 文档变化联动 Wiki 页面：
 - on_document_done_for_wiki：文档解析完成后
   1. 将该节点下已发布的 Wiki 页面标记为过期（status='expired'），
-     保证 Wiki 内容与文档内容长期一致
+     保证 Wiki 内容与文档内容长期一致；系统触发的过期不记录操作人（expired_by=None），
+     仅记录过期时间，重建后由生成器清空
   2. 置文档 wiki_status=pending 并按节点防抖派发构建任务
      （build_node_wiki_task 基于最新文档内容重新生成页面）
 - 防抖合并：同节点多文档连续完成只派发一次构建任务，批量处理后统一回写状态，
   避免每次文档上传都触发一次全量 LLM 重建
 """
+from django.utils import timezone
 from loguru import logger
 
 
@@ -44,10 +47,11 @@ def on_document_done_for_wiki(document_id: int):
         Document.objects.filter(id=document_id).update(wiki_status='skipped')
         return
 
-    # 将节点下已发布 Wiki 页面标记为过期，等待重建
+    # 将节点下已发布 Wiki 页面标记为过期，等待重建；
+    # 系统触发的过期不记操作人，仅记录过期时间（人工过期走 views.expire 带原因）
     updated = WikiPage.objects.filter(
         node_id=doc.node_id, status='published'
-    ).update(status='expired')
+    ).update(status='expired', expire_reason='', expired_by=None, expired_at=timezone.now())
     if updated:
         logger.info(
             f'[Wiki Sync] 文档 {document_id} 完成，'

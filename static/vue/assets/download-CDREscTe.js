@@ -1,1 +1,0 @@
-function l(o,t,c={}){const{revokeDelay:a=0}=c,n=URL.createObjectURL(o),e=document.createElement("a");e.href=n,e.download=t,document.body.appendChild(e),e.click(),e.remove(),a>0?setTimeout(()=>{URL.revokeObjectURL(n)},a):URL.revokeObjectURL(n)}function r(o,t){const c=new Blob(["\uFEFF"+t],{type:"text/csv;charset=utf-8"});l(c,o)}export{l as d,r as e};

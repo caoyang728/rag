@@ -27,7 +27,9 @@
     <div class="eval-panel mb-3">
       <PanelHeader titleClass="eval-panel-title">各阶段增益分析</PanelHeader>
       <div class="eval-panel-body">
-        <BarChart v-if="gainData.length" :data="gainData" :width="500" :height="200" :pad-left="40" :pad-bottom="30" :pad-top="10" :start-x="50" :value-text="fmtPct" />
+        <div v-if="gainData.length" class="bar-chart-box">
+          <VChart :option="barOption" />
+        </div>
         <div v-else class="eval-empty"><div class="eval-empty-icon">🔍</div><div>暂无评估报告，选择测试集后点击"执行检索评估"</div></div>
         <div class="text-sm text-sub mt-2">向量 vs BM25 vs 混合(RRF) vs Rerank 各阶段 Recall@10 对比</div>
       </div>
@@ -70,8 +72,10 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import api from '../../api/http'
 import { formatDate, errMsg } from '../../utils/format'
-import BarChart from './BarChart.vue'
 import PanelHeader from '../base/PanelHeader.vue'
+import { useTheme } from '../../composables/useTheme'
+import { buildBarOption, chartThemeColors } from '../../utils/chart'
+import VChart from '../base/VChart.vue'
 import { useListLoader } from '../../composables/useListLoader'
 import { fmtPct, kpiClass, scoreTagType } from './constants'
 
@@ -99,6 +103,17 @@ const gainData = computed(() => {
     { label: 'Rerank', value: Number(latest.rerank_recall_at_10) || 0, color: '#10b981' },
   ]
 })
+
+const { isDark } = useTheme()
+// 图表主题色：依赖 isDark，主题切换时重建（canvas 图表需取计算后的 CSS 变量色值）
+const chartColors = computed(() => chartThemeColors(isDark.value))
+// 增益柱状图 option：数值刻度模式（Y 轴百分比网格），柱顶展示 fmtPct
+const barOption = computed(() => buildBarOption({
+  data: gainData.value,
+  valueText: fmtPct,
+  maxMode: 'value',
+  colors: chartColors.value,
+}))
 
 async function loadDatasetsOptions() {
   try {
@@ -205,6 +220,12 @@ defineExpose({ reload })
 .retrieval-toolbar {
   display: flex;
   align-items: center;
+}
+
+/* 增益柱状图容器：固定高度（ECharts 需显式容器尺寸） */
+.bar-chart-box {
+  height: 220px;
+  width: 100%;
 }
 
 .text-sub {

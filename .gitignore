@@ -29,9 +29,11 @@ plan.md
 .DS_Store
 Thumbs.db
 
-# Node（前端未使用打包工具，但预留）
+# Node
 node_modules/
 dist/
+# Vite 构建产物（源码在 frontend/，部署时通过 npm run build 生成）
+static/vue/
 
 # 模型权重（不入库）
 models/

@@ -62,36 +62,21 @@
         <div class="system-section last">
           <div class="section-title">📊 延迟与错误分布</div>
           <div class="dist-grid">
-            <!-- 延迟直方图：100ms 等宽桶（后端 build_latency_histogram 生成），div 柱状图，桶多时柱自动变细 -->
+            <!-- 延迟直方图：后端100ms细粒度桶由 mergeHistogramBuckets 智能合并为 6~12 个可读区间 -->
             <div class="sub-panel">
-              <div class="sub-panel-title">⚡ 延迟分布（ms）</div>
-              <div v-if="histKeys.length === 0" class="empty">暂无分布数据</div>
-              <div v-else class="hist-chart">
-                <!-- 柱区：柱高按最大桶归一，柱从底部向上生长 -->
-                <div class="hist-bars">
-                  <div v-for="(k, i) in histKeys" :key="k" class="hist-col"
-                    :style="{ height: histBarHeight(hist[k]) + '%', background: histColor }"
-                    :title="`${k} ms：${Number(hist[k]).toLocaleString()} 条（${histPct(hist[k])}%）`"></div>
-                </div>
-                <!-- 分类标签：与柱一一对应，标明每个柱子的延迟范围；桶多时自动省略号，hover 看完整范围 -->
-                <div class="hist-labels">
-                  <div v-for="(k, i) in histKeys" :key="'l' + k" class="hist-label" :title="k + ' ms'">{{ k }}</div>
-                </div>
+              <div class="sub-panel-title">⚡ 延迟分布</div>
+              <div v-if="histOption" class="chart-box">
+                <VChart :option="histOption" />
               </div>
+              <div v-else class="empty">暂无分布数据</div>
             </div>
-            <!-- 错误分布：红色系进度条，按次数降序 -->
+            <!-- 错误分布：水平条形图，按次数降序 -->
             <div class="sub-panel">
               <div class="sub-panel-title">❌ 错误分布</div>
-              <div v-if="errKeys.length === 0" class="empty">暂无错误数据 🎉</div>
-              <div v-else>
-                <div v-for="k in errKeys" :key="k" class="hist-row">
-                  <span class="hist-label-err">{{ k || 'unknown' }}</span>
-                  <div class="hist-track-err">
-                    <div class="hist-bar-err" :style="{ width: errPct(errDist[k]) + '%' }"></div>
-                  </div>
-                  <span class="hist-value">{{ errDist[k] }} ({{ errPct(errDist[k]) }}%)</span>
-                </div>
+              <div v-if="errOption" class="chart-box">
+                <VChart :option="errOption" />
               </div>
+              <div v-else class="empty">暂无错误数据 🎉</div>
             </div>
           </div>
         </div>
@@ -104,8 +89,11 @@
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import api from '../../api/http'
-import { errMsg, fmtPct } from '../../utils/format'
+import { errMsg } from '../../utils/format'
 import { useListLoader } from '../../composables/useListLoader'
+import { useTheme } from '../../composables/useTheme'
+import { buildHistogramOption, buildErrorDistOption, chartThemeColors } from '../../utils/chart'
+import VChart from '../base/VChart.vue'
 
 /**
  * 历史指标 Tab：某日期（默认昨日）的 P50/P95/P99 / 缓存命中率 / 失败率 / Token / 延迟与错误分布
@@ -163,28 +151,19 @@ const latencyCols = computed(() => {
   ]
 })
 
-/* ===== 延迟直方图（div 柱状图）与错误分布 ===== */
-const hist = computed(() => data.value.latency_histogram || {})
-const histTotal = computed(() => histKeys.value.reduce((s, k) => s + (hist.value[k] || 0), 0))
-// 桶按键值（毫秒）升序排列
-const histKeys = computed(() => Object.keys(hist.value).sort((a, b) => parseInt(a, 10) - parseInt(b, 10)))
-const histColor = '#2563eb'
-// 柱高按最大桶归一为百分比；桶多时柱自动变细（flex 均分宽度）
-function histBarHeight(v) {
-  const max = Math.max(1, ...histKeys.value.map(k => hist.value[k] || 0))
-  return Math.max(1, (v || 0) / max * 100)
-}
-function histPct(v) {
-  return histTotal.value ? ((v || 0) / histTotal.value * 100).toFixed(1) : '0.0'
-}
-
-const errDist = computed(() => data.value.error_distribution || {})
-// 错误分布按次数降序排列
-const errKeys = computed(() => Object.keys(errDist.value).sort((a, b) => (errDist.value[b] || 0) - (errDist.value[a] || 0)))
-const errTotal = computed(() => errKeys.value.reduce((s, k) => s + (errDist.value[k] || 0), 0) || 1)
-function errPct(v) {
-  return (v / errTotal.value * 100).toFixed(1)
-}
+/* ===== 延迟直方图 & 错误分布（ECharts）===== */
+const { isDark } = useTheme()
+const chartColors = computed(() => chartThemeColors(isDark.value))
+// 延迟直方图 option：后端100ms桶由 mergeHistogramBuckets 智能合并为 6~12 个可读区间
+const histOption = computed(() => buildHistogramOption({
+  rawHist: data.value.latency_histogram,
+  colors: chartColors.value,
+}))
+// 错误分布 option：水平条形图，按次数降序
+const errOption = computed(() => buildErrorDistOption({
+  errDist: data.value.error_distribution,
+  colors: chartColors.value,
+}))
 
 /* ===== 数值格式化 ===== */
 function num(v) {
@@ -437,93 +416,10 @@ defineExpose({ reload: loadSystemMetrics })
   font-size: 13px;
 }
 
-/* 延迟直方图：纵向布局，上为柱区（flex 柱状图，柱从底部向上生长），下为分类标签行；
-   柱区随面板剩余高度伸缩，保留最小高度避免直方图过矮 */
-.hist-chart {
+/* 图表容器：ECharts 需显式容器尺寸 */
+.chart-box {
   flex: 1;
   min-height: 200px;
-  display: flex;
-  flex-direction: column;
-}
-
-.hist-bars {
-  flex: 1;
-  display: flex;
-  align-items: flex-end;
-  gap: 1px;
-  min-height: 0;
-  padding-top: 8px;
-}
-
-.hist-col {
-  flex: 1;
-  min-width: 1px;
-  border-radius: 2px 2px 0 0;
-  cursor: pointer;
-  transition: filter .15s;
-}
-
-.hist-col:hover {
-  filter: brightness(0.9);
-}
-
-/* 分类标签行：与柱一一对应，桶多时溢出省略，避免标签相互挤压重叠 */
-.hist-labels {
-  display: flex;
-  gap: 1px;
-  padding-top: 4px;
-}
-
-.hist-label {
-  flex: 1;
-  min-width: 0;
-  font-size: 10px;
-  line-height: 14px;
-  color: var(--app-text-sub);
-  text-align: center;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* 错误分布行：[标签 | 进度条 | 数值] */
-.hist-row {
-  margin: 6px 0;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.hist-label-err {
-  width: 160px;
-  text-align: right;
-  color: #dc2626;
-  font-size: 12px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.hist-track-err {
-  flex: 1;
-  height: 20px;
-  border-radius: 4px;
-  overflow: hidden;
-  max-width: 480px;
-  background: var(--el-color-error-light-9, #fef2f2);
-}
-
-.hist-bar-err {
-  height: 100%;
-  background: #dc2626;
-  transition: width .3s ease;
-}
-
-.hist-value {
-  width: 90px;
-  text-align: right;
-  font-size: 12px;
-  color: var(--app-text);
-  white-space: nowrap;
+  width: 100%;
 }
 </style>

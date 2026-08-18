@@ -33,6 +33,30 @@ html.dark {
   --app-scrollbar-thumb-hover: rgba(139, 148, 158, 0.8);
 }
 
+/* highlight.js 暗色主题：github.css 为浅色基底，此处覆盖为 github-dark 配色 */
+html.dark .hljs {
+  color: #c9d1d9;
+  background: #0d1117;
+}
+html.dark .hljs-comment,
+html.dark .hljs-quote { color: #8b949e; font-style: italic; }
+html.dark .hljs-keyword,
+html.dark .hljs-selector-tag { color: #ff7b72; }
+html.dark .hljs-string,
+html.dark .hljs-addition { color: #a5d6ff; }
+html.dark .hljs-number { color: #79c0ff; }
+html.dark .hljs-built_in,
+html.dark .hljs-type { color: #ffa657; }
+html.dark .hljs-function .hljs-title,
+html.dark .hljs-title.function_ { color: #d2a8ff; }
+html.dark .hljs-attr,
+html.dark .hljs-variable { color: #79c0ff; }
+html.dark .hljs-params { color: #c9d1d9; }
+html.dark .hljs-literal { color: #79c0ff; }
+html.dark .hljs-regexp { color: #a5d6ff; }
+html.dark .hljs-symbol { color: #79c0ff; }
+html.dark .hljs-meta { color: #d2a8ff; }
+
 * {
   box-sizing: border-box;
 }

@@ -3,6 +3,7 @@
 // （如 llmEnabled），便于复用与单测
 
 import { escapeHtml } from './format'
+import hljs from 'highlight.js'
 
 /* ==========================================================
    溯源来源构建（由 buildSourceHtml 迁移为响应式数据结构）
@@ -193,6 +194,7 @@ export function formatAnswer(text, citations) {
   let inTable = false
   let tableRows = []
   let codeLang = ''
+  let codeBuf = []       // 代码块内容缓冲，闭合时一次性高亮
 
   // 表格行判定：以 | 开头且至少含 2 个 |（Markdown 表格，LLM/数据库工具常用）
   const isTableRow = (line) => /^\s*\|/.test(line) && line.indexOf('|') !== line.lastIndexOf('|')
@@ -230,17 +232,25 @@ export function formatAnswer(text, citations) {
       if (inList) { result.push('</ul>'); inList = false }
       if (!inCodeBlock) {
         codeLang = line.slice(3).trim().replace(/[^a-zA-Z0-9_-]/g, '')
-        result.push('<pre><code class="' + codeLang + '">')
+        codeBuf = []
         inCodeBlock = true
       } else {
-        result.push('</code></pre>')
+        // 代码块闭合：将收集的行拼接后用 highlight.js 高亮，保留语言 class
+        const code = codeBuf.join('\n')
+        const language = codeLang && hljs.getLanguage(codeLang) ? codeLang : null
+        const highlighted = language
+          ? hljs.highlight(code, { language }).value
+          : hljs.highlightAuto(code).value
+        const langClass = language ? ' class="language-' + language + '"' : ''
+        result.push('<pre class="md-code"><code' + langClass + '>' + highlighted + '</code></pre>')
         inCodeBlock = false
         codeLang = ''
+        codeBuf = []
       }
       continue
     }
     if (inCodeBlock) {
-      result.push(escapeHtml(line))
+      codeBuf.push(line)
       continue
     }
     if (isTableRow(line)) {
@@ -293,7 +303,16 @@ export function formatAnswer(text, citations) {
 
   if (inTable) flushTable()
   if (inList) result.push('</ul>')
-  if (inCodeBlock) result.push('</code></pre>')
+  // 未闭合的代码块：同样用 hljs 高亮后输出
+  if (inCodeBlock) {
+    const code = codeBuf.join('\n')
+    const language = codeLang && hljs.getLanguage(codeLang) ? codeLang : null
+    const highlighted = language
+      ? hljs.highlight(code, { language }).value
+      : hljs.highlightAuto(code).value
+    const langClass = language ? ' class="language-' + language + '"' : ''
+    result.push('<pre class="md-code"><code' + langClass + '>' + highlighted + '</code></pre>')
+  }
   return result.join('\n')
 }
 

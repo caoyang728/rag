@@ -4,28 +4,27 @@
     <div class="eval-toolbar mb-3">
       <div class="attr-toolbar">
         <div class="filters">
-          <el-select v-model="days" style="width: 120px" @change="loadAttribution">
+          <el-select v-model="days" style="width: 110px" @change="loadAttribution">
             <el-option v-for="opt in options" :key="opt.value" :label="opt.label" :value="opt.value" />
           </el-select>
-          <el-select v-model="category" placeholder="全部归因" clearable style="width: 140px" @change="loadAttribution">
+          <el-select v-model="category" placeholder="全部归因" clearable style="width: 130px" @change="loadAttribution">
             <el-option v-for="(label, key) in ATTR_CATEGORY_LABEL" :key="key" :label="label" :value="key" />
           </el-select>
-          <el-select v-model="layer" placeholder="全部层级" clearable style="width: 120px" @change="loadAttribution">
+          <el-select v-model="layer" placeholder="全部层级" clearable style="width: 100px" @change="loadAttribution">
             <el-option v-for="(label, key) in ATTR_LAYER_LABEL" :key="key" :label="label" :value="key" />
           </el-select>
-          <el-select v-model="status" placeholder="全部状态" clearable style="width: 110px" @change="loadAttribution">
+          <el-select v-model="status" placeholder="全部状态" clearable style="width: 100px" @change="loadAttribution">
             <el-option label="已完成" value="completed" />
             <el-option label="待分析" value="pending" />
             <el-option label="失败" value="failed" />
           </el-select>
-          <el-select v-model="org.deptId" placeholder="全部部门" clearable style="width: 160px" @change="onDeptChange">
+          <el-select v-model="org.deptId" placeholder="全部部门" clearable style="width: 120px" @change="onDeptChange">
             <el-option v-for="d in org.departments" :key="d.id" :label="d.name" :value="d.id" />
           </el-select>
-          <el-select v-model="org.teamId" placeholder="全部团队" clearable style="width: 160px" :disabled="!org.deptId" @change="loadAttribution">
+          <el-select v-model="org.teamId" placeholder="全部团队" clearable style="width: 120px" :disabled="!org.deptId" @change="loadAttribution">
             <el-option v-for="t in org.teamsOfDept" :key="t.id" :label="t.name" :value="t.id" />
           </el-select>
           <el-button @click="loadAttribution">🔄 刷新</el-button>
-          <span class="text-sub text-sm" style="white-space: nowrap; margin-left: 8px">{{ summaryText }}</span>
         </div>
         <div class="manual-attr">
           <el-input v-model="manualQaId" placeholder="QA ID" type="number" style="width: 100px" />
@@ -192,7 +191,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import api from '../../api/http'
 import { formatDate, errMsg } from '../../utils/format'
@@ -216,10 +215,7 @@ const status = ref('')
 const rows = ref([])
 const stats = reactive({ total: 0, retrieval: 0, content: 0, generation: 0, rule: 0, llm: 0 })
 const categoryDist = ref([])
-const listCount = ref(0)
-const listDays = ref(7)
 
-const summaryText = computed(() => `共 ${listCount.value} 条(最近 ${listDays.value} 天) · 范围 ${org.scopeText}`)
 
 function onDeptChange() {
   org.onDeptChange()
@@ -248,8 +244,6 @@ const { loading, load: loadAttribution } = useListLoader(async () => {
     api.getJson(`/api/v1/analytics/low-score-analysis/stats/?${statsParams.toString()}`),
   ])
   rows.value = listData.rows || []
-  listCount.value = (listData.rows || []).length
-  listDays.value = listData.days || days.value
   renderAttrStats(statsData)
 }, {
   // 失败时清空列表展示空状态并提示；onError 存在时不会走 useListLoader 的默认提示

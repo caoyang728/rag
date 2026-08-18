@@ -65,7 +65,14 @@
             <div class="eval-empty-icon">📊</div>
             <div>暂无评估数据</div>
           </div>
-          <RadarChart v-else :groups="groups" :dims="visibleDimsOrdered" :labels="DIM_LABEL" />
+          <!-- 展示维度不足 3 个时雷达图无法成型（至少需要三角形），给出空态提示 -->
+          <div v-else-if="visibleDimsOrdered.length < 3" class="eval-empty">
+            <div class="eval-empty-icon">🚫</div>
+            <div>展示维度不足 3 个，无法绘制雷达图</div>
+          </div>
+          <div v-else class="radar-chart-box">
+            <VChart :option="radarOption" />
+          </div>
         </div>
         <div ref="dimWrapRef" class="eval-dim-wrap">
           <div v-if="dimsCleared" class="eval-empty">
@@ -197,9 +204,11 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import api from '../../api/http'
 import { formatDate, errMsg } from '../../utils/format'
-import RadarChart from './RadarChart.vue'
 import Sparkline from './Sparkline.vue'
 import PanelHeader from '../base/PanelHeader.vue'
+import { useTheme } from '../../composables/useTheme'
+import { buildRadarOption, chartThemeColors } from '../../utils/chart'
+import VChart from '../base/VChart.vue'
 import { useListLoader } from '../../composables/useListLoader'
 import { useTimeRange } from '../../composables/useTimeRange'
 import { useOrgFilter } from './useOrgFilter'
@@ -257,6 +266,17 @@ const visibleDimsOrdered = computed(() => ALL_DIMS_ORDERED.filter(d => isDimVisi
 
 // dimension_groups 为空对象时(后端无评估数据),整体均分显示 -- ,不渲染雷达图/sparkline
 const hasDimData = computed(() => Object.values(groups.value).some(g => g.dimensions && g.dimensions.length > 0))
+
+const { isDark } = useTheme()
+// 图表主题色：依赖 isDark，主题切换时重建（canvas 图表需取计算后的 CSS 变量色值）
+const chartColors = computed(() => chartThemeColors(isDark.value))
+// 雷达图 option：维度白名单/分组数据变化时自动重渲染
+const radarOption = computed(() => buildRadarOption({
+  groups: groups.value,
+  dims: visibleDimsOrdered.value,
+  labels: DIM_LABEL,
+  colors: chartColors.value,
+}))
 
 // 整体均分 = 4 大类均分的平均
 const overallAvg = computed(() => {
@@ -566,6 +586,12 @@ defineExpose({ reload: loadDashboard })
 .ml-2 { margin-left: 8px; }
 
 .text-sub { color: var(--el-text-color-secondary, #6b7280); }
+
+/* 雷达图容器：固定高度（ECharts 需显式容器尺寸） */
+.radar-chart-box {
+  height: 400px;
+  width: 100%;
+}
 
 .text-loading {
   padding: 20px;

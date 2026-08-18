@@ -30,7 +30,9 @@
     <div class="eval-panel mb-3">
       <PanelHeader titleClass="eval-panel-title">文档质量分布</PanelHeader>
       <div class="eval-panel-body">
-        <BarChart v-if="distData.length" :data="distData" :width="400" :height="140" :pad-left="20" :pad-bottom="24" :pad-top="20" :start-x="20" max-mode="sum" :value-text="distValueText" />
+        <div v-if="distData.length" class="bar-chart-box">
+          <VChart :option="barOption" />
+        </div>
         <div v-else class="eval-empty"><div class="eval-empty-icon">📄</div><div>暂无数据，点击"批量评估"</div></div>
       </div>
     </div>
@@ -94,8 +96,10 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import api from '../../api/http'
 import { formatDate, errMsg } from '../../utils/format'
-import BarChart from './BarChart.vue'
 import PanelHeader from '../base/PanelHeader.vue'
+import { useTheme } from '../../composables/useTheme'
+import { buildBarOption, chartThemeColors } from '../../utils/chart'
+import VChart from '../base/VChart.vue'
 import { useListLoader } from '../../composables/useListLoader'
 import { useOrgFilter } from './useOrgFilter'
 import { fmtPct, qualityTagType } from './constants'
@@ -122,6 +126,17 @@ const distData = computed(() => [
 // 比例模式下柱顶显示"数量 (占比%)"
 const distTotal = computed(() => distData.value.reduce((s, d) => s + d.value, 0))
 const distValueText = v => `${v} (${distTotal.value > 0 ? (v / distTotal.value * 100).toFixed(0) : 0}%)`
+
+const { isDark } = useTheme()
+// 图表主题色：依赖 isDark，主题切换时重建（canvas 图表需取计算后的 CSS 变量色值）
+const chartColors = computed(() => chartThemeColors(isDark.value))
+// 质量分布柱状图 option：比例堆叠模式（无网格，柱高=占比），柱顶展示"数量 (占比%)"
+const barOption = computed(() => buildBarOption({
+  data: distData.value,
+  valueText: distValueText,
+  maxMode: 'sum',
+  colors: chartColors.value,
+}))
 
 function onDeptChange() {
   org.onDeptChange()
@@ -220,6 +235,12 @@ defineExpose({ reload: loadDocQuality })
   justify-content: space-between;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+/* 质量分布柱状图容器：固定高度（ECharts 需显式容器尺寸） */
+.bar-chart-box {
+  height: 180px;
+  width: 100%;
 }
 
 .text-sub {

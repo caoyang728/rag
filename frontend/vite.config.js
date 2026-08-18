@@ -29,7 +29,14 @@ export default defineConfig({
     proxy: {
       // 本地开发时代理 API 与静态资源到 Django（8000）
       '/api': 'http://localhost:8000',
-      '/static': 'http://localhost:8000',
+      // '/static': 'http://localhost:8000',
+      // /static/vue/ 由 Vite dev server 直接服务（HMR），其余 /static/ 转发 Django
+      '/static': {
+        target: 'http://localhost:8000',
+        bypass(req) {
+          if (req.url?.startsWith('/static/vue/')) return req.url
+        },
+      },
       '/media': 'http://localhost:8000'
     }
   }

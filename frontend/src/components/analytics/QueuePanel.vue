@@ -42,12 +42,12 @@
       <!-- 历史趋势区：占满卡片剩余高度 -->
       <div class="queue-history-section">
         <div class="history-title">📈 队列深度历史趋势</div>
-        <!-- 队列集合动态变化，TrendChart 内 series 由队列名动态生成；空/单点展示占位文案。
-             fill 模式让折线图撑满历史趋势区剩余高度（svgH 跟随容器实测） -->
-        <TrendChart :series="chartSeries" :data="chartData" :axes="queueAxes"
-          :height="300" fill smooth :x-label="xLabel"
-          empty-text="暂无历史数据（需要等待至少 1 个 5 分钟周期）"
-          single-text="历史数据不足，至少需要 2 个时间槽" />
+        <!-- 队列集合动态变化，series 由队列名动态生成；空/单点展示占位文案。
+             图表撑满历史趋势区剩余高度（ECharts 随容器自适应） -->
+        <div v-if="chartData.length > 1" class="trend-chart-box">
+          <VChart :option="trendOption" :events="trendEvents" />
+        </div>
+        <div v-else class="chart-placeholder">{{ chartData.length === 0 ? '暂无历史数据（需要等待至少 1 个 5 分钟周期）' : '历史数据不足，至少需要 2 个时间槽' }}</div>
       </div>
     </div>
   </div>
@@ -59,7 +59,9 @@ import { ElMessage } from 'element-plus'
 import api from '../../api/http'
 import { errMsg } from '../../utils/format'
 import { useListLoader } from '../../composables/useListLoader'
-import TrendChart from './TrendChart.vue'
+import { useTheme } from '../../composables/useTheme'
+import { buildTrendOption, chartThemeColors, trendLegendSelectChanged } from '../../utils/chart'
+import VChart from '../base/VChart.vue'
 
 /**
  * 队列深度 Tab：实时快照（各 Celery 队列当前状态）+ 指定时间窗口的历史深度趋势折线图
@@ -124,6 +126,21 @@ const chartSeries = computed(() => queueNames.value.map((q, i) => ({
 const queueAxes = {
   left: { toFixed: 0, includeZero: true, clampMin: 0, clampMax: null, minSpan: 1, padMin: 1, padMax: 1 },
 }
+
+const { isDark } = useTheme()
+// 图表主题色：依赖 isDark，主题切换时重建（canvas 图表需取计算后的 CSS 变量色值）
+const chartColors = computed(() => chartThemeColors(isDark.value))
+// 趋势图 option：队列集合/数据变化时自动重渲染
+const trendOption = computed(() => buildTrendOption({
+  series: chartSeries.value,
+  data: chartData.value,
+  axes: queueAxes,
+  xLabel,
+  smooth: true,
+  colors: chartColors.value,
+}))
+// 图例保护：至少保留一条指标线可见，避免图表空白
+const trendEvents = { legendselectchanged: trendLegendSelectChanged }
 
 onMounted(loadQueueDepth)
 
@@ -205,7 +222,20 @@ defineExpose({ reload: loadQueueDepth })
   margin-bottom: 10px;
 }
 
-.queue-history-section :deep(.trend-chart) {
+/* 图表容器：占满历史趋势区剩余高度，保留最小尺寸保证图表可读 */
+.queue-history-section .trend-chart-box {
   flex: 1;
+  min-width: 320px;
+  min-height: 220px;
+}
+
+/* 空数据/单点占位文案 */
+.chart-placeholder {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--app-text-sub);
+  font-size: 13px;
 }
 </style>

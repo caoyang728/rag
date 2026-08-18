@@ -29,9 +29,13 @@
           <el-button size="small" @click="exportReport">📥 导出报表</el-button>
         </div>
       </div>
-      <!-- 趋势折线图：指标分轴（计数/满意率%/耗时 ms），fill 撑满卡片剩余高度，图例勾选在组件内部处理 -->
+      <!-- 趋势折线图：指标分轴（计数/满意率%/耗时 ms），撑满卡片剩余高度，图例多选/自适应由 ECharts 处理 -->
       <div class="trend-section">
-        <TrendChart :series="trendSeries" :data="trendData" :axes="trendAxes" :height="360" fill />
+        <div v-if="trendData.length > 1" class="trend-chart-box">
+          <VChart :option="trendOption" :events="trendEvents" />
+        </div>
+        <!-- 空数据 / 仅 1 天数据：不绘制图表，直接展示文案（与原版占位一致） -->
+        <div v-else class="chart-placeholder">{{ trendData.length === 0 ? '暂无数据' : '仅 1 天数据，暂无法绘制趋势图' }}</div>
       </div>
     </div>
 
@@ -61,7 +65,10 @@ import { ElMessage } from 'element-plus'
 import api from '../../api/http'
 import { errMsg } from '../../utils/format'
 import { exportCsv } from '../../utils/download'
-import TrendChart from './TrendChart.vue'
+import { useListLoader } from '../../composables/useListLoader'
+import { useTheme } from '../../composables/useTheme'
+import { buildTrendOption, chartThemeColors, trendLegendSelectChanged } from '../../utils/chart'
+import VChart from '../base/VChart.vue'
 
 /**
  * 概览 Tab：今日实时（Redis 快照 + 5 分钟轮询）+ 指标趋势折线图 + CSV 导出
@@ -232,6 +239,20 @@ const trendAxes = {
   // 耗时轴：毫秒刻度，从 0 起算、不设上限；pad/minSpan 保证小波动也有刻度跨度
   time: { toFixed: 0, unit: 'ms', includeZero: true, clampMin: 0, clampMax: null, minSpan: 100, padMin: 100, padMax: 100 },
 }
+
+const { isDark } = useTheme()
+// 图表主题色：依赖 isDark，主题切换时重建（canvas 图表需取计算后的 CSS 变量色值）
+const chartColors = computed(() => chartThemeColors(isDark.value))
+// 趋势图 option：由 series/axes/data 翻译为 echarts 配置，数据与主题变化时自动重渲染
+const trendOption = computed(() => buildTrendOption({
+  series: trendSeries,
+  data: trendData.value,
+  axes: trendAxes,
+  smooth: false,
+  colors: chartColors.value,
+}))
+// 图例保护：至少保留一条指标线可见，避免图表空白
+const trendEvents = { legendselectchanged: trendLegendSelectChanged }
 
 /* ---- 时间范围切换 ---- */
 function onTimeRangeChange(val) {
@@ -431,8 +452,21 @@ defineExpose({
   padding: 12px 16px 16px;
 }
 
-.trend-section :deep(.trend-chart) {
+/* 图表容器：占满剩余空间，保留最小尺寸保证窄/矮容器中图表可读（原 fill 模式语义） */
+.trend-chart-box {
   flex: 1;
+  min-width: 320px;
+  min-height: 220px;
+}
+
+/* 空数据/单点占位文案 */
+.chart-placeholder {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--app-text-sub);
+  font-size: 13px;
 }
 
 /* 自定义日期弹窗：横向双列 */

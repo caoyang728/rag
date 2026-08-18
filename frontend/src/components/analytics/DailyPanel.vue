@@ -13,9 +13,11 @@
           </el-select>
         </div>
         <!-- QA次数/好评/差评 走左轴，准确率 走右轴；勾选状态由 dailyMetricVisible 恢复。
-             fill 模式让折线图撑满趋势区剩余高度（svgH 跟随容器实测） -->
-        <TrendChart :series="dailySeries" :data="trendData" :axes="dailyAxes" :height="300" fill
-          :x-label="xLabel" :single-text="'仅 1 天数据，暂无法绘制趋势图'" />
+             图表撑满趋势区剩余高度（ECharts 随容器自适应） -->
+        <div v-if="trendData.length > 1" class="trend-chart-box">
+          <VChart :option="trendOption" :events="trendEvents" />
+        </div>
+        <div v-else class="chart-placeholder">{{ trendData.length === 0 ? '暂无数据' : '仅 1 天数据，暂无法绘制趋势图' }}</div>
       </div>
 
       <!-- 每日摘要对比：今日 vs 昨日 + 环比 -->
@@ -49,7 +51,9 @@ import { ElMessage } from 'element-plus'
 import api from '../../api/http'
 import { errMsg, fmtPct } from '../../utils/format'
 import { useListLoader } from '../../composables/useListLoader'
-import TrendChart from './TrendChart.vue'
+import { useTheme } from '../../composables/useTheme'
+import { buildTrendOption, chartThemeColors, trendLegendSelectChanged } from '../../utils/chart'
+import VChart from '../base/VChart.vue'
 
 /**
  * 日报详情 Tab：多日趋势折线图（QA/好评/差评/准确率）+ 今日 vs 昨日摘要对比（含环比）
@@ -115,6 +119,21 @@ const dailyAxes = {
   left: { toFixed: 0, includeZero: true, clampMin: 0, clampMax: null },
   right: { unit: '%', toFixed: 0, includeZero: false, clampMin: 0, clampMax: 100, defaultMin: 0, defaultMax: 100, minSpan: 5, padMin: 5, padMax: 5 },
 }
+
+const { isDark } = useTheme()
+// 图表主题色：依赖 isDark，主题切换时重建（canvas 图表需取计算后的 CSS 变量色值）
+const chartColors = computed(() => chartThemeColors(isDark.value))
+// 趋势图 option：数据/勾选配置变化时自动重渲染
+const trendOption = computed(() => buildTrendOption({
+  series: dailySeries.value,
+  data: trendData.value,
+  axes: dailyAxes,
+  xLabel,
+  smooth: false,
+  colors: chartColors.value,
+}))
+// 图例保护：至少保留一条指标线可见，避免图表空白
+const trendEvents = { legendselectchanged: trendLegendSelectChanged }
 
 /* ===== 摘要对比表 ===== */
 /**
@@ -214,8 +233,21 @@ defineExpose({ reload: loadDailyReport })
   font-weight: 600;
 }
 
-.daily-trend-section :deep(.trend-chart) {
+/* 图表容器：占满趋势区剩余高度，保留最小尺寸保证图表可读 */
+.daily-trend-section .trend-chart-box {
   flex: 1;
+  min-width: 320px;
+  min-height: 220px;
+}
+
+/* 空数据/单点占位文案 */
+.chart-placeholder {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--app-text-sub);
+  font-size: 13px;
 }
 
 /* 摘要对比区：保持自然高度，不可压缩，保证表格完整可见 */

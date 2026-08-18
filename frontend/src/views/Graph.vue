@@ -13,7 +13,7 @@
     <!-- ===== 内容区：tabs 撑满高度，面板内部滚动 ===== -->
     <div class="page-body tabs-fill">
     <!-- ===== Tab 切换 ===== -->
-    <el-tabs v-model="activeTab" @tab-change="onTabChange">
+    <el-tabs v-model="activeTab">
       <!-- ============ 图谱浏览 ============ -->
       <el-tab-pane label="🕸️ 图谱浏览" name="graph">
         <div class="graph-toolbar">
@@ -23,15 +23,11 @@
             clearable
             style="flex: 1; min-width: 240px"
             @keyup.enter="doEntitySearch"
-            @clear="doEntitySearch"
+            @clear="resetSearch"
           />
           <div class="toolbar-actions">
             <el-select v-model="entityTypeFilter" placeholder="全部类型" clearable style="width: 120px">
-              <el-option label="人物" value="PERSON" />
-              <el-option label="组织" value="ORG" />
-              <el-option label="概念" value="CONCEPT" />
-              <el-option label="术语" value="TERM" />
-              <el-option label="产品" value="PRODUCT" />
+              <el-option v-for="opt in ENTITY_TYPE_OPTIONS" :key="opt.value" :label="opt.label" :value="opt.value" />
             </el-select>
             <el-button type="primary" @click="doEntitySearch">检索</el-button>
             <el-button @click="resetGraph">重置</el-button>
@@ -58,23 +54,37 @@
 
         <!-- 图谱内容排列：SVG 画布 + 实体详情面板 -->
         <div class="graph-layout">
-          <div class="graph-canvas-wrap">
-            <!-- 原生 SVG 力导向图：节点点击扩展邻居，悬停提示实体信息 -->
+          <div
+            ref="svgWrapRef"
+            class="graph-canvas-wrap"
+            :class="{ 'graph-canvas-grabbing': isDragging }"
+            @wheel.prevent="onSvgWheel"
+            @mousedown="onSvgMouseDown"
+          >
+            <!-- 缩放控制按钮 -->
+            <div class="graph-zoom-controls" v-if="graphNodes.length">
+              <button class="zoom-btn" @click="zoomIn" title="放大">＋</button>
+              <span class="zoom-label">{{ Math.round(graphScale * 100) }}%</span>
+              <button class="zoom-btn" @click="zoomOut" title="缩小">－</button>
+              <button class="zoom-btn zoom-btn-reset" @click="zoomReset" title="重置">↻</button>
+            </div>
+            <!-- 原生 SVG 力导向图：节点点击扩展邻居，悬停提示实体信息
+                 viewBox 动态计算实现缩放，支持鼠标拖动平移 -->
             <svg
               v-if="graphNodes.length"
               class="graph-svg"
-              :viewBox="`0 0 ${GRAPH_W} ${GRAPH_H}`"
-              @click="onSvgClick"
+              :class="{ 'graph-svg-grabbing': isDragging }"
+              :viewBox="graphViewBox"
             >
               <!-- 边：中心关联边加粗展示，便于追踪中心实体关系 -->
               <line
-                v-for="e in graphEdges"
+                v-for="e in graphEdgesWithCoords"
                 :key="e.id"
-                :x1="nodeX(e.source)"
-                :y1="nodeY(e.source)"
-                :x2="nodeX(e.target)"
-                :y2="nodeY(e.target)"
-                :stroke-width="e.source === graphCenterId || e.target === graphCenterId ? 2 : 1"
+                :x1="e.x1"
+                :y1="e.y1"
+                :x2="e.x2"
+                :y2="e.y2"
+                :stroke-width="e.isCenter ? edgeStrokeWidthCenter : edgeStrokeWidth"
                 class="graph-edge"
               />
               <g
@@ -88,10 +98,15 @@
                   :r="nodeRadius(n)"
                   :fill="typeColor(n.type)"
                   :stroke="n.is_center ? '#f59e0b' : 'transparent'"
-                  :stroke-width="n.is_center ? 3 : 0"
+                  :stroke-width="n.is_center ? 2 : 0"
                   class="graph-node-circle"
                 />
-                <text :y="nodeRadius(n) + 14" text-anchor="middle" class="graph-node-label">{{ n.name }}</text>
+                <text
+                  :y="nodeRadius(n) + Math.round(nodeLabelFontSize * 1.2)"
+                  text-anchor="middle"
+                  :font-size="nodeLabelFontSize"
+                  class="graph-node-label"
+                >{{ n.name }}</text>
                 <title>{{ n.name }}（{{ typeLabel(n.type) }}）{{ n.description ? '：' + n.description : '' }}</title>
               </g>
             </svg>
@@ -102,8 +117,9 @@
             </div>
           </div>
 
-          <!-- 实体详情面板（右侧固定宽度，与画布等高） -->
-          <div v-show="entityDetail" class="entity-panel">
+          <!-- 实体详情面板（右侧固定宽度，与画布等高）
+               始终显示面板，避免 v-show 切换导致 graph-svg 抖动 -->
+          <div class="entity-panel">
             <div v-if="entityDetail" class="entity-panel-inner">
               <div class="entity-panel-title">
                 {{ entityDetail.name }}
@@ -135,7 +151,10 @@
                 <el-button size="small" @click="loadSubgraph(entityDetail.id, 2)">↻ 以此为中心</el-button>
               </div>
             </div>
-            <div v-else class="text-sub ep-loading">加载中...</div>
+            <div v-else class="ep-placeholder">
+              <div class="ep-placeholder-icon">👆</div>
+              <div class="ep-placeholder-text">点击节点查看详情</div>
+            </div>
           </div>
         </div>
       </el-tab-pane>
@@ -218,7 +237,7 @@
 </template>
 
 <script setup>
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useUserStore } from '../stores/user'
 import api from '../api/http'
@@ -235,10 +254,26 @@ const { confirm } = useConfirm()
 
 const TYPE_LABELS = { PERSON: '人物', ORG: '组织', CONCEPT: '概念', TERM: '术语', PRODUCT: '产品' }
 const TYPE_COLORS = { PERSON: '#f97316', ORG: '#3b82f6', CONCEPT: '#10b981', TERM: '#8b5cf6', PRODUCT: '#ec4899' }
+// 实体类型选项：统一数据源，避免模板中硬编码导致维护两份类型列表
+const ENTITY_TYPE_OPTIONS = Object.entries(TYPE_LABELS).map(([value, label]) => ({ label, value }))
 
-// SVG 视口尺寸（viewBox 固定，容器内等比缩放）
-const GRAPH_W = 900
-const GRAPH_H = 600
+// SVG 视口基准尺寸（小图使用，大图动态扩展）
+const GRAPH_W_BASE = 900
+const GRAPH_H_BASE = 600
+
+/**
+ * 缩放不变量计算：根据缩放级别计算视觉大小，并除以 scale 抵消 viewBox 放大。
+ * 用于节点标签字体大小、边线条宽度等需要在任意缩放级别下保持屏幕视觉大小一致的属性。
+ * @param {number} base - 基础视觉大小
+ * @param {number} min - 最小视觉大小限制
+ * @param {number} max - 最大视觉大小限制
+ * @param {number} scale - 当前缩放级别
+ * @returns {number} SVG 坐标系中的大小值
+ */
+function scaleInvariant(base, min, max, scale) {
+  const visual = base * scale
+  return Math.max(min, Math.min(max, visual)) / scale
+}
 
 /* ==========================================================
    图谱浏览状态
@@ -251,15 +286,69 @@ const searchResults = ref([])
 const searchResultsIsFallback = ref(false)
 const activeResultIndex = ref(0)
 
+const svgWrapRef = ref(null)       // SVG 容器引用（缓存尺寸，避免高频事件 reflow）
 const graphNodes = ref([])        // 节点数组（布局后含 x/y）
 const graphEdges = ref([])        // 边数组
 const graphCenterId = ref(null)   // 当前中心实体 id
 const entityDetail = ref(null)    // 实体详情面板数据
 const expandedSet = new Set()     // 已展开过邻居的节点 id（避免重复请求）
+// SVG 缩放状态：通过 viewBox 控制缩放，节点大小保持不变
+const graphScale = ref(1)
+const GRAPH_SCALE_MIN = 0.3
+const GRAPH_SCALE_MAX = 3
+// 缩放中心点（相对于画布的坐标比例）
+const graphPanX = ref(0.5)
+const graphPanY = ref(0.5)
+// 拖动状态
+const isDragging = ref(false)
+const dragStartX = ref(0)
+const dragStartY = ref(0)
+const dragStartPanX = ref(0)
+const dragStartPanY = ref(0)
+let _cachedSvgRect = null  // 拖动期间缓存 SVG 尺寸，避免 mousemove 高频 reflow
+let _wheelRaf = null       // 滚轮缩放 requestAnimationFrame 句柄，用于节流
 // id → 节点对象索引（非响应式，仅用于坐标/度数快速查找）
 const nodeById = new Map()
 // id → 边对象（非响应式，用于去重；渲染数组为 graphEdges）
 const edgeById = new Map()
+
+// 动态画布尺寸：根据节点数自动扩展，避免大量节点挤在一起
+const graphW = computed(() => {
+  const count = graphNodes.value.length
+  if (count <= 50) return GRAPH_W_BASE
+  // 节点数 >50 时按面积比例扩展（每 50 个节点增加约 22% 边长）
+  const scale = Math.sqrt(count / 50)
+  return Math.ceil(GRAPH_W_BASE * Math.max(1, scale))
+})
+const graphH = computed(() => {
+  const count = graphNodes.value.length
+  if (count <= 50) return GRAPH_H_BASE
+  const scale = Math.sqrt(count / 50)
+  return Math.ceil(GRAPH_H_BASE * Math.max(1, scale))
+})
+
+// 动态 viewBox：根据缩放级别和中心点计算，实现缩放时节点大小不变
+const graphViewBox = computed(() => {
+  const GW = graphW.value
+  const GH = graphH.value
+  const scale = graphScale.value
+  // 缩放后的视口尺寸（缩放越大，视口越小，内容显示越大）
+  const vw = GW / scale
+  const vh = GH / scale
+  // 视口左上角坐标（基于中心点比例）
+  const cx = graphPanX.value * GW
+  const cy = graphPanY.value * GH
+  const vx = cx - vw / 2
+  const vy = cy - vh / 2
+  return `${vx} ${vy} ${vw} ${vh}`
+})
+
+// 节点标签字体大小：视觉大小 = base × scale，除以 scale 抵消 viewBox 放大
+const nodeLabelFontSize = computed(() => scaleInvariant(12, 8, 11, graphScale.value || 1))
+
+// 边线条宽度：视觉宽度 = base × scale，除以 scale 抵消 viewBox 放大
+const edgeStrokeWidth = computed(() => scaleInvariant(1, 0.5, 2, graphScale.value || 1))
+const edgeStrokeWidthCenter = computed(() => scaleInvariant(2, 1, 4, graphScale.value || 1))
 
 /* ==========================================================
    社区列表状态
@@ -275,6 +364,12 @@ const communityDetailMap = ref({})      // 社区详情缓存（卡片展开只�
 
 // 请求序号：防止快速筛选/翻页时旧响应后返回覆盖新状态
 let communitySeq = 0
+let searchSeq = 0      // 检索/子图请求序号：防快速连续操作时旧响应覆盖新状态
+let detailSeq = 0      // 详情请求序号
+let detectTimer = null  // 社区检测轮询定时器（卸载时清理）
+let detectPollCount = 0  // 当前轮询次数
+const DETECT_POLL_MAX = 10  // 最大轮询次数（每 3 秒一次，最多 30 秒）
+const DETECT_POLL_INTERVAL = 3000  // 轮询间隔（毫秒）
 
 function typeLabel(type) {
   return TYPE_LABELS[type] || type
@@ -291,6 +386,7 @@ async function doEntitySearch() {
     ElMessage.warning('请输入要检索的实体关键词')
     return
   }
+  const seq = ++searchSeq
   const type = entityTypeFilter.value
   searchHint.value = '🔍 检索中...'
   searchResults.value = []
@@ -299,11 +395,13 @@ async function doEntitySearch() {
     const params = new URLSearchParams({ q, top_k: 10 })
     if (type) params.set('type', type)
     const data = await api.getJson(`${GRAPH_API}/entities/search/?${params.toString()}`)
+    if (seq !== searchSeq) return
     const results = data.results || []
 
     if (!results.length) {
       // 语义检索无命中：回退到名称模糊检索，保证"实体存在但无向量"场景可用
       const fb = await nameSearchFallback(q, type)
+      if (seq !== searchSeq) return
       if (!fb.length) {
         searchHint.value = `未找到与"${q}"匹配的实体`
         return
@@ -321,6 +419,7 @@ async function doEntitySearch() {
     activeResultIndex.value = 0
     loadSubgraph(results[0].entity_id || results[0].id)
   } catch (e) {
+    if (seq !== searchSeq) return
     searchHint.value = `检索失败：${errMsg(e, '未知错误')}`
   }
 }
@@ -339,13 +438,22 @@ function switchCenter(id, index) {
 
 /* ============ 子图加载 / 邻居扩展 ============ */
 async function loadSubgraph(entityId, depth = 2) {
+  const seq = ++searchSeq
   searchHint.value = '🕸️ 子图加载中...'
   try {
     const data = await api.getJson(`${GRAPH_API}/entities/${entityId}/neighbors/?depth=${depth}`)
+    if (seq !== searchSeq) return
+    const hadNodes = graphNodes.value.length > 0
     mergeSubgraph(data, true)
-    runLayout()
+    // 有已有节点时用增量布局（复用坐标），无节点时用全量布局
+    if (hadNodes) {
+      await runIncrementalLayout(entityId)
+    } else {
+      await runLayout()
+    }
     showEntityDetail(entityId)
   } catch (e) {
+    if (seq !== searchSeq) return
     searchHint.value = `子图加载失败：${errMsg(e, '未知错误')}`
   }
 }
@@ -357,12 +465,19 @@ async function expandNode(entityId) {
     return
   }
   expandedSet.add(entityId)
+  const seq = ++searchSeq
   try {
     const data = await api.getJson(`${GRAPH_API}/entities/${entityId}/neighbors/?depth=1`)
+    if (seq !== searchSeq) {
+      expandedSet.delete(entityId)
+      return
+    }
     mergeSubgraph(data, false)
-    runLayout()
+    // 新增了邻居节点：做增量布局，新节点围绕中心节点展开，不移动已有节点
+    await runIncrementalLayout(entityId)
     showEntityDetail(entityId)
   } catch (e) {
+    if (seq !== searchSeq) return
     expandedSet.delete(entityId)
     ElMessage.error('邻居扩展失败：' + errMsg(e, '未知错误'))
   }
@@ -384,6 +499,9 @@ function mergeSubgraph(data, isNewCenter) {
       type: n.type,
       type_label: n.type_label,
       description: n.description,
+      // 保留已有节点的坐标，避免重建对象后坐标丢失导致节点堆叠到原点
+      x: existing && existing.x != null ? existing.x : undefined,
+      y: existing && existing.y != null ? existing.y : undefined,
       is_center: isNewCenter ? n.is_center : (existing ? existing.is_center : false),
     })
   })
@@ -392,146 +510,364 @@ function mergeSubgraph(data, isNewCenter) {
     nodeById.get(graphCenterId.value).is_center = true
   }
   // 边按 id 去重：多次扩展邻居会返回重复边，避免渲染重叠
+  // 先写入 Map，最后一次性赋值 graphEdges，避免中间态逐条 push 触发 computed 重算
   newEdges.forEach(e => {
     if (!edgeById.has(e.id)) {
       edgeById.set(e.id, e)
-      graphEdges.value.push(e)
     }
   })
-  // 用去重后的 Map 值重建节点数组（保证同一节点只渲染一次）
+  // 用去重后的 Map 值一次性重建节点和边数组（保证同一元素只渲染一次）
+  graphEdges.value = [...edgeById.values()]
   graphNodes.value = [...nodeById.values()]
 }
 
-/* ============ 力导向布局（原生实现，替代原 ECharts force 布局） ============
- * 斥力（所有节点对）+ 弹簧力（边）+ 中心引力，迭代收敛后写入节点 x/y。
- * 节点数通常为几十个，O(n²) 迭代在同步计算内可接受。
+/* ============ 力导向布局（原生实现） ============
+ * 公共模拟逻辑提取到 simulateForces，runLayout / runIncrementalLayout 各自负责初始化坐标和参数。
+ * 斥力计算为 O(n²) + 距离剪枝（大图跳过远距离节点对），实际复杂度介于 O(n) ~ O(n²) 之间。
  */
-function runLayout() {
+
+/**
+ * 力导向布局公共模拟：斥力 + 弹簧力 + 中心引力，迭代收敛后写入节点 x/y。
+ * 使用 requestAnimationFrame 分帧执行，避免阻塞主线程导致 UI 卡顿。
+ * @param {Array} nodes - 节点数组
+ * @param {Array} edges - 边数组（已过滤无效端点）
+ * @param {Map} pos - 节点 id → {x, y} 位置
+ * @param {Map} vel - 节点 id → {x, y} 速度
+ * @param {Object} opts - 布局参数：cx, cy, GW, GH, REPULSION, SPRING_LEN, SPRING_K, GRAVITY, DAMPING, ITER, [newIdSet]
+ * @returns {Promise<void>} 布局完成后 resolve
+ */
+function simulateForces(nodes, edges, pos, vel, opts) {
+  return new Promise(resolve => {
+    const n = nodes.length
+    const { cx, cy, GW, GH, REPULSION, SPRING_LEN, SPRING_K, GRAVITY, DAMPING, ITER, newIdSet } = opts
+
+    const idx = new Map(nodes.map((node, i) => [node.id, i]))
+    const adj = edges
+      .map(e => ({ a: idx.get(e.source), b: idx.get(e.target) }))
+      .filter(e => e.a !== undefined && e.b !== undefined)
+
+    let iter = 0
+    const BATCH_SIZE = 5 // 每帧执行的迭代轮数，平衡流畅度与布局速度
+    const hasNewId = !!newIdSet
+
+    function step() {
+      const batchEnd = Math.min(iter + BATCH_SIZE, ITER)
+      for (; iter < batchEnd; iter++) {
+        // 斥力：O(n²) + 距离剪枝（大图跳过远距离节点对）
+        for (let i = 0; i < n; i++) {
+          const ni = nodes[i]
+          const pi = pos.get(ni.id)
+          const vi = vel.get(ni.id)
+          for (let j = i + 1; j < n; j++) {
+            const pj = pos.get(nodes[j].id)
+            let dx = pi.x - pj.x
+            let dy = pi.y - pj.y
+            let d2 = dx * dx + dy * dy
+            if (d2 < 1) {
+              // 重叠节点添加微小随机偏移，避免斥力发散
+              dx = Math.random() - 0.5
+              dy = Math.random() - 0.5
+              d2 = dx * dx + dy * dy || 1
+            }
+            if (n > 100 && d2 > 100000) continue
+            const d = Math.sqrt(d2)
+            const f = REPULSION / d2
+            const fx = (dx / d) * f
+            const fy = (dy / d) * f
+            vi.x += fx
+            vi.y += fy
+            const vj = vel.get(nodes[j].id)
+            vj.x -= fx
+            vj.y -= fy
+          }
+        }
+        // 弹簧力：边两端节点受力向平衡长度靠拢
+        for (const { a, b } of adj) {
+          const na = nodes[a]
+          const nb = nodes[b]
+          const pa = pos.get(na.id)
+          const pb = pos.get(nb.id)
+          const va = vel.get(na.id)
+          const vb = vel.get(nb.id)
+          const dx = pb.x - pa.x
+          const dy = pb.y - pa.y
+          const d = Math.sqrt(dx * dx + dy * dy) || 0.01
+          const f = SPRING_K * (d - SPRING_LEN)
+          const fx = (dx / d) * f
+          const fy = (dy / d) * f
+          va.x += fx
+          va.y += fy
+          vb.x -= fx
+          vb.y -= fy
+        }
+        // 中心引力 + 阻尼：新节点引力更强（newIdSet），引导快速落位
+        for (const node of nodes) {
+          const p = pos.get(node.id)
+          const v = vel.get(node.id)
+          const g = hasNewId && newIdSet.has(node.id) ? 0.05 : GRAVITY
+          v.x += (cx - p.x) * g
+          v.y += (cy - p.y) * g
+          v.x *= DAMPING
+          v.y *= DAMPING
+          p.x += v.x
+          p.y += v.y
+        }
+      }
+
+      if (iter < ITER) {
+        requestAnimationFrame(step)
+      } else {
+        // 将模拟结果写回节点并夹紧到画布边界
+        const pad = 34
+        for (const node of nodes) {
+          const p = pos.get(node.id)
+          node.x = Math.max(pad, Math.min(GW - pad, p.x))
+          node.y = Math.max(pad, Math.min(GH - pad, p.y))
+        }
+        resolve()
+      }
+    }
+
+    requestAnimationFrame(step)
+  })
+}
+
+// 增量布局：为新节点（无坐标）围绕中心节点分配初始位置，再做轻量迭代微调。
+// 不瞬移已有节点到画布中心——否则中心节点会脱离邻居孤立显示（视觉上"没有连线"）。
+// 使用异步布局避免阻塞主线程，返回 Promise 表示布局完成。
+async function runIncrementalLayout(centerId) {
   const nodes = graphNodes.value
   const n = nodes.length
   if (n === 0) return
+  const GW = graphW.value
+  const GH = graphH.value
+  const cx = GW / 2
+  const cy = GH / 2
+
+  // 中心节点位置：优先用其现有坐标（保持与邻居的连线）
+  const centerNode = nodeById.get(centerId)
+  const centerX = centerNode && centerNode.x != null ? centerNode.x : cx
+  const centerY = centerNode && centerNode.y != null ? centerNode.y : cy
+
+  // 为没有坐标的新节点分配初始位置：围绕中心节点环形分布，保证邻居展开后可见
+  const newNodes = nodes.filter(node => node.x == null)
+  const newIdSet = new Set(newNodes.map(node => node.id))
+  const r0 = Math.max(80, Math.min(160, Math.sqrt(GW * GH / n) * 0.4))
+  newNodes.forEach((node, i) => {
+    const ang = (2 * Math.PI * i) / Math.max(newNodes.length, 1)
+    node.x = centerX + r0 * Math.cos(ang)
+    node.y = centerY + r0 * Math.sin(ang)
+  })
+
   const pos = new Map()
   const vel = new Map()
-  const cx = GRAPH_W / 2
-  const cy = GRAPH_H / 2
-  const r = Math.min(GRAPH_W, GRAPH_H) / 2 - 80
-  // 初始位置：环形分布，避免随机初值导致收敛到局部重叠
+  nodes.forEach(node => {
+    pos.set(node.id, { x: node.x || cx, y: node.y || cy })
+    vel.set(node.id, { x: 0, y: 0 })
+  })
+
+  // 增量布局：迭代次数少，靠已有位置快速收敛
+  await simulateForces(nodes, graphEdges.value, pos, vel, {
+    cx, cy, GW, GH,
+    REPULSION: 3000 * Math.max(1, Math.sqrt(n / 50)),
+    SPRING_LEN: Math.max(40, Math.min(150, Math.sqrt(GW * GH / n) * 0.4)),
+    SPRING_K: 0.02,
+    GRAVITY: 0.03,
+    DAMPING: 0.6,
+    ITER: n > 200 ? 30 : 60,
+    newIdSet,
+  })
+}
+
+// 全量布局（首次加载或重置后使用），异步执行避免阻塞主线程
+async function runLayout() {
+  const nodes = graphNodes.value
+  const n = nodes.length
+  if (n === 0) return
+  const GW = graphW.value
+  const GH = graphH.value
+  const cx = GW / 2
+  const cy = GH / 2
+  const r = Math.min(GW, GH) / 2 - 80
+
+  const pos = new Map()
+  const vel = new Map()
   nodes.forEach((node, i) => {
     const ang = (2 * Math.PI * i) / n
     pos.set(node.id, { x: cx + r * Math.cos(ang), y: cy + r * Math.sin(ang) })
     vel.set(node.id, { x: 0, y: 0 })
   })
-  const idx = new Map(nodes.map((node, i) => [node.id, i]))
-  // 过滤掉端点不在图中的边（如删图后残留边）
-  const adj = graphEdges.value
-    .map(e => ({ a: idx.get(e.source), b: idx.get(e.target) }))
-    .filter(e => e.a !== undefined && e.b !== undefined)
 
-  const REPULSION = 5000   // 斥力系数
-  const SPRING_LEN = 130   // 边理想长度
-  const SPRING_K = 0.02    // 弹簧刚度
-  const GRAVITY = 0.02     // 中心引力，防止整体漂移出画布
-  const DAMPING = 0.6      // 速度阻尼
-  const ITER = 260
-
-  for (let iter = 0; iter < ITER; iter++) {
-    // 斥力（所有节点对，力与距离平方成反比）
-    for (let i = 0; i < n; i++) {
-      const pi = pos.get(nodes[i].id)
-      const vi = vel.get(nodes[i].id)
-      for (let j = i + 1; j < n; j++) {
-        const pj = pos.get(nodes[j].id)
-        let dx = pi.x - pj.x
-        let dy = pi.y - pj.y
-        let d2 = dx * dx + dy * dy
-        // 完全重叠时施加随机扰动，避免除零/死锁
-        if (d2 < 1) {
-          dx = Math.random() - 0.5
-          dy = Math.random() - 0.5
-          d2 = dx * dx + dy * dy || 1
-        }
-        const d = Math.sqrt(d2)
-        const f = REPULSION / d2
-        const fx = (dx / d) * f
-        const fy = (dy / d) * f
-        vi.x += fx
-        vi.y += fy
-        const vj = vel.get(nodes[j].id)
-        vj.x -= fx
-        vj.y -= fy
-      }
-    }
-    // 弹簧力（边，趋向理想长度）
-    for (const { a, b } of adj) {
-      const pa = pos.get(nodes[a].id)
-      const pb = pos.get(nodes[b].id)
-      const dx = pb.x - pa.x
-      const dy = pb.y - pa.y
-      const d = Math.sqrt(dx * dx + dy * dy) || 0.01
-      const f = SPRING_K * (d - SPRING_LEN)
-      const fx = (dx / d) * f
-      const fy = (dy / d) * f
-      const va = vel.get(nodes[a].id)
-      const vb = vel.get(nodes[b].id)
-      va.x += fx
-      va.y += fy
-      vb.x -= fx
-      vb.y -= fy
-    }
-    // 中心引力 + 阻尼更新位置
-    for (const node of nodes) {
-      const p = pos.get(node.id)
-      const v = vel.get(node.id)
-      v.x += (cx - p.x) * GRAVITY
-      v.y += (cy - p.y) * GRAVITY
-      v.x *= DAMPING
-      v.y *= DAMPING
-      p.x += v.x
-      p.y += v.y
-    }
-  }
-  // 边界约束：节点不超出画布（留出标签空间）
-  const pad = 34
-  for (const node of nodes) {
-    const p = pos.get(node.id)
-    node.x = Math.max(pad, Math.min(GRAPH_W - pad, p.x))
-    node.y = Math.max(pad, Math.min(GRAPH_H - pad, p.y))
-  }
+  // 动态参数：根据节点数自适应
+  await simulateForces(nodes, graphEdges.value, pos, vel, {
+    cx, cy, GW, GH,
+    REPULSION: 5000 * Math.max(1, Math.sqrt(n / 50)),
+    SPRING_LEN: Math.max(40, Math.min(150, Math.sqrt(GW * GH / n) * 0.4)),
+    SPRING_K: n > 100 ? 0.015 : 0.02,
+    GRAVITY: n > 100 ? 0.01 : 0.02,
+    DAMPING: 0.6,
+    // 大幅减少迭代次数：500+节点用更少迭代，靠增量布局微调
+    ITER: n > 200 ? 80 : n > 50 ? 120 : 200,
+  })
 }
 
-// SVG 渲染辅助：边端点坐标（节点不存在时回退到画布中心，避免 NaN）
-function nodeX(id) {
-  const n = nodeById.get(id)
-  return n && n.x != null ? n.x : GRAPH_W / 2
-}
+// 预计算边渲染数据：一次性算出端点坐标与是否关联中心节点，
+// 避免模板中对每条边进行 4 次 Map 查找（节点不存在时回退到画布中心，避免 NaN）
+const graphEdgesWithCoords = computed(() => {
+  return graphEdges.value.map(e => {
+    const s = nodeById.get(e.source)
+    const t = nodeById.get(e.target)
+    return {
+      id: e.id,
+      x1: s && s.x != null ? s.x : graphW.value / 2,
+      y1: s && s.y != null ? s.y : graphH.value / 2,
+      x2: t && t.x != null ? t.x : graphW.value / 2,
+      y2: t && t.y != null ? t.y : graphH.value / 2,
+      isCenter: e.source === graphCenterId.value || e.target === graphCenterId.value,
+    }
+  })
+})
 
-function nodeY(id) {
-  const n = nodeById.get(id)
-  return n && n.y != null ? n.y : GRAPH_H / 2
-}
+// 节点大小常量（视觉半径，单位 px，即屏幕上看到的实际大小）
+// 中心节点的 1.7 倍放大同时作用于 base/min/max 三个值：
+// 普通节点范围 [NODE_RADIUS_MIN, NODE_RADIUS_MAX]，中心节点范围自动为 1.7 倍。
+const NODE_RADIUS_BASE = 12            // 普通节点基础视觉半径
+const NODE_RADIUS_CENTER_FACTOR = 1.7  // 中心节点放大系数（1.7 倍）
+const NODE_RADIUS_MIN = 10             // 普通节点最小视觉半径（缩小到极限时的下限）
+const NODE_RADIUS_MAX = 100            // 普通节点最大视觉半径（放大到极限时的上限）
 
-// 节点大小：中心实体放大，其余按度数自适应
+// 节点大小：视觉半径 = base × scale（随缩放线性变化）。
+// 中心节点整条范围（base/min/max）都放大 1.7 倍，保证任意缩放级别下始终比其他节点大 1.7 倍。
+// 由于 viewBox 会把 SVG 坐标放大 scale 倍，这里将 clamp 后的视觉半径除以 scale
+// 得到 SVG 坐标半径，从而保证屏幕上看到的实际大小正好等于 clamp 后的视觉半径。
 function nodeRadius(n) {
-  if (n.is_center) return 26
-  const degree = graphEdges.value.filter(e => e.source === n.id || e.target === n.id).length
-  return 14 + Math.min(degree, 8) * 2
+  const scale = graphScale.value || 1
+  const factor = n.is_center ? NODE_RADIUS_CENTER_FACTOR : 1
+  const base = NODE_RADIUS_BASE * factor
+  const min = NODE_RADIUS_MIN * factor
+  const max = NODE_RADIUS_MAX * factor
+  const visual = base * scale
+  const clamped = Math.max(min, Math.min(max, visual))
+  // 除以 scale 抵消 viewBox 放大，屏幕视觉大小 = clamped
+  return clamped / scale
 }
 
-// 点击节点：展开其邻居并展示详情（已展开仅刷新详情）
+// 点击节点：将该节点设为中心并展示详情，同时确保邻居已展开
 function onNodeClick(n) {
+  // 将点击的节点设为中心实体（更新中心标记和中心 id，不移动节点位置）
+  if (graphCenterId.value !== n.id) {
+    const prevCenter = graphCenterId.value
+    graphCenterId.value = n.id
+    if (prevCenter != null && nodeById.has(prevCenter)) {
+      nodeById.get(prevCenter).is_center = false
+    }
+    nodeById.get(n.id).is_center = true
+  }
+  // 展开邻居（首次点击拉取邻居并做增量布局，让新增节点围绕中心显示）
   expandNode(n.id)
 }
 
-// 点击画布空白：无操作（保留当前图，便于浏览）
-function onSvgClick() {}
+/* ============ 检索状态重置 ============ */
+// 清空输入框时重置检索结果，不触发搜索请求
+function resetSearch() {
+  searchResults.value = []
+  searchResultsIsFallback.value = false
+  activeResultIndex.value = 0
+  searchHint.value = ''
+}
+
+/* ============ SVG 缩放 ============ */
+// 鼠标滚轮缩放：以鼠标位置为中心缩放，使用 requestAnimationFrame 节流避免高频重绘
+function onSvgWheel(e) {
+  // .prevent 修饰符已处理 preventDefault，无需重复调用
+  if (_wheelRaf) return
+  // 提前提取事件属性，避免闭包持有整个 MouseEvent（可能被浏览器回收或进入被动模式）
+  const { clientX, clientY, deltaY } = e
+  _wheelRaf = requestAnimationFrame(() => {
+    _wheelRaf = null
+    const svg = svgWrapRef.value && svgWrapRef.value.querySelector('svg')
+    if (!svg) return
+    const rect = svg.getBoundingClientRect()
+    const mx = (clientX - rect.left) / rect.width
+    const my = (clientY - rect.top) / rect.height
+    const delta = deltaY > 0 ? -0.12 : 0.12
+    const newScale = Math.max(GRAPH_SCALE_MIN, Math.min(GRAPH_SCALE_MAX, graphScale.value + delta))
+    // 平滑更新中心点（向鼠标位置偏移）
+    const factor = 0.3
+    graphPanX.value = graphPanX.value + (mx - graphPanX.value) * factor
+    graphPanY.value = graphPanY.value + (my - graphPanY.value) * factor
+    graphScale.value = newScale
+  })
+}
+
+// 缩放按钮控制
+function zoomIn() {
+  graphScale.value = Math.min(GRAPH_SCALE_MAX, graphScale.value + 0.2)
+}
+
+function zoomOut() {
+  graphScale.value = Math.max(GRAPH_SCALE_MIN, graphScale.value - 0.2)
+}
+
+function zoomReset() {
+  graphScale.value = 1
+  graphPanX.value = 0.5
+  graphPanY.value = 0.5
+}
+
+/* ============ SVG 拖动 ============ */
+// 鼠标按下：记录拖动起始位置，动态绑定 document 事件确保拖拽不丢失
+function onSvgMouseDown(e) {
+  // 仅响应左键，且不在节点上时才启动拖动
+  if (e.button !== 0) return
+  // 如果点击的是节点，不启动拖动（让节点点击事件处理）
+  if (e.target.closest('.graph-node')) return
+  isDragging.value = true
+  dragStartX.value = e.clientX
+  dragStartY.value = e.clientY
+  dragStartPanX.value = graphPanX.value
+  dragStartPanY.value = graphPanY.value
+  // 缓存 SVG 尺寸，避免拖动期间 mousemove 高频触发 reflow
+  if (svgWrapRef.value) {
+    const svg = svgWrapRef.value.querySelector('svg')
+    if (svg) _cachedSvgRect = svg.getBoundingClientRect()
+  }
+  // 绑定 document 级别事件，确保鼠标移出 SVG 区域后仍能响应拖拽
+  document.addEventListener('mousemove', onSvgMouseMove)
+  document.addEventListener('mouseup', onSvgMouseUp)
+}
+
+// 鼠标移动：更新 viewBox 中心点实现拖动效果
+function onSvgMouseMove(e) {
+  if (!isDragging.value || !_cachedSvgRect) return
+  // 使用 mousedown 时缓存的 SVG 尺寸，避免每帧触发 reflow
+  const dx = (e.clientX - dragStartX.value) / _cachedSvgRect.width
+  const dy = (e.clientY - dragStartY.value) / _cachedSvgRect.height
+  const scale = graphScale.value
+  // 拖动方向与视口移动方向相反（鼠标向右拖，视图向左移）
+  // 除以 scale 后拖动距离与鼠标物理位移 1:1 一致，任意缩放级别下手感相同
+  graphPanX.value = Math.max(0, Math.min(1, dragStartPanX.value - dx / scale))
+  graphPanY.value = Math.max(0, Math.min(1, dragStartPanY.value - dy / scale))
+}
+
+// 鼠标松开：结束拖动，解绑 document 事件
+function onSvgMouseUp() {
+  isDragging.value = false
+  _cachedSvgRect = null
+  document.removeEventListener('mousemove', onSvgMouseMove)
+  document.removeEventListener('mouseup', onSvgMouseUp)
+}
 
 /* ============ 实体详情面板 ============ */
 async function showEntityDetail(id) {
+  const seq = ++detailSeq
   entityDetail.value = null
   try {
     const d = await api.getJson(`${GRAPH_API}/entities/${id}/`)
+    if (seq !== detailSeq) return
     entityDetail.value = d
   } catch (e) {
+    if (seq !== detailSeq) return
     entityDetail.value = null
     ElMessage.error('详情加载失败：' + errMsg(e, '未知错误'))
   }
@@ -547,6 +883,9 @@ function resetGraph() {
   entityDetail.value = null
   searchResults.value = []
   searchHint.value = ''
+  graphScale.value = 1    // 重置缩放
+  graphPanX.value = 0.5   // 重置平移中心
+  graphPanY.value = 0.5
 }
 
 /* ============ 社区列表 ============ */
@@ -559,6 +898,9 @@ async function loadCommunities(page) {
   const seq = ++communitySeq
   communityPage.value = page
   communityLoading.value = true
+  // 翻页/筛选时清理社区详情缓存，避免内存无限增长
+  communityDetailMap.value = {}
+  expandedCommunityId.value = null
   try {
     const params = new URLSearchParams({ page: String(page), page_size: String(PAGE_SIZE) })
     if (communityLevelFilter.value) params.set('level', communityLevelFilter.value)
@@ -570,8 +912,6 @@ async function loadCommunities(page) {
     if (seq !== communitySeq) return
     communities.value = data.results || []
     communityTotal.value = data.count || 0
-    // 翻页后收起已展开的社区，避免详情错位
-    expandedCommunityId.value = null
   } catch (e) {
     if (seq !== communitySeq) return
     communities.value = []
@@ -592,8 +932,11 @@ async function toggleCommunityDetail(id) {
   if (communityDetailMap.value[id]) return
   try {
     const d = await api.getJson(`${GRAPH_API}/communities/${id}/`)
-    communityDetailMap.value[id] = d
+    // 整体替换触发响应式，确保模板可靠刷新；同时避免直接 addProperty 的隐式依赖
+    communityDetailMap.value = { ...communityDetailMap.value, [id]: d }
   } catch (e) {
+    // 请求失败：标记为空对象避免重复请求，显示无实体提示
+    communityDetailMap.value = { ...communityDetailMap.value, [id]: { entities: [], error: true } }
     ElMessage.error('加载失败：' + errMsg(e, '未知错误'))
   }
 }
@@ -613,15 +956,43 @@ function confirmDetect() {
   }, async () => {
     const res = await api.postJson(`${GRAPH_API}/communities/detect/`, {})
     ElMessage.success(res.detail || '任务已提交')
-    // 异步任务完成后刷新社区列表
-    setTimeout(() => loadCommunities(1), 5000)
+    // 启动轮询：每 3 秒刷新社区列表，最多 10 次（30 秒），直到社区数据更新
+    startDetectPolling()
   })
+}
+
+// 社区检测轮询：定期刷新社区列表，直到检测完成或达到最大次数
+function startDetectPolling() {
+  // 清除旧轮询
+  if (detectTimer) clearInterval(detectTimer)
+  detectPollCount = 0
+  const prevTotal = communityTotal.value
+  detectTimer = setInterval(async () => {
+    detectPollCount++
+    await loadCommunities(1)
+    // 检测完成：社区数量发生变化，或达到最大轮询次数
+    if (communityTotal.value !== prevTotal || detectPollCount >= DETECT_POLL_MAX) {
+      clearInterval(detectTimer)
+      detectTimer = null
+      if (detectPollCount >= DETECT_POLL_MAX && communityTotal.value === prevTotal) {
+        ElMessage.info('社区检测仍在进行中，请稍后手动刷新查看')
+      }
+    }
+  }, DETECT_POLL_INTERVAL)
 }
 
 /* ============ 页面初始化 ============ */
 onMounted(() => {
   userStore.restore()
   loadCommunities(1)
+})
+
+onUnmounted(() => {
+  // 清理社区检测轮询定时器
+  if (detectTimer) clearInterval(detectTimer)
+  // 清理可能残留的 document 事件监听器（拖拽中途卸载组件时）
+  document.removeEventListener('mousemove', onSvgMouseMove)
+  document.removeEventListener('mouseup', onSvgMouseUp)
 })
 </script>
 
@@ -704,10 +1075,66 @@ onMounted(() => {
   flex: 1;
   min-width: 0;
   display: flex;
+  position: relative;
   border: 1px solid var(--app-border);
   border-radius: 8px;
   background: var(--app-card-bg);
   overflow: hidden;
+  cursor: grab; /* 默认显示抓手图标，表示可拖动 */
+}
+
+/* 拖动中：抓手按下状态 */
+.graph-canvas-grabbing,
+.graph-svg-grabbing {
+  cursor: grabbing !important;
+}
+
+/* 缩放控制按钮组（悬浮在图谱右上角） */
+.graph-zoom-controls {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--app-card-bg);
+  border: 1px solid var(--app-border);
+  border-radius: 6px;
+  padding: 4px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+.zoom-btn {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 16px;
+  color: var(--app-text);
+  transition: background 0.15s;
+}
+
+.zoom-btn:hover {
+  background: var(--app-menu-hover);
+}
+
+.zoom-btn-reset {
+  font-size: 14px;
+  margin-left: 2px;
+}
+
+.zoom-label {
+  font-size: 12px;
+  color: var(--app-text-sub);
+  min-width: 40px;
+  text-align: center;
+  user-select: none;
 }
 
 /* SVG 画布：随 graph-layout 剩余高度自适应（viewBox 等比缩放），
@@ -717,6 +1144,7 @@ onMounted(() => {
   width: 100%;
   height: 100%;
   display: block;
+  user-select: none; /* 防止拖动时选中文本 */
 }
 
 /* 边：灰线，中心关联边加粗 */
@@ -724,7 +1152,7 @@ onMounted(() => {
   stroke: var(--app-border);
 }
 
-/* 节点 hover 放大提示（原生 title 已带实体信息，无需额外 tooltip 库） */
+/* 节点：手型指针表示可点击，拖动时保持 pointer 不变 */
 .graph-node {
   cursor: pointer;
 }
@@ -738,7 +1166,6 @@ onMounted(() => {
 }
 
 .graph-node-label {
-  font-size: 12px;
   fill: var(--app-text);
   pointer-events: none;
 }
@@ -769,6 +1196,26 @@ onMounted(() => {
   background: var(--app-card-bg);
   padding: 14px;
   overflow-y: auto;
+}
+
+/* 面板占位符：未选中节点时显示引导提示 */
+.ep-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 200px;
+  color: var(--app-text-sub);
+}
+
+.ep-placeholder-icon {
+  font-size: 32px;
+  margin-bottom: 12px;
+  opacity: 0.5;
+}
+
+.ep-placeholder-text {
+  font-size: 13px;
 }
 
 .entity-panel-title {
@@ -839,11 +1286,6 @@ onMounted(() => {
 .ep-actions {
   display: flex;
   gap: 8px;
-}
-
-.ep-loading {
-  text-align: center;
-  padding: 40px 0;
 }
 
 .text-sub {

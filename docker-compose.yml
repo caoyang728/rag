@@ -5,7 +5,7 @@
 #   - 除 LLM（DeepSeek 云 API）外，所有服务都跑在 docker 内部网络 rag_network
 #   - 仅 nginx 对外暴露 80 端口（django 8000 为开发直连，生产环境注释掉）；postgres/redis/xinference 不暴露到宿主机
 #   - embedding/rerank 由 Xinference 自托管（bge-m3 / bge-reranker-v2-m3，CPU）
-# 数据持久化：postgres_data / redis_data / static_data / media_data / xinference_data
+# 数据持久化：postgres_data / redis_data / static_data / xinference_data（media 使用绑定挂载 ./media）
 # ==========================================================================
 
 name: rag-full
@@ -65,7 +65,7 @@ services:
     volumes:
       - .:/app
       - static_data:/app/staticfiles
-      - media_data:/app/media
+      - ./media:/app/media
     depends_on:
       postgres:
         condition: service_healthy
@@ -88,7 +88,7 @@ services:
       TZ: Asia/Shanghai
     volumes:
       - .:/app
-      - media_data:/app/media
+      - ./media:/app/media
     depends_on:
       postgres:
         condition: service_healthy
@@ -132,7 +132,7 @@ services:
       - "80:80"
     volumes:
       - static_data:/usr/share/nginx/static:ro
-      - media_data:/usr/share/nginx/media:ro
+      - ./media:/usr/share/nginx/media:ro
     networks:
       - rag_network
 
@@ -175,8 +175,6 @@ volumes:
     name: rag_redis_data
   static_data:
     name: rag_static_data
-  media_data:
-    name: rag_media_data
   xinference_data:
     name: rag_xinference_data
 

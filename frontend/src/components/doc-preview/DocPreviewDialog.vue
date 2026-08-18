@@ -1,8 +1,9 @@
 <template>
-  <!-- 文档预览弹窗（Chat / Upload 等页面共用，preview-doc.js 迁移）
+  <!-- 文档预览弹窗（Chat / Upload 等页面共用）
        复用 BaseDialog 骨架：60% 视口宽 + 屏幕居中 + 轻微模糊遮罩；
        高度按 PPT 页（16:9）比例自适应：宽度 60vw × 9/16 = 33.75vw 为页图高，
-       再加头部/元信息条/底部约 190px 骨架高，保证弹窗刚好容纳一页（不再固定 80vh）；
+       再加头部/元信息条/底部约 190px 骨架高，保证 PPT 整页刚好容纳一页；
+       Word 等竖版文档在 16:9 窗口内宽度贴合、高度超出时上下滚动；
        :z-index 显式抬高层级，保证盖在文档列表等其他弹窗之上 -->
   <BaseDialog
     v-model="dialogVisible"
@@ -123,6 +124,7 @@ import { ElMessage } from 'element-plus'
 import { Loading } from '@element-plus/icons-vue'
 import api from '../../api/http'
 import { escapeHtml, formatDate, formatFileSize } from '../../utils/format'
+import { highlightCode } from '../../utils/markdown'
 import { downloadBlob } from '../../utils/download'
 import { useDocWatermark } from '../../composables/useDocWatermark'
 import { getToken } from '../../utils/authStorage'
@@ -356,6 +358,9 @@ function initPreviewState(data, id, opts) {
     // 写入会话缓存：后续翻页直接走 switchImagePage 切页图，不再重新请求 preview 元信息
     previewCacheSet(id, state)
     previewState.value = state
+    // 预取首图：API 返回后立即 fetch，不等 DOM 渲染触发 pageImgSrc computed，
+    // 避免弹窗打开后出现空白加载态
+    loadPageImage(state, previewPage.value)
     return
   }
   // 行模式：整文件直出或分块
@@ -576,56 +581,6 @@ async function downloadDoc(docId) {
   }
 }
 
-/* ---- 轻量语法高亮（无第三方依赖） ----
- * 按 字符串/注释/数字/关键字 顺序做单趟分词，每段单独转义，
- * 避免对已转义 HTML 再做正则匹配导致错乱 */
-const CODE_KEYWORDS = {
-  python: 'def class return import from if elif else for while try except finally with as lambda pass break continue None True False and or not in is global nonlocal yield raise assert del async await',
-  javascript: 'function return const let var if else for while do switch case break continue new class extends super this typeof instanceof try catch finally throw async await import export default null undefined true false',
-  typescript: 'function return const let var if else for while do switch case break continue new class extends implements interface super this typeof instanceof try catch finally throw async await import export default null undefined true false readonly enum',
-  java: 'public private protected class interface extends implements return void static final new if else for while do switch case break continue try catch finally throw throws import package null true false this super int long double float boolean char byte short String Object instanceof synchronized',
-  go: 'package import func return var const if else for range switch case break continue defer go chan map struct interface type nil true false len cap make append delete select',
-  c: 'int char float double void struct union enum typedef static extern const return if else for while do switch case break continue goto sizeof include define null true false unsigned signed long short volatile',
-  cpp: 'int char float double void struct union enum class namespace template typename const return if else for while do switch case break continue try catch throw new delete this public private protected virtual override nullptr true false using',
-  rust: 'fn let mut const if else for while loop match return pub use mod impl trait struct enum self Self Some None true false move ref dyn as where async await unsafe static',
-  csharp: 'public private protected class interface struct enum namespace using return void static const readonly new if else for while do switch case break continue try catch finally throw null true false this base int long double float bool string object var async await is as',
-  shell: 'if then else elif fi for while do done case esac function return export local echo cd set unset exit readonly',
-  sql: 'SELECT INSERT UPDATE DELETE FROM WHERE GROUP BY ORDER HAVING JOIN LEFT RIGHT INNER OUTER ON AND OR NOT IN IS NULL LIKE CREATE TABLE ALTER DROP INDEX VIEW UNION DISTINCT LIMIT OFFSET AS',
-  php: 'function class public private protected return if else foreach for while switch case break continue try catch finally throw new null true false echo isset empty array this namespace use static final interface',
-  ruby: 'def class module return if elsif else unless for while do end yield nil true false and or not begin rescue ensure attr_reader attr_accessor new puts require',
-  json: 'true false null',
-  yaml: 'true false null yes no on off',
-  toml: 'true false',
-  ini: 'true false'
-}
-
-function highlightCode(code, lang) {
-  const keywords = (CODE_KEYWORDS[lang] || '').split(/\s+/).filter(Boolean)
-  const groups = [
-    '("(?:[^"\\\\]|\\\\.)*"|\'(?:[^\'\\\\]|\\\\.)*\'|`(?:[^`\\\\]|\\\\.)*`)', // 1 字符串
-    '(\\/\\/.*$|#[^\\n]*$|--.*$|\\/\\*[\\s\\S]*?\\*\\/)',                   // 2 注释
-    '\\b(\\d+(?:\\.\\d+)?)\\b'                                              // 3 数字
-  ]
-  if (keywords.length) {
-    groups.push('\\b(' + keywords.join('|') + ')\\b')                       // 4 关键字
-  }
-  const re = new RegExp(groups.join('|'), 'gm')
-  let out = ''
-  let last = 0
-  let m
-  while ((m = re.exec(code)) !== null) {
-    out += escapeHtml(code.slice(last, m.index))
-    const cls = m[1] != null ? 'tok-str'
-      : m[2] != null ? 'tok-com'
-      : m[3] != null ? 'tok-num'
-      : 'tok-kw'
-    out += '<span class="' + cls + '">' + escapeHtml(m[0]) + '</span>'
-    last = m.index + m[0].length
-  }
-  out += escapeHtml(code.slice(last))
-  return out
-}
-
 // 弹窗显隐/文档切换：父组件打开或切换预览目标时触发加载
 watch(
   () => [props.modelValue, props.docId, props.initialPage],
@@ -715,11 +670,9 @@ onBeforeUnmount(() => {
 }
 
 .doc-preview-image {
-  /* 统一按 PPT 页（16:9）比例展示：宽铺满容器，高按比例固定；
-     object-fit: contain 保留原图比例，PDF/Word 竖版页图在画布中居中留白，
-     留白背景与画布同色，滚动翻页时观感连续（暗色下由 html.dark 规则处理） */
+  /* 宽度贴合容器，高度按图片原始比例自适应（不固定 aspect-ratio）；
+     横版 PPT 在 16:9 弹窗内整页展示，竖版 Word/PDF 宽度贴合、高度超出时由 el-scrollbar 滚动 */
   width: 100%;
-  aspect-ratio: 16 / 9;
   object-fit: contain;
   /* 与代码模式背景保持一致：img 元素自身的底色不再是白色，
      避免页图边缘/透明区域露出白底造成与代码预览颜色不一致 */
@@ -818,12 +771,6 @@ html.dark .doc-preview-dialog .preview-img-scroll .el-scrollbar__wrap {
   color: var(--text-sub);
   cursor: pointer;
 }
-
-/* 轻量高亮配色 */
-.doc-preview-code-txt .tok-kw { color: #0550ae; font-weight: 600; }
-.doc-preview-code-txt .tok-str { color: #0a7a33; }
-.doc-preview-code-txt .tok-com { color: #6e7781; font-style: italic; }
-.doc-preview-code-txt .tok-num { color: #953800; }
 
 /* 原文不可用提示 */
 .doc-preview-disabled {

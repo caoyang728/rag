@@ -8,6 +8,7 @@ import 'element-plus/theme-chalk/dark/css-vars.css'
 import App from './App.vue'
 import router from './router'
 import './assets/style.css'
+import 'highlight.js/styles/github.css'
 import { initTheme } from './composables/useTheme'
 
 // 挂载前应用已保存的主题，避免首帧闪白

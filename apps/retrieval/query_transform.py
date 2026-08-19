@@ -33,14 +33,16 @@ from .hybrid import rrf_fuse
 # ---------------------------------------------------------------------------
 
 def transform_enabled() -> bool:
-    """查询改写/分解总开关，默认关闭
+    """查询改写/分解总开关，默认开启
 
-    关闭时 hybrid_search 直接走原混合检索，行为与现状完全一致。
+    开启后 hybrid_search 内部走改写→分解→并行检索→RRF 合并，单次调用即可覆盖多子查询，
+    避免 Agent LLM 多轮串行调用 knowledge_search 导致延迟过高。
+    关闭时 hybrid_search 直接走原混合检索，行为与旧版完全一致。
     """
     try:
-        return bool(get_config_value('QUERY_TRANSFORM_ENABLED', default=False, value_type='bool'))
+        return bool(get_config_value('QUERY_TRANSFORM_ENABLED', default=True, value_type='bool'))
     except Exception:
-        return False
+        return True
 
 
 def _decompose_threshold() -> float:

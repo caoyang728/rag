@@ -330,6 +330,9 @@ const CONFIG_METADATA = {
   QUERY_TRANSFORM_ENABLED: { label: '查询改写/分解开关', description: '开启后，检索前先对用户 Query 做 LLM 改写/同义词扩展，改写后置信度不足时再拆分为多个子查询分别召回后合并；关闭时行为与现状一致', sortOrder: 7 },
   QUERY_DECOMPOSE_THRESHOLD: { label: '改写后置信度阈值', description: '改写后检索结果的置信度低于该值时触发查询分解（0-1），越低越容易触发分解；0.35 大致对应改写后无命中片段', sortOrder: 8 },
   QUERY_DECOMPOSE_MAX_SUB: { label: '最大子查询数', description: '查询分解时最多生成的子查询数量（1-5），防止过度拆分导致检索延迟过高', sortOrder: 9 },
+  FAST_MODE_STRATEGY: { label: '快速问答检索策略', description: '控制快速问答模式的检索策略：parallel 三路并行（Wiki+GraphRAG+RAG，延迟 4-6s）；rag_only 仅 RAG（延迟 3-5s，最省资源）；sequential 串行降级（命中即停，延迟波动大）', sortOrder: 10 },
+  PERSONALIZED_RETRIEVAL_ENABLED: { label: '个性化检索开关', description: '开启后，基于用户历史问答/画像对检索结果做轻量加权排序（默认影响≤10%）；关闭时行为与现状完全一致，冷启动用户无副作用', sortOrder: 11 },
+  PERSONALIZED_WEIGHT: { label: '个性化加权系数', description: '个性化排序加权系数（0-0.2，默认 0.1 即影响不超过 10%）。数值越大个性化对排序影响越明显，过高会导致画像污染全局检索结果', sortOrder: 12 },
 
   // ===== 存储 =====
   IMAGE_STORAGE_MODE: { label: '图片存储模式', description: '图片的存储方式：转换 base64 存入数据库或对象存储', sortOrder: 1 },

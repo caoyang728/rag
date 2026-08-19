@@ -13,5 +13,6 @@ urlpatterns = [
     path("ask_stream/", views.ChatAskStreamView.as_view()),
     path("feedback/", views.FeedbackView.as_view()),
     path("records/", views.QaRecordListView.as_view()),
+    path("records/<int:pk>/", views.QaRecordDeleteView.as_view()),
     path("", include(router.urls)),
 ]

@@ -13,16 +13,22 @@
            外层用 div 而非 label：el-checkbox 内部已是 label，label 嵌套 label 会让浏览器的
            点击转发行为失效/混乱，导致点文字无法勾选。改为 div 后点文字走 onSourceRowToggle，
            点 checkbox 走 @click.stop + @change，互不干扰 -->
+      <!-- 快速问答模式提示 -->
+      <div v-if="disabled" class="scope-hint" style="color: var(--el-color-warning); margin-bottom: 8px;">
+        ⚡ 快速问答模式仅支持内部文档，数据来源已锁定
+      </div>
       <div class="source-switches">
         <div
           v-for="k in enabled"
           :key="k"
           class="scope-item source-switch"
-          @click="onSourceRowToggle(k)"
+          :class="{ 'is-disabled': disabled }"
+          @click="disabled ? null : onSourceRowToggle(k)"
         >
           <el-checkbox
             @click.stop
             :model-value="!!sources[k]"
+            :disabled="disabled"
             @change="val => onSourceChange(k, val)"
           />
           <span class="scope-label">
@@ -91,6 +97,11 @@ const NODES_CACHE_TTL = 2 * 60 * 60 * 1000       // 节点树缓存 TTL 2 小时
 const enabled = defineModel('enabled', { default: () => ['doc', 'db', 'web', 'llm'] })
 const sources = defineModel('sources', { default: () => ({ doc: true, db: true, web: true, llm: true }) })
 const scopes = defineModel('scopes', { default: () => new Set() })
+
+// 快速问答模式下禁用来源切换
+const props = defineProps({
+  disabled: { type: Boolean, default: false },
+})
 
 // 节点树内部状态
 const scopeTreeData = ref([])
@@ -403,6 +414,12 @@ onMounted(initSourceSwitches)
   border-radius: 8px;
   margin: 1px 4px;
   align-items: flex-start;
+}
+
+.source-switch.is-disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  pointer-events: none;
 }
 
 .source-switch .scope-label {

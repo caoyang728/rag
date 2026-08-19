@@ -4,6 +4,11 @@
             <template v-if="msg.role === 'user'">
               <div class="msg-user-content">
                 <div class="msg-user-bubble">{{ msg.content }}</div>
+                <!-- 撤回/删除操作按钮：仅用户消息显示，AI 回复成对删除 -->
+                <div v-if="msg.messageId" class="msg-user-actions">
+                  <span class="msg-action-btn" @click="recallMessage(msg)" title="撤回消息（将问题填回输入框）">撤回</span>
+                  <span class="msg-action-btn msg-action-danger" @click="deleteMessage(msg)" title="删除消息">删除</span>
+                </div>
               </div>
               <div class="msg-user-side">
                 <div class="msg-user-avatar">{{ userInitial }}</div>
@@ -213,7 +218,7 @@ const props = defineProps({
 const {
   workflowStatusText, wfStepIcon, wfNodeStatusText, submitInlineApproval, refreshWorkflowResult,
   toggleFilterFalsePositiveForm, submitFilterFalsePositive, previewCitation, retrySendChat,
-  submitFeedback, submitDetailedFeedback,
+  submitFeedback, submitDetailedFeedback, recallMessage, deleteMessage,
 } = props.handlers
 </script>
 
@@ -264,6 +269,36 @@ const {
   line-height: 1.6;
   max-width: 100%;
   word-break: break-word;
+}
+
+/* 用户消息操作按钮行（撤回/删除），紧跟气泡下方 */
+.msg-user-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 4px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.msg-user-content:hover .msg-user-actions {
+  opacity: 1;
+}
+
+.msg-action-btn {
+  font-size: 12px;
+  color: var(--text-sub);
+  cursor: pointer;
+  user-select: none;
+  transition: color 0.15s;
+}
+
+.msg-action-btn:hover {
+  color: var(--primary);
+}
+
+.msg-action-btn.msg-action-danger:hover {
+  color: var(--danger);
 }
 
 .msg-time {

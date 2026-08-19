@@ -31,6 +31,8 @@ class QaRecord(models.Model):
         # agent/general 由 agent 模块写入（任务编排 / 通用闲聊兜底），choices 与实际写入值对齐
         ('agent', 'agent'),
         ('general', 'general'),
+        # plan 由 Plan-and-Execute 模式写入（规划→并行执行→综合生成）
+        ('plan', 'plan'),
     ]
 
     id = models.BigAutoField(primary_key=True)
@@ -103,6 +105,9 @@ class QaRecord(models.Model):
     # 区别于 answer_type='refused'（正常的"无相关资料"拒答）
     is_success = models.BooleanField(default=True,
                                       help_text='对话是否成功完成（False=链路中断）')
+
+    # 软删除标记：用户撤回/删除消息时置为 True，不物理删除记录（审计+统计可追溯）
+    is_deleted = models.BooleanField(default=False, help_text='软删除标记（用户撤回/删除消息）')
 
     # --- 内容安全审查标记 ---
     # is_filtered=True 表示 LLM 输出命中敏感词被拦截/脱敏（区别于链路错误的 is_success）

@@ -153,7 +153,7 @@ class TestAskStream:
                       return_value=MagicMock(id=1)) as mock_persist, \
                 patch('apps.agent.executor.MemoryManager') as mock_mm_cls:
             events = list(ask_stream(None, '问题', sess, use_cache=True,
-                                     mode='auto'))
+                                     mode='agent'))
         deltas = [e['delta'] for e in events if e['type'] == 'delta']
         assert deltas == ['缓存答案']
         assert events[0]['is_hit_cache'] is True
@@ -176,7 +176,7 @@ class TestAskStream:
                       return_value=MagicMock(id=2)) as mock_persist, \
                 patch('apps.agent.executor.MemoryManager') as mock_mm_cls:
             events = list(ask_stream(None, '问题', sess, use_cache=True,
-                                     mode='auto'))
+                                     mode='agent'))
         types = [e['type'] for e in events]
         assert 'content_filtered' in types
         assert 'delta' not in types  # 命中 block 不下发任何 delta
@@ -736,3 +736,637 @@ class TestAskStreamViaAgent:
                                                     1, 0,
                                                     ['doc', 'db', 'web', 'llm']))
         assert events[-1]['type'] == 'done'
+
+    def test_ask_stream_via_agent_when_client_abort_filtered_then_persists_empty(self):
+        """客户端断开 + is_filtered=True：保存空 answer（规避违规内容落库）"""
+        from apps.agent.executor import _ask_stream_via_agent
+        stack, m = self._env([
+            {'type': 'content_filtered', 'category': 'porn'},
+            self._done_event(answer='', citations=[], tool_traces=[], chunks=[],
+                             is_filtered=True, filter_reason='output:词',
+                             stats={'llm': {}, 'tool_rounds': 0}),
+        ])
+        with stack:
+            gen = _ask_stream_via_agent(None, '问题', self._session(),
+                                        ['company_doc'], None, 'company_doc', 1, 0,
+                                        ['doc', 'db', 'web', 'llm'])
+            ev = next(gen)  # start
+            assert ev['type'] == 'start'
+            ev = next(gen)  # content_filtered
+            assert ev['type'] == 'content_filtered'
+            gen.close()  # 触发 GeneratorExit
+            kw = m['persist'].call_args.kwargs
+            assert kw['answer'] == ''
+            assert kw['is_filtered'] is True
+
+    def test_ask_stream_via_agent_when_llm_call_log_exception_then_non_fatal(self):
+        """LlmCallLog 写入失败不影响流式主流程"""
+        from apps.agent.executor import _ask_stream_via_agent
+        stack, m = self._env([self._done_event()])
+        with stack:
+            with patch('apps.agent.executor.LlmCallLog',
+                       side_effect=Exception('db down')):
+                events = list(_ask_stream_via_agent(None, '问题', self._session(),
+                                                    ['company_doc'], None, 'company_doc',
+                                                    1, 0,
+                                                    ['doc', 'db', 'web', 'llm']))
+        assert events[-1]['type'] == 'done'
+
+    def test_ask_stream_via_agent_when_answer_only_no_traces_then_general(self):
+        """有答案但无工具调用链：answer_type='general'"""
+        from apps.agent.executor import _ask_stream_via_agent
+        stack, m = self._env([
+            self._done_event(answer='直接回答', citations=[], tool_traces=[],
+                             chunks=[], stats={'llm': {}, 'tool_rounds': 0}),
+        ])
+        with stack:
+            events = list(_ask_stream_via_agent(None, '问题', self._session(),
+                                                ['company_doc'], None, 'company_doc',
+                                                1, 0,
+                                                ['doc', 'db', 'web', 'llm']))
+        kw = m['persist'].call_args.kwargs
+        assert kw['answer_type'] == 'general'
+
+
+# ---------------------------------------------------------------------------
+# _ask_stream_via_route 额外覆盖
+# ---------------------------------------------------------------------------
+
+class TestAskStreamViaRouteExtra:
+    """_ask_stream_via_route 额外路径覆盖"""
+
+    @staticmethod
+    def _session():
+        return MagicMock(id=1, turn_count=0)
+
+    def test_route_when_orchestrate_exception_then_refused(self):
+        """orchestrate 异常：降级为空 chunks + 拒答"""
+        from apps.agent.executor import _ask_stream_via_route
+        m = _stream_mocks()
+        with patch('apps.graph.router.orchestrate', side_effect=Exception('orchestrate down')), \
+                patch('apps.security.sensitive_filter.get_sensitive_filter',
+                      return_value=m['sf']), \
+                patch('apps.agent.executor.MemoryManager', return_value=m['mm']), \
+                patch('apps.agent.executor.get_llm', return_value=m['llm']), \
+                patch('apps.agent.executor.LlmCallLog'), \
+                patch('apps.agent.executor._persist_qa',
+                      return_value=MagicMock(id=1)), \
+                patch('apps.agent.executor._update_cache'):
+            events = list(_ask_stream_via_route(None, '问题', self._session(),
+                                                ['company_doc'], 'company_doc', 1, 0,
+                                                ['doc', 'db', 'web', 'llm']))
+        deltas = [e['delta'] for e in events if e['type'] == 'delta']
+        assert '未找到相关资料' in deltas[0]
+        m['llm'].stream.assert_not_called()
+
+    def test_route_when_doc_not_in_sources_then_refused(self):
+        """关闭内部文档来源：拒答文案提示用户开启"""
+        from apps.agent.executor import _ask_stream_via_route
+        m = _stream_mocks()
+        with patch('apps.security.sensitive_filter.get_sensitive_filter',
+                      return_value=m['sf']), \
+                patch('apps.agent.executor.MemoryManager', return_value=m['mm']), \
+                patch('apps.agent.executor.get_llm', return_value=m['llm']), \
+                patch('apps.agent.executor.LlmCallLog'), \
+                patch('apps.agent.executor._persist_qa',
+                      return_value=MagicMock(id=1)), \
+                patch('apps.agent.executor._update_cache'):
+            events = list(_ask_stream_via_route(None, '问题', self._session(),
+                                                ['company_doc'], 'company_doc', 1, 0,
+                                                ['db', 'web', 'llm']))
+        deltas = [e['delta'] for e in events if e['type'] == 'delta']
+        assert '已关闭' in deltas[0]
+        assert '内部文档' in deltas[0]
+
+    def test_route_when_llm_finish_with_error_then_detected(self):
+        """LLM 流式 finish 帧携带 error：error_type 被检测"""
+        from apps.agent.executor import _ask_stream_via_route
+        m = _stream_mocks()
+        m['llm'].stream.return_value = iter([
+            {'finish': True, 'error': 'HTTP 429'},
+        ])
+        with patch('apps.graph.router.orchestrate', return_value={
+            'context': '上下文', 'chunks': [], 'source': 'rag',
+            'route_trace': [],
+        }), \
+                patch('apps.security.sensitive_filter.get_sensitive_filter',
+                      return_value=m['sf']), \
+                patch('apps.agent.executor.MemoryManager', return_value=m['mm']), \
+                patch('apps.agent.executor.get_llm', return_value=m['llm']), \
+                patch('apps.agent.executor.LlmCallLog'), \
+                patch('apps.agent.executor._persist_qa',
+                      return_value=MagicMock(id=1)) as mock_persist, \
+                patch('apps.agent.executor._update_cache'):
+            events = list(_ask_stream_via_route(None, '问题', self._session(),
+                                                ['company_doc'], 'company_doc', 1, 0,
+                                                ['doc']))
+        kw = mock_persist.call_args.kwargs
+        assert kw['answer'] == '[未生成内容]'
+        assert kw['is_success'] is False
+
+    def test_route_when_filter_block_mid_stream_then_filtered(self):
+        """route 流式审查 block 命中：中断 + 发拦截事件"""
+        from apps.agent.executor import _ask_stream_via_route
+        m = _stream_mocks()
+        block_hit = MagicMock(action='block', word='违禁', category='other')
+        m['sf'].feed.side_effect = lambda state, delta: (
+            ([], block_hit) if '违禁' in delta else ([delta], None))
+        m['llm'].stream.return_value = iter([
+            {'delta': '正常'}, {'delta': '违禁内容'},
+            {'finish': True, 'latency_ms': 5},
+        ])
+        with patch('apps.graph.router.orchestrate', return_value={
+            'context': '上下文', 'chunks': [], 'source': 'rag',
+            'route_trace': [],
+        }), \
+                patch('apps.security.sensitive_filter.get_sensitive_filter',
+                      return_value=m['sf']), \
+                patch('apps.agent.executor.MemoryManager', return_value=m['mm']), \
+                patch('apps.agent.executor.get_llm', return_value=m['llm']), \
+                patch('apps.agent.executor.LlmCallLog'), \
+                patch('apps.agent.executor._persist_qa',
+                      return_value=MagicMock(id=1)) as mock_persist, \
+                patch('apps.agent.executor._update_cache'):
+            events = list(_ask_stream_via_route(None, '问题', self._session(),
+                                                ['company_doc'], 'company_doc', 1, 0,
+                                                ['doc']))
+        assert 'content_filtered' in [e['type'] for e in events]
+        deltas = [e['delta'] for e in events if e['type'] == 'delta']
+        assert deltas == ['正常']
+        kw = mock_persist.call_args.kwargs
+        assert kw['is_filtered'] is True
+
+    def test_route_when_llm_stream_exception_then_continues(self):
+        """route LLM 流式异常：补 first_token + 中断 delta"""
+        from apps.agent.executor import _ask_stream_via_route
+        m = _stream_mocks()
+        m['llm'].stream.side_effect = Exception('LLM route down')
+        with patch('apps.graph.router.orchestrate', return_value={
+            'context': '上下文', 'chunks': [], 'source': 'rag',
+            'route_trace': [],
+        }), \
+                patch('apps.security.sensitive_filter.get_sensitive_filter',
+                      return_value=m['sf']), \
+                patch('apps.agent.executor.MemoryManager', return_value=m['mm']), \
+                patch('apps.agent.executor.get_llm', return_value=m['llm']), \
+                patch('apps.agent.executor.LlmCallLog'), \
+                patch('apps.agent.executor._persist_qa',
+                      return_value=MagicMock(id=1)), \
+                patch('apps.agent.executor._update_cache'):
+            events = list(_ask_stream_via_route(None, '问题', self._session(),
+                                                ['company_doc'], 'company_doc', 1, 0,
+                                                ['doc']))
+        types = [e['type'] for e in events]
+        assert 'first_token' in types
+        deltas = [e['delta'] for e in events if e['type'] == 'delta']
+        assert any('流式中断' in d for d in deltas)
+
+    def test_route_when_flush_block_then_filtered(self):
+        """route flush 审查 buffer 命中 block"""
+        from apps.agent.executor import _ask_stream_via_route
+        m = _stream_mocks()
+        block_hit = MagicMock(action='block', word='尾词', category='other')
+        m['sf'].flush.return_value = ([], block_hit)
+        m['llm'].stream.return_value = iter([
+            {'delta': '内容'}, {'finish': True, 'latency_ms': 5},
+        ])
+        with patch('apps.graph.router.orchestrate', return_value={
+            'context': '上下文', 'chunks': [], 'source': 'rag',
+            'route_trace': [],
+        }), \
+                patch('apps.security.sensitive_filter.get_sensitive_filter',
+                      return_value=m['sf']), \
+                patch('apps.agent.executor.MemoryManager', return_value=m['mm']), \
+                patch('apps.agent.executor.get_llm', return_value=m['llm']), \
+                patch('apps.agent.executor.LlmCallLog'), \
+                patch('apps.agent.executor._persist_qa',
+                      return_value=MagicMock(id=1)) as mock_persist, \
+                patch('apps.agent.executor._update_cache'):
+            events = list(_ask_stream_via_route(None, '问题', self._session(),
+                                                ['company_doc'], 'company_doc', 1, 0,
+                                                ['doc']))
+        assert events[-1]['is_filtered'] is True
+
+    def test_route_when_flush_exception_then_continues(self):
+        """route flush 审查器抛异常：仅记录日志，正常收尾"""
+        from apps.agent.executor import _ask_stream_via_route
+        m = _stream_mocks()
+        m['sf'].flush.side_effect = Exception('flush err')
+        m['llm'].stream.return_value = iter([
+            {'delta': '内容'}, {'finish': True, 'latency_ms': 5},
+        ])
+        with patch('apps.graph.router.orchestrate', return_value={
+            'context': '上下文', 'chunks': [], 'source': 'rag',
+            'route_trace': [],
+        }), \
+                patch('apps.security.sensitive_filter.get_sensitive_filter',
+                      return_value=m['sf']), \
+                patch('apps.agent.executor.MemoryManager', return_value=m['mm']), \
+                patch('apps.agent.executor.get_llm', return_value=m['llm']), \
+                patch('apps.agent.executor.LlmCallLog'), \
+                patch('apps.agent.executor._persist_qa',
+                      return_value=MagicMock(id=1)), \
+                patch('apps.agent.executor._update_cache'):
+            events = list(_ask_stream_via_route(None, '问题', self._session(),
+                                                ['company_doc'], 'company_doc', 1, 0,
+                                                ['doc']))
+        assert events[-1]['type'] == 'done'
+        assert events[-1]['is_filtered'] is False
+
+    def test_route_when_empty_answer_then_refused(self):
+        """LLM 未产出任何 delta：answer_type='refused'"""
+        from apps.agent.executor import _ask_stream_via_route
+        m = _stream_mocks()
+        m['llm'].stream.return_value = iter([
+            {'finish': True, 'latency_ms': 5},
+        ])
+        with patch('apps.graph.router.orchestrate', return_value={
+            'context': '上下文', 'chunks': [], 'source': 'rag',
+            'route_trace': [],
+        }), \
+                patch('apps.security.sensitive_filter.get_sensitive_filter',
+                      return_value=m['sf']), \
+                patch('apps.agent.executor.MemoryManager', return_value=m['mm']), \
+                patch('apps.agent.executor.get_llm', return_value=m['llm']), \
+                patch('apps.agent.executor.LlmCallLog'), \
+                patch('apps.agent.executor._persist_qa',
+                      return_value=MagicMock(id=1)) as mock_persist, \
+                patch('apps.agent.executor._update_cache'):
+            events = list(_ask_stream_via_route(None, '问题', self._session(),
+                                                ['company_doc'], 'company_doc', 1, 0,
+                                                ['doc']))
+        kw = mock_persist.call_args.kwargs
+        assert kw['answer'] == '[未生成内容]'
+        assert kw['answer_type'] == 'refused'
+
+    def test_route_when_llm_call_log_exception_then_non_fatal(self):
+        """route LlmCallLog 写入失败不影响主流程"""
+        from apps.agent.executor import _ask_stream_via_route
+        m = _stream_mocks()
+        m['llm'].stream.return_value = iter([
+            {'delta': '答案'}, {'finish': True, 'latency_ms': 5},
+        ])
+        with patch('apps.graph.router.orchestrate', return_value={
+            'context': '上下文', 'chunks': [], 'source': 'rag',
+            'route_trace': [],
+        }), \
+                patch('apps.security.sensitive_filter.get_sensitive_filter',
+                      return_value=m['sf']), \
+                patch('apps.agent.executor.MemoryManager', return_value=m['mm']), \
+                patch('apps.agent.executor.get_llm', return_value=m['llm']), \
+                patch('apps.agent.executor.LlmCallLog',
+                      side_effect=Exception('db write fail')), \
+                patch('apps.agent.executor._persist_qa',
+                      return_value=MagicMock(id=1)), \
+                patch('apps.agent.executor._update_cache'):
+            events = list(_ask_stream_via_route(None, '问题', self._session(),
+                                                ['company_doc'], 'company_doc', 1, 0,
+                                                ['doc']))
+        assert events[-1]['type'] == 'done'
+
+    def test_route_when_no_filter_then_llm_stream_raw(self):
+        """route 审查器初始化失败：LLM 原样下发（未启用审查的 else 分支）"""
+        from apps.agent.executor import _ask_stream_via_route
+        m = _stream_mocks()
+        m['llm'].stream.return_value = iter([
+            {'delta': '原始内容'}, {'finish': True, 'latency_ms': 5},
+        ])
+        with patch('apps.graph.router.orchestrate', return_value={
+            'context': '上下文', 'chunks': [], 'source': 'rag',
+            'route_trace': [],
+        }), \
+                patch('apps.security.sensitive_filter.get_sensitive_filter',
+                      side_effect=Exception('sf init fail')), \
+                patch('apps.agent.executor.MemoryManager', return_value=m['mm']), \
+                patch('apps.agent.executor.get_llm', return_value=m['llm']), \
+                patch('apps.agent.executor.LlmCallLog'), \
+                patch('apps.agent.executor._persist_qa',
+                      return_value=MagicMock(id=1)), \
+                patch('apps.agent.executor._update_cache'):
+            events = list(_ask_stream_via_route(None, '问题', self._session(),
+                                                ['company_doc'], 'company_doc', 1, 0,
+                                                ['doc']))
+        deltas = [e['delta'] for e in events if e['type'] == 'delta']
+        assert '原始内容' in deltas
+
+    def test_route_when_client_abort_then_persists_partial(self):
+        """route 客户端断开：保存已生成的部分答案"""
+        from apps.agent.executor import _ask_stream_via_route
+        m = _stream_mocks()
+        m['llm'].stream.return_value = iter([
+            {'delta': '部分'}, {'delta': '答案'}, {'finish': True, 'latency_ms': 5},
+        ])
+        with patch('apps.graph.router.orchestrate', return_value={
+            'context': '上下文', 'chunks': [], 'source': 'rag',
+            'route_trace': [],
+        }), \
+                patch('apps.security.sensitive_filter.get_sensitive_filter',
+                      return_value=m['sf']), \
+                patch('apps.agent.executor.MemoryManager', return_value=m['mm']), \
+                patch('apps.agent.executor.get_llm', return_value=m['llm']), \
+                patch('apps.agent.executor.LlmCallLog'), \
+                patch('apps.agent.executor._persist_qa',
+                      return_value=MagicMock(id=1)) as mock_persist, \
+                patch('apps.agent.executor._update_cache'):
+            gen = _ask_stream_via_route(None, '问题', self._session(),
+                                        ['company_doc'], 'company_doc', 1, 0, ['doc'])
+            while True:
+                ev = next(gen)
+                if ev['type'] == 'delta':
+                    break
+            gen.close()
+            kw = mock_persist.call_args.kwargs
+            assert kw['answer'] == '部分'
+
+
+# ---------------------------------------------------------------------------
+# _ask_stream_via_plan
+# ---------------------------------------------------------------------------
+
+class TestAskStreamViaPlan:
+    """_ask_stream_via_plan：Plan-and-Execute 模式流式问答"""
+
+    @staticmethod
+    def _session():
+        return MagicMock(id=1, turn_count=0)
+
+    def _env(self, events):
+        """构造 _ask_stream_via_plan 的 mock 上下文"""
+        stack = ExitStack()
+        stack.enter_context(patch('apps.agent.plan.plan_execute_stream',
+                                  return_value=iter(events)))
+        trace = MagicMock()
+        stack.enter_context(patch('apps.agent.models.AgentTrace', trace))
+        stack.enter_context(patch('apps.agent.executor.LlmCallLog'))
+        persist = MagicMock(return_value=MagicMock(id=10))
+        stack.enter_context(patch('apps.agent.executor._persist_qa', persist))
+        update_cache = MagicMock()
+        stack.enter_context(patch('apps.agent.executor._update_cache', update_cache))
+        mm = MagicMock()
+        stack.enter_context(patch('apps.agent.executor.MemoryManager', return_value=mm))
+        return stack, {'trace': trace, 'persist': persist, 'update_cache': update_cache, 'mm': mm}
+
+    @staticmethod
+    def _done_event(**overrides):
+        ev = {
+            'type': 'done', 'answer': 'Plan 答案', 'citations': [{'doc_title': 'A'}],
+            'tool_traces': [{'round': 1, 'tool_name': 'calculator'}],
+            'chunks': [{'chunk_id': 1}], 'is_filtered': False,
+            'stats': {'llm': {}, 'tool_rounds': 1},
+        }
+        ev.update(overrides)
+        return ev
+
+    def test_plan_when_forward_events_then_persists(self):
+        """转发 tool_call/tool_result/delta 事件，done 统一落库（answer_type='plan'）"""
+        from apps.agent.executor import _ask_stream_via_plan
+        stack, m = self._env([
+            {'type': 'first_token', 'ttfb_ms': 2},
+            {'type': 'tool_call', 'call_id': 'c1', 'tool_name': 'calculator',
+             'tool_args': {'expr': '2+2'}},
+            {'type': 'tool_result', 'call_id': 'c1', 'tool_name': 'calculator', 'ok': True},
+            {'type': 'delta', 'delta': '答案'},
+            self._done_event(),
+        ])
+        with stack:
+            events = list(_ask_stream_via_plan(None, '问题', self._session(),
+                                               ['company_doc'], None, 'company_doc', 1, 0,
+                                               ['doc']))
+        types = [e['type'] for e in events]
+        assert types[0] == 'start'
+        assert 'tool_call' in types
+        assert types[-1] == 'done'
+        assert events[-1]['message_id'] == 10
+        kw = m['persist'].call_args.kwargs
+        assert kw['answer_type'] == 'plan'
+        assert kw['answer'] == 'Plan 答案'
+        # answer_type='plan' 不在 _should_update_cache 的可缓存集合中，不更新缓存
+        m['update_cache'].assert_not_called()
+
+    def test_plan_when_content_filtered_then_refused(self):
+        """Plan 内部命中 block：answer 存空串 + answer_type='refused'"""
+        from apps.agent.executor import _ask_stream_via_plan
+        stack, m = self._env([
+            {'type': 'content_filtered', 'category': 'porn'},
+            self._done_event(answer='', citations=[], tool_traces=[], chunks=[],
+                             is_filtered=True, filter_reason='output:词',
+                             stats={'llm': {}, 'tool_rounds': 0}),
+        ])
+        with stack:
+            events = list(_ask_stream_via_plan(None, '问题', self._session(),
+                                               ['company_doc'], None, 'company_doc', 1, 0,
+                                               ['doc']))
+        assert 'content_filtered' in [e['type'] for e in events]
+        kw = m['persist'].call_args.kwargs
+        assert kw['answer'] == ''
+        assert kw['answer_type'] == 'refused'
+        m['update_cache'].assert_not_called()
+
+    def test_plan_when_error_event_then_detected(self):
+        """Plan 内部 error 事件：error_type 被检测"""
+        from apps.agent.executor import _ask_stream_via_plan
+        stack, m = self._env([
+            {'type': 'error', 'detail': 'Plan 内部错误'},
+            self._done_event(answer='', citations=[], tool_traces=[], chunks=[],
+                             stats={'llm': {}, 'tool_rounds': 0}),
+        ])
+        with stack:
+            events = list(_ask_stream_via_plan(None, '问题', self._session(),
+                                               ['company_doc'], None, 'company_doc', 1, 0,
+                                               ['doc']))
+        assert events[1]['type'] == 'error'
+        kw = m['persist'].call_args.kwargs
+        assert kw['answer_type'] == 'refused'
+
+    def test_plan_when_no_answer_no_traces_then_refused(self):
+        """无答案且无工具调用链：'[未生成内容]' + refused"""
+        from apps.agent.executor import _ask_stream_via_plan
+        stack, m = self._env([
+            self._done_event(answer='', citations=[], tool_traces=[], chunks=[],
+                             stats={'llm': {}, 'tool_rounds': 0}),
+        ])
+        with stack:
+            events = list(_ask_stream_via_plan(None, '问题', self._session(),
+                                               ['company_doc'], None, 'company_doc', 1, 0,
+                                               ['doc']))
+        kw = m['persist'].call_args.kwargs
+        assert kw['answer'] == '[未生成内容]'
+        assert kw['answer_type'] == 'refused'
+        m['update_cache'].assert_not_called()
+
+    def test_plan_when_client_abort_then_persists_partial(self):
+        """客户端断开：保存已生成的部分答案"""
+        from apps.agent.executor import _ask_stream_via_plan
+        stack, m = self._env([
+            {'type': 'delta', 'delta': '部分'},
+            self._done_event(),
+        ])
+        with stack:
+            gen = _ask_stream_via_plan(None, '问题', self._session(),
+                                       ['company_doc'], None, 'company_doc', 1, 0, ['doc'])
+            ev = next(gen)  # start
+            assert ev['type'] == 'start'
+            ev = next(gen)  # delta
+            assert ev['type'] == 'delta'
+            gen.close()
+            kw = m['persist'].call_args.kwargs
+            assert kw['answer'] == '部分'
+            assert kw['answer_type'] == 'plan'
+
+    def test_plan_when_client_abort_filtered_then_persists_empty(self):
+        """客户端断开 + is_filtered=True：保存空 answer"""
+        from apps.agent.executor import _ask_stream_via_plan
+        stack, m = self._env([
+            {'type': 'content_filtered', 'category': 'porn'},
+            self._done_event(answer='', is_filtered=True, filter_reason='output:词',
+                             stats={'llm': {}, 'tool_rounds': 0}),
+        ])
+        with stack:
+            gen = _ask_stream_via_plan(None, '问题', self._session(),
+                                       ['company_doc'], None, 'company_doc', 1, 0, ['doc'])
+            next(gen)  # start
+            next(gen)  # content_filtered
+            gen.close()
+            kw = m['persist'].call_args.kwargs
+            assert kw['answer'] == ''
+            assert kw['is_filtered'] is True
+
+    def test_plan_when_trace_failure_then_non_fatal(self):
+        """AgentTrace 批量写入失败不影响主流程"""
+        from apps.agent.executor import _ask_stream_via_plan
+        stack, m = self._env([self._done_event()])
+        with stack:
+            with patch('apps.agent.models.AgentTrace.batch_create_from_traces',
+                       side_effect=Exception('trace fail')):
+                events = list(_ask_stream_via_plan(None, '问题', self._session(),
+                                                   ['company_doc'], None, 'company_doc',
+                                                   1, 0, ['doc']))
+        assert events[-1]['type'] == 'done'
+
+    def test_plan_when_llm_call_log_exception_then_non_fatal(self):
+        """LlmCallLog 写入失败不影响 Plan 主流程"""
+        from apps.agent.executor import _ask_stream_via_plan
+        stack, m = self._env([self._done_event()])
+        with stack:
+            with patch('apps.agent.executor.LlmCallLog',
+                       side_effect=Exception('db down')):
+                events = list(_ask_stream_via_plan(None, '问题', self._session(),
+                                                   ['company_doc'], None, 'company_doc',
+                                                   1, 0, ['doc']))
+        assert events[-1]['type'] == 'done'
+
+    def test_plan_when_answer_only_no_traces_then_general(self):
+        """有答案但无工具调用链：answer_type='general'"""
+        from apps.agent.executor import _ask_stream_via_plan
+        stack, m = self._env([
+            self._done_event(answer='直接回答', citations=[], tool_traces=[],
+                             chunks=[], stats={'llm': {}, 'tool_rounds': 0}),
+        ])
+        with stack:
+            events = list(_ask_stream_via_plan(None, '问题', self._session(),
+                                               ['company_doc'], None, 'company_doc',
+                                               1, 0, ['doc']))
+        kw = m['persist'].call_args.kwargs
+        assert kw['answer_type'] == 'general'
+
+
+# ---------------------------------------------------------------------------
+# _ask_stream_via_workflow
+# ---------------------------------------------------------------------------
+
+class TestAskStreamViaWorkflow:
+    """_ask_stream_via_workflow：多 Agent 工作流流式问答入口"""
+
+    @staticmethod
+    def _session():
+        return MagicMock(id=1, turn_count=0)
+
+    def test_workflow_when_planner_says_no_workflow_then_fallback_react(self):
+        """编排器判断不需要工作流：降级走 ReAct 单轮链路"""
+        from apps.agent.executor import _ask_stream_via_workflow
+        react_events = [
+            {'type': 'first_token', 'ttfb_ms': 5},
+            {'type': 'delta', 'delta': 'React 答案'},
+            {'type': 'done', 'answer': 'React 答案', 'citations': [],
+             'tool_traces': [], 'chunks': [], 'is_filtered': False,
+             'stats': {'llm': {}, 'tool_rounds': 0}},
+        ]
+        with patch('apps.agent.workflow.planner.maybe_plan',
+                   return_value={'need_workflow': False, 'reason': '简单问题'}), \
+                patch('apps.agent.react.agent_ask_stream',
+                      return_value=iter(react_events)), \
+                patch('apps.agent.models.AgentTrace'), \
+                patch('apps.agent.executor.LlmCallLog'), \
+                patch('apps.agent.executor._persist_qa',
+                      return_value=MagicMock(id=1)), \
+                patch('apps.agent.executor._update_cache'), \
+                patch('apps.agent.executor.MemoryManager') as mock_mm_cls:
+            events = list(_ask_stream_via_workflow(None, '简单问题', self._session(),
+                                                   ['company_doc'], None, 'company_doc', 1, 0,
+                                                   ['doc']))
+        # 第一个事件是 workflow_planning 提示
+        assert events[0]['type'] == 'workflow_planning'
+        # 之后走 ReAct 链路（含 start → first_token → delta → done）
+        types = [e['type'] for e in events[1:]]
+        assert 'start' in types
+        assert 'delta' in types
+        assert 'done' in types
+
+    def test_workflow_when_planner_exception_then_fallback_react(self):
+        """编排器异常：降级走 ReAct 单轮链路"""
+        from apps.agent.executor import _ask_stream_via_workflow
+        react_events = [
+            {'type': 'first_token', 'ttfb_ms': 5},
+            {'type': 'delta', 'delta': '降级答案'},
+            {'type': 'done', 'answer': '降级答案', 'citations': [],
+             'tool_traces': [], 'chunks': [], 'is_filtered': False,
+             'stats': {'llm': {}, 'tool_rounds': 0}},
+        ]
+        with patch('apps.agent.workflow.planner.maybe_plan',
+                   side_effect=Exception('planner down')), \
+                patch('apps.agent.react.agent_ask_stream',
+                      return_value=iter(react_events)), \
+                patch('apps.agent.models.AgentTrace'), \
+                patch('apps.agent.executor.LlmCallLog'), \
+                patch('apps.agent.executor._persist_qa',
+                      return_value=MagicMock(id=1)), \
+                patch('apps.agent.executor._update_cache'), \
+                patch('apps.agent.executor.MemoryManager'):
+            events = list(_ask_stream_via_workflow(None, '问题', self._session(),
+                                                   ['company_doc'], None, 'company_doc', 1, 0,
+                                                   ['doc']))
+        assert events[0]['type'] == 'workflow_planning'
+        # 降级走 ReAct
+        done_events = [e for e in events if e['type'] == 'done']
+        assert len(done_events) >= 1
+
+    def test_workflow_when_need_workflow_then_runs_engine(self):
+        """编排器判断需要工作流：走 run_workflow_stream"""
+        from apps.agent.executor import _ask_stream_via_workflow
+        wf_events = [
+            {'type': 'workflow_start', 'workflow_id': 99},
+            {'type': 'workflow_node_start', 'node_id': 'r1'},
+            {'type': 'workflow_node_done', 'node_id': 'r1', 'status': 'succeeded'},
+            {'type': 'workflow_node_start', 'node_id': 'finalize'},
+            {'type': 'workflow_node_done', 'node_id': 'finalize', 'status': 'succeeded'},
+            {'type': 'first_token', 'ttfb_ms': 0},
+            {'type': 'delta', 'delta': '工作流答案'},
+            {'type': 'done', 'workflow_id': 99, 'message_id': 1, 'status': 'succeeded',
+             'is_workflow': True, 'answer_type': 'agent'},
+        ]
+        with patch('apps.agent.workflow.planner.maybe_plan',
+                   return_value={'need_workflow': True, 'reason': '复杂问题',
+                                 'nodes': [{'id': 'r1', 'type': 'research',
+                                            'question': '子问题'}]}), \
+                patch('apps.agent.workflow.engine.run_workflow_stream',
+                      return_value=iter(wf_events)):
+            events = list(_ask_stream_via_workflow(None, '复杂问题', self._session(),
+                                                   ['company_doc'], None, 'company_doc', 1, 0,
+                                                   ['doc']))
+        assert events[0]['type'] == 'workflow_planning'
+        types = [e['type'] for e in events]
+        assert 'workflow_start' in types
+        assert 'start' in types
+        # 最后一个事件应是 run_workflow_stream 的 done
+        done_events = [e for e in events if e['type'] == 'done']
+        assert done_events[-1]['is_workflow'] is True

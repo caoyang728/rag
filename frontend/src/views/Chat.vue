@@ -11,11 +11,16 @@
             v-model:sources="currentSources"
             v-model:enabled="enabledSources"
             v-model:scopes="selectedScopeIds"
+            :disabled="isRagMode"
           />
+          <!-- 快速问答模式提示 -->
+          <span v-if="isRagMode" class="tag tag-info" style="color: var(--el-color-warning)">
+            ⚡ 快速问答仅基于内部文档回答
+          </span>
           <el-radio-group v-model="currentMode" class="mode-switcher" @change="setChatMode">
-            <el-radio-button value="auto" title="LLM 自主决定是否调用工具（推荐）">⚡ Auto</el-radio-button>
-            <el-radio-button value="rag" title="传统 RAG：预检索 + LLM 生成">📚 RAG</el-radio-button>
-            <el-radio-button value="agent" title="强制 Agent 模式：必定走 ReAct 工具循环">🤖 Agent</el-radio-button>
+            <el-radio-button value="rag" title="快速问答：单次检索 + LLM 生成，延迟最低">⚡ 快速问答</el-radio-button>
+            <el-radio-button value="agent" title="智能问答：Agent 决策 + 工具调用（推荐）">🧠 智能问答</el-radio-button>
+            <el-radio-button value="plan" title="深度分析：规划→并行执行→综合生成，适合复杂问题">🔬 深度分析</el-radio-button>
           </el-radio-group>
           <span class="tag tag-info">💡 4 层记忆</span>
           <el-button size="small" @click="newSession">+ 新建会话</el-button>
@@ -136,8 +141,10 @@ const TYPING_INTERVAL_MS = 16     // 打字机补帧间隔
 // 数据来源（SourceScopePicker 通过 v-model 维护勾选状态，此处仅持有供发送消息读取）
 const enabledSources = ref(['doc', 'db', 'web', 'llm'])
 const currentSources = reactive({ doc: true, db: true, web: true, llm: true })
-// 问答模式：auto（LLM 自主）/ rag（传统 RAG）/ agent（强制 Agent）
-const currentMode = ref('auto')
+// 问答模式：rag（快速问答）/ agent（智能问答）/ plan（深度分析）
+const currentMode = ref('agent')
+// 快速问答模式下，数据来源强制为仅内部文档
+const isRagMode = computed(() => currentMode.value === 'rag')
 // 选中的知识范围节点 ID 集合（统一存字符串 ID，避免与 API 数字 ID 混淆；由 SourceScopePicker 维护）
 const selectedScopeIds = ref(new Set())
 // 会话
@@ -162,22 +169,36 @@ let draftSaveTimer = null
 /* ==========================================================
    问答模式切换
    ========================================================== */
-// 从 localStorage 恢复上次选择的模式，默认 auto
+// 从 localStorage 恢复上次选择的模式，默认 agent
 function initModeSwitcher() {
   const saved = localStorage.getItem(MODE_STORAGE_KEY)
-  if (saved && ['auto', 'rag', 'agent'].includes(saved)) {
+  if (saved && ['rag', 'agent', 'plan'].includes(saved)) {
     currentMode.value = saved
   }
 }
 
 function setChatMode(mode) {
-  if (!['auto', 'rag', 'agent'].includes(mode)) return
-  // v-model 已同步更新 currentMode（change 仅在值真正变化时触发），
-  // 这里只负责持久化到 localStorage 并提示用户
+  if (!['rag', 'agent', 'plan'].includes(mode)) return
   currentMode.value = mode
   localStorage.setItem(MODE_STORAGE_KEY, mode)
-  const label = { auto: 'Auto（LLM 自主）', rag: 'RAG（传统检索）', agent: 'Agent（强制工具）' }[mode]
+  const label = { rag: '快速问答', agent: '智能问答', plan: '深度分析' }[mode]
   ElMessage.success('已切换为 ' + label + ' 模式')
+
+  // 快速问答模式：强制仅内部文档，禁用其他来源
+  if (mode === 'rag') {
+    currentSources.doc = true
+    currentSources.db = false
+    currentSources.web = false
+    currentSources.llm = false
+    enabledSources.value = ['doc']
+  } else {
+    // 恢复所有来源
+    currentSources.doc = true
+    currentSources.db = true
+    currentSources.web = true
+    currentSources.llm = true
+    enabledSources.value = ['doc', 'db', 'web', 'llm']
+  }
 }
 
 /* ==========================================================
@@ -392,9 +413,9 @@ async function sendChat() {
     use_cache: true,
     do_task_split: false,
     mode: currentMode.value,
-    // 多 Agent 工作流开关：rag 传统检索模式下不启用；
-    // auto/agent 模式由后端编排器判断——复杂问题走工作流（含 HITL 审批）
-    do_workflow: currentMode.value !== 'rag'
+    // 多 Agent 工作流开关：rag/plan 模式下不启用；
+    // agent 模式由后端编排器判断——复杂问题走工作流（含 HITL 审批）
+    do_workflow: currentMode.value === 'agent'
   }
   if (currentSessionId.value) {
     body.session_id = currentSessionId.value
@@ -431,7 +452,7 @@ async function sendChat() {
           }
           msg.citations = chunk.citations || []
           // 答案区占位文本：避免 start→delta 间隔显示空白框
-          // Agent 模式用更友好的"LLM 分析中..."占位，RAG 模式用"检索并生成中..."占位
+          // Agent/Plan 模式用更友好的占位，RAG 模式用"检索并生成中..."占位
           if (chunk.is_agent) {
             msg.placeholder = '<p style="color:var(--app-text-sub)">🧠 LLM 正在分析问题，必要时会调用工具... 请稍候</p>'
           } else {
@@ -547,6 +568,11 @@ async function sendChat() {
             msg.workflow.status = chunk.status
           }
           msg.messageId = chunk.message_id
+          // 同步回填 messageId 到对应的用户消息（撤回/删除操作需要通过用户消息定位 QaRecord）
+          const msgIdx = messages.value.findIndex(m => m.mid === msg.mid)
+          if (msgIdx > 0 && messages.value[msgIdx - 1].role === 'user') {
+            messages.value[msgIdx - 1].messageId = chunk.message_id
+          }
           msg.totalMs = (chunk.stats && chunk.stats.total_ms) || 0
           msg.ttfbMs = (chunk.stats && chunk.stats.ttfb_ms) || msg.ttfbMs
           msg.citations = chunk.citations || msg.citations
@@ -814,6 +840,68 @@ async function submitFilterFalsePositive(msg) {
   }
 }
 
+/* ==========================================================
+   消息撤回与删除（用户消息 + AI 回复成对操作）
+   ========================================================== */
+/**
+ * 从消息列表中移除一对消息（用户消息 + 紧随其后的 AI 回复）
+ * @param {Object} userMsg - 用户消息对象（role='user'）
+ */
+function removeMessagePair(userMsg) {
+  const idx = messages.value.findIndex(m => m.mid === userMsg.mid)
+  if (idx === -1) return
+  // 移除用户消息
+  messages.value.splice(idx, 1)
+  // 紧随其后的 AI 消息（若存在且 role='ai'）一并移除
+  if (idx < messages.value.length && messages.value[idx].role === 'ai') {
+    messages.value.splice(idx, 1)
+  }
+  // 清理会话详情缓存，避免残留已删除消息
+  if (currentSessionId.value) {
+    removeSessionCache(currentSessionId.value)
+  }
+}
+
+/**
+ * 撤回消息：将问题文本填回输入框，删除消息对（确认弹窗后执行）
+ * 适用场景：用户误发或想重新编辑后发送
+ */
+async function recallMessage(msg) {
+  if (isSending.value) {
+    ElMessage.warning('正在回答中，请稍后再试')
+    return
+  }
+  const ok = await confirm({ message: '撤回后将删除该消息及 AI 回复，并把问题填回输入框，确定撤回吗？' })
+  if (!ok) return
+  // 将问题文本填回输入框
+  draft.value = msg.content || ''
+  // 前端移除消息对
+  removeMessagePair(msg)
+  // 后端软删除（尽力而为，失败不影响前端体验）
+  if (msg.messageId) {
+    api.deleteJson('/api/v1/chat/records/' + msg.messageId + '/').catch(() => {})
+  }
+  ElMessage.success('已撤回，问题已填入输入框')
+}
+
+/**
+ * 删除消息：仅删除消息对，不保留问题文本（确认弹窗后执行）
+ * 适用场景：用户想清理不需要的对话记录
+ */
+async function deleteMessage(msg) {
+  if (isSending.value) {
+    ElMessage.warning('正在回答中，请稍后再试')
+    return
+  }
+  const ok = await confirm({ message: '确定删除该消息及 AI 回复吗？此操作不可撤销。', type: 'warning' })
+  if (!ok) return
+  removeMessagePair(msg)
+  if (msg.messageId) {
+    api.deleteJson('/api/v1/chat/records/' + msg.messageId + '/').catch(() => {})
+  }
+  ElMessage.success('已删除')
+}
+
 // 格式化耗时展示：有首字耗时则显示"首字 X · 总计 Y"，否则仅显示总计
 function formatLatencyText(stats) {
   if (!stats) return ''
@@ -893,6 +981,8 @@ function recordsToMessages(records) {
       mid: 'u' + r.id, role: 'user',
       content: r.question || '',
       time: formatSessionTime(r.created_at),
+      // messageId 用于撤回/删除操作定位后端 QaRecord，与 AI 消息共用同一 ID
+      messageId: r.id,
     })
     list.push(buildHistoryAiMessage(r))
   })
@@ -1162,7 +1252,7 @@ function previewCitation(docId, page, qaRecordId, chunkIdsStr) {
 const chatMsgHandlers = {
   workflowStatusText, wfStepIcon, wfNodeStatusText, submitInlineApproval, refreshWorkflowResult,
   toggleFilterFalsePositiveForm, submitFilterFalsePositive, previewCitation, retrySendChat,
-  submitFeedback, submitDetailedFeedback,
+  submitFeedback, submitDetailedFeedback, recallMessage, deleteMessage,
 }
 
 </script>

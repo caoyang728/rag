@@ -17,6 +17,7 @@ ReAct Agent 循环 - Agentic RAG 核心
     {'type': 'error',       'detail'}
 """
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, Iterator, List
 
 from loguru import logger
@@ -198,9 +199,37 @@ def _collect_citations(tool_traces: List[Dict]) -> tuple:
     return citations, all_chunks
 
 
+def _execute_one_tool(tc: Dict, ctx: ToolContext, tool_registry) -> Dict:
+    """执行单个工具调用（供并行调度使用）
+
+    Args:
+        tc: 单个 tool_call {'id', 'name', 'arguments'}
+        ctx: 工具执行上下文
+        tool_registry: 工具注册表
+
+    Returns:
+        {'call_id', 'result', 'ok', 'meta', 'latency_ms', 'tool_name'}
+    """
+    call_id = tc.get('id', '')
+    name = tc.get('name', '')
+    raw_args = tc.get('arguments', '')
+    args = parse_tool_arguments(raw_args)
+    ret = tool_registry.execute(name, args, ctx)
+    ret['call_id'] = call_id
+    return ret
+
+
+# 工具并行执行的线程池大小上限（防止 DB 连接池耗尽）
+_MAX_TOOL_WORKERS = 4
+
+
 def _execute_tool_calls(tool_calls: List[Dict], ctx: ToolContext,
                         tool_registry) -> List[Dict]:
-    """执行一批工具调用
+    """执行一批工具调用（多个工具并行，单个工具降级为串行）
+
+    LLM 单次响应可返回多个 tool_calls（如 knowledge_search + web_search），
+    它们之间无数据依赖，用 ThreadPoolExecutor 并行执行以缩短总耗时。
+    仅 1 个 tool_call 时直接串行执行，避免线程开销。
 
     Args:
         tool_calls: LLM 返回的 tool_calls 列表 [{'id', 'name', 'arguments'}]
@@ -209,17 +238,35 @@ def _execute_tool_calls(tool_calls: List[Dict], ctx: ToolContext,
 
     Returns:
         [{'call_id', 'result', 'ok', 'meta', 'latency_ms', 'tool_name'}]
+        顺序与 tool_calls 输入一致（不受并行执行影响）
     """
-    results = []
-    for tc in tool_calls:
-        call_id = tc.get('id', '')
-        name = tc.get('name', '')
-        raw_args = tc.get('arguments', '')
-        args = parse_tool_arguments(raw_args)
-        ret = tool_registry.execute(name, args, ctx)
-        ret['call_id'] = call_id
-        results.append(ret)
-    return results
+    if not tool_calls:
+        return []
+    # 单个工具调用：直接串行，避免线程开销
+    if len(tool_calls) == 1:
+        return [_execute_one_tool(tool_calls[0], ctx, tool_registry)]
+
+    # 多个工具调用：并行执行，按原始顺序收集结果
+    # 用 call_id 映射保证返回顺序与 tool_calls 一致
+    results_by_id: Dict[str, Dict] = {}
+    workers = min(len(tool_calls), _MAX_TOOL_WORKERS)
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        future_map = {
+            executor.submit(_execute_one_tool, tc, ctx, tool_registry): tc.get('id', '')
+            for tc in tool_calls
+        }
+        for future in as_completed(future_map):
+            cid = future_map[future]
+            try:
+                results_by_id[cid] = future.result()
+            except Exception as e:
+                logger.exception(f'[Agent] parallel tool execution failed: call_id={cid}')
+                results_by_id[cid] = {
+                    'call_id': cid, 'result': f'工具执行异常: {e}', 'ok': False,
+                    'meta': {}, 'latency_ms': 0, 'tool_name': '',
+                }
+    # 按 tool_calls 原始顺序排列（保证 assistant message + tool message 顺序一致）
+    return [results_by_id.get(tc.get('id', ''), {}) for tc in tool_calls]
 
 
 def agent_ask(user, question: str, session, root_types: list = None,

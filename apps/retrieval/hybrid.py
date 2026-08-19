@@ -51,7 +51,8 @@ def hybrid_search(query: str,
                   rrf_top_k: int = 30,
                   rerank_top_k: int = None,
                   do_rerank: bool = True,
-                  personalize: bool = True) -> Dict[str, Any]:
+                  personalize: bool = True,
+                  query_vector: Optional[List[float]] = None) -> Dict[str, Any]:
     """混合检索对外入口（对外契约不变）
 
     - 总开关 QUERY_TRANSFORM_ENABLED 关闭（默认）时：行为与现状完全一致，
@@ -72,12 +73,14 @@ def hybrid_search(query: str,
             query, user, root_types=root_types, node_path_prefix=node_path_prefix,
             node_ids=node_ids, vector_top_k=vector_top_k, bm25_top_k=bm25_top_k,
             rrf_top_k=rrf_top_k, rerank_top_k=rerank_top_k, do_rerank=do_rerank,
+            query_vector=query_vector,
         )
     else:
         result = _search_core(
             query, user, root_types=root_types, node_path_prefix=node_path_prefix,
             node_ids=node_ids, vector_top_k=vector_top_k, bm25_top_k=bm25_top_k,
             rrf_top_k=rrf_top_k, rerank_top_k=rerank_top_k, do_rerank=do_rerank,
+            query_vector=query_vector,
         )
     if personalize:
         return apply_personalization(result, user, query)
@@ -93,7 +96,8 @@ def _search_core(query: str,
                  bm25_top_k: int = None,
                  rrf_top_k: int = 30,
                  rerank_top_k: int = None,
-                 do_rerank: bool = True) -> Dict[str, Any]:
+                 do_rerank: bool = True,
+                 query_vector: Optional[List[float]] = None) -> Dict[str, Any]:
     """三级混合检索核心（原 hybrid_search 实现，供包装层与查询改写/分解复用）
     返回: {
       'chunks': [...],  # Rerank 后的最终结果
@@ -108,13 +112,16 @@ def _search_core(query: str,
     bm25_top_k = bm25_top_k or get_config_value('BM25_TOP_K', default=settings.BM25_TOP_K, value_type='int') or settings.BM25_TOP_K
     rerank_top_k = rerank_top_k or settings.RETRIEVAL_RERANK_TOP_K
 
-    # 1. 生成 query 向量
-    embed_client = get_embedding_client()
-    try:
-        qvec = embed_client.embed_one(query)
-    except EmbeddingException as e:
-        logger.error(f'[Hybrid] query embedding failed: {e}')
-        raise
+    # 1. 生成 query 向量（支持外部传入预计算向量，避免重复调用 Embedding API）
+    if query_vector is not None:
+        qvec = query_vector
+    else:
+        embed_client = get_embedding_client()
+        try:
+            qvec = embed_client.embed_one(query)
+        except EmbeddingException as e:
+            logger.error(f'[Hybrid] query embedding failed: {e}')
+            raise
     
     # 检测零向量
     if all(v == 0.0 for v in qvec):

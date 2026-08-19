@@ -10,7 +10,7 @@
 > 3. **RAG 兜底**：pgvector 向量 + BM25 + RRF 混合检索 + Rerank 重排，格式化 Top 5 片段作为上下文。
 > 每层路由的置信度与耗时记录到 `route_trace`，随问答记录落库，由 RouteAnalysis 持续评估各层命中率与回答质量。
 >
-> 除三层路由外，系统还内置 **Agentic RAG 模式**（`mode=auto/agent`，LLM 自主决策调用工具）与**多 Agent 工作流**（`do_workflow=true`）。完整问答链路见下方「问答流程总览」。
+> 除三层路由外，系统还内置 **智能问答模式**（`mode=agent`，ReAct 循环，LLM 自主决策调用工具）、**深度分析模式**（`mode=plan`，Plan-and-Execute 三阶段编排）与**多 Agent 工作流**（`do_workflow=true`）。完整问答链路见下方「问答流程总览」。
 
 ---
 
@@ -38,9 +38,12 @@
 
 ## 问答流程总览
 
-> 从用户 Query 到最终结果的完整链路：**输入审查 → 热点缓存 → 检索核心 → LLM 流式生成 → SSE 输出 → 落库与评估**：
-> - `wiki / graphrag / rag`：三层路由，预检索注入 context；
-> - `auto / agent`（默认）：Agentic RAG，LLM 自主决策调用工具，`do_workflow=true` 可升级为多 Agent 工作流。
+> 从用户 Query 到最终结果的完整链路：**输入审查 → 热点缓存 → 模式分流 → 检索 → LLM 流式生成 → SSE 输出 → 落库与评估**。
+>
+> 系统提供三种问答模式，对应不同的复杂度和性能需求：
+> - ⚡ **快速问答**（`rag`）：三路并行检索（Wiki + GraphRAG + RAG，共享向量），仅 1 次 LLM 调用，首字 3-5s；
+> - 🧠 **智能问答**（`agent`，默认）：ReAct 循环，LLM 自主决策调用工具（≤5 轮），`do_workflow=true` 可升级为多 Agent 工作流；
+> - 🔬 **深度分析**（`plan`）：Plan-and-Execute 三阶段（规划 → 并行执行 → 综合生成），适合多工具组合的复杂任务。
 
 ```mermaid
 flowchart TD
@@ -50,22 +53,40 @@ flowchart TD
     CACHE -->|"命中：直接返回<br/>（仍过内容审查 + 引用权限校验）"| DONE["返回答案"]
     CACHE -->|"未命中"| MODE{"mode 分流"}
 
-    MODE -->|"RAG(wiki / graphrag / rag)"| ROUTE["三层路由编排<br/>Wiki 命中 → GraphRAG → RAG 兜底"]
-    MODE -->|"auto / agent（默认）"| REACT["Agentic RAG · ReAct 循环<br/>（≤5 轮，LLM 自主决策是否调用工具）"]
+    MODE -->|"rag：快速问答"| RAG_FAST["三路并行检索<br/>Wiki ↔ GraphRAG ↔ RAG<br/>共享 query 向量 · 置信度择优"]
+    MODE -->|"agent：智能问答（默认）"| REACT["ReAct 循环<br/>（≤5 轮，LLM 自主决策是否调用工具）"]
+    MODE -->|"plan：深度分析"| PLAN["Plan-and-Execute 三阶段"]
+
     REACT -->|"do_workflow=true 且<br/>planner 判定复杂"| WF["多 Agent 工作流<br/>research/tool/approval 节点 DAG<br/>+ HITL 人工确认"]
-    REACT --> TOOLS["工具注册表（3 个）<br/>按来源过滤可用性：<br/>knowledge_search(doc) / web_search(web) / text2sql(db)"]
+    REACT --> TOOLS["工具注册表（4 个）<br/>按来源过滤可用性：<br/>knowledge_search(doc) / web_search(web)<br/>/ text2sql(db) / code_interpreter"]
     WF --> TOOLS
 
-    ROUTE -.->|"RAG 兜底层"| CORE["检索核心 _search_core（hybrid_search）<br/>向量 + BM25 + RRF 融合<br/>+ Rerank 重排 + 阈值过滤 + 二次权限过滤"]
-    TOOLS -.->|"knowledge_search 工具复用"| CORE
+    PLAN --> PLANNER["Phase 1：Planner LLM 规划<br/>输出工具调用计划"]
+    PLANNER --> PARALLEL["Phase 2：并行执行所有工具<br/>ThreadPoolExecutor"]
+    PARALLEL --> TOOLS
+    PARALLEL --> SYNTH["Phase 3：Synthesizer LLM 综合答案"]
+
+    RAG_FAST -.->|"受 FAST_MODE_STRATEGY<br/>配置控制"| ORCHESTRATE["三层路由编排<br/>parallel / sequential / rag_only"]
+    ORCHESTRATE --> CORE["检索核心<br/>向量 + BM25 + RRF 融合<br/>+ Rerank 重排 + 阈值过滤"]
+    TOOLS -.->|"knowledge_search<br/>内部走三层路由"| ORCHESTRATE
+
     CORE --> GEN["LLM 流式生成<br/>逐段敏感词审查（block/mask）"]
-    ROUTE --> GEN
+    ORCHESTRATE --> GEN
     TOOLS --> GEN
+    SYNTH --> GEN
     GEN --> SSE["SSE 事件输出<br/>start → (tool_call/tool_result)*<br/>→ first_token → delta* → done<br/>（或 content_filtered / error）"]
     SSE --> PERSIST["落库<br/>QaRecord + AgentTrace<br/>+ 热点缓存 + 记忆 + 12 维评估"]
     PERSIST --> DONE
     F --> DONE
 ```
+
+**三种模式对比**：
+
+| 模式 | LLM 调用次数 | 检索方式 | 首字延迟 | 适用场景 |
+|---|---|---|---|---|
+| ⚡ 快速问答（rag） | 1 次 | 三路并行（受 `FAST_MODE_STRATEGY` 控制） | 3-5s | 简单问题，追求速度 |
+| 🧠 智能问答（agent） | 2-4 次 | ReAct + 三路并行检索 | 5-10s | 需要工具调用的复杂问题 |
+| 🔬 深度分析（plan） | 2 次 | Plan-and-Execute + 并行工具 | 6-10s | 多工具组合的复杂任务 |
 
 **链路说明**：
 
@@ -73,20 +94,33 @@ flowchart TD
 |---|---|
 | 输入侧敏感词审查 | block 命中直接拒答（content_filtered），不浪费 LLM 算力 |
 | 热点缓存 | HotQaCache 组织分组（public/org_…）+ 文档级兜底校验（Deny Override）；命中仍过内容审查 + 引用权限校验 |
-| 检索核心 `_search_core` | 向量 pgvector + BM25 + RRF 融合 + Rerank 重排 + 检索级权限过滤；查询改写/分解（`QUERY_TRANSFORM_ENABLED`，默认关闭）是透明增强层，失败恒降级为原 Query；召回 top_k 与相关性阈值在系统配置「检索参数」中可调 |
+| 检索核心 | 向量 pgvector + BM25 + RRF 融合 + Rerank 重排 + 检索级权限过滤；查询改写/分解（`QUERY_TRANSFORM_ENABLED`，默认开启）是透明增强层，失败恒降级为原 Query；召回 top_k 与相关性阈值在系统配置「检索参数」中可调 |
 | LLM 流式生成 | 逐段敏感词审查（block 中断 / mask 脱敏） |
 | SSE 输出 | `start → (tool_call/tool_result)* → first_token → delta* → done`（或 `content_filtered` / `error`） |
-| 落库 | QaRecord（answer_type：rag / agent / general / refused）+ AgentTrace（工具调用链）+ 热点缓存 + 记忆 + 12 维评估 |
+| 落库 | QaRecord（answer_type：rag / agent / plan / general / refused）+ AgentTrace（工具调用链）+ 热点缓存 + 记忆 + 12 维评估 |
 
-**三层路由（wiki/graphrag/rag）**：按置信度逐层降级——LLM Wiki 直接命中（≥ 0.68）→ GraphRAG（≥ 0.45）→ RAG 兜底；Wiki 检索参与阈值为 0.55（低于此值视为 Wiki 无关直接跳过），每层置信度与耗时记入 `route_trace`，由 RouteAnalysis 持续评估各层命中率与回答质量。
+**三层路由编排**：系统配置 `FAST_MODE_STRATEGY` 控制快速问答的检索策略：
+- **parallel**：预计算 query embedding 后，Wiki / GraphRAG / RAG 三路同时执行，按置信度择优（Wiki ≥ 0.68 → GraphRAG ≥ 0.45 → RAG 兜底），总延迟 = max(三路) 而非三路之和；
+- **sequential**：串行降级（Wiki → GraphRAG → RAG），命中即停，省资源但延迟波动大；
+- **rag_only**（默认）：仅 RAG 混合检索，跳过 Wiki/GraphRAG，最省资源。
 
-**Agentic RAG（auto/agent）**：不预检索注入 context，LLM 在 ReAct 循环中自主决策是否调用工具（≤ 5 轮，末轮强制成文，达上限强制总结）。内置 3 个工具，知识检索为唯一统一入口（按来源开关决定是否可用）：
+三层路由的每层置信度与耗时记入 `route_trace`，由 RouteAnalysis 持续评估各层命中率与回答质量。智能问答和深度分析模式的 `knowledge_search` 工具内部同样走三层路由（parallel 策略）。
 
-- `knowledge_search`：统一知识检索入口（对应来源 `doc`），内部固定走三层路由（LLM Wiki 命中 → GraphRAG → RAG 文档兜底），复用混合检索全链路 + 二次权限过滤
+**智能问答（agent）**：LLM 在 ReAct 循环中自主决策是否调用工具（≤ 5 轮，末轮强制成文，达上限强制总结）。内置 4 个工具，按来源开关过滤可用性：
+
+- `knowledge_search`：统一知识检索入口（对应来源 `doc`），内部走三层路由（parallel 策略），复用混合检索全链路 + 二次权限过滤
 - `web_search`：Tavily，未配置降级 DuckDuckGo（对应来源 `web`）
 - `text2sql`：业务库，白名单限定（对应来源 `db`）
+- `code_interpreter`：代码执行沙箱（对应来源 `llm`）
 
 统一返回 `{result, ok, meta, latency_ms}` 回填 messages，工具调用链落库 AgentTrace。`do_workflow=true` 时由 planner 判定，复杂问题产出节点 DAG（research / tool / approval）走多 Agent 工作流：拓扑序执行、无依赖节点并行（≤ 4）、失败自动重试（≤ 2），`web_search` / `text2sql` 敏感工具及 approval 节点隐式人工确认（HITL，在聊天对话框内嵌「确认/拒绝」按钮，不再创建工单），确认通过 `resume_workflow` 继续 / 拒绝降级回答；节点轨迹落 WorkflowNodeRun。
+
+**深度分析（plan）**：Plan-and-Execute 三阶段编排：
+1. **Planner LLM 规划**：分析问题，输出工具调用计划（JSON），不执行工具；
+2. **并行执行**：ThreadPoolExecutor 并行执行所有规划的工具调用；
+3. **Synthesizer LLM 综合**：汇总所有工具结果，生成最终答案。
+
+仅 2 次 LLM 调用（规划 + 综合），工具执行并行化，适合需要多工具组合的复杂问题。
 
 ---
 
@@ -222,7 +256,7 @@ rag/
 │   ├── llm/                    # DeepSeek Provider + 抽象工厂 + Prompt 模板
 │   ├── memory/                 # 四层记忆（short/session/user/global），每晚提炼用户偏好
 │   ├── agent/                  # 问答编排 + ReAct Agent + 任务拆分 + 流式回答 + 引用合并
-│   │   ├── executor.py         # 问答执行器（mode: auto/rag/agent/wiki/graphrag，含多 Agent 工作流分流）
+│   │   ├── executor.py         # 问答执行器（mode: rag/agent/plan，含多 Agent 工作流分流）
 │   │   ├── react.py            # ReAct Agent 循环（Agentic RAG 核心：同步/流式 + 工具调用链）
 │   │   ├── task_splitter.py    # 复杂任务拆分
 │   │   ├── streamer.py         # SSE 流式输出
@@ -407,7 +441,7 @@ rag/
 
 | Method | Path | 说明 |
 |--------|------|------|
-| POST | `/api/v1/chat/ask_stream/` | **核心问答接口**（SSE 流式 + TTFB + 终止控制；`mode=auto/agent` 走 Agentic RAG，`do_workflow=true` 走多 Agent 工作流） |
+| POST | `/api/v1/chat/ask_stream/` | **核心问答接口**（SSE 流式 + TTFB + 终止控制；`mode=agent` 走 ReAct 循环，`mode=plan` 走 Plan-and-Execute，`do_workflow=true` 走多 Agent 工作流） |
 | GET | `/api/v1/chat/config/` | 聊天页前端配置（系统配置 `CHAT_SOURCE_ENABLED` 开启的知识来源列表，前端据此渲染「知识来源」开关） |
 | POST | `/api/v1/chat/feedback/` | 提交问答反馈 |
 | CRUD | `/api/v1/chat/sessions/` | 会话管理 |
@@ -1107,6 +1141,7 @@ docker compose exec django pytest apps/users/tests/        # 指定 app
 # HTML 报告输出到 coverage_report/，与前端 /coverage/ 静态服务目录一致）
 docker compose exec django pytest --cov=apps --cov-report=term-missing  # 终端输出覆盖率明细
 docker compose exec django pytest --cov=apps --cov-report=html          # 生成 HTML 覆盖率报告（coverage_report/）
+docker compose exec django pytest -n auto --cov=apps --cov-report=term-missing --cov-report=html --cov-append  # 并发执行覆盖测试, 追加覆盖率统计
 # 生成后可访问 http://localhost:8000/coverage/ 查看（仅开发环境挂载，生产 DEBUG=False 时 404）
 ```
 

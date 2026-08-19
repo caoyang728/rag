@@ -107,21 +107,27 @@ class KnowledgeSearchTool(BaseTool):
         }
 
         # 1. Wiki 命中：返回结构化知识页（无需文档权限过滤，Wiki 页可见性由 Wiki 检索器控制）
+        # chunks 来自 _citation_chunks 补充的 RAG 检索结果，用于构建前端来源卡片
         if source == 'wiki':
             wiki_page = route.get('wiki_page') or {}
             content = route.get('context') or ''
+            wiki_chunks = route.get('chunks') or []
             return {
                 'result': content or '未找到相关的 Wiki 知识页面。',
                 'ok': True,
                 'meta': {
                     **meta,
                     'wiki_pages': [wiki_page] if wiki_page else [],
+                    'chunks': wiki_chunks,
+                    'chunk_ids': [c.get('chunk_id') for c in wiki_chunks],
                     'hit': bool(wiki_page),
                 },
             }
 
         # 2. 知识图谱命中：返回图谱上下文（实体/关系/社区）
+        # chunks 来自 _citation_chunks 补充的 RAG 检索结果，用于构建前端来源卡片
         if source.startswith('graphrag'):
+            graph_chunks = route.get('chunks') or []
             return {
                 'result': route.get('context') or '未检索到相关的知识图谱内容。',
                 'ok': True,
@@ -130,6 +136,8 @@ class KnowledgeSearchTool(BaseTool):
                     'entities': route.get('entities') or [],
                     'relations': route.get('relations') or [],
                     'communities': route.get('communities') or [],
+                    'chunks': graph_chunks,
+                    'chunk_ids': [c.get('chunk_id') for c in graph_chunks],
                     'hit': bool(route.get('context')),
                 },
             }

@@ -195,7 +195,7 @@ def ask_stream(user, question: str, session: Session,
                do_task_split: bool = False,
                do_workflow: bool = False,
                do_rerank: bool = True,
-               mode: str = 'auto',
+               mode: str = 'agent',
                sources: list = None):
     """流式问答主流程，yield SSE 事件 dict
 
@@ -330,12 +330,12 @@ def ask_stream(user, question: str, session: Session,
             }
             return
 
-    # Agent 模式分流（auto / agent 走 ReAct 流式循环）
+    # Agent 模式分流（agent 走 ReAct 流式循环）
     # 转发 agent_ask_stream 的 tool_call/tool_result/delta 事件，
     # 在 done 事件时统一落 QaRecord + 缓存 + 记忆
     # do_workflow=True 时先由编排器判断：复杂问题走多 Agent 工作流（含 HITL），
     # 简单问题仍回退到现有 ReAct 单轮链路（兼容性要求）
-    if mode in ('auto', 'agent'):
+    if mode == 'agent':
         if do_workflow:
             yield from _ask_stream_via_workflow(user, question, session, root_types,
                                                 node_ids, root_type, turn_index, t0, sources)
@@ -344,11 +344,18 @@ def ask_stream(user, question: str, session: Session,
                                          node_ids, root_type, turn_index, t0, sources)
         return
 
-    # 三层路由分流（wiki / graphrag / rag 走 LLM Wiki → GraphRAG → RAG 兜底）
+    # Plan-and-Execute 模式（plan 走规划→并行执行→综合生成）
+    if mode == 'plan':
+        yield from _ask_stream_via_plan(user, question, session, root_types,
+                                        node_ids, root_type, turn_index, t0, sources)
+        return
+
+    # 三层路由分流（rag 走 Wiki → GraphRAG → RAG 兜底）
     # 检索阶段同步完成（orchestrate），LLM 生成阶段流式输出
-    if mode in ('wiki', 'graphrag', 'rag'):
+    if mode == 'rag':
         yield from _ask_stream_via_route(user, question, session, root_types,
-                                         root_type, turn_index, t0, sources)
+                                         root_type, turn_index, t0, sources,
+                                         node_ids=node_ids)
         return
 
     # 2. 任务拆分：流式模式下不支持真流式（execute_split 内部走同步 ask），
@@ -713,29 +720,38 @@ def ask_stream(user, question: str, session: Session,
 
 
 def _ask_stream_via_route(user, question, session, root_types, root_type,
-                          turn_index, t0, sources):
-    """三层路由流式问答（wiki / graphrag / rag 模式）
+                          turn_index, t0, sources, node_ids=None):
+    """快速问答流式问答（rag 模式）
 
-    检索阶段（orchestrate）同步完成，LLM 生成阶段流式输出，
-    事件协议与 ask_stream 一致：start → first_token → delta* → done。
-    输出侧沿用流式敏感词审查（block 中断 / mask 脱敏），
-    并在 done 事件中携带 route_source / route_trace 供前端展示路由链路。
-
-    sources 关闭「内部文档」时跳过三层路由检索（不产生文档引用），
-    直接返回"未找到相关资料"的拒答语义。
+    三路并行检索（Wiki + GraphRAG + RAG，共享 query 向量），置信度择优，
+    只做 1 次 LLM 调用（生成答案），预期首字 4-6s。
     """
     from apps.graph.router import orchestrate
     from apps.llm.prompts.qa import QA_USER_TEMPLATE, SYSTEM_PROMPT
 
-    # 1. 三层路由决策（同步检索）——doc 关闭时跳过检索
+    # 1. 三路并行检索（Wiki / GraphRAG / RAG 共享向量，并行执行）
     if 'doc' in sources:
-        route_result = orchestrate(question, user, session)
+        try:
+            t_search = time.time()
+            route_result = orchestrate(question, user, node_ids=node_ids,
+                                       root_types=root_types)
+            search_ms = int((time.time() - t_search) * 1000)
+            logger.info(f'[RAG fast] orchestrate {search_ms}ms '
+                        f'source={route_result.get("source")} '
+                        f'trace={route_result.get("route_trace", [])}')
+            chunks = route_result.get('chunks', [])
+            route_source = route_result.get('source', 'rag')
+            route_trace = route_result.get('route_trace')
+        except Exception as e:
+            logger.exception(f'[ask_stream_via_route] orchestrate failed')
+            chunks = []
+            route_source = 'rag'
+            route_trace = None
+            route_result = {}
     else:
-        route_result = {'context': '', 'chunks': [], 'source': 'none', 'route_trace': []}
-    context = route_result.get('context', '')
-    chunks = route_result.get('chunks', [])
-    route_source = route_result.get('source', 'none')
-    route_trace = route_result.get('route_trace', [])
+        chunks = []
+        route_source = 'rag'
+        route_trace = None
     citations = _build_citations(chunks)
 
     # 2. start 事件（引用提前下发，前端可先渲染溯源区）
@@ -745,17 +761,18 @@ def _ask_stream_via_route(user, question, session, root_types, root_type,
         'citations': citations,
         'is_hit_cache': False,
         'route_source': route_source,
-        'route_trace': route_trace,
     }
 
     mm = MemoryManager()
     llm_stats = {}
     filter_hit = None
 
-    # 3. 无上下文：拒答（与 ask_stream RAG 分支语义一致）
+    # 3. 使用 orchestrate 返回的上下文（Wiki/GraphRAG/RAG 择优结果）
+    context = route_result.get('context', '') if 'doc' in sources else ''
+
+    # 4. 无上下文：拒答
     if not context:
         if 'doc' not in sources:
-            # 用户关闭了「内部文档」来源：路由检索无可用输入，明确提示原因
             answer = '已关闭「内部文档」来源，当前检索模式无法获取知识库内容。请开启「内部文档」，或切换到其他问答模式。'
         else:
             answer = '当前知识范围内未找到相关资料，无法回答该问题。'
@@ -764,7 +781,7 @@ def _ask_stream_via_route(user, question, session, root_types, root_type,
         yield {'type': 'first_token', 'ttfb_ms': ttfb_ms}
         yield {'type': 'delta', 'delta': answer}
     else:
-        # 4. 记忆加载 + 构造 messages（context 为路由层格式化文本，直接注入 QA 模板）
+        # 5. 记忆加载 + 构造 messages
         ctx = mm.load_context(user, session, question, root_type=root_type)
         user_content = QA_USER_TEMPLATE.format(
             memory_block=ctx['memory_block'] or '（无历史记忆）',
@@ -940,7 +957,7 @@ def _ask_stream_via_route(user, question, session, root_types, root_type,
     if _should_update_cache(answer_type, filter_hit is not None):
         _update_cache(question, root_type, user, answer, citations)
 
-    # 7. done 事件（带路由链路信息）
+    # 7. done 事件
     yield {
         'type': 'done',
         'message_id': qa.id,
@@ -949,12 +966,10 @@ def _ask_stream_via_route(user, question, session, root_types, root_type,
         'is_filtered': filter_hit is not None,
         'answer_type': answer_type,
         'route_source': route_source,
-        'route_trace': route_trace,
         'stats': {
             'total_ms': total_ms,
             'ttfb_ms': ttfb_ms,
             'route_source': route_source,
-            'route_trace': route_trace,
             'llm': llm_stats,
         },
     }
@@ -1423,6 +1438,184 @@ def _ask_stream_via_agent(user, question, session, root_types, node_ids,
         logger.exception('llm_call_log write failed (agent stream)')
 
     # 记忆 + 缓存（命中 block 时不更新缓存，避免违规内容被缓存复用）
+    MemoryManager().append_turn(session, question, answer)
+    if _should_update_cache(answer_type, is_filtered):
+        _update_cache(question, root_type, user, answer, citations)
+
+    yield {
+        'type': 'done',
+        'message_id': qa.id,
+        'session_id': session.id,
+        'citations': citations,
+        'tool_traces': tool_traces,
+        'is_filtered': is_filtered,
+        'answer_type': answer_type,
+        'stats': {
+            'total_ms': total_ms,
+            'ttfb_ms': ttfb_ms,
+            'llm': llm_stats,
+            'tool_rounds': len(tool_traces),
+            'is_agent': True,
+        },
+    }
+
+
+def _ask_stream_via_plan(user, question, session, root_types, node_ids,
+                         root_type, turn_index, t0, sources):
+    """Plan-and-Execute 模式流式问答入口（mode='plan' 走这里）
+
+    与 _ask_stream_via_agent 类似，但调用 plan_execute_stream（规划→并行执行→综合生成），
+    而非 agent_ask_stream（ReAct 多轮循环）。
+
+    转发 plan_execute_stream 的 tool_call/tool_result/first_token/delta 事件，
+    在 done 事件时统一落 QaRecord + LlmCallLog + 缓存 + 记忆。
+    """
+    from apps.agent.plan import plan_execute_stream
+
+    # 先发送 start 事件（前端先渲染问答气泡 + 思考过程区）
+    yield {
+        'type': 'start',
+        'session_id': session.id,
+        'citations': [],
+        'is_hit_cache': False,
+        'is_agent': True,
+    }
+
+    answer_parts = []
+    citations = []
+    tool_traces = []
+    chunks = []
+    llm_stats = {}
+    ttfb_ms = None
+    is_filtered = False
+    filter_reason = ''
+    detected_error = ''
+
+    try:
+        for event in plan_execute_stream(user, question, session,
+                                          root_types=root_types, node_ids=node_ids,
+                                          sources=sources):
+            etype = event.get('type')
+            if etype == 'delta':
+                answer_parts.append(event.get('delta', ''))
+                yield event
+            elif etype == 'first_token':
+                ttfb_ms = event.get('ttfb_ms')
+                yield event
+            elif etype in ('tool_call', 'tool_result'):
+                yield event
+            elif etype == 'content_filtered':
+                is_filtered = True
+                yield event
+            elif etype == 'done':
+                citations = event.get('citations', [])
+                tool_traces = event.get('tool_traces', [])
+                chunks = event.get('chunks', [])
+                llm_stats = event.get('stats', {}).get('llm', {})
+                done_answer = event.get('answer', '')
+                if done_answer:
+                    answer_parts = [done_answer]
+                if event.get('is_filtered'):
+                    is_filtered = True
+                    filter_reason = event.get('filter_reason', '')
+                detected_error = event.get('detected_error', '')
+            elif etype == 'error':
+                detected_error = event.get('detail', 'Plan 内部错误')
+                yield event
+    except GeneratorExit:
+        logger.info('[ask_stream_via_plan] client aborted, saving partial answer')
+        answer = '' if is_filtered else ''.join(answer_parts)
+        if answer or is_filtered:
+            try:
+                _persist_qa(
+                    user=user, session=session, question=question,
+                    answer=answer, citations=citations,
+                    retrieval_hits=[c['chunk_id'] for c in chunks],
+                    retrieval_scores=[
+                        {'chunk_id': c['chunk_id'], 'rrf': c.get('rrf_score', 0),
+                         'rerank': c.get('rerank_score', 0)} for c in chunks
+                    ],
+                    stats={'latency_total_ms': int((time.time() - t0) * 1000),
+                           'latency_ttfb_ms': ttfb_ms or 0},
+                    llm_stats=llm_stats, root_type=root_type,
+                    turn_index=turn_index, answer_type='plan',
+                    is_success=True, is_filtered=is_filtered,
+                    filter_reason=filter_reason,
+                    route_trace=_collect_transform_route_trace(tool_traces) or None,
+                )
+            except Exception:
+                logger.exception('[ask_stream_via_plan] failed to persist partial answer')
+        raise
+
+    # 命中审查拦截：answer 存空字符串
+    if is_filtered:
+        answer = ''
+    else:
+        answer = ''.join(answer_parts) or '[未生成内容]'
+
+    # answer_type
+    if is_filtered:
+        answer_type = 'refused'
+    elif not answer or answer == '[未生成内容]':
+        answer_type = 'refused'
+    elif tool_traces:
+        answer_type = 'plan'
+    else:
+        answer_type = 'general'
+
+    total_ms = int((time.time() - t0) * 1000)
+    error_type = _classify_error(detected_error) if detected_error else ''
+
+    qa = _persist_qa(
+        user=user, session=session, question=question,
+        answer=answer,
+        citations=citations,
+        retrieval_hits=[c['chunk_id'] for c in chunks],
+        retrieval_scores=[
+            {'chunk_id': c['chunk_id'], 'rrf': c.get('rrf_score', 0),
+             'rerank': c.get('rerank_score', 0)} for c in chunks
+        ],
+        stats={
+            'latency_total_ms': total_ms,
+            'latency_ttfb_ms': ttfb_ms or 0,
+        },
+        llm_stats=llm_stats,
+        root_type=root_type,
+        turn_index=turn_index,
+        answer_type=answer_type,
+        is_filtered=is_filtered,
+        filter_reason=filter_reason,
+        error_type=error_type,
+        is_success=not detected_error,
+        route_trace=_collect_transform_route_trace(tool_traces) or None,
+    )
+
+    # 记录 Agent 工具调用链
+    if tool_traces:
+        try:
+            from apps.agent.models import AgentTrace
+            AgentTrace.batch_create_from_traces(qa, user, session, tool_traces)
+        except Exception:
+            logger.exception('[Executor] AgentTrace batch_create failed (plan stream)')
+
+    # 记录 LlmCallLog
+    try:
+        LlmCallLog.objects.create(
+            provider=llm_stats.get('llm_provider', 'deepseek'),
+            model=llm_stats.get('llm_model', 'deepseek-chat'),
+            scene='qa',
+            user=user if user and getattr(user, 'is_authenticated', False) else None,
+            prompt_tokens=llm_stats.get('tokens_prompt', 0),
+            completion_tokens=llm_stats.get('tokens_completion', 0),
+            total_tokens=llm_stats.get('tokens_prompt', 0) + llm_stats.get('tokens_completion', 0),
+            cost=Decimal(str(llm_stats.get('cost', 0))),
+            latency_ms=llm_stats.get('latency_llm_ms', 0),
+            status='error' if detected_error else 'success',
+        )
+    except Exception:
+        logger.exception('llm_call_log write failed (plan stream)')
+
+    # 记忆 + 缓存
     MemoryManager().append_turn(session, question, answer)
     if _should_update_cache(answer_type, is_filtered):
         _update_cache(question, root_type, user, answer, citations)

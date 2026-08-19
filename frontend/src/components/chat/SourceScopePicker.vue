@@ -73,7 +73,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { ArrowDown } from '@element-plus/icons-vue'
 import api from '../../api/http'
@@ -108,6 +108,16 @@ const scopeTreeData = ref([])
 const scopeFlatList = ref([])                     // 扁平化节点 [{id,name,depth,parent_id}]
 const allScopeIds = ref([])
 const scopeOpen = ref(false)
+
+// 监听 sources.doc 变化：父组件通过 v-model 切换模式时，确保节点树能正确触发加载
+// 解决响应式更新时序问题——父组件修改 currentSources.doc 后，本组件的 sources.value
+// 需要等 Vue 的下一个 tick 才会同步，因此在 onSourceChange/initSourceSwitches 中
+// 的同步检查可能漏掉触发时机；watch 能可靠捕获任何来源的变更
+watch(() => sources.value.doc, (val) => {
+  if (val && !scopeTreeData.value.length) {
+    nextTick(() => loadScopeTree())
+  }
+})
 
 /* ==========================================================
    数据来源开关

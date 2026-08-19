@@ -726,7 +726,11 @@ class TestInitSystemCommand:
     @pytest.mark.django_db
     def test_full_init_then_data_created(self, tmp_path):
         cfg = self._write_config(tmp_path, self._minimal_yaml())
-        call_command('init_system', config=cfg)
+        # test_db_connection 用 psycopg 直连环境变量里的 DB，但测试库名带 test_ 前缀，
+        # 直连会连到非测试库导致数据写不到测试库，须 mock 让命令继续走 Django ORM
+        with patch('apps.system.management.commands.init.common.test_db_connection',
+                   return_value=True):
+            call_command('init_system', config=cfg)
         from apps.users.models import Role, Permission, User
         from apps.system.models import SystemConfig, LLMModel
         from apps.memory.models import GlobalMemory
@@ -743,7 +747,9 @@ class TestInitSystemCommand:
         from apps.users.models import Role
         Role.objects.create(role_key='super_admin', name='超管')
         cfg = self._write_config(tmp_path, self._minimal_yaml())
-        call_command('init_system', config=cfg)
+        with patch('apps.system.management.commands.init.common.test_db_connection',
+                   return_value=True):
+            call_command('init_system', config=cfg)
         # 增量模式只补系统配置/模型，不重新创建角色/用户
         from apps.users.models import User
         from apps.system.models import SystemConfig
@@ -755,7 +761,9 @@ class TestInitSystemCommand:
     def test_with_org_then_creates_departments_and_teams(self, tmp_path):
         # --with-org 时合并开发示例组织数据（departments/teams）
         cfg = self._write_config(tmp_path, self._minimal_yaml())
-        call_command('init_system', config=cfg, with_org=True)
+        with patch('apps.system.management.commands.init.common.test_db_connection',
+                   return_value=True):
+            call_command('init_system', config=cfg, with_org=True)
         from apps.users.models import Department, Team
         assert Department.objects.count() > 0
         assert Team.objects.count() > 0

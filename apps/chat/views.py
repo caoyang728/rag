@@ -52,10 +52,11 @@ class SessionViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["get"])
     def qa(self, request, pk=None):
-        """会话下所有问答记录"""
+        """会话下所有问答记录（排除软删除的记录）"""
         s = self.get_object()
         # prefetch_related 避免 AgentTrace 的 N+1 查询（序列化时读取工具调用链）
-        records = QaRecord.objects.filter(session=s).prefetch_related('agent_traces').order_by("turn_index")
+        records = QaRecord.objects.filter(session=s, is_deleted=False) \
+            .prefetch_related('agent_traces').order_by("turn_index")
         return Response(QaRecordSerializer(records, many=True).data)
 
 
@@ -101,7 +102,7 @@ class ChatAskStreamView(APIView):
     - done:        {type, message_id, session_id, citations, stats, tool_traces?}
     - error:       {type, detail}
 
-    mode 取值：auto（默认）/ rag / agent，详见下方注释中的 ChatAskView 说明。
+    mode 取值：rag（快速问答）/ agent（智能问答，默认）/ plan（深度分析），详见下方注释中的 ChatAskView 说明。
     """
     permission_classes = [IsAuthenticated]
 
@@ -111,7 +112,7 @@ class ChatAskStreamView(APIView):
             return Response({"detail": "question 必填"}, status=400)
 
         session_id = request.data.get("session_id")
-        mode = request.data.get("mode", "auto")  # auto / rag / agent
+        mode = request.data.get("mode", "agent")  # rag / agent / plan
         root_types = request.data.get("root_types")
         node_ids = request.data.get("node_ids")
         use_cache = bool(request.data.get("use_cache", True))
@@ -204,9 +205,27 @@ class QaRecordListView(APIView):
 
     def get(self, request):
         # prefetch_related 避免 AgentTrace 的 N+1 查询（最多 200 条，每条都可能带工具调用链）
-        qs = QaRecord.objects.filter(user=self.request.user).prefetch_related('agent_traces').order_by("-created_at")
+        # 排除软删除的记录（用户撤回/删除的消息对）
+        qs = QaRecord.objects.filter(user=self.request.user, is_deleted=False) \
+            .prefetch_related('agent_traces').order_by("-created_at")
         session_id = request.query_params.get("session_id")
         if session_id:
             qs = qs.filter(session_id=session_id)
         qs = qs[:200]
         return Response({"records": QaRecordSerializer(qs, many=True).data})
+
+
+class QaRecordDeleteView(APIView):
+    """DELETE /api/v1/chat/records/<id>/  软删除单条问答记录（用户消息 + AI 回复成对删除）
+    前端撤回/删除操作统一调用此接口，只置位 is_deleted，不物理删除。
+    """
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request, pk=None):
+        try:
+            qa = QaRecord.objects.get(id=pk, user=request.user)
+        except QaRecord.DoesNotExist:
+            return Response({"detail": "记录不存在"}, status=404)
+        qa.is_deleted = True
+        qa.save(update_fields=["is_deleted"])
+        return Response(status=204)

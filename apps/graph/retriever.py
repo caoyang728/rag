@@ -21,7 +21,8 @@ ENTITY_MATCH_THRESHOLD = 0.3
 GLOBAL_ENTITY_GATE = 0.4
 
 
-def local_search(query: str, user, max_hops: int = 2, top_k_entities: int = 5) -> Dict:
+def local_search(query: str, user, max_hops: int = 2, top_k_entities: int = 5,
+                 query_vector: Optional[List[float]] = None) -> Dict:
     """局部图谱检索（Local Search）。
 
     流程：
@@ -34,6 +35,7 @@ def local_search(query: str, user, max_hops: int = 2, top_k_entities: int = 5) -
         user: 用户对象（预留权限过滤）
         max_hops: 关系扩展最大跳数
         top_k_entities: 向量检索实体数
+        query_vector: 可选，预计算的 query embedding 向量；传入时跳过 Embedding 调用
 
     Returns:
         {
@@ -46,9 +48,12 @@ def local_search(query: str, user, max_hops: int = 2, top_k_entities: int = 5) -
     """
     t0 = time.time()
 
-    # 1. 生成 query 向量，检索相关实体
-    embed_client = get_embedding_client()
-    qvec = embed_client.embed_one(query)
+    # 1. 使用预计算向量或生成 query 向量，检索相关实体
+    if query_vector is not None:
+        qvec = query_vector
+    else:
+        embed_client = get_embedding_client()
+        qvec = embed_client.embed_one(query)
 
     if all(v == 0.0 for v in qvec):
         return _empty_result('graphrag_local')
@@ -221,13 +226,15 @@ def global_search(query: str, user, top_k_communities: int = 3) -> Dict:
     }
 
 
-def graphrag_search(query: str, user, mode: str = 'auto') -> Dict:
+def graphrag_search(query: str, user, mode: str = 'auto',
+                    query_vector: Optional[List[float]] = None) -> Dict:
     """GraphRAG 检索统一入口。
 
     Args:
         query: 用户问题
         user: 用户对象
         mode: 'auto'（先 local 再 global，按置信度择优）/ 'local' / 'global'
+        query_vector: 可选，预计算的 query embedding 向量；传入时跳过 Embedding 调用
 
     Returns:
         统一格式的检索结果
@@ -235,10 +242,10 @@ def graphrag_search(query: str, user, mode: str = 'auto') -> Dict:
     if mode == 'global':
         result = global_search(query, user)
     elif mode == 'local':
-        result = local_search(query, user)
+        result = local_search(query, user, query_vector=query_vector)
     else:
         # auto: 先尝试 local，置信度不足则尝试 global 并择优
-        result = local_search(query, user)
+        result = local_search(query, user, query_vector=query_vector)
         if result['confidence'] < 0.3:
             global_result = global_search(query, user)
             if global_result['confidence'] > result['confidence']:

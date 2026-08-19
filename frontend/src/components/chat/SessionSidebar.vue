@@ -156,11 +156,13 @@ onBeforeUnmount(() => {
 }
 
 .chat-sessions .panel-header {
-  padding: 12px 16px;
+  height: var(--app-header-height);
+  padding: 0 16px;
   border-bottom: 1px solid var(--border);
   display: flex;
   align-items: center;
   gap: 8px;
+  box-sizing: border-box;
 }
 
 /* 已删除「历史会话」标题，搜索框占满面板宽度 */

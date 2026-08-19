@@ -262,7 +262,7 @@ class TestChatAskStreamAPI(ChatAPITestBase):
             {'type': 'done', 'message_id': 1, 'session_id': 1, 'citations': [], 'stats': {}},
         ])
 
-        for mode in ['auto', 'rag', 'agent', 'wiki', 'graphrag']:
+        for mode in ['rag', 'agent', 'plan']:
             mock_executor.reset_mock()
             self.client.post(
                 '/api/v1/chat/ask_stream/',

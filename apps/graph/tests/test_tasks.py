@@ -18,7 +18,7 @@ DB 集成（django_db）：任务内部直接 ORM 查询节点下文档并回写
 import uuid
 
 import pytest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from apps.knowledge.models import KnowledgeNode, Document, VisibilityLevel
 from apps.users.models import User, Department, Team
@@ -64,6 +64,127 @@ def _make_doc(node, owner, title, **extra):
     }
     fields.update(extra)
     return Document.objects.create(**fields)
+
+
+# ---------------------------------------------------------------------------
+# Redis 辅助函数单元测试（纯逻辑，无 DB 依赖）
+# ---------------------------------------------------------------------------
+@pytest.mark.unit
+class TestRedisHelpers:
+    """Redis 辅助函数（进度/活跃标记读写）降级路径测试
+
+    覆盖：_get_doc_progress / _set_doc_progress / _clear_doc_progress /
+    _mark_node_active / _clear_node_active / _node_active 在 Redis 不可用时的
+    容错行为（conn=None），以及读写异常时的降级处理。
+    """
+
+    def test_get_doc_progress_when_redis_unavailable(self):
+        """Redis 不可用时 _get_doc_progress 应返回 None，不抛异常"""
+        from apps.graph.tasks import _get_doc_progress
+        with patch('apps.graph.tasks._redis', return_value=None):
+            result = _get_doc_progress(999)
+        assert result is None
+
+    def test_set_doc_progress_when_redis_unavailable(self):
+        """Redis 不可用时 _set_doc_progress 应静默返回，不抛异常"""
+        from apps.graph.tasks import _set_doc_progress
+        with patch('apps.graph.tasks._redis', return_value=None):
+            _set_doc_progress(999, chunk_index=0, version=1)
+
+    def test_clear_doc_progress_when_redis_unavailable(self):
+        """Redis 不可用时 _clear_doc_progress 应静默返回，不抛异常"""
+        from apps.graph.tasks import _clear_doc_progress
+        with patch('apps.graph.tasks._redis', return_value=None):
+            _clear_doc_progress(999)
+
+    def test_mark_node_active_when_redis_unavailable(self):
+        """Redis 不可用时 _mark_node_active 应静默返回，不抛异常"""
+        from apps.graph.tasks import _mark_node_active
+        with patch('apps.graph.tasks._redis', return_value=None):
+            _mark_node_active(999)
+
+    def test_clear_node_active_when_redis_unavailable(self):
+        """Redis 不可用时 _clear_node_active 应静默返回，不抛异常"""
+        from apps.graph.tasks import _clear_node_active
+        with patch('apps.graph.tasks._redis', return_value=None):
+            _clear_node_active(999)
+
+    def test_node_active_returns_true_when_redis_unavailable(self):
+        """Redis 不可用时 _node_active 应返回 True（保守判定"有任务"），避免误回退"""
+        from apps.graph.tasks import _node_active
+        with patch('apps.graph.tasks._redis', return_value=None):
+            result = _node_active(999)
+        assert result is True
+
+    def test_get_doc_progress_when_redis_raises(self):
+        """Redis 连接正常但操作异常时，_get_doc_progress 应降级返回 None"""
+        from apps.graph.tasks import _get_doc_progress
+        mock_conn = MagicMock()
+        mock_conn.get.side_effect = ConnectionError('redis down')
+        with patch('apps.graph.tasks._redis', return_value=mock_conn):
+            result = _get_doc_progress(999)
+        assert result is None
+
+    def test_set_doc_progress_when_redis_raises(self):
+        """Redis 连接正常但写入异常时，_set_doc_progress 应静默降级"""
+        from apps.graph.tasks import _set_doc_progress
+        mock_conn = MagicMock()
+        mock_conn.set.side_effect = ConnectionError('redis down')
+        with patch('apps.graph.tasks._redis', return_value=mock_conn):
+            _set_doc_progress(999, chunk_index=0, version=1)
+
+    def test_clear_doc_progress_when_redis_raises(self):
+        """Redis 连接正常但删除异常时，_clear_doc_progress 应静默降级"""
+        from apps.graph.tasks import _clear_doc_progress
+        mock_conn = MagicMock()
+        mock_conn.delete.side_effect = ConnectionError('redis down')
+        with patch('apps.graph.tasks._redis', return_value=mock_conn):
+            _clear_doc_progress(999)
+
+    def test_mark_node_active_when_redis_raises(self):
+        """Redis 连接正常但写入异常时，_mark_node_active 应静默降级"""
+        from apps.graph.tasks import _mark_node_active
+        mock_conn = MagicMock()
+        mock_conn.set.side_effect = ConnectionError('redis down')
+        with patch('apps.graph.tasks._redis', return_value=mock_conn):
+            _mark_node_active(999)
+
+    def test_clear_node_active_when_redis_raises(self):
+        """Redis 连接正常但删除异常时，_clear_node_active 应静默降级"""
+        from apps.graph.tasks import _clear_node_active
+        mock_conn = MagicMock()
+        mock_conn.delete.side_effect = ConnectionError('redis down')
+        with patch('apps.graph.tasks._redis', return_value=mock_conn):
+            _clear_node_active(999)
+
+    def test_node_active_returns_true_when_redis_raises(self):
+        """Redis 连接正常但读取异常时，_node_active 应返回 True（保守判定）"""
+        from apps.graph.tasks import _node_active
+        mock_conn = MagicMock()
+        mock_conn.exists.side_effect = ConnectionError('redis down')
+        with patch('apps.graph.tasks._redis', return_value=mock_conn):
+            result = _node_active(999)
+        assert result is True
+
+    def test_get_doc_progress_parses_json(self):
+        """Redis 返回有效 JSON 时，_get_doc_progress 应正确解析并返回字典"""
+        from apps.graph.tasks import _get_doc_progress
+        import json
+        mock_conn = MagicMock()
+        mock_conn.get.return_value = json.dumps(
+            {'chunk_index': 3, 'version': 1}).encode()
+        with patch('apps.graph.tasks._redis', return_value=mock_conn):
+            result = _get_doc_progress(42)
+        assert result == {'chunk_index': 3, 'version': 1}
+
+    def test_get_doc_progress_returns_none_when_key_missing(self):
+        """Redis key 不存在时，_get_doc_progress 应返回 None"""
+        from apps.graph.tasks import _get_doc_progress
+        mock_conn = MagicMock()
+        mock_conn.get.return_value = None
+        with patch('apps.graph.tasks._redis', return_value=mock_conn):
+            result = _get_doc_progress(42)
+        assert result is None
 
 
 @pytest.mark.django_db
@@ -266,6 +387,90 @@ class TestGraphExtractTask:
         assert self.doc_pending_2.graph_status == 'pending'
         mock_delay.assert_called_once_with(self.node.id)
 
+    def test_soft_time_limit_exceeded_reverts_current_doc_and_breaks(self):
+        """SoftTimeLimitExceeded 应将当前文档回退 pending 并中断循环"""
+        from apps.graph.tasks import graph_extract_task
+        from celery.exceptions import SoftTimeLimitExceeded
+
+        with patch('apps.graph.sync._graph_enabled', return_value=True), \
+                patch('apps.graph.tasks._get_doc_progress', return_value=None), \
+                patch('apps.graph.sync._clean_graph_data'), \
+                patch('apps.graph.extractor.batch_extract_for_document',
+                      side_effect=SoftTimeLimitExceeded()) as mock_batch, \
+                patch('apps.graph.tasks.graph_extract_task.delay') as mock_delay:
+            result = graph_extract_task(self.node.id)
+
+        # 仅第一篇文档触发了抽取（遇到软超时即 break）
+        assert mock_batch.call_count == 1
+        assert result['timed_out'] is True
+        assert result['processed'] == 0
+        # 触发 SoftTimeLimitExceeded 的文档回退 pending
+        self.doc_pending_1.refresh_from_db()
+        assert self.doc_pending_1.graph_status == 'pending'
+        # 剩余文档也被回退 pending（timed_out 路径）
+        self.doc_pending_2.refresh_from_db()
+        assert self.doc_pending_2.graph_status == 'pending'
+        # timed_out 触发续派
+        mock_delay.assert_called_once_with(self.node.id)
+
+    def test_outer_exception_reverts_all_extracting_to_pending(self):
+        """批量级异常（如 LLM 整体不可用）应回退本批所有 extracting 文档为 pending
+
+        外层 except 捕获的是 for 循环体内、内层 try 之外的异常，
+        例如 time.monotonic() 调用失败（系统时钟异常等极端场景）。
+        """
+        from apps.graph.tasks import graph_extract_task
+        call_count = [0]
+
+        def _boom_monotonic():
+            """第2次调用时抛异常，模拟批量处理中途的系统级故障"""
+            call_count[0] += 1
+            if call_count[0] >= 2:
+                raise RuntimeError('system clock unavailable')
+            return 0
+
+        with patch('apps.graph.sync._graph_enabled', return_value=True), \
+                patch('apps.graph.tasks._get_doc_progress', return_value=None), \
+                patch('apps.graph.sync._clean_graph_data'), \
+                patch('apps.graph.extractor.batch_extract_for_document',
+                      return_value=_DONE_RESULT), \
+                patch('apps.graph.tasks.time.monotonic', side_effect=_boom_monotonic), \
+                patch('apps.graph.tasks.graph_extract_task.delay') as mock_delay:
+            result = graph_extract_task(self.node.id)
+
+        assert result['timed_out'] is True
+        assert result['processed'] == 0
+        assert result['failed'] == 0
+        # 本批文档全部回退 pending（外层 except 路径）
+        self.doc_pending_1.refresh_from_db()
+        self.doc_pending_2.refresh_from_db()
+        assert self.doc_pending_1.graph_status == 'pending'
+        assert self.doc_pending_2.graph_status == 'pending'
+        mock_delay.assert_called_once_with(self.node.id)
+
+    def test_has_more_pending_docs_triggers_redispatch(self):
+        """处理完成后仍有 pending 文档时，应续派下一轮任务"""
+        from apps.graph.tasks import graph_extract_task
+        # 在 _env 创建的 doc_pending_2 之外再添加两篇 pending 文档（共 4 篇）
+        # doc_pending_1 正常完成，doc_pending_2 未完成（回退 pending）→ has_more 为 True
+        extra1 = _make_doc(self.node, self.owner, '额外pending1', graph_status='pending')
+        extra2 = _make_doc(self.node, self.owner, '额外pending2', graph_status='pending')
+
+        with patch('apps.graph.sync._graph_enabled', return_value=True), \
+                patch('apps.graph.tasks._get_doc_progress', return_value=None), \
+                patch('apps.graph.sync._clean_graph_data'), \
+                patch('apps.graph.extractor.batch_extract_for_document',
+                      side_effect=[_DONE_RESULT,
+                                   {'completed': False, 'processed': 0, 'next_chunk': 0}]) as mock_batch, \
+                patch('apps.graph.tasks._set_doc_progress'), \
+                patch('apps.graph.tasks.graph_extract_task.delay') as mock_delay:
+            result = graph_extract_task(self.node.id)
+
+        # doc_pending_1 成功完成，doc_pending_2 未完成（预算耗尽），timed_out 后续派
+        assert result['timed_out'] is True
+        # doc_pending_2 回退 pending，extra1/extra2 已标记 extracting 也回退 pending → has_more=True
+        mock_delay.assert_called_once_with(self.node.id)
+
 
 @pytest.mark.django_db
 @pytest.mark.integration
@@ -351,6 +556,44 @@ class TestGraphRecover:
 
         assert result == {'ok': True, 'recovered': 0, 'dispatched_nodes': 0, 'skipped': True}
         mock_recover.assert_not_called()
+
+    def test_skips_node_with_graph_pending_true(self):
+        """节点 graph_pending=True 时应跳过恢复（说明任务可能正在运行）"""
+        from apps.graph.tasks import _recover_stuck_graph_docs
+        # 将所有节点标记为 graph_pending=True，阻止所有补派
+        KnowledgeNode.objects.filter(
+            id__in=[self.node.id, self.node2.id]
+        ).update(graph_pending=True)
+
+        with patch('apps.graph.tasks._node_active', return_value=False), \
+                patch('apps.graph.tasks.graph_extract_task.delay') as mock_delay:
+            stats = _recover_stuck_graph_docs()
+
+        # 卡死节点被跳过（graph_pending=True），不应回退文档
+        assert stats['recovered'] == 0
+        assert stats['dispatched_nodes'] == 0
+        mock_delay.assert_not_called()
+        self.doc_stuck_1.refresh_from_db()
+        assert self.doc_stuck_1.graph_status == 'extracting'
+
+    def test_skips_deleted_node(self):
+        """已删除的节点应跳过恢复（数据已不可用）"""
+        from apps.graph.tasks import _recover_stuck_graph_docs
+        # 将 node 标记为已删除
+        KnowledgeNode.objects.filter(id=self.node.id).update(is_deleted=True)
+
+        with patch('apps.graph.tasks._node_active', return_value=False), \
+                patch('apps.graph.tasks.graph_extract_task.delay') as mock_delay:
+            stats = _recover_stuck_graph_docs()
+
+        # 已删除节点的卡死文档不应回退
+        assert stats['recovered'] == 0
+        self.doc_stuck_1.refresh_from_db()
+        assert self.doc_stuck_1.graph_status == 'extracting'
+        # node2 的 pending 文档仍应正常补派
+        if mock_delay.call_count > 0:
+            dispatched_ids = [c.args[0] for c in mock_delay.call_args_list]
+            assert self.node2.id in dispatched_ids
 
 
 @pytest.mark.unit

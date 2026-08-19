@@ -378,8 +378,8 @@ class TestAskStreamModeBranching:
 
     @patch('apps.agent.executor._try_cache')
     @patch('apps.agent.executor._ask_stream_via_agent')
-    def test_ask_stream_when_mode_auto_then_calls_agent_stream(self, mock_agent_stream, mock_cache):
-        """mode='auto' 应 yield from _ask_stream_via_agent"""
+    def test_ask_stream_when_mode_agent_then_calls_agent_stream(self, mock_agent_stream, mock_cache):
+        """mode='agent' 应 yield from _ask_stream_via_agent"""
         mock_cache.return_value = None
         mock_agent_stream.return_value = iter([
             {'type': 'start'},
@@ -393,7 +393,7 @@ class TestAskStreamModeBranching:
         session.id = 1
         session.turn_count = 0
 
-        events = list(ask_stream(user, 'q', session, mode='auto'))
+        events = list(ask_stream(user, 'q', session, mode='agent'))
         types = [e['type'] for e in events]
         assert 'start' in types
         assert 'delta' in types
@@ -777,3 +777,289 @@ class TestNormalizeSources:
         mock_cfg.return_value = ''
         from apps.agent.executor import _enabled_source_set
         assert _enabled_source_set() == {'doc', 'db', 'web', 'llm'}
+
+
+# ---------------------------------------------------------------------------
+# _collect_transform_route_trace
+# ---------------------------------------------------------------------------
+
+class TestCollectTransformRouteTrace:
+    """_collect_transform_route_trace：从工具调用链 meta 收集查询改写追踪"""
+
+    @patch('apps.agent.executor.build_route_trace')
+    def test_collect_when_transform_enabled_then_extends(self, mock_build_rt):
+        """transform 追踪信息启用时，调用 build_route_trace 并汇总"""
+        mock_build_rt.return_value = [{'layer': 'rewrite', 'query': '新查询'}]
+        from apps.agent.executor import _collect_transform_route_trace
+        traces = [{'meta': {'transform': {'enabled': True, 'queries': ['原始']}}}]
+        result = _collect_transform_route_trace(traces)
+        assert result == [{'layer': 'rewrite', 'query': '新查询'}]
+        mock_build_rt.assert_called_once_with({'enabled': True, 'queries': ['原始']})
+
+    def test_collect_when_transform_disabled_then_skipped(self):
+        """transform 未启用时不调用 build_route_trace"""
+        from apps.agent.executor import _collect_transform_route_trace
+        traces = [{'meta': {'transform': {'enabled': False}}}]
+        result = _collect_transform_route_trace(traces)
+        assert result == []
+
+    def test_collect_when_no_transform_key_then_skipped(self):
+        """meta 中无 transform 键时不报错"""
+        from apps.agent.executor import _collect_transform_route_trace
+        traces = [{'meta': {'other': 'data'}}]
+        result = _collect_transform_route_trace(traces)
+        assert result == []
+
+    def test_collect_when_none_traces_then_empty(self):
+        """tool_traces 为 None 时返回空列表"""
+        from apps.agent.executor import _collect_transform_route_trace
+        assert _collect_transform_route_trace(None) == []
+
+    @patch('apps.agent.executor.build_route_trace')
+    def test_collect_when_multiple_traces_then_extends_all(self, mock_build_rt):
+        """多条 trace 均有 transform 时，结果列表合并"""
+        mock_build_rt.return_value = [{'layer': 'rewrite'}]
+        from apps.agent.executor import _collect_transform_route_trace
+        traces = [
+            {'meta': {'transform': {'enabled': True}}},
+            {'meta': {'transform': {'enabled': True}}},
+        ]
+        result = _collect_transform_route_trace(traces)
+        assert len(result) == 2
+
+
+# ---------------------------------------------------------------------------
+# _cache_scope_accessible
+# ---------------------------------------------------------------------------
+
+@pytest.mark.django_db
+class TestCacheScopeAccessible:
+    """_cache_scope_accessible：缓存权限组粗筛"""
+
+    @pytest.fixture(autouse=True)
+    def _scope_env(self):
+        self.user = User.objects.create_user(
+            username='scope_user', email='scope@example.com', password='x')
+
+    def _make_cache_obj(self, scope, **kwargs):
+        """构造 Fake HotQaCache 对象用于 scope 校验"""
+        obj = MagicMock()
+        obj.visibility_scope = scope
+        obj.cited_doc_ids = kwargs.get('cited_doc_ids', [])
+        obj.citations = kwargs.get('citations', [])
+        return obj
+
+    def test_scope_public_then_returns_true(self):
+        from apps.agent.executor import _cache_scope_accessible
+        obj = self._make_cache_obj('public')
+        assert _cache_scope_accessible(self.user, obj) is True
+
+    def test_scope_public_with_none_user_then_returns_true(self):
+        from apps.agent.executor import _cache_scope_accessible
+        obj = self._make_cache_obj('public')
+        assert _cache_scope_accessible(None, obj) is True
+
+    def test_scope_org_with_anonymous_user_then_returns_false(self):
+        """org_* 权限组：匿名用户（未认证）不满足条件"""
+        from apps.agent.executor import _cache_scope_accessible
+        obj = self._make_cache_obj('org_d1')
+        assert _cache_scope_accessible(None, obj) is False
+
+    def test_scope_org_with_unauthenticated_user_then_returns_false(self):
+        """org_* 权限组：未认证用户不满足条件"""
+        from apps.agent.executor import _cache_scope_accessible
+        obj = self._make_cache_obj('org_d1')
+        anon_user = MagicMock(is_authenticated=False, is_super_admin=False)
+        assert _cache_scope_accessible(anon_user, obj) is False
+
+    def test_scope_super_when_super_admin_then_returns_true(self):
+        from apps.agent.executor import _cache_scope_accessible
+        obj = self._make_cache_obj('super')
+        # is_super_admin 是 property（基于 UserRoleRel 查询），用 MagicMock 模拟
+        mock_user = MagicMock(is_authenticated=True, is_super_admin=True)
+        assert _cache_scope_accessible(mock_user, obj) is True
+
+    def test_scope_super_when_not_super_admin_then_returns_false(self):
+        from apps.agent.executor import _cache_scope_accessible
+        obj = self._make_cache_obj('super')
+        mock_user = MagicMock(is_authenticated=True, is_super_admin=False)
+        assert _cache_scope_accessible(mock_user, obj) is False
+
+    def test_scope_anonymous_when_not_authenticated_then_returns_true(self):
+        from apps.agent.executor import _cache_scope_accessible
+        obj = self._make_cache_obj('anonymous')
+        anon = MagicMock(is_authenticated=False)
+        assert _cache_scope_accessible(anon, obj) is True
+
+    def test_scope_anonymous_when_authenticated_then_returns_false(self):
+        from apps.agent.executor import _cache_scope_accessible
+        obj = self._make_cache_obj('anonymous')
+        assert _cache_scope_accessible(self.user, obj) is False
+
+    def test_scope_unknown_prefix_then_returns_false(self):
+        """未识别的 scope 前缀直接返回 False"""
+        from apps.agent.executor import _cache_scope_accessible
+        obj = self._make_cache_obj('unknown_group')
+        assert _cache_scope_accessible(self.user, obj) is False
+
+    def test_scope_org_when_super_admin_then_returns_true(self):
+        """org_* 权限组：超管直接通过（不走组织覆盖校验）"""
+        from apps.agent.executor import _cache_scope_accessible
+        obj = self._make_cache_obj('org_d99')
+        mock_user = MagicMock(is_authenticated=True, is_super_admin=True)
+        assert _cache_scope_accessible(mock_user, obj) is True
+
+
+# ---------------------------------------------------------------------------
+# _cache_docs_accessible
+# ---------------------------------------------------------------------------
+
+@pytest.mark.django_db
+class TestCacheDocsAccessible:
+    """_cache_docs_accessible：文档级兜底校验（Deny Override 铁律）"""
+
+    @pytest.fixture(autouse=True)
+    def _docs_env(self):
+        self.user = User.objects.create_user(
+            username='docs_user', email='docs@example.com', password='x')
+
+    def _make_cache_obj(self, cited_doc_ids=None, citations=None):
+        obj = MagicMock()
+        obj.cited_doc_ids = cited_doc_ids or []
+        obj.citations = citations or []
+        return obj
+
+    def test_docs_accessible_when_no_cited_and_no_citations_then_true(self):
+        from apps.agent.executor import _cache_docs_accessible
+        obj = self._make_cache_obj(cited_doc_ids=[], citations=[])
+        assert _cache_docs_accessible(self.user, obj) is True
+
+    def test_docs_accessible_when_no_cited_but_has_citations_not_super_admin_then_false(self):
+        """旧数据：cited_doc_ids 为空但有 citations，非超管用户保守跳过"""
+        from apps.agent.executor import _cache_docs_accessible
+        obj = self._make_cache_obj(cited_doc_ids=[], citations=[{'doc_title': 'A'}])
+        mock_user = MagicMock(is_authenticated=True, is_super_admin=False)
+        assert _cache_docs_accessible(mock_user, obj) is False
+
+    def test_docs_accessible_when_no_cited_but_has_citations_super_admin_then_true(self):
+        """旧数据：超管用户可以命中无权限组标记的旧缓存"""
+        from apps.agent.executor import _cache_docs_accessible
+        obj = self._make_cache_obj(cited_doc_ids=[], citations=[{'doc_title': 'A'}])
+        mock_user = MagicMock(is_authenticated=True, is_super_admin=True)
+        assert _cache_docs_accessible(mock_user, obj) is True
+
+    def test_docs_accessible_when_cited_doc_ids_but_anonymous_then_false(self):
+        """有 cited_doc_ids 但用户未认证：匿名无法访问文档级权限"""
+        from apps.agent.executor import _cache_docs_accessible
+        obj = self._make_cache_obj(cited_doc_ids=[123])
+        assert _cache_docs_accessible(None, obj) is False
+
+    @patch('apps.agent.executor.filter_accessible_doc_ids')
+    def test_docs_accessible_when_all_docs_accessible_then_true(self, mock_filter):
+        """有 cited_doc_ids 且全部文档可访问：通过"""
+        from apps.agent.executor import _cache_docs_accessible
+        obj = self._make_cache_obj(cited_doc_ids=[123, 456])
+        mock_filter.return_value = [123, 456]
+        assert _cache_docs_accessible(self.user, obj) is True
+
+    @patch('apps.agent.executor.filter_accessible_doc_ids')
+    def test_docs_accessible_when_some_docs_inaccessible_then_false(self, mock_filter):
+        """有 cited_doc_ids 但部分文档被黑名单拦截：不通过（Deny Override）"""
+        from apps.agent.executor import _cache_docs_accessible
+        obj = self._make_cache_obj(cited_doc_ids=[123, 456])
+        mock_filter.return_value = [123]  # 456 被过滤
+        assert _cache_docs_accessible(self.user, obj) is False
+
+
+# ---------------------------------------------------------------------------
+# mode='plan' 和 do_workflow=True 分流
+# ---------------------------------------------------------------------------
+
+class TestAskStreamModePlanAndWorkflow:
+    """ask_stream() 的 mode='plan' 和 do_workflow=True 分流测试"""
+
+    @patch('apps.agent.executor._try_cache')
+    @patch('apps.agent.executor._ask_stream_via_plan')
+    def test_ask_stream_when_mode_plan_then_calls_plan_stream(self, mock_plan_stream, mock_cache):
+        """mode='plan' 应 yield from _ask_stream_via_plan"""
+        mock_cache.return_value = None
+        mock_plan_stream.return_value = iter([
+            {'type': 'start'},
+            {'type': 'delta', 'delta': 'plan answer'},
+            {'type': 'done'},
+        ])
+        from apps.agent.executor import ask_stream
+        user = MagicMock()
+        session = MagicMock()
+        session.id = 1
+        session.turn_count = 0
+        events = list(ask_stream(user, 'q', session, mode='plan'))
+        types = [e['type'] for e in events]
+        assert 'start' in types
+        assert 'delta' in types
+        mock_plan_stream.assert_called_once()
+
+    @patch('apps.agent.executor._try_cache')
+    @patch('apps.agent.executor._ask_stream_via_workflow')
+    def test_ask_stream_when_mode_agent_do_workflow_then_calls_workflow(self, mock_wf_stream, mock_cache):
+        """mode='agent' + do_workflow=True 应 yield from _ask_stream_via_workflow"""
+        mock_cache.return_value = None
+        mock_wf_stream.return_value = iter([
+            {'type': 'start'},
+            {'type': 'delta', 'delta': 'workflow answer'},
+            {'type': 'done'},
+        ])
+        from apps.agent.executor import ask_stream
+        user = MagicMock()
+        session = MagicMock()
+        session.id = 1
+        session.turn_count = 0
+        events = list(ask_stream(user, 'q', session, mode='agent', do_workflow=True))
+        mock_wf_stream.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# _extract_cited_doc_ids
+# ---------------------------------------------------------------------------
+
+@pytest.mark.django_db
+class TestExtractCitedDocIds:
+    """_extract_cited_doc_ids：从 citations 提取引用文档 ID"""
+
+    def test_extract_when_no_citations_then_empty(self):
+        from apps.agent.executor import _extract_cited_doc_ids
+        assert _extract_cited_doc_ids([]) == []
+
+    def test_extract_when_none_citations_then_empty(self):
+        from apps.agent.executor import _extract_cited_doc_ids
+        assert _extract_cited_doc_ids(None) == []
+
+    def test_extract_when_citations_without_chunk_ids_then_empty(self):
+        """citations 中无 chunk_ids 键时跳过"""
+        from apps.agent.executor import _extract_cited_doc_ids
+        result = _extract_cited_doc_ids([{'doc_title': 'A'}])
+        assert result == []
+
+    def test_extract_when_citations_with_empty_chunk_ids_then_empty(self):
+        from apps.agent.executor import _extract_cited_doc_ids
+        result = _extract_cited_doc_ids([{'doc_title': 'A', 'chunk_ids': []}])
+        assert result == []
+
+    def test_extract_when_chunk_ids_present_then_queries_db(self):
+        """citations 有 chunk_ids 时反查 DocumentChunk 获取 document_id"""
+        from apps.knowledge.models import KnowledgeNode, Document, DocumentChunk
+        from apps.users.models import User
+        from apps.agent.executor import _extract_cited_doc_ids
+
+        owner = User.objects.create_user(username='extract_user', email='ext@example.com', password='x')
+        node = KnowledgeNode.objects.create(name='root', node_type='root',
+                                            root_type='extract_root', created_by=owner)
+        doc = Document.objects.create(node=node, owner=owner, title='extract doc',
+                                      file_name='e.txt', file_type='txt', file_hash='h',
+                                      root_type='extract_root', dept_id=1,
+                                      visibility_level='DEPT_ONLY')
+        chunk = DocumentChunk.objects.create(document=doc, content='test content',
+                                             content_length=14, chunk_index=0)
+        citations = [{'doc_title': 'A', 'chunk_ids': [chunk.id]}]
+        result = _extract_cited_doc_ids(citations)
+        assert doc.id in result

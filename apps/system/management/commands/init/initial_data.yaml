@@ -740,6 +740,23 @@ system_configs:
     is_readonly: false
     risk_level: normal
 
+  - key: FAST_MODE_STRATEGY
+    value: "rag_only"
+    value_type: string
+    category: retrieval
+    label: "快速问答检索策略"
+    description: "控制快速问答模式的检索策略：parallel 三路并行（Wiki+GraphRAG+RAG 共享向量，延迟 4-6s，资源消耗高）；rag_only 仅 RAG 混合检索（延迟 3-5s，最省资源，覆盖大多数简单问题）；sequential 串行降级（Wiki→GraphRAG→RAG，命中即停，延迟 6-10s，资源适中）"
+    options:
+      - value: "parallel"
+        label: "三路并行（速度快，准确率最高，资源消耗高）"
+      - value: "rag_only"
+        label: "仅 RAG（速度最快，资源消耗最低，准确率一般）"
+      - value: "sequential"
+        label: "串行降级（命中即停，资源消耗适中，延迟波动大）"
+    is_secret: false
+    is_readonly: false
+    risk_level: normal
+
   # ==================== 存储（category: storage）====================
   - key: IMAGE_STORAGE_MODE
     value: "base64"

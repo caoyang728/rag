@@ -13,16 +13,22 @@
            外层用 div 而非 label：el-checkbox 内部已是 label，label 嵌套 label 会让浏览器的
            点击转发行为失效/混乱，导致点文字无法勾选。改为 div 后点文字走 onSourceRowToggle，
            点 checkbox 走 @click.stop + @change，互不干扰 -->
+      <!-- 快速问答模式提示 -->
+      <div v-if="disabled" class="scope-hint" style="color: var(--el-color-warning); margin-bottom: 8px;">
+        ⚡ 快速问答模式仅支持内部文档，数据来源已锁定
+      </div>
       <div class="source-switches">
         <div
           v-for="k in enabled"
           :key="k"
           class="scope-item source-switch"
-          @click="onSourceRowToggle(k)"
+          :class="{ 'is-disabled': disabled }"
+          @click="disabled ? null : onSourceRowToggle(k)"
         >
           <el-checkbox
             @click.stop
             :model-value="!!sources[k]"
+            :disabled="disabled"
             @change="val => onSourceChange(k, val)"
           />
           <span class="scope-label">
@@ -92,6 +98,11 @@ const enabled = defineModel('enabled', { default: () => ['doc', 'db', 'web', 'll
 const sources = defineModel('sources', { default: () => ({ doc: true, db: true, web: true, llm: true }) })
 const scopes = defineModel('scopes', { default: () => new Set() })
 
+// 快速问答模式下禁用来源切换
+const props = defineProps({
+  disabled: { type: Boolean, default: false },
+})
+
 // 节点树内部状态
 const scopeTreeData = ref([])
 const scopeFlatList = ref([])                     // 扁平化节点 [{id,name,depth,parent_id}]
@@ -157,8 +168,9 @@ function currentSourcesList() {
   return enabled.value.filter(k => sources.value[k])
 }
 
-// 顶部按钮徽标：全部开启 → "全开"；部分开启 → 逗号分隔的来源名
+// 顶部按钮徽标：快速问答模式下固定显示"内部文档"；全开→"全开"；部分开启→逗号分隔来源名
 const scopeBadge = computed(() => {
+  if (props.disabled) return '内部文档'
   const on = currentSourcesList()
   if (on.length === enabled.value.length) return '全开'
   return on.map(k => SOURCE_META[k].label).join(' / ')
@@ -403,6 +415,12 @@ onMounted(initSourceSwitches)
   border-radius: 8px;
   margin: 1px 4px;
   align-items: flex-start;
+}
+
+.source-switch.is-disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  pointer-events: none;
 }
 
 .source-switch .scope-label {

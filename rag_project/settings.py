@@ -291,11 +291,8 @@ BUSINESS_DB_DSN = os.getenv('BUSINESS_DB_DSN', '')
 # BUSINESS_DB_TABLES: Text2SQL 可查询表的名称白名单（逗号分隔）
 # 留空表示允许 public schema 下的全部表（生产环境建议配置白名单）
 BUSINESS_DB_TABLES = os.getenv('BUSINESS_DB_TABLES', '')
-# AGENT_DEFAULT_MODE: 默认问答模式（auto / rag / agent）
-# auto: Agent 模式，LLM 自主决定是否调用工具
-# rag: 传统 RAG 模式，预检索 + LLM 生成
-# agent: 强制 Agent 模式
-AGENT_DEFAULT_MODE = os.getenv('AGENT_DEFAULT_MODE', 'auto')
+# AGENT_DEFAULT_MODE: 默认问答模式（rag / agent / plan）
+AGENT_DEFAULT_MODE = os.getenv('AGENT_DEFAULT_MODE', 'agent')
 
 # --- 敏感词流式审查（输出侧内容安全防线）---
 # 总开关：关闭后 LLM 输出不再过审（仅在调试或低风险场景关闭）

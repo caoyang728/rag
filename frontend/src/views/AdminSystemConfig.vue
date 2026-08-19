@@ -355,7 +355,7 @@ const CONFIG_METADATA = {
   FRONTEND_BASE_URL: { label: '前端基础地址', description: '密码重置链接的域名前缀（如 https://rag.example.com）。使用验证码重置时不需要此配置', sortOrder: 9 },
 
   // ===== Agent =====
-  AGENT_DEFAULT_MODE: { label: '默认问答模式', description: '新会话的默认问答模式：Agent 自主决策、传统 RAG 或强制 Agent', sortOrder: 1 },
+  AGENT_DEFAULT_MODE: { label: '默认问答模式', description: '用户未指定模式时的默认问答模式：rag 快速问答（仅 RAG 检索，首字 3-5s）；agent 智能问答（ReAct 循环，默认）；plan 深度分析（Plan-and-Execute 三阶段编排）', sortOrder: 1 },
   // 多选组件的展示文案通过 multiSelect 字段定制，避免复用 Text2SQL 白名单的硬编码文案
   BUSINESS_DB_TABLES: {
     label: 'Text2SQL 白名单', description: '多选，空=不允许任何表查询（Text2SQL 不生效）；需主动勾选表后才生效', sortOrder: 2,

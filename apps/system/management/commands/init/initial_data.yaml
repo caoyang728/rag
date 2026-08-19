@@ -22,7 +22,7 @@ users:
     role: super_admin
 
 # ------------------------------
-# 系统内置角色（8 个，与 seed_permissions.py 完全对齐）
+# 系统内置角色（9 个，与 seed_permissions.py 完全对齐）
 # role_type: GLOBAL(全局) / DEPT_SCOPE(部门属地) / TEAM_SCOPE(团队属地) / NORMAL_USER(普通)
 # data_scope: GLOBAL(全局级) / DEPT(部门级) / TEAM(团队级) —— 决定数据可见范围等级
 # ------------------------------
@@ -922,18 +922,18 @@ system_configs:
 
   # ==================== Agent（category: agent）====================
   - key: AGENT_DEFAULT_MODE
-    value: "auto"
+    value: "agent"
     value_type: string
     category: agent
     label: "默认问答模式"
-    description: ""
+    description: "用户未指定模式时的默认问答模式：rag 快速问答（仅 RAG 检索，1 次 LLM，首字 3-5s）；agent 智能问答（ReAct 循环，LLM 自主调用工具）；plan 深度分析（Plan-and-Execute 三阶段编排）"
     options:
-      - value: "auto"
-        label: "Agent 自主决策"
       - value: "rag"
-        label: "传统 RAG"
+        label: "快速问答（RAG 检索，速度最快）"
       - value: "agent"
-        label: "强制 Agent"
+        label: "智能问答（ReAct 循环，默认）"
+      - value: "plan"
+        label: "深度分析（Plan-and-Execute）"
     is_secret: false
     is_readonly: true
 

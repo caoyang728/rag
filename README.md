@@ -58,12 +58,12 @@ flowchart TD
     MODE -->|"plan：深度分析"| PLAN["Plan-and-Execute 三阶段"]
 
     REACT -->|"do_workflow=true 且<br/>planner 判定复杂"| WF["多 Agent 工作流<br/>research/tool/approval 节点 DAG<br/>+ HITL 人工确认"]
-    REACT --> TOOLS["工具注册表（4 个）<br/>按来源过滤可用性：<br/>knowledge_search(doc) / web_search(web)<br/>/ text2sql(db) / code_interpreter"]
+    REACT --> TOOLS["工具注册表（3 个）<br/>按来源过滤可用性：<br/>knowledge_search(doc) / web_search(web)<br/>/ text2sql(db)"]
     WF --> TOOLS
 
     PLAN --> PLANNER["Phase 1：Planner LLM 规划<br/>输出工具调用计划"]
     PLANNER --> PARALLEL["Phase 2：并行执行所有工具<br/>ThreadPoolExecutor"]
-    PARALLEL --> TOOLS
+    PARALLEL --> TOOLS2["工具注册表（3 个）<br/>knowledge_search / web_search / text2sql"]
     PARALLEL --> SYNTH["Phase 3：Synthesizer LLM 综合答案"]
 
     RAG_FAST -.->|"受 FAST_MODE_STRATEGY<br/>配置控制"| ORCHESTRATE["三层路由编排<br/>parallel / sequential / rag_only"]
@@ -94,10 +94,10 @@ flowchart TD
 |---|---|
 | 输入侧敏感词审查 | block 命中直接拒答（content_filtered），不浪费 LLM 算力 |
 | 热点缓存 | HotQaCache 组织分组（public/org_…）+ 文档级兜底校验（Deny Override）；命中仍过内容审查 + 引用权限校验 |
-| 检索核心 | 向量 pgvector + BM25 + RRF 融合 + Rerank 重排 + 检索级权限过滤；查询改写/分解（`QUERY_TRANSFORM_ENABLED`，默认开启）是透明增强层，失败恒降级为原 Query；召回 top_k 与相关性阈值在系统配置「检索参数」中可调 |
+| 检索核心 | 向量 pgvector + BM25 + RRF 融合 + Rerank 重排 + 检索级权限过滤；查询改写/分解（`QUERY_TRANSFORM_ENABLED`，默认关闭）是透明增强层，失败恒降级为原 Query；召回 top_k 与相关性阈值在系统配置「检索参数」中可调 |
 | LLM 流式生成 | 逐段敏感词审查（block 中断 / mask 脱敏） |
-| SSE 输出 | `start → (tool_call/tool_result)* → first_token → delta* → done`（或 `content_filtered` / `error`） |
-| 落库 | QaRecord（answer_type：rag / agent / plan / general / refused）+ AgentTrace（工具调用链）+ 热点缓存 + 记忆 + 12 维评估 |
+| SSE 输出 | 基础事件：`start → (tool_call/tool_result)* → first_token → delta* → done`（或 `content_filtered` / `error`）；工作流事件：`workflow_planning → workflow_start → (workflow_node_start → workflow_node_done)* → workflow_approval_required` |
+| 落库 | QaRecord（answer_type：rag / agent / plan / general / refused / reasoning / mixed）+ AgentTrace（工具调用链）+ 热点缓存 + 记忆 + 12 维评估 |
 
 **三层路由编排**：系统配置 `FAST_MODE_STRATEGY` 控制快速问答的检索策略：
 - **parallel**：预计算 query embedding 后，Wiki / GraphRAG / RAG 三路同时执行，按置信度择优（Wiki ≥ 0.68 → GraphRAG ≥ 0.45 → RAG 兜底），总延迟 = max(三路) 而非三路之和；
@@ -106,12 +106,11 @@ flowchart TD
 
 三层路由的每层置信度与耗时记入 `route_trace`，由 RouteAnalysis 持续评估各层命中率与回答质量。智能问答和深度分析模式的 `knowledge_search` 工具内部同样走三层路由（parallel 策略）。
 
-**智能问答（agent）**：LLM 在 ReAct 循环中自主决策是否调用工具（≤ 5 轮，末轮强制成文，达上限强制总结）。内置 4 个工具，按来源开关过滤可用性：
+**智能问答（agent）**：LLM 在 ReAct 循环中自主决策是否调用工具（≤ 5 轮，末轮强制成文，达上限强制总结）。内置 3 个工具，按来源开关过滤可用性：
 
 - `knowledge_search`：统一知识检索入口（对应来源 `doc`），内部走三层路由（parallel 策略），复用混合检索全链路 + 二次权限过滤
 - `web_search`：Tavily，未配置降级 DuckDuckGo（对应来源 `web`）
 - `text2sql`：业务库，白名单限定（对应来源 `db`）
-- `code_interpreter`：代码执行沙箱（对应来源 `llm`）
 
 统一返回 `{result, ok, meta, latency_ms}` 回填 messages，工具调用链落库 AgentTrace。`do_workflow=true` 时由 planner 判定，复杂问题产出节点 DAG（research / tool / approval）走多 Agent 工作流：拓扑序执行、无依赖节点并行（≤ 4）、失败自动重试（≤ 2），`web_search` / `text2sql` 敏感工具及 approval 节点隐式人工确认（HITL，在聊天对话框内嵌「确认/拒绝」按钮，不再创建工单），确认通过 `resume_workflow` 继续 / 拒绝降级回答；节点轨迹落 WorkflowNodeRun。
 
@@ -447,6 +446,7 @@ rag/
 | CRUD | `/api/v1/chat/sessions/` | 会话管理 |
 | GET | `/api/v1/chat/sessions/{id}/qa/` | 问答历史（按 turn_index 升序） |
 | GET | `/api/v1/chat/records/` | 问答记录列表 |
+| DELETE | `/api/v1/chat/records/{record_id}/` | 软删除单条问答记录（用户消息 + AI 回复成对删除） |
 | POST | `/api/v1/agent/task/plan/` | 复杂任务拆分预览 |
 | POST | `/api/v1/agent/task/run/` | 拆分并执行 |
 | GET | `/api/v1/agent/workflows/` | 工作流列表（`?status=running` 过滤） |

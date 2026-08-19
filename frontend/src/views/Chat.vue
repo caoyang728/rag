@@ -13,17 +13,14 @@
             v-model:scopes="selectedScopeIds"
             :disabled="isRagMode"
           />
-          <!-- 快速问答模式提示 -->
-          <span v-if="isRagMode" class="tag tag-info" style="color: var(--el-color-warning)">
-            ⚡ 快速问答仅基于内部文档回答
-          </span>
           <el-radio-group v-model="currentMode" class="mode-switcher" @change="setChatMode">
             <el-radio-button value="rag" title="快速问答：单次检索 + LLM 生成，延迟最低">⚡ 快速问答</el-radio-button>
             <el-radio-button value="agent" title="智能问答：Agent 决策 + 工具调用（推荐）">🧠 智能问答</el-radio-button>
             <el-radio-button value="plan" title="深度分析：规划→并行执行→综合生成，适合复杂问题">🔬 深度分析</el-radio-button>
           </el-radio-group>
-          <span class="tag tag-info">💡 4 层记忆</span>
-          <el-button size="small" @click="newSession">+ 新建会话</el-button>
+          <el-button type="primary" size="small" class="new-session-btn" @click="newSession">
+            <el-icon><Plus /></el-icon>新建会话
+          </el-button>
         </div>
       </div>
 
@@ -104,7 +101,7 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Loading } from '@element-plus/icons-vue'
+import { Loading, Plus } from '@element-plus/icons-vue'
 import { useUserStore } from '../stores/user'
 import api from '../api/http'
 import { errMsg, formatDuration, formatSessionTime } from '../utils/format'
@@ -1343,21 +1340,6 @@ const chatMsgHandlers = {
   font-weight: 500;
 }
 
-/* 通用 tag */
-.tag {
-  display: inline-block;
-  padding: 2px 8px;
-  font-size: 12px;
-  border-radius: 4px;
-  line-height: 1.6;
-  white-space: nowrap;
-}
-
-.tag-info {
-  background: #ecf5ff;
-  color: #409eff;
-}
-
 /* ============ 消息区 ============ */
 .chat-messages {
   flex: 1;
@@ -1431,6 +1413,17 @@ const chatMsgHandlers = {
   min-width: 72px;
 }
 
+/* 新建会话按钮：圆角胶囊样式，与模式切换按钮风格协调 */
+.new-session-btn {
+  border-radius: 18px;
+  padding: 6px 16px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+
+.new-session-btn .el-icon {
+  margin-right: 4px;
+}
 
 @media (max-width: 640px) {
   .source-list {

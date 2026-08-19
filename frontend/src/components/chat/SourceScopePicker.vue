@@ -168,8 +168,9 @@ function currentSourcesList() {
   return enabled.value.filter(k => sources.value[k])
 }
 
-// 顶部按钮徽标：全部开启 → "全开"；部分开启 → 逗号分隔的来源名
+// 顶部按钮徽标：快速问答模式下固定显示"内部文档"；全开→"全开"；部分开启→逗号分隔来源名
 const scopeBadge = computed(() => {
+  if (props.disabled) return '内部文档'
   const on = currentSourcesList()
   if (on.length === enabled.value.length) return '全开'
   return on.map(k => SOURCE_META[k].label).join(' / ')
